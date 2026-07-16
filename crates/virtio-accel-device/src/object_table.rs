@@ -25,9 +25,10 @@ impl ObjectKind {
 
 /// Device-instance namespace encoded into every object ID.
 ///
-/// A transport integration assigns a distinct nonzero namespace to each live device instance.
-/// IDs from different namespaces can therefore never resolve even when their slot, kind, and
-/// generation are otherwise identical.
+/// A transport integration assigns a distinct nonzero namespace to each device reset epoch and
+/// does not reuse it while an ID from that epoch could still be presented. IDs from different
+/// devices or reset epochs can therefore never resolve even when their slot, kind, and generation
+/// are otherwise identical.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct ObjectNamespace(NonZeroU16);
@@ -283,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn namespaces_prevent_cross_device_aliasing() {
+    fn namespaces_prevent_cross_device_or_reset_epoch_aliasing() {
         let first_namespace = ObjectNamespace::new(1).unwrap();
         let second_namespace = ObjectNamespace::new(2).unwrap();
         let mut first = ObjectTable::with_namespace(ObjectKind::Context, 1, first_namespace);

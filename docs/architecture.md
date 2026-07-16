@@ -32,7 +32,8 @@ command-specific response capacity before a decoded request can reach semantic d
 Guest-visible handles are opaque `u64` values. The device table combines a slot number with a
 device-instance namespace, resource-kind tag, and generation. Removing an object increments its
 generation; a slot is permanently retired before generation overflow. Therefore stale, wrong-kind,
-and cross-device handles never alias a live object during the lifetime of a device instance.
+cross-device, and pre-reset handles never alias a live object when each reset epoch receives a fresh
+namespace.
 
 `DeviceState` composes typed context, buffer, program, execution-queue, and event tables. Context
 records retain live-child counts, while event records retain queue, program, and buffer references

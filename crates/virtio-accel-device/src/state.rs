@@ -77,6 +77,10 @@ impl<R> ResourceSlot<R> {
         self.resource.as_ref().ok_or(DeviceStateError::Releasing)
     }
 
+    fn get_mut(&mut self) -> Result<&mut R, DeviceStateError> {
+        self.resource.as_mut().ok_or(DeviceStateError::Releasing)
+    }
+
     fn begin_release(&mut self) -> Result<R, DeviceStateError> {
         if self.release != ReleaseState::Live {
             return Err(DeviceStateError::InvalidTransition);
@@ -144,6 +148,14 @@ pub struct BufferRecord<B> {
 impl<B> BufferRecord<B> {
     pub fn resource(&self) -> Result<&B, DeviceStateError> {
         self.resource.get()
+    }
+
+    /// Borrow the live provider buffer for an explicit mutating operation.
+    ///
+    /// The command engine remains responsible for validating the operation and any in-flight
+    /// access policy before invoking the provider.
+    pub fn resource_mut(&mut self) -> Result<&mut B, DeviceStateError> {
+        self.resource.get_mut()
     }
 
     pub const fn context_id(&self) -> ObjectId {
@@ -382,6 +394,13 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
         self.buffers.get(id).map_err(map_table_error)
     }
 
+    pub fn buffer_record_mut(
+        &mut self,
+        id: ObjectId,
+    ) -> Result<&mut BufferRecord<B>, DeviceStateError> {
+        self.buffers.get_mut(id).map_err(map_table_error)
+    }
+
     pub fn program_record(&self, id: ObjectId) -> Result<&ProgramRecord<P>, DeviceStateError> {
         self.programs.get(id).map_err(map_table_error)
     }
@@ -448,13 +467,14 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
     pub fn create_program_with<ProviderError>(
         &mut self,
         context_id: ObjectId,
+        artifact_bytes: u64,
         resident_bytes: u64,
         create: impl FnOnce(&C) -> Result<P, ProviderError>,
     ) -> Result<ObjectId, CreateError<ProviderError>> {
-        if resident_bytes == 0 {
+        if artifact_bytes == 0 || resident_bytes == 0 {
             return Err(CreateError::State(DeviceStateError::InvalidArgument));
         }
-        if resident_bytes > self.limits.max_artifact_bytes {
+        if artifact_bytes > self.limits.max_artifact_bytes {
             return Err(CreateError::State(DeviceStateError::ResourceLimit));
         }
         self.check_child_admission(
@@ -1055,8 +1075,13 @@ mod tests {
                 Ok::<_, &'static str>((20, buffer_info(desc)))
             })
             .unwrap();
+        *state
+            .buffer_record_mut(buffer)
+            .unwrap()
+            .resource_mut()
+            .unwrap() = 21;
         let program = state
-            .create_program_with(context, 8192, |context| {
+            .create_program_with(context, 4096, 8192, |context| {
                 assert_eq!(*context, 10);
                 Ok::<_, &'static str>(30)
             })
@@ -1072,8 +1097,8 @@ mod tests {
                 assert_eq!(resources.context_id(), context);
                 assert_eq!(*resources.queue(), 40);
                 assert_eq!(*resources.program(), 30);
-                assert_eq!(*resources.buffer(0).unwrap(), 20);
-                assert_eq!(*resources.buffer(1).unwrap(), 20);
+                assert_eq!(*resources.buffer(0).unwrap(), 21);
+                assert_eq!(*resources.buffer(1).unwrap(), 21);
                 Ok::<_, &'static str>(50)
             })
             .unwrap();
@@ -1131,7 +1156,7 @@ mod tests {
             .restore_buffer_release(buffer, buffer_resource)
             .unwrap();
         let buffer_resource = state.begin_buffer_release(buffer).unwrap();
-        assert_eq!(buffer_resource, 20);
+        assert_eq!(buffer_resource, 21);
         state.commit_buffer_release(buffer).unwrap();
 
         let program_resource = state.begin_program_release(program).unwrap();
@@ -1200,13 +1225,13 @@ mod tests {
         ));
 
         let program = state
-            .create_program_with(context, 1, |_| {
+            .create_program_with(context, 1, 1, |_| {
                 calls.set(calls.get() + 1);
                 Ok::<_, &'static str>(30)
             })
             .unwrap();
         assert!(matches!(
-            state.create_program_with(context, 1, |_| {
+            state.create_program_with(context, 1, 1, |_| {
                 calls.set(calls.get() + 1);
                 Ok::<_, &'static str>(31)
             }),
@@ -1265,7 +1290,7 @@ mod tests {
             Err(CreateError::Provider("buffer"))
         ));
         assert!(matches!(
-            state.create_program_with(context, 1, |_| Err::<u32, _>("program")),
+            state.create_program_with(context, 1, 1, |_| Err::<u32, _>("program")),
             Err(CreateError::Provider("program"))
         ));
         assert!(matches!(
@@ -1283,7 +1308,7 @@ mod tests {
             })
             .unwrap();
         let program = state
-            .create_program_with(context, 1, |_| Ok::<_, &'static str>(30))
+            .create_program_with(context, 1, 1, |_| Ok::<_, &'static str>(30))
             .unwrap();
         let queue = state
             .create_queue_with(context, |_| Ok::<_, &'static str>(40))
@@ -1310,7 +1335,7 @@ mod tests {
             })
             .unwrap();
         let program = first
-            .create_program_with(second_context, 1, |_| Ok::<_, &'static str>(30))
+            .create_program_with(second_context, 1, 1, |_| Ok::<_, &'static str>(30))
             .unwrap();
         let queue = first
             .create_queue_with(first_context, |_| Ok::<_, &'static str>(40))
@@ -1363,7 +1388,7 @@ mod tests {
     }
 
     #[test]
-    fn byte_limits_reject_before_provider_use_or_table_growth() {
+    fn byte_limits_and_resident_charges_have_distinct_semantics() {
         let mut state = state(1, 1);
         let context = create_context(&mut state, 10);
         let calls = Cell::new(0_u32);
@@ -1383,18 +1408,32 @@ mod tests {
             Err(CreateError::State(DeviceStateError::ResourceLimit))
         ));
         assert!(matches!(
-            state.create_program_with(context, state.limits().max_artifact_bytes + 1, |_| {
+            state.create_program_with(context, state.limits().max_artifact_bytes + 1, 1, |_| {
                 calls.set(calls.get() + 1);
                 Ok::<_, &'static str>(30)
             }),
             Err(CreateError::State(DeviceStateError::ResourceLimit))
         ));
-        assert_eq!(calls.get(), 0);
+        let resident_bytes = state.limits().max_artifact_bytes + 1;
+        let program = state
+            .create_program_with(context, 1, resident_bytes, |_| {
+                calls.set(calls.get() + 1);
+                Ok::<_, &'static str>(30)
+            })
+            .unwrap();
+        assert_eq!(calls.get(), 1);
         assert_eq!(state.buffer_count(), 0);
-        assert_eq!(state.program_count(), 0);
+        assert_eq!(state.program_count(), 1);
+        assert_eq!(
+            state.program_record(program).unwrap().resident_bytes(),
+            resident_bytes
+        );
         assert_eq!(
             state.context_record(context).unwrap().children(),
-            ChildCounts::default()
+            ChildCounts {
+                programs: 1,
+                ..ChildCounts::default()
+            }
         );
     }
 }
