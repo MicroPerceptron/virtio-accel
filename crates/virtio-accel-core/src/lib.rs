@@ -211,6 +211,19 @@ impl BufferDesc {
         self.alignment.get()
     }
 
+    /// Whether this declaration permits one program binding access mode.
+    pub const fn allows_access(self, access: AccessMode) -> bool {
+        match access {
+            AccessMode::Read => self
+                .usage
+                .intersects(BufferUsage::PROGRAM_INPUT.union(BufferUsage::MUTABLE_STATE)),
+            AccessMode::Write => self
+                .usage
+                .intersects(BufferUsage::PROGRAM_OUTPUT.union(BufferUsage::MUTABLE_STATE)),
+            AccessMode::ReadWrite => self.usage.contains(BufferUsage::MUTABLE_STATE),
+        }
+    }
+
     /// Whether this allocation can appear in a program binding.
     pub const fn is_program_visible(self) -> bool {
         self.usage.intersects(
@@ -607,7 +620,7 @@ impl Timeout {
 ///
 /// Program-visible buffers carry [`BufferProperties::DIRECT_BINDING`]. A backend must reject an
 /// incompatible buffer/program combination instead of copying the range into a hidden bounce
-/// allocation.
+/// allocation. Binding order is not semantic; command engines may present the slice in slot order.
 #[derive(Debug)]
 pub struct BindingRef<'a, B> {
     pub slot: u32,
@@ -744,7 +757,15 @@ pub trait Accelerator {
         bindings: &[BindingRef<'_, Self::Buffer>],
         timeout: Timeout,
     ) -> Result<Self::Event, SubmitFailure<Self::Event>>;
+    /// Observe event state without blocking or driving an executor.
+    ///
+    /// Once a terminal state is observed, every later successful poll returns the same state.
     fn poll_event(&self, event: &Self::Event) -> Result<EventState, BackendError>;
+    /// Attempt to make a pending event terminal as [`EventState::Cancelled`].
+    ///
+    /// If completion wins the race, the backend returns [`BackendError::Busy`] and polling reveals
+    /// the selected terminal result. Returning `Ok(())` means cancellation won and every later
+    /// successful poll returns `Cancelled`.
     fn cancel_event(&self, _event: &Self::Event) -> Result<(), BackendError> {
         Err(BackendError::Unsupported)
     }
@@ -766,6 +787,27 @@ mod tests {
                 .alignment(),
             16
         );
+    }
+
+    #[test]
+    fn buffer_usage_defines_submission_access_compatibility() {
+        let input =
+            BufferDesc::new(64, 16, MemoryDomain::Host, BufferUsage::PROGRAM_INPUT).unwrap();
+        assert!(input.allows_access(AccessMode::Read));
+        assert!(!input.allows_access(AccessMode::Write));
+        assert!(!input.allows_access(AccessMode::ReadWrite));
+
+        let output =
+            BufferDesc::new(64, 16, MemoryDomain::Host, BufferUsage::PROGRAM_OUTPUT).unwrap();
+        assert!(!output.allows_access(AccessMode::Read));
+        assert!(output.allows_access(AccessMode::Write));
+        assert!(!output.allows_access(AccessMode::ReadWrite));
+
+        let mutable =
+            BufferDesc::new(64, 16, MemoryDomain::Host, BufferUsage::MUTABLE_STATE).unwrap();
+        assert!(mutable.allows_access(AccessMode::Read));
+        assert!(mutable.allows_access(AccessMode::Write));
+        assert!(mutable.allows_access(AccessMode::ReadWrite));
     }
 
     #[test]

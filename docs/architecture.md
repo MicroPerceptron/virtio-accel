@@ -154,6 +154,12 @@ validation of program-specific compatibility, native handle/address binding, and
 does not allocate per binding, assemble a second binding array with owned payloads, or copy tensor
 contents. Small command and metadata writes are not buffer staging and remain provider-specific.
 
+The command engine uses three bounded metadata allocations for `SUBMIT`: decoded bindings, retained
+buffer IDs, and borrowed native binding references. Duplicate-slot detection sorts the decoded
+allocation in place; event state takes ownership of the retained-ID allocation. No allocation owns
+buffer contents, boxes individual bindings, or survives event reclamation except the retained ID
+list required for exactly-once reference release.
+
 Issue #29 owns quantitative evidence: explicit-transfer bytes, staged bytes and allocations,
 submission allocations, retained memory, and host preparation versus device execution time. A
 backend should be diagnosable when it misses the intended path rather than requiring a profiler to

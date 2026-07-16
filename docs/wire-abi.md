@@ -133,6 +133,10 @@ At least one usage bit **MUST** be set. Unknown bits produce `UNSUPPORTED`.
 
 All other values produce `INVALID_ARGUMENT`.
 
+`Read` requires `PROGRAM_INPUT` or `MUTABLE_STATE`, `Write` requires `PROGRAM_OUTPUT` or
+`MUTABLE_STATE`, and `Read and write` requires `MUTABLE_STATE`. A mismatch produces
+`PERMISSION_DENIED` before backend admission.
+
 ### 4.5 Event states
 
 | Value | State | `error` field |
@@ -286,7 +290,8 @@ with the mapped non-`OK` status when admission is indeterminate. A rejected subm
 error payload.
 
 `WireEventState` is eight bytes: `state: u16`, `error: u16`, and `reserved: u32`. Reserved bytes are
-zero and the state/error combinations are exactly those in section 4.5.
+zero and the state/error combinations are exactly those in section 4.5. Polling is nonblocking.
+Once a terminal state is observed, later successful polls return the same terminal state.
 
 ## 6. Status namespace
 

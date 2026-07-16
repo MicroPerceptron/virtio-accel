@@ -3,9 +3,9 @@ use std::rc::Rc;
 use std::vec::Vec;
 
 use virtio_accel_core::{
-    Accelerator, AllocatedBuffer, ArtifactRef, BackendError, BindingRef, BufferDesc, BufferUsage,
-    ByteSink, ByteSource, ContextDesc, DeviceInfo, EventState, MemoryDomain, QueueDesc,
-    ReleaseFailure, SubmitFailure, Timeout,
+    Accelerator, AccessMode, AllocatedBuffer, ArtifactRef, BackendError, BindingRef, BufferDesc,
+    BufferUsage, ByteSink, ByteSource, Capabilities, ContextDesc, DeviceInfo, EventState,
+    MemoryDomain, QueueDesc, ReleaseFailure, SubmitFailure, Timeout,
 };
 use virtio_accel_device::{
     ChainRegion, CommandOutcome, CommandProcessError, CommandProcessor, CommandProcessorInitError,
@@ -17,9 +17,10 @@ use virtio_accel_mock::{
 };
 use virtio_accel_proto::{
     AllocateBufferRequest, BASELINE_COMMAND_QUEUES, CreateContextRequest, CreateQueueRequest,
-    HARD_MAX_REQUEST_BYTES, HARD_MAX_RESPONSE_BYTES, Le16, Le32, Le64, LoadProgramRequest,
-    ObjectPayload, PROTOCOL_MAJOR, PROTOCOL_MINOR, RequestFlags, RequestHeader, ResponseHeader,
-    StatusCode, TransferBufferRequest, WireConfig, WireDeviceInfo, read_exact,
+    HARD_MAX_REQUEST_BYTES, HARD_MAX_RESPONSE_BYTES, KnownEventState, Le16, Le32, Le64,
+    LoadProgramRequest, ObjectPayload, PROTOCOL_MAJOR, PROTOCOL_MINOR, RequestFlags, RequestHeader,
+    ResponseHeader, StatusCode, SubmitRequest, SubmitResponse, TransferBufferRequest, WireBinding,
+    WireConfig, WireDeviceInfo, WireEventState, read_exact,
 };
 use zerocopy::IntoBytes;
 
@@ -28,6 +29,13 @@ const REQUEST_ID: u64 = 0x0102_0304_0506_0708;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReleaseMode {
     Pass,
+    Reject,
+    Indeterminate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubmitMode {
+    Accept,
     Reject,
     Indeterminate,
 }
@@ -45,6 +53,15 @@ struct RecordingBackend {
     segmented_write: Cell<bool>,
     segmented_read: Cell<bool>,
     segmented_artifact: Cell<bool>,
+    submit_mode: Cell<SubmitMode>,
+    submit_calls: Cell<u32>,
+    last_timeout: Cell<Option<Timeout>>,
+    poll_error: Cell<Option<BackendError>>,
+    event_state_override: Cell<Option<EventState>>,
+    poll_calls: Cell<u32>,
+    cancel_calls: Cell<u32>,
+    event_release_mode: Cell<ReleaseMode>,
+    destroy_event_calls: Cell<u32>,
 }
 
 impl Default for RecordingBackend {
@@ -62,6 +79,15 @@ impl Default for RecordingBackend {
             segmented_write: Cell::new(false),
             segmented_read: Cell::new(false),
             segmented_artifact: Cell::new(false),
+            submit_mode: Cell::new(SubmitMode::Accept),
+            submit_calls: Cell::new(0),
+            last_timeout: Cell::new(None),
+            poll_error: Cell::new(None),
+            event_state_override: Cell::new(None),
+            poll_calls: Cell::new(0),
+            cancel_calls: Cell::new(0),
+            event_release_mode: Cell::new(ReleaseMode::Pass),
+            destroy_event_calls: Cell::new(0),
         }
     }
 }
@@ -171,19 +197,57 @@ impl Accelerator for RecordingBackend {
         bindings: &[BindingRef<'_, Self::Buffer>],
         timeout: Timeout,
     ) -> Result<Self::Event, SubmitFailure<Self::Event>> {
-        self.inner.submit(queue, program, bindings, timeout)
+        self.submit_calls.set(self.submit_calls.get() + 1);
+        self.last_timeout.set(Some(timeout));
+        match self.submit_mode.get() {
+            SubmitMode::Accept => self.inner.submit(queue, program, bindings, timeout),
+            SubmitMode::Reject => Err(SubmitFailure::Rejected(BackendError::Busy)),
+            SubmitMode::Indeterminate => {
+                match self.inner.submit(queue, program, bindings, timeout) {
+                    Ok(event) => Err(SubmitFailure::Indeterminate {
+                        error: BackendError::DeadlineExpired,
+                        event,
+                    }),
+                    Err(error) => Err(error),
+                }
+            }
+        }
     }
 
     fn poll_event(&self, event: &Self::Event) -> Result<EventState, BackendError> {
+        self.poll_calls.set(self.poll_calls.get() + 1);
+        if let Some(error) = self.poll_error.take() {
+            return Err(error);
+        }
+        if let Some(state) = self.event_state_override.get() {
+            return Ok(state);
+        }
         self.inner.poll_event(event)
     }
 
     fn cancel_event(&self, event: &Self::Event) -> Result<(), BackendError> {
+        self.cancel_calls.set(self.cancel_calls.get() + 1);
         self.inner.cancel_event(event)
     }
 
     fn destroy_event(&self, event: Self::Event) -> Result<(), ReleaseFailure<Self::Event>> {
-        self.inner.destroy_event(event)
+        self.destroy_event_calls
+            .set(self.destroy_event_calls.get() + 1);
+        match self.event_release_mode.get() {
+            ReleaseMode::Pass => match self.event_state_override.get() {
+                Some(EventState::Complete | EventState::Failed(_) | EventState::Cancelled) => {
+                    Ok(())
+                }
+                Some(EventState::Pending) | None => self.inner.destroy_event(event),
+            },
+            ReleaseMode::Reject => Err(ReleaseFailure::Rejected {
+                error: BackendError::Busy,
+                resource: event,
+            }),
+            ReleaseMode::Indeterminate => Err(ReleaseFailure::Indeterminate {
+                error: BackendError::DeviceLost,
+            }),
+        }
     }
 }
 
@@ -327,6 +391,108 @@ fn allocate_buffer_with_usage(
     let (outcome, response) = run(processor, &frame, 24);
     assert_eq!(status(outcome), StatusCode::OK);
     object_id(&response)
+}
+
+fn load_program(
+    processor: &mut CommandProcessor<RecordingBackend>,
+    context_id: ObjectId,
+) -> ObjectId {
+    let artifact = b"program";
+    let load = LoadProgramRequest {
+        context_id: Le64::new(context_id.get()),
+        format: Le32::new(1),
+        flags: Le32::new(0),
+        target: [Le32::new(0); 12],
+        payload_bytes: Le64::new(artifact.as_slice().len() as u64),
+        resident_bytes: Le64::new(artifact.as_slice().len() as u64),
+    };
+    let mut payload = Vec::from(load.as_bytes());
+    payload.extend_from_slice(artifact);
+    let (outcome, response) = run(
+        processor,
+        &request(virtio_accel_proto::KnownOpcode::LoadProgram, &payload),
+        24,
+    );
+    assert_eq!(status(outcome), StatusCode::OK);
+    object_id(&response)
+}
+
+fn create_queue(
+    processor: &mut CommandProcessor<RecordingBackend>,
+    context_id: ObjectId,
+) -> ObjectId {
+    let frame = request(
+        virtio_accel_proto::KnownOpcode::CreateQueue,
+        CreateQueueRequest {
+            context_id: Le64::new(context_id.get()),
+            flags: Le32::new(0),
+            reserved: Le32::new(0),
+        }
+        .as_bytes(),
+    );
+    let (outcome, response) = run(processor, &frame, 24);
+    assert_eq!(status(outcome), StatusCode::OK);
+    object_id(&response)
+}
+
+fn submission_objects(
+    processor: &mut CommandProcessor<RecordingBackend>,
+    usage: BufferUsage,
+) -> (ObjectId, ObjectId, ObjectId, ObjectId) {
+    let context = create_context(processor);
+    let buffer = allocate_buffer_with_usage(processor, context, usage);
+    let program = load_program(processor, context);
+    let queue = create_queue(processor, context);
+    (context, buffer, program, queue)
+}
+
+fn submit_request(
+    queue_id: ObjectId,
+    program_id: ObjectId,
+    buffer_id: ObjectId,
+    offset: u64,
+    bytes: u64,
+    access: AccessMode,
+) -> Vec<u8> {
+    submit_request_with_timeout(queue_id, program_id, buffer_id, offset, bytes, access, 0)
+}
+
+fn submit_request_with_timeout(
+    queue_id: ObjectId,
+    program_id: ObjectId,
+    buffer_id: ObjectId,
+    offset: u64,
+    bytes: u64,
+    access: AccessMode,
+    timeout_ns: u64,
+) -> Vec<u8> {
+    let submit = SubmitRequest {
+        queue_id: Le64::new(queue_id.get()),
+        program_id: Le64::new(program_id.get()),
+        binding_count: Le32::new(1),
+        flags: Le32::new(0),
+        timeout_ns: Le64::new(timeout_ns),
+    };
+    let binding = WireBinding {
+        buffer_id: Le64::new(buffer_id.get()),
+        offset: Le64::new(offset),
+        bytes: Le64::new(bytes),
+        slot: Le32::new(0),
+        access: access as u8,
+        reserved: [0; 3],
+    };
+    let mut payload = Vec::from(submit.as_bytes());
+    payload.extend_from_slice(binding.as_bytes());
+    request(virtio_accel_proto::KnownOpcode::Submit, &payload)
+}
+
+fn event_id(response: &[u8]) -> ObjectId {
+    let payload = read_exact::<SubmitResponse>(&response[16..24]).unwrap();
+    ObjectId::from_raw(payload.event_id.get()).unwrap()
+}
+
+fn event_state(response: &[u8]) -> WireEventState {
+    read_exact::<WireEventState>(&response[16..24]).unwrap()
 }
 
 #[test]
@@ -650,4 +816,476 @@ fn response_failure_after_creation_requires_reset() {
     );
     assert_eq!(processor.state().context_count(), 1);
     assert_eq!(processor.health(), DeviceHealth::NeedsReset);
+}
+
+#[test]
+fn accepted_events_retain_resources_and_resolve_cancel_completion_races() {
+    let mut processor = processor();
+    let (_context, buffer, program, queue) =
+        submission_objects(&mut processor, BufferUsage::PROGRAM_INPUT);
+    let submit =
+        submit_request_with_timeout(queue, program, buffer, 0, 8, AccessMode::Read, 1_000_000);
+
+    let (outcome, response) = run(&mut processor, &submit, 24);
+    assert_eq!(status(outcome), StatusCode::OK);
+    assert_eq!(
+        processor.accelerator().last_timeout.get(),
+        Some(Timeout::from_wire_ns(1_000_000))
+    );
+    let cancelled_event = event_id(&response);
+    assert_eq!(processor.state().event_count(), 1);
+    assert_eq!(
+        processor.state().buffer_record(buffer).unwrap().in_flight(),
+        1
+    );
+    assert_eq!(
+        processor
+            .state()
+            .program_record(program)
+            .unwrap()
+            .in_flight(),
+        1
+    );
+    assert_eq!(
+        processor.state().queue_record(queue).unwrap().in_flight(),
+        1
+    );
+
+    let free = object_request(virtio_accel_proto::KnownOpcode::FreeBuffer, buffer);
+    assert_eq!(status(run(&mut processor, &free, 16).0), StatusCode::BUSY);
+
+    let poll = object_request(virtio_accel_proto::KnownOpcode::PollEvent, cancelled_event);
+    let (outcome, response) = run(&mut processor, &poll, 24);
+    assert_eq!(status(outcome), StatusCode::OK);
+    assert_eq!(
+        event_state(&response).known_state().unwrap(),
+        KnownEventState::Pending
+    );
+
+    let destroy = object_request(
+        virtio_accel_proto::KnownOpcode::DestroyEvent,
+        cancelled_event,
+    );
+    assert_eq!(
+        status(run(&mut processor, &destroy, 16).0),
+        StatusCode::BUSY
+    );
+    assert_eq!(processor.accelerator().destroy_event_calls.get(), 0);
+
+    let cancel = object_request(
+        virtio_accel_proto::KnownOpcode::CancelEvent,
+        cancelled_event,
+    );
+    assert_eq!(status(run(&mut processor, &cancel, 16).0), StatusCode::OK);
+    let (outcome, response) = run(&mut processor, &poll, 24);
+    assert_eq!(status(outcome), StatusCode::OK);
+    assert_eq!(
+        event_state(&response).known_state().unwrap(),
+        KnownEventState::Cancelled
+    );
+    assert_eq!(status(run(&mut processor, &destroy, 16).0), StatusCode::OK);
+    assert_eq!(processor.state().event_count(), 0);
+    assert_eq!(
+        processor.state().buffer_record(buffer).unwrap().in_flight(),
+        0
+    );
+    assert_eq!(
+        processor
+            .state()
+            .program_record(program)
+            .unwrap()
+            .in_flight(),
+        0
+    );
+    assert_eq!(
+        processor.state().queue_record(queue).unwrap().in_flight(),
+        0
+    );
+
+    let (outcome, response) = run(&mut processor, &submit, 24);
+    assert_eq!(status(outcome), StatusCode::OK);
+    let pending_event = event_id(&response);
+    let (outcome, response) = run(&mut processor, &submit, 24);
+    assert_eq!(status(outcome), StatusCode::OK);
+    let completed_event = event_id(&response);
+    assert_ne!(pending_event, completed_event);
+    assert_eq!(
+        processor.state().buffer_record(buffer).unwrap().in_flight(),
+        2
+    );
+    let event = processor
+        .state()
+        .event_record(completed_event)
+        .unwrap()
+        .resource()
+        .unwrap();
+    processor.accelerator().inner.complete(event).unwrap();
+
+    let poll = object_request(virtio_accel_proto::KnownOpcode::PollEvent, pending_event);
+    let (outcome, response) = run(&mut processor, &poll, 24);
+    assert_eq!(status(outcome), StatusCode::OK);
+    assert_eq!(
+        event_state(&response).known_state().unwrap(),
+        KnownEventState::Pending
+    );
+
+    let cancel = object_request(
+        virtio_accel_proto::KnownOpcode::CancelEvent,
+        completed_event,
+    );
+    assert_eq!(status(run(&mut processor, &cancel, 16).0), StatusCode::BUSY);
+    let poll = object_request(virtio_accel_proto::KnownOpcode::PollEvent, completed_event);
+    let (outcome, response) = run(&mut processor, &poll, 24);
+    assert_eq!(status(outcome), StatusCode::OK);
+    assert_eq!(
+        event_state(&response).known_state().unwrap(),
+        KnownEventState::Complete
+    );
+    let destroy = object_request(
+        virtio_accel_proto::KnownOpcode::DestroyEvent,
+        completed_event,
+    );
+    assert_eq!(status(run(&mut processor, &destroy, 16).0), StatusCode::OK);
+    assert_eq!(
+        processor.state().buffer_record(buffer).unwrap().in_flight(),
+        1
+    );
+
+    let cancel = object_request(virtio_accel_proto::KnownOpcode::CancelEvent, pending_event);
+    assert_eq!(status(run(&mut processor, &cancel, 16).0), StatusCode::OK);
+    let destroy = object_request(virtio_accel_proto::KnownOpcode::DestroyEvent, pending_event);
+    assert_eq!(status(run(&mut processor, &destroy, 16).0), StatusCode::OK);
+    assert_eq!(
+        processor.state().buffer_record(buffer).unwrap().in_flight(),
+        0
+    );
+}
+
+#[test]
+fn rejected_and_indeterminate_submissions_preserve_the_admission_boundary() {
+    let mut processor = processor();
+    let (_context, buffer, program, queue) =
+        submission_objects(&mut processor, BufferUsage::PROGRAM_INPUT);
+    let submit = submit_request(queue, program, buffer, 0, 8, AccessMode::Read);
+
+    processor.accelerator().submit_mode.set(SubmitMode::Reject);
+    let (outcome, response) = run(&mut processor, &submit, 24);
+    assert_eq!(status(outcome), StatusCode::BUSY);
+    assert_eq!(
+        read_exact::<ResponseHeader>(&response[..16])
+            .unwrap()
+            .payload_bytes
+            .get(),
+        0
+    );
+    assert_eq!(processor.state().event_count(), 0);
+    assert_eq!(
+        processor.state().buffer_record(buffer).unwrap().in_flight(),
+        0
+    );
+    assert_eq!(
+        processor
+            .state()
+            .program_record(program)
+            .unwrap()
+            .in_flight(),
+        0
+    );
+    assert_eq!(
+        processor.state().queue_record(queue).unwrap().in_flight(),
+        0
+    );
+
+    processor
+        .accelerator()
+        .submit_mode
+        .set(SubmitMode::Indeterminate);
+    let (outcome, response) = run(&mut processor, &submit, 24);
+    assert_eq!(status(outcome), StatusCode::DEADLINE_EXPIRED);
+    let event_id = event_id(&response);
+    assert_eq!(processor.health(), DeviceHealth::Running);
+    assert_eq!(processor.state().event_count(), 1);
+    assert_eq!(
+        processor.state().buffer_record(buffer).unwrap().in_flight(),
+        1
+    );
+    assert_eq!(
+        processor
+            .state()
+            .program_record(program)
+            .unwrap()
+            .in_flight(),
+        1
+    );
+    assert_eq!(
+        processor.state().queue_record(queue).unwrap().in_flight(),
+        1
+    );
+
+    let event = processor
+        .state()
+        .event_record(event_id)
+        .unwrap()
+        .resource()
+        .unwrap();
+    processor.accelerator().inner.complete(event).unwrap();
+    let destroy = object_request(virtio_accel_proto::KnownOpcode::DestroyEvent, event_id);
+    assert_eq!(status(run(&mut processor, &destroy, 16).0), StatusCode::OK);
+    assert_eq!(
+        processor.state().buffer_record(buffer).unwrap().in_flight(),
+        0
+    );
+    assert_eq!(
+        processor
+            .state()
+            .program_record(program)
+            .unwrap()
+            .in_flight(),
+        0
+    );
+    assert_eq!(
+        processor.state().queue_record(queue).unwrap().in_flight(),
+        0
+    );
+}
+
+#[test]
+fn submission_validation_rejects_before_backend_admission() {
+    let mut processor = processor();
+    let (_context, buffer, program, queue) =
+        submission_objects(&mut processor, BufferUsage::PROGRAM_OUTPUT);
+
+    let wrong_access = submit_request(queue, program, buffer, 0, 8, AccessMode::Read);
+    assert_eq!(
+        status(run(&mut processor, &wrong_access, 24).0),
+        StatusCode::PERMISSION_DENIED
+    );
+
+    let out_of_bounds = submit_request(queue, program, buffer, 1, 8, AccessMode::Write);
+    assert_eq!(
+        status(run(&mut processor, &out_of_bounds, 24).0),
+        StatusCode::OUT_OF_BOUNDS
+    );
+
+    let other_context = create_context(&mut processor);
+    let other_buffer =
+        allocate_buffer_with_usage(&mut processor, other_context, BufferUsage::PROGRAM_INPUT);
+    let wrong_context = submit_request(queue, program, other_buffer, 0, 8, AccessMode::Read);
+    assert_eq!(
+        status(run(&mut processor, &wrong_context, 24).0),
+        StatusCode::STALE_OBJECT
+    );
+    assert_eq!(processor.accelerator().submit_calls.get(), 0);
+    assert_eq!(processor.state().event_count(), 0);
+    assert_eq!(
+        processor.state().buffer_record(buffer).unwrap().in_flight(),
+        0
+    );
+    assert_eq!(
+        processor
+            .state()
+            .program_record(program)
+            .unwrap()
+            .in_flight(),
+        0
+    );
+    assert_eq!(
+        processor.state().queue_record(queue).unwrap().in_flight(),
+        0
+    );
+    assert_eq!(
+        processor
+            .state()
+            .buffer_record(other_buffer)
+            .unwrap()
+            .in_flight(),
+        0
+    );
+}
+
+#[test]
+fn event_release_rejection_retries_and_indeterminate_release_requires_reset() {
+    let mut processor = processor();
+    let (_context, buffer, program, queue) =
+        submission_objects(&mut processor, BufferUsage::PROGRAM_INPUT);
+    let submit = submit_request(queue, program, buffer, 0, 8, AccessMode::Read);
+
+    let (_, response) = run(&mut processor, &submit, 24);
+    let first_event = event_id(&response);
+    let event = processor
+        .state()
+        .event_record(first_event)
+        .unwrap()
+        .resource()
+        .unwrap();
+    processor.accelerator().inner.complete(event).unwrap();
+    let destroy = object_request(virtio_accel_proto::KnownOpcode::DestroyEvent, first_event);
+
+    processor
+        .accelerator()
+        .event_release_mode
+        .set(ReleaseMode::Reject);
+    assert_eq!(
+        status(run(&mut processor, &destroy, 16).0),
+        StatusCode::BUSY
+    );
+    assert!(processor.state().event_record(first_event).is_ok());
+    assert_eq!(
+        processor.state().buffer_record(buffer).unwrap().in_flight(),
+        1
+    );
+
+    processor
+        .accelerator()
+        .event_release_mode
+        .set(ReleaseMode::Pass);
+    assert_eq!(status(run(&mut processor, &destroy, 16).0), StatusCode::OK);
+    assert_eq!(
+        processor.state().buffer_record(buffer).unwrap().in_flight(),
+        0
+    );
+
+    let (_, response) = run(&mut processor, &submit, 24);
+    let second_event = event_id(&response);
+    let event = processor
+        .state()
+        .event_record(second_event)
+        .unwrap()
+        .resource()
+        .unwrap();
+    processor.accelerator().inner.complete(event).unwrap();
+    processor
+        .accelerator()
+        .event_release_mode
+        .set(ReleaseMode::Indeterminate);
+    let destroy = object_request(virtio_accel_proto::KnownOpcode::DestroyEvent, second_event);
+    assert_eq!(
+        status(run(&mut processor, &destroy, 16).0),
+        StatusCode::DEVICE_LOST
+    );
+    assert_eq!(processor.health(), DeviceHealth::NeedsReset);
+    assert_eq!(
+        processor.state().event_record(second_event).unwrap_err(),
+        DeviceStateError::StaleObject
+    );
+    assert_eq!(
+        processor.state().buffer_record(buffer).unwrap().in_flight(),
+        0
+    );
+}
+
+#[test]
+fn event_faults_and_unreportable_admission_require_recovery() {
+    let mut poll_processor = processor();
+    let (_context, buffer, program, queue) =
+        submission_objects(&mut poll_processor, BufferUsage::PROGRAM_INPUT);
+    let submit = submit_request(queue, program, buffer, 0, 8, AccessMode::Read);
+    let (_, response) = run(&mut poll_processor, &submit, 24);
+    let event = event_id(&response);
+    poll_processor
+        .accelerator()
+        .poll_error
+        .set(Some(BackendError::DeviceLost));
+    let poll = object_request(virtio_accel_proto::KnownOpcode::PollEvent, event);
+    assert_eq!(
+        status(run(&mut poll_processor, &poll, 24).0),
+        StatusCode::DEVICE_LOST
+    );
+    assert_eq!(poll_processor.health(), DeviceHealth::NeedsReset);
+    assert_eq!(poll_processor.state().event_count(), 1);
+
+    let mut completion_processor = processor();
+    let (_context, buffer, program, queue) =
+        submission_objects(&mut completion_processor, BufferUsage::PROGRAM_INPUT);
+    let submit = submit_request(queue, program, buffer, 0, 8, AccessMode::Read);
+    let (_, response) = run(&mut completion_processor, &submit, 24);
+    let event = event_id(&response);
+    completion_processor
+        .accelerator()
+        .event_state_override
+        .set(Some(EventState::Failed(BackendError::DeadlineExpired)));
+    let poll = object_request(virtio_accel_proto::KnownOpcode::PollEvent, event);
+    for _ in 0..2 {
+        let (outcome, response) = run(&mut completion_processor, &poll, 24);
+        assert_eq!(status(outcome), StatusCode::OK);
+        let state = event_state(&response);
+        assert_eq!(state.known_state().unwrap(), KnownEventState::Failed);
+        assert_eq!(state.error.get(), StatusCode::DEADLINE_EXPIRED.0);
+    }
+    let destroy = object_request(virtio_accel_proto::KnownOpcode::DestroyEvent, event);
+    assert_eq!(
+        status(run(&mut completion_processor, &destroy, 16).0),
+        StatusCode::OK
+    );
+    assert_eq!(
+        completion_processor
+            .state()
+            .buffer_record(buffer)
+            .unwrap()
+            .in_flight(),
+        0
+    );
+
+    let mut response_processor = processor();
+    let (_context, buffer, program, queue) =
+        submission_objects(&mut response_processor, BufferUsage::PROGRAM_INPUT);
+    response_processor
+        .accelerator()
+        .submit_mode
+        .set(SubmitMode::Indeterminate);
+    let submit = submit_request(queue, program, buffer, 0, 8, AccessMode::Read);
+    let request_segments = [submit.as_slice()];
+    let source = SegmentedSource::new(&request_segments).unwrap();
+    let regions = [
+        ChainRegion::readable(submit.len() as u64),
+        ChainRegion::writable(24),
+    ];
+    let mut sink = FailingSink { len: 24 };
+
+    assert_eq!(
+        response_processor.process(&regions, &source, &mut sink),
+        Err(CommandProcessError::ResponseWrite(
+            ResponseWriteError::SinkAccess
+        ))
+    );
+    assert_eq!(response_processor.state().event_count(), 1);
+    assert_eq!(
+        response_processor
+            .state()
+            .buffer_record(buffer)
+            .unwrap()
+            .in_flight(),
+        1
+    );
+    assert_eq!(response_processor.health(), DeviceHealth::NeedsReset);
+}
+
+#[test]
+fn cancellation_is_not_forwarded_without_the_capability() {
+    let backend = RecordingBackend::default();
+    let mut info = backend.device_info().unwrap();
+    backend.device_info_calls.set(0);
+    info.capabilities.remove(Capabilities::EVENT_CANCELLATION);
+    backend.info_override.set(Some(info));
+    let mut processor =
+        CommandProcessor::new(backend, &config(), ObjectNamespace::new(1).unwrap()).unwrap();
+    let (_context, buffer, program, queue) =
+        submission_objects(&mut processor, BufferUsage::PROGRAM_INPUT);
+    let submit = submit_request(queue, program, buffer, 0, 8, AccessMode::Read);
+    let (_, response) = run(&mut processor, &submit, 24);
+    let event = event_id(&response);
+    let cancel = object_request(virtio_accel_proto::KnownOpcode::CancelEvent, event);
+
+    assert_eq!(
+        status(run(&mut processor, &cancel, 16).0),
+        StatusCode::UNSUPPORTED
+    );
+    assert_eq!(processor.accelerator().cancel_calls.get(), 0);
+    let poll = object_request(virtio_accel_proto::KnownOpcode::PollEvent, event);
+    let (outcome, response) = run(&mut processor, &poll, 24);
+    assert_eq!(status(outcome), StatusCode::OK);
+    assert_eq!(
+        event_state(&response).known_state().unwrap(),
+        KnownEventState::Pending
+    );
 }
