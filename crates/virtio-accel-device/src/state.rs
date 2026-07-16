@@ -83,7 +83,7 @@ impl<R> ResourceSlot<R> {
 
     fn begin_release(&mut self) -> Result<R, DeviceStateError> {
         if self.release != ReleaseState::Live {
-            return Err(DeviceStateError::InvalidTransition);
+            return Err(DeviceStateError::Releasing);
         }
         let resource = self.resource.take().ok_or(DeviceStateError::Releasing)?;
         self.release = ReleaseState::Releasing;
