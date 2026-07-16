@@ -128,6 +128,7 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "virtio-accel-core",
+ "virtio-accel-mock",
  "virtio-accel-proto",
  "zerocopy",
 ]

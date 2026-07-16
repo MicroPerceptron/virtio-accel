@@ -713,6 +713,8 @@ pub trait Accelerator {
     ///
     /// The command engine calls this only for buffers with [`BufferUsage::TRANSFER_SOURCE`]. The
     /// provider must not retain `data` and should write directly across segmented destinations.
+    /// Returning `Ok(())` guarantees that every byte in `data` was initialized; the command engine
+    /// may publish the complete destination without first clearing it.
     fn read_buffer(
         &self,
         buffer: &Self::Buffer,

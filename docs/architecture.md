@@ -46,6 +46,13 @@ resource-lock order. Creation checks quotas and reserves fallible table capacity
 provider. Release moves a handle to an explicit `Releasing` state and either commits removal or
 restores the same live ID after a rejected provider release.
 
+`CommandProcessor` preserves that ownership model rather than placing an atomic or lock in each
+record. One mutable processor owns one backend and one object graph. A transport may move that owner
+between workers or serialize admission at its queue boundary; provider-native asynchronous work
+continues behind borrowed handles and event objects. Atomics belong in provider completion tokens
+or the concrete Virtio status publication path where state is genuinely shared, not in portable
+object lookup or reference counting.
+
 Provider releases have an explicit failure boundary too. A rejected release returns the still-live
 handle for retry. An indeterminate release invalidates the guest ID and requires device recovery;
 the adapter must never guess that the resource is either safe to reuse or safe to free.
@@ -154,15 +161,15 @@ discover an undocumented copy.
 
 ## Next implementation boundary
 
-The next portable milestone is a command engine that depends only on `virtio-accel-proto` and
-`virtio-accel-core`. It will:
+The portable command engine depends only on `virtio-accel-proto` and `virtio-accel-core`. Its
+baseline processor:
 
-1. Decode one bounded request from abstract readable/writable byte regions.
-2. Maintain typed object records and context dependency counts.
-3. Translate wire types into validated semantic values.
-4. Retain buffer, program, and queue ownership through event completion.
-5. Produce a response without knowing about rust-vmm or a host operating system.
+1. Decodes one bounded request from abstract readable/writable byte regions.
+2. Maintains typed object records and context dependency counts.
+3. Translates wire types into validated semantic values.
+4. Passes transfer and artifact regions directly to backend byte ports.
+5. Produces a response without knowing about rust-vmm or a host operating system.
 
-After that engine passes adversarial parser and lifecycle tests, a thin rust-vmm adapter can supply
-`virtio-device`, `virtio-queue`, and `vm-memory` integration. Linux vhost-user and an in-kernel guest
-driver remain later platform layers.
+Submission/event retention and deterministic reset complete this engine before a thin rust-vmm
+adapter supplies `virtio-device`, `virtio-queue`, and `vm-memory` integration. Linux vhost-user and
+an in-kernel guest driver remain later platform layers.

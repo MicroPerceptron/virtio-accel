@@ -9,6 +9,7 @@
 extern crate alloc;
 
 mod decoder;
+mod engine;
 mod frame;
 mod object_table;
 mod regions;
@@ -18,6 +19,10 @@ mod state;
 pub use decoder::{
     DecodedBinding, DecodedRequest, DecodedRequestBody, DecoderLimits, DecoderLimitsError,
     FrameDecodeError, FrameDecoder, UnrecoverableDecodeError,
+};
+pub use engine::{
+    AcceleratorState, CommandOutcome, CommandProcessError, CommandProcessor,
+    CommandProcessorInitError, DeviceHealth,
 };
 pub use frame::{FramePreflight, FramePreflightError, UnusableFrame, preflight_command_frame};
 pub use object_table::{ObjectId, ObjectKind, ObjectNamespace, ObjectTable, ObjectTableError};
