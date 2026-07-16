@@ -12,6 +12,7 @@ members = [
     "conformance/rust-clean-room",
     "crates/virtio-accel-core",
     "crates/virtio-accel-device",
+    "crates/virtio-accel-guest",
     "crates/virtio-accel-mock",
     "crates/virtio-accel-proto",
     "crates/virtio-accel-split-queue",
@@ -32,6 +33,7 @@ zerocopy = { version = "0.8.54", default-features = false, features = ["derive"]
 virtio-accel-core = { path = "crates/virtio-accel-core" }
 virtio-accel-cleanroom = { path = "conformance/rust-clean-room" }
 virtio-accel-device = { path = "crates/virtio-accel-device" }
+virtio-accel-guest = { path = "crates/virtio-accel-guest" }
 virtio-accel-mock = { path = "crates/virtio-accel-mock" }
 virtio-accel-proto = { path = "crates/virtio-accel-proto" }
 virtio-accel-split-queue = { path = "crates/virtio-accel-split-queue" }
@@ -40,6 +42,7 @@ virtio-accel-transport = { path = "crates/virtio-accel-transport" }
 [dependencies]
 virtio-accel-core.workspace = true
 virtio-accel-device.workspace = true
+virtio-accel-guest.workspace = true
 virtio-accel-proto.workspace = true
 virtio-accel-split-queue.workspace = true
 virtio-accel-transport.workspace = true

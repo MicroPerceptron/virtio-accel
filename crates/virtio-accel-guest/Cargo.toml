@@ -1,0 +1,17 @@
+[package]
+name = "virtio-accel-guest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "No-std reference guest client for virtio-accel protocol 1.0"
+publish = false
+
+[dependencies]
+bitflags.workspace = true
+virtio-accel-proto.workspace = true
+virtio-accel-transport.workspace = true
+zerocopy.workspace = true
+
+[dev-dependencies]
+virtio-accel-split-queue.workspace = true

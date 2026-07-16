@@ -6,6 +6,7 @@ readonly packages=(
   virtio-accel-proto
   virtio-accel-transport
   virtio-accel-core
+  virtio-accel-guest
   virtio-accel-split-queue
 )
 

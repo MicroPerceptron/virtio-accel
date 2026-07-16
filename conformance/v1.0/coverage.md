@@ -17,7 +17,7 @@ behavior is deliberately tracked by a later issue. The exact per-keyword ledger 
 | `wire-abi.md` sections 1-6: config, headers, namespaces, all payloads, statuses, limits, and reserved fields | `layout.json`, `vectors.json`, primary `zerocopy` assertions, and the manual dependency-free codec | Device-state limits that require live objects are exercised by #20 and threat-model issue #25 |
 | `wire-abi.md` section 7: preflight and response atomicity | Error-shape vectors and ownership-aware core error types | Writable-region preflight and post-mutation failure are VQ-012/VQ-020 in #18 and #20 |
 | `wire-abi.md` sections 8-9: versioned artifacts and change control | Checked-in inputs, drift tests, and coordinated-change documentation | Release freeze governance is finalized by #32 and #33 |
-| `virtqueue.md` sections 1-12 | Stable executable case identifiers `VQ-001` through `VQ-020` define the required assertions | Region ports are #17, split-ring model tests are #18, guest compatibility is #19, and full-path behavior is #20 |
+| `virtqueue.md` sections 1-12 | Stable executable cases plus portable guest tests cover segmented chains, out-of-order completion, bounded request-ID wrap, malformed responses, backpressure, and reset ownership | Full guest-to-command-engine behavior and response atomicity remain tracked by #20 |
 
 ## Independent implementation evidence
 

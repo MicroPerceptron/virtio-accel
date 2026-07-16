@@ -8,8 +8,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use virtio_accel_transport::{
     ByteAccessError, ChainError, ChainId, ChainIo, ChainIoResult, ChainLayout, ChainRegion,
-    DeviceChain, MAX_SPLIT_QUEUE_SIZE, MalformedChain, QueueEpoch, ReadableBytes, WritableBytes,
-    validate_chain_layout,
+    DeviceChain, DriverChainBuffer, MAX_SPLIT_QUEUE_SIZE, MalformedChain, QueueEpoch,
+    ReadableBytes, WritableBytes, validate_chain_layout,
 };
 
 /// Descriptor continues through its `next` field.
@@ -290,6 +290,34 @@ impl DriverChain {
     }
 }
 
+impl DriverChainBuffer for DriverChain {
+    type Error = ByteAccessError;
+
+    fn device_readable_len(&self) -> u64 {
+        self.data
+            .analysis
+            .validation()
+            .map_or(0, ChainLayout::readable_bytes)
+    }
+
+    fn device_writable_len(&self) -> u64 {
+        self.data
+            .analysis
+            .validation()
+            .map_or(0, ChainLayout::writable_bytes)
+    }
+
+    fn write_device_readable(&mut self, offset: u64, source: &[u8]) -> Result<(), Self::Error> {
+        checked_logical_range(offset, source.len(), self.device_readable_len())?;
+        copy_to_descriptors(&self.data, false, offset, source)
+    }
+
+    fn read_device_writable(&self, offset: u64, target: &mut [u8]) -> Result<(), Self::Error> {
+        checked_logical_range(offset, target.len(), self.device_writable_len())?;
+        copy_from_descriptors(&self.data, true, offset, target)
+    }
+}
+
 /// Device-readable concatenation of a valid chain's readable descriptors.
 pub struct SplitSource {
     data: Rc<ChainData>,
@@ -360,7 +388,7 @@ impl WritableBytes for SplitSink {
     fn write_at(&mut self, offset: u64, source: &[u8]) -> Result<(), ByteAccessError> {
         self.check_epoch()?;
         checked_logical_range(offset, source.len(), self.len())?;
-        copy_to_descriptors(&self.data, offset, source)
+        copy_to_descriptors(&self.data, true, offset, source)
     }
 }
 
@@ -555,6 +583,7 @@ fn copy_from_descriptors(
 
 fn copy_to_descriptors(
     data: &ChainData,
+    writable: bool,
     offset: u64,
     source: &[u8],
 ) -> Result<(), ByteAccessError> {
@@ -565,7 +594,7 @@ fn copy_to_descriptors(
     let mut copied = 0;
     for index in data.analysis.order() {
         let descriptor = &data.descriptors[usize::from(*index)];
-        if !descriptor.is_writable() {
+        if descriptor.is_writable() != writable {
             continue;
         }
         if skip >= descriptor.len() {

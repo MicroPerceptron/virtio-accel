@@ -56,3 +56,67 @@ pub trait WritableBytes: fmt::Debug {
         None
     }
 }
+
+/// Driver-owned byte access for one unpublished or reclaimed descriptor chain.
+///
+/// The readable side is written by the driver and later read by the device. The writable side is
+/// written by the device and may be read by the driver only after used-ring reclamation. Methods
+/// are nonblocking and allocation-free; queue ownership prevents calls while a chain is published.
+pub trait DriverChainBuffer: fmt::Debug {
+    /// Concrete transport byte-access failure.
+    type Error;
+
+    /// Total bytes readable by the device.
+    fn device_readable_len(&self) -> u64;
+
+    /// Total bytes writable by the device.
+    fn device_writable_len(&self) -> u64;
+
+    /// Write an exact logical range into the device-readable side.
+    fn write_device_readable(&mut self, offset: u64, source: &[u8]) -> Result<(), Self::Error>;
+
+    /// Read an exact logical range from the device-writable side after completion.
+    fn read_device_writable(&self, offset: u64, target: &mut [u8]) -> Result<(), Self::Error>;
+}
+
+impl ReadableBytes for [u8] {
+    fn len(&self) -> u64 {
+        self.len() as u64
+    }
+
+    fn read_at(&self, offset: u64, target: &mut [u8]) -> Result<(), ByteAccessError> {
+        let start = usize::try_from(offset).map_err(|_| ByteAccessError::OutOfBounds)?;
+        let end = start
+            .checked_add(target.len())
+            .ok_or(ByteAccessError::OutOfBounds)?;
+        let source = self.get(start..end).ok_or(ByteAccessError::OutOfBounds)?;
+        target.copy_from_slice(source);
+        Ok(())
+    }
+
+    fn as_contiguous(&self) -> Option<&[u8]> {
+        Some(self)
+    }
+}
+
+impl WritableBytes for [u8] {
+    fn len(&self) -> u64 {
+        self.len() as u64
+    }
+
+    fn write_at(&mut self, offset: u64, source: &[u8]) -> Result<(), ByteAccessError> {
+        let start = usize::try_from(offset).map_err(|_| ByteAccessError::OutOfBounds)?;
+        let end = start
+            .checked_add(source.len())
+            .ok_or(ByteAccessError::OutOfBounds)?;
+        let target = self
+            .get_mut(start..end)
+            .ok_or(ByteAccessError::OutOfBounds)?;
+        target.copy_from_slice(source);
+        Ok(())
+    }
+
+    fn as_contiguous_mut(&mut self) -> Option<&mut [u8]> {
+        Some(self)
+    }
+}

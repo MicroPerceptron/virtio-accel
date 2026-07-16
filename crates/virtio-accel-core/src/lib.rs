@@ -507,7 +507,7 @@ impl<const N: usize> ByteSource for [u8; N] {
     }
 
     fn read_at(&self, offset: u64, target: &mut [u8]) -> Result<(), BackendError> {
-        self.as_slice().read_at(offset, target)
+        ByteSource::read_at(self.as_slice(), offset, target)
     }
 
     fn as_contiguous(&self) -> Option<&[u8]> {
@@ -603,7 +603,7 @@ impl<const N: usize> ByteSink for [u8; N] {
     }
 
     fn write_at(&mut self, offset: u64, source: &[u8]) -> Result<(), BackendError> {
-        self.as_mut_slice().write_at(offset, source)
+        ByteSink::write_at(self.as_mut_slice(), offset, source)
     }
 
     fn as_contiguous_mut(&mut self) -> Option<&mut [u8]> {

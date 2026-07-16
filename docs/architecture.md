@@ -136,6 +136,13 @@ operation is nonblocking and heap-allocation-free: publish, pop, complete, notif
 notification recheck, and reset. Reset may move already-owned storage into a reclamation result but
 does not allocate or wait for a peer.
 
+`virtio-accel-guest` owns one portable driver queue without internal synchronization. It
+preallocates a caller-selected number of tracking slots, writes fixed prefixes directly into
+caller-owned chains, and retains bulk read responses in reclaimed chain storage. Prepared transfer
+and artifact tails are published without another payload copy. Non-`Copy` typed handles carry the
+queue reset epoch; release operations consume them and report whether a failure is retryable,
+invalidated, indeterminate, or an opaque unknown status.
+
 `virtio-accel-split-queue` is the deterministic executable implementation of that boundary. It
 preallocates descriptor ownership, chain records, available entries, and used entries at
 configuration. Its split-ring counters use wrapping `u16` arithmetic, direct chains retain their
@@ -222,8 +229,8 @@ transport-neutral region metadata re-exported by `virtio-accel-device`. Its base
 4. Passes transfer and artifact regions directly to backend byte ports.
 5. Produces a response without knowing about rust-vmm or a host operating system.
 
-Submission/event retention, deterministic reset, and the bounded split-virtqueue model complete the
-portable device side. The next boundary is the no-std reference guest in issue #19, followed by the
-full guest-to-command-engine lifecycle in issue #20. A thin rust-vmm adapter supplying
+Submission/event retention, deterministic reset, the bounded split-virtqueue model, and the no-std
+reference guest complete both portable queue endpoints. The next boundary is the full
+guest-to-command-engine lifecycle in issue #20. A thin rust-vmm adapter supplying
 `virtio-device`, `virtio-queue`, and `vm-memory` integration remains a later platform layer, as do
 Linux vhost-user and an in-kernel guest driver.
