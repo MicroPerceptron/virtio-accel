@@ -26,7 +26,7 @@ use zerocopy::FromBytes;
 use crate::{ObjectId, ReadableRegion};
 
 const REQUEST_HEADER_BYTES: u64 = size_of::<RequestHeader>() as u64;
-const RESPONSE_HEADER_BYTES: u64 = 16;
+const RESPONSE_HEADER_BYTES: u64 = size_of::<virtio_accel_proto::ResponseHeader>() as u64;
 const MAX_FIXED_PREFIX_BYTES: usize = size_of::<LoadProgramRequest>();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
