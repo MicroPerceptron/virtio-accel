@@ -258,8 +258,8 @@ implementations consume the case identifiers above so the same behavioral scenar
 by the in-memory split ring and future platform transports. The dependency-free
 `virtio-accel-transport` crate provides the executable region, ownership, reset-epoch, backpressure,
 and notification port contracts. `virtio-accel-split-queue` exercises the ring-level portions of
-`VQ-001`, `VQ-003` through `VQ-006`, `VQ-013`, `VQ-014`, and `VQ-016` through `VQ-018`. Guest
-compatibility behavior remains tracked by #19 and full-path semantic assertions by #20.
+`VQ-001`, `VQ-003` through `VQ-006`, `VQ-013`, `VQ-014`, and `VQ-016` through `VQ-018`. The reference
+guest and end-to-end scenarios exercise the complete `VQ-001` through `VQ-020` lifecycle.
 
 ## Appendix A: portable Rust queue-port mapping
 

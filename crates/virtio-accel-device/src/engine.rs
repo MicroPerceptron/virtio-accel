@@ -9,7 +9,8 @@ use alloc::vec::Vec;
 
 use virtio_accel_core::{
     Accelerator, ArtifactRef, BackendError, BindingRef, BufferRange, BufferUsage, ByteSink,
-    ByteSource, Capabilities, DeviceInfo, EventState, ReleaseFailure, SubmitFailure, Timeout,
+    ByteSource, Capabilities, DeviceInfo, DeviceInfoError, EventState, ReleaseFailure,
+    SubmitFailure, Timeout,
 };
 use virtio_accel_proto::{
     KnownEventState, Le16, Le32, Le64, ObjectPayload, StatusCode, SubmitResponse, WireConfig,
@@ -62,6 +63,7 @@ pub enum ResetError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommandProcessorInitError {
     Backend(BackendError),
+    DeviceInfo(DeviceInfoError),
     Decoder(DecoderLimitsError),
     State(DeviceStateConfigError),
 }
@@ -128,6 +130,8 @@ impl<A: Accelerator> CommandProcessor<A> {
         let info = accelerator
             .device_info()
             .map_err(CommandProcessorInitError::Backend)?;
+        info.validate()
+            .map_err(CommandProcessorInitError::DeviceInfo)?;
         let limits =
             DecoderLimits::new(config, info).map_err(CommandProcessorInitError::Decoder)?;
         let state =
@@ -286,6 +290,9 @@ impl<A: Accelerator> CommandProcessor<A> {
                 )
             }
             DecodedRequestBody::CreateContext(desc) => {
+                if let Err(error) = self.info.validate_context_desc(desc) {
+                    return self.respond_backend_error(response, request_id, error, false);
+                }
                 let accelerator = &self.accelerator;
                 match self
                     .state
@@ -356,6 +363,9 @@ impl<A: Accelerator> CommandProcessor<A> {
                 self.unload_program(response, request_id, program_id)
             }
             DecodedRequestBody::CreateQueue { context_id, desc } => {
+                if let Err(error) = self.info.validate_queue_desc(desc) {
+                    return self.respond_backend_error(response, request_id, error, false);
+                }
                 let accelerator = &self.accelerator;
                 match self.state.create_queue_with(context_id, |context| {
                     accelerator.create_queue(context, desc)
@@ -805,11 +815,7 @@ impl<A: Accelerator> CommandProcessor<A> {
         request_id: u64,
         event_id: ObjectId,
     ) -> Result<CommandOutcome, CommandProcessError> {
-        if !self
-            .info
-            .capabilities
-            .contains(Capabilities::EVENT_CANCELLATION)
-        {
+        if self.info.validate_event_cancellation().is_err() {
             return self.respond_empty(response, StatusCode::UNSUPPORTED, request_id, false);
         }
         let event = match self.state.event_record(event_id) {

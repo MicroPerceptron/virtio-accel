@@ -169,6 +169,24 @@ regions. Object lookup is constant time and bounded by advertised limits. The qu
 allocation or copy to the steady-state path; mapping implementations can present borrowed segmented
 byte ports directly to the command processor.
 
+`Accelerator` deliberately places no `Send` or `Sync` bound on the backend or its associated handle
+types. The reference command engine specializes over one concrete backend and owns it behind one
+mutable admission boundary. A provider can therefore preserve thread-affine native handles without
+boxing, atomics, or locks. Providers that opt into cross-thread auto traits own the synchronization
+needed by their actual shared state; the portable object graph does not speculate by adding it to
+every handle.
+
+The source-level trait may be erased only after an adapter fixes all associated handle types. Stable
+binary plugin loading, cross-module allocation ownership, and an erased handle ABI are deliberately
+outside v1. A future plugin adapter can add those policies without changing static providers or
+weakening the submit and release contracts.
+
+Backend metadata is fetched and validated once before object tables are constructed. Assigned
+reserved capabilities, a missing usable memory domain, and zero advertised limits fail construction.
+Unknown capability bits remain available for diagnostics but do not select operations. The command
+engine then uses the cached capabilities and limits to reject unsupported work before provider
+invocation.
+
 `WRITE_BUFFER` and `READ_BUFFER` are the baseline's explicit content-copy boundaries. Device-local
 memory may require bounded staging during those operations. Allocation, submission, polling, and
 release do not receive permission to copy a bound buffer merely because a native import or binding
@@ -230,7 +248,8 @@ transport-neutral region metadata re-exported by `virtio-accel-device`. Its base
 5. Produces a response without knowing about rust-vmm or a host operating system.
 
 Submission/event retention, deterministic reset, the bounded split-virtqueue model, and the no-std
-reference guest complete both portable queue endpoints. The next boundary is the full
-guest-to-command-engine lifecycle in issue #20. A thin rust-vmm adapter supplying
-`virtio-device`, `virtio-queue`, and `vm-memory` integration remains a later platform layer, as do
-Linux vhost-user and an in-kernel guest driver.
+reference guest now complete both portable queue endpoints and their full serialized lifecycle. The
+next backend boundary is issue #22's portable reference artifact and deterministic execution model,
+which will exercise real buffer output without standardizing production artifact contents. A thin
+rust-vmm adapter supplying `virtio-device`, `virtio-queue`, and `vm-memory` integration remains a
+later platform layer, as do Linux vhost-user and an in-kernel guest driver.

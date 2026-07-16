@@ -145,7 +145,8 @@ impl Accelerator for MockAccelerator {
         Ok(self.info)
     }
 
-    fn create_context(&self, _desc: ContextDesc) -> Result<Self::Context, BackendError> {
+    fn create_context(&self, desc: ContextDesc) -> Result<Self::Context, BackendError> {
+        self.info.validate_context_desc(desc)?;
         Ok(MockContext {
             id: self.next_id()?,
         })
@@ -276,8 +277,9 @@ impl Accelerator for MockAccelerator {
     fn create_queue(
         &self,
         context: &Self::Context,
-        _desc: QueueDesc,
+        desc: QueueDesc,
     ) -> Result<Self::Queue, BackendError> {
+        self.info.validate_queue_desc(desc)?;
         Ok(MockQueue {
             context_id: context.id,
         })
@@ -355,7 +357,9 @@ impl Accelerator for MockAccelerator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use virtio_accel_core::{AccessMode, BindingRef, BufferRange, BufferUsage};
+    use virtio_accel_core::{
+        AccessMode, BindingRef, BufferRange, BufferUsage, ContextFlags, QueueFlags,
+    };
 
     #[derive(Debug)]
     struct SplitSource<'a> {
@@ -508,6 +512,29 @@ mod tests {
         );
 
         backend.free_buffer(buffer).unwrap();
+        backend.destroy_context(context).unwrap();
+    }
+
+    #[test]
+    fn reserved_creation_flags_are_rejected_without_resources() {
+        let backend = MockAccelerator::default();
+        assert!(matches!(
+            backend.create_context(ContextDesc {
+                flags: ContextFlags::SECURE,
+            }),
+            Err(BackendError::Unsupported)
+        ));
+
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        assert!(matches!(
+            backend.create_queue(
+                &context,
+                QueueDesc {
+                    flags: QueueFlags::IN_ORDER,
+                },
+            ),
+            Err(BackendError::Unsupported)
+        ));
         backend.destroy_context(context).unwrap();
     }
 
