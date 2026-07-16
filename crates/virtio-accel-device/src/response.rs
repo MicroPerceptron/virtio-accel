@@ -190,11 +190,13 @@ fn write_header(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SegmentedSink;
+    use crate::{SegmentedSink, SegmentedSource};
 
     #[test]
     fn response_header_and_payload_cross_every_writable_split() {
         let payload = *b"response";
+        let payload_segments = [&payload[..3], &payload[3..]];
+        let payload_source = SegmentedSource::new(&payload_segments).unwrap();
         let expected_len = 16 + payload.as_slice().len();
         for split in 1..expected_len {
             let mut output = [0_u8; 24];
@@ -204,7 +206,7 @@ mod tests {
             let mut writer = ResponseWriter::new(&mut sink, 1024);
             assert_eq!(
                 writer
-                    .write_response(StatusCode::OK, 0x0102_0304_0506_0708, &payload)
+                    .write_response(StatusCode::OK, 0x0102_0304_0506_0708, &payload_source)
                     .unwrap(),
                 expected_len as u32
             );
