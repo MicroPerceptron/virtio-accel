@@ -49,15 +49,23 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
     ),
     ("SPEC", 2): coverage(
         "mixed",
-        ("ci/check-portable-dependencies.sh", "docs/architecture.md"),
-        ("#17", "#20", "#21"),
-        "Portable dependency direction is enforced now; concrete transport and provider boundaries are tracked.",
+        (
+            "ci/check-portable-dependencies.sh",
+            "crates/virtio-accel-transport/src/lib.rs",
+            "docs/architecture.md",
+        ),
+        ("#20", "#21"),
+        "Portable queue and dependency boundaries are enforced now; concrete end-to-end and provider adapters remain tracked.",
     ),
     ("SPEC", 3): coverage(
         "mixed",
-        ("ci/check-portable-dependencies.sh", "docs/architecture.md"),
-        ("#17", "#20", "#21"),
-        "Layer dependencies are enforceable now; runtime adapter boundaries require their implementations.",
+        (
+            "ci/check-portable-dependencies.sh",
+            "crates/virtio-accel-transport/src/queue.rs",
+            "docs/architecture.md",
+        ),
+        ("#20", "#21"),
+        "Layer and ownership boundaries are enforceable now; runtime provider integration remains tracked.",
     ),
     ("SPEC", 4): coverage(
         "mixed",
@@ -203,26 +211,37 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
     ("VIRTQ", 1): coverage(
         "tracked",
         ("docs/virtqueue.md",),
-        ("#17", "#18"),
+        ("#18",),
         "The negotiated reference profile is specified; transport feature enforcement requires the queue adapter.",
     ),
     ("VIRTQ", 2): coverage(
-        "tracked",
-        ("docs/virtqueue.md",),
-        ("#17", "#18"),
-        "The flattened region contract is specified and assigned to the region-port and split-ring implementations.",
+        "mixed",
+        (
+            "crates/virtio-accel-transport/src/queue.rs",
+            "crates/virtio-accel-transport/src/regions.rs",
+            "docs/virtqueue.md",
+        ),
+        ("#18",),
+        "The flattened address-free region and chain contracts are executable; concrete descriptor mapping remains tracked.",
     ),
     ("VIRTQ", 3): coverage(
-        "tracked",
-        ("docs/virtqueue.md",),
-        ("#17", "#18"),
-        "Topology and mapping rules have stable VQ cases but require executable descriptor-chain ports.",
+        "mixed",
+        (
+            "crates/virtio-accel-device/src/frame.rs",
+            "crates/virtio-accel-transport/src/regions.rs",
+        ),
+        ("#18",),
+        "Direction, count, length, and byte-port totals are executable; split-ring topology and mapping remain tracked.",
     ),
     ("VIRTQ", 4): coverage(
-        "tracked",
-        ("conformance/rust-clean-room/tests/vectors.rs",),
-        ("#17", "#18"),
-        "Frame exactness is executable; cross-region presentation requires the region adapter and split-ring model.",
+        "mixed",
+        (
+            "conformance/rust-clean-room/tests/vectors.rs",
+            "crates/virtio-accel-device/src/frame.rs",
+            "crates/virtio-accel-transport/src/regions.rs",
+        ),
+        ("#18",),
+        "Frame exactness and cross-region port validation are executable; descriptor-backed presentation remains tracked.",
     ),
     ("VIRTQ", 5): coverage(
         "tracked",
@@ -243,16 +262,16 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
         "Stable VQ ordering cases exist; concurrent publication and completion behavior awaits the queue model.",
     ),
     ("VIRTQ", 8): coverage(
-        "tracked",
-        ("docs/virtqueue.md",),
+        "mixed",
+        ("crates/virtio-accel-transport/src/queue.rs", "docs/virtqueue.md"),
         ("#19", "#20"),
-        "Backpressure semantics are specified and assigned to the guest and full-path implementations.",
+        "Publication ownership and retryable backpressure types are executable; guest behavior and full-path tests remain tracked.",
     ),
     ("VIRTQ", 9): coverage(
-        "tracked",
-        ("docs/virtqueue.md",),
+        "mixed",
+        ("crates/virtio-accel-transport/src/queue.rs", "docs/virtqueue.md"),
         ("#18", "#19"),
-        "Notification invariants are specified and assigned to split-ring and guest implementations.",
+        "Notification decisions and mandatory recheck results are executable at the port boundary; ring implementations remain tracked.",
     ),
     ("VIRTQ", 10): coverage(
         "tracked",
@@ -261,10 +280,14 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
         "Malformed frame behavior is executable; malformed descriptor-chain isolation requires queue execution.",
     ),
     ("VIRTQ", 11): coverage(
-        "tracked",
-        ("docs/virtqueue.md",),
+        "mixed",
+        (
+            "crates/virtio-accel-transport/src/queue.rs",
+            "crates/virtio-accel-device/src/engine.rs",
+            "docs/virtqueue.md",
+        ),
         ("#18", "#19", "#20"),
-        "Reset cases are stable, while descriptor reclamation and late-completion exclusion require full implementations.",
+        "Reset epochs, consuming completion, reclamation ownership, and engine reset are executable; concrete ring and full-path reset remain tracked.",
     ),
     ("VIRTQ", 12): coverage(
         "tracked",
@@ -286,12 +309,13 @@ RESET_ENGINE_COVERAGE: Final = coverage(
 RESET_TRANSPORT_COVERAGE: Final = coverage(
     "mixed",
     (
+        "crates/virtio-accel-transport/src/queue.rs",
         "crates/virtio-accel-device/src/engine.rs",
         "crates/virtio-accel-device/tests/command_processor.rs",
         "docs/virtqueue.md",
     ),
-    ("#17", "#18"),
-    "The portable reset admission gate is executable; stopping queue fetch and publication requires the transport adapter and split-ring model.",
+    ("#18",),
+    "Queue reset epochs and the portable reset admission gate are executable; stopping concrete split-ring fetch and publication remains tracked.",
 )
 RESET_ENGINE_MARKERS: Final = (
     "Teardown **MUST** be bounded",

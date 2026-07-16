@@ -112,14 +112,14 @@
         "status": "mixed",
         "evidence": [
           "ci/check-portable-dependencies.sh",
+          "crates/virtio-accel-transport/src/lib.rs",
           "docs/architecture.md"
         ],
         "issues": [
-          "#17",
           "#20",
           "#21"
         ],
-        "rationale": "Portable dependency direction is enforced now; concrete transport and provider boundaries are tracked."
+        "rationale": "Portable queue and dependency boundaries are enforced now; concrete end-to-end and provider adapters remain tracked."
       }
     },
     {
@@ -133,14 +133,14 @@
         "status": "mixed",
         "evidence": [
           "ci/check-portable-dependencies.sh",
+          "crates/virtio-accel-transport/src/queue.rs",
           "docs/architecture.md"
         ],
         "issues": [
-          "#17",
           "#20",
           "#21"
         ],
-        "rationale": "Layer dependencies are enforceable now; runtime adapter boundaries require their implementations."
+        "rationale": "Layer and ownership boundaries are enforceable now; runtime provider integration remains tracked."
       }
     },
     {
@@ -154,14 +154,14 @@
         "status": "mixed",
         "evidence": [
           "ci/check-portable-dependencies.sh",
+          "crates/virtio-accel-transport/src/queue.rs",
           "docs/architecture.md"
         ],
         "issues": [
-          "#17",
           "#20",
           "#21"
         ],
-        "rationale": "Layer dependencies are enforceable now; runtime adapter boundaries require their implementations."
+        "rationale": "Layer and ownership boundaries are enforceable now; runtime provider integration remains tracked."
       }
     },
     {
@@ -175,14 +175,14 @@
         "status": "mixed",
         "evidence": [
           "ci/check-portable-dependencies.sh",
+          "crates/virtio-accel-transport/src/queue.rs",
           "docs/architecture.md"
         ],
         "issues": [
-          "#17",
           "#20",
           "#21"
         ],
-        "rationale": "Layer dependencies are enforceable now; runtime adapter boundaries require their implementations."
+        "rationale": "Layer and ownership boundaries are enforceable now; runtime provider integration remains tracked."
       }
     },
     {
@@ -196,14 +196,14 @@
         "status": "mixed",
         "evidence": [
           "ci/check-portable-dependencies.sh",
+          "crates/virtio-accel-transport/src/queue.rs",
           "docs/architecture.md"
         ],
         "issues": [
-          "#17",
           "#20",
           "#21"
         ],
-        "rationale": "Layer dependencies are enforceable now; runtime adapter boundaries require their implementations."
+        "rationale": "Layer and ownership boundaries are enforceable now; runtime provider integration remains tracked."
       }
     },
     {
@@ -217,14 +217,14 @@
         "status": "mixed",
         "evidence": [
           "ci/check-portable-dependencies.sh",
+          "crates/virtio-accel-transport/src/queue.rs",
           "docs/architecture.md"
         ],
         "issues": [
-          "#17",
           "#20",
           "#21"
         ],
-        "rationale": "Layer dependencies are enforceable now; runtime adapter boundaries require their implementations."
+        "rationale": "Layer and ownership boundaries are enforceable now; runtime provider integration remains tracked."
       }
     },
     {
@@ -655,15 +655,15 @@
       "coverage": {
         "status": "mixed",
         "evidence": [
+          "crates/virtio-accel-transport/src/queue.rs",
           "crates/virtio-accel-device/src/engine.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
           "docs/virtqueue.md"
         ],
         "issues": [
-          "#17",
           "#18"
         ],
-        "rationale": "The portable reset admission gate is executable; stopping queue fetch and publication requires the transport adapter and split-ring model."
+        "rationale": "Queue reset epochs and the portable reset admission gate are executable; stopping concrete split-ring fetch and publication remains tracked."
       }
     },
     {
@@ -1491,9 +1491,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-A6D1EA8B8FFD",
+      "id": "REQ-SPEC-3123035A074A",
       "source": "docs/specification.md",
-      "line": 438,
+      "line": 439,
       "section": "10. Portability requirements",
       "keyword": "MUST NOT",
       "statement": "Platform adapters depend inward on the portable layers. A portable layer **MUST NOT** conditionally",
@@ -1509,9 +1509,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-ABF529AA1C73",
+      "id": "REQ-SPEC-7D81F01D02EB",
       "source": "docs/specification.md",
-      "line": 454,
+      "line": 455,
       "section": "11. Tracked completion work",
       "keyword": "MAY",
       "statement": "No implementation **MAY** advertise a reserved optional feature merely because a Rust constant",
@@ -2261,7 +2261,6 @@
           "docs/virtqueue.md"
         ],
         "issues": [
-          "#17",
           "#18"
         ],
         "rationale": "The negotiated reference profile is specified; transport feature enforcement requires the queue adapter."
@@ -2275,15 +2274,16 @@
       "keyword": "MUST NOT",
       "statement": "The command engine sees region lengths and byte access only. It **MUST NOT** receive guest physical",
       "coverage": {
-        "status": "tracked",
+        "status": "mixed",
         "evidence": [
+          "crates/virtio-accel-transport/src/queue.rs",
+          "crates/virtio-accel-transport/src/regions.rs",
           "docs/virtqueue.md"
         ],
         "issues": [
-          "#17",
           "#18"
         ],
-        "rationale": "The flattened region contract is specified and assigned to the region-port and split-ring implementations."
+        "rationale": "The flattened address-free region and chain contracts are executable; concrete descriptor mapping remains tracked."
       }
     },
     {
@@ -2294,15 +2294,15 @@
       "keyword": "MUST",
       "statement": "The transport adapter **MUST** validate the descriptor topology and map every readable and required",
       "coverage": {
-        "status": "tracked",
+        "status": "mixed",
         "evidence": [
-          "docs/virtqueue.md"
+          "crates/virtio-accel-device/src/frame.rs",
+          "crates/virtio-accel-transport/src/regions.rs"
         ],
         "issues": [
-          "#17",
           "#18"
         ],
-        "rationale": "Topology and mapping rules have stable VQ cases but require executable descriptor-chain ports."
+        "rationale": "Direction, count, length, and byte-port totals are executable; split-ring topology and mapping remain tracked."
       }
     },
     {
@@ -2313,15 +2313,16 @@
       "keyword": "MUST",
       "statement": "is request-header byte zero. The readable total **MUST** equal:",
       "coverage": {
-        "status": "tracked",
+        "status": "mixed",
         "evidence": [
-          "conformance/rust-clean-room/tests/vectors.rs"
+          "conformance/rust-clean-room/tests/vectors.rs",
+          "crates/virtio-accel-device/src/frame.rs",
+          "crates/virtio-accel-transport/src/regions.rs"
         ],
         "issues": [
-          "#17",
           "#18"
         ],
-        "rationale": "Frame exactness is executable; cross-region presentation requires the region adapter and split-ring model."
+        "rationale": "Frame exactness and cross-region port validation are executable; descriptor-backed presentation remains tracked."
       }
     },
     {
@@ -2446,15 +2447,16 @@
       "keyword": "MUST",
       "statement": "- A driver with no free descriptor head or insufficient writable buffers **MUST** retain the command",
       "coverage": {
-        "status": "tracked",
+        "status": "mixed",
         "evidence": [
+          "crates/virtio-accel-transport/src/queue.rs",
           "docs/virtqueue.md"
         ],
         "issues": [
           "#19",
           "#20"
         ],
-        "rationale": "Backpressure semantics are specified and assigned to the guest and full-path implementations."
+        "rationale": "Publication ownership and retryable backpressure types are executable; guest behavior and full-path tests remain tracked."
       }
     },
     {
@@ -2465,15 +2467,16 @@
       "keyword": "MUST NOT",
       "statement": "- It **MUST NOT** publish a partial command or reuse descriptors still owned by the device.",
       "coverage": {
-        "status": "tracked",
+        "status": "mixed",
         "evidence": [
+          "crates/virtio-accel-transport/src/queue.rs",
           "docs/virtqueue.md"
         ],
         "issues": [
           "#19",
           "#20"
         ],
-        "rationale": "Backpressure semantics are specified and assigned to the guest and full-path implementations."
+        "rationale": "Publication ownership and retryable backpressure types are executable; guest behavior and full-path tests remain tracked."
       }
     },
     {
@@ -2503,8 +2506,10 @@
       "keyword": "MUST NOT",
       "statement": "the base Virtio reset rule. It **MUST NOT** expect response bytes or used entries for those chains.",
       "coverage": {
-        "status": "tracked",
+        "status": "mixed",
         "evidence": [
+          "crates/virtio-accel-transport/src/queue.rs",
+          "crates/virtio-accel-device/src/engine.rs",
           "docs/virtqueue.md"
         ],
         "issues": [
@@ -2512,7 +2517,7 @@
           "#19",
           "#20"
         ],
-        "rationale": "Reset cases are stable, while descriptor reclamation and late-completion exclusion require full implementations."
+        "rationale": "Reset epochs, consuming completion, reclamation ownership, and engine reset are executable; concrete ring and full-path reset remain tracked."
       }
     },
     {

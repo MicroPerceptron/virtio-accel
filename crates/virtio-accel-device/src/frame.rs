@@ -60,7 +60,7 @@ pub fn preflight_command_frame<'a>(
             return Ok(FramePreflight::Unusable(UnusableFrame::ChainLayout(error)));
         }
     };
-    if let Err(error) = layout.validate_ports(request, response) {
+    if let Err(error) = layout.validate_port_lengths(request.len(), response.len()) {
         return Ok(FramePreflight::Unusable(UnusableFrame::ChainLayout(error)));
     }
 

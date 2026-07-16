@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 virtio-accel-core.workspace = true
 virtio-accel-proto.workspace = true
+virtio-accel-transport.workspace = true
 zerocopy.workspace = true
 
 [dev-dependencies]
