@@ -83,8 +83,10 @@ impl Default for MockAccelerator {
                     | Capabilities::EVENT_CANCELLATION,
                 limits: DeviceLimits {
                     max_contexts: 64,
-                    max_queues_per_context: 16,
                     max_buffers_per_context: 1_024,
+                    max_programs_per_context: 256,
+                    max_queues_per_context: 16,
+                    max_events_per_context: 4_096,
                     max_bindings_per_submission: 256,
                     max_buffer_bytes: 1 << 30,
                     max_artifact_bytes: 1 << 30,

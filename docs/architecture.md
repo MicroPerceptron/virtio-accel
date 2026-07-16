@@ -6,12 +6,13 @@ The portable layers define the semantics that must agree across every guest tran
 machine monitor, host operating system, and hardware provider. Platform integrations are adapters;
 they do not own accelerator semantics.
 
-The draft does not yet assign a virtio device ID. It also does not standardize vendor executable
+Protocol 1.0 does not assign a Virtio device ID. It also does not standardize vendor executable
 formats: artifact format identifiers and target words remain opaque to the transport.
 
 The normative terminology, object model, and compatibility rules live in
-[specification.md](specification.md). This document explains the implementation boundaries that
-preserve those rules.
+[specification.md](specification.md), with exact layouts in [wire-abi.md](wire-abi.md) and command
+queue rules in [virtqueue.md](virtqueue.md). This document explains the implementation boundaries
+that preserve those rules.
 
 ## Load-bearing invariants
 

@@ -40,9 +40,10 @@ CI runs `cargo hack check --feature-powerset --no-dev-deps` across the workspace
 additive: disabling default features may remove convenience behavior but must not select a different
 protocol interpretation.
 
-The portable dependency guard inspects resolved target features for `virtio-accel-proto` and
-`virtio-accel-core`. A dependency’s host-side derive macro may use `std`, but the target graph for
-these crates must not enable a dependency feature named `std` or `alloc`.
+The portable dependency guard inspects normal and build target features for `virtio-accel-proto`
+and `virtio-accel-core`; test-only development dependencies are intentionally outside the target
+runtime graph. A dependency’s host-side derive macro may use `std`, but the target graph for these
+crates must not enable a dependency feature named `std` or `alloc`.
 
 ## Dependency policy
 

@@ -1,15 +1,15 @@
 # virtio-accel portable protocol foundations
 
-Status: normative design draft. Current draft protocol version: 0.1. Target first stable protocol
-version: 1.0.
+Status: frozen portable protocol 1.0. Implementation conformance remains in progress.
 
 This document defines the portable semantic foundation for `virtio-accel`. It does not assign a
 Virtio device ID and is not an OASIS Virtio specification. The transport model is intended to remain
 compatible with the general facilities defined by the
 [Virtio specification](https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html).
 
-Sections 1 through 11 are normative for the portable v1 design. Appendix A maps the current Rust
-surface to the terms in this document and is non-normative implementation guidance.
+Sections 1 through 11, [wire-abi.md](wire-abi.md), and [virtqueue.md](virtqueue.md) are normative for
+portable protocol 1.0. Appendix A maps the current Rust surface to the terms in this document and is
+non-normative implementation guidance.
 
 ## 1. Normative language
 
@@ -222,13 +222,13 @@ changing the event.
 
 ### 5.2 Transport feature bits
 
-Transport feature bits alter driver/device protocol behavior. The mandatory draft baseline has no
+Transport feature bits alter driver/device protocol behavior. The mandatory baseline has no
 device-specific transport features: `BASELINE_FEATURES` is empty.
 
-The currently assigned draft bits `MULTI_QUEUE`, `EVENT_QUEUE`, `EXTERNAL_MEMORY`,
+The currently reserved bits `MULTI_QUEUE`, `EVENT_QUEUE`, `EXTERNAL_MEMORY`,
 `TIMELINE_FENCES`, and `SECURE_CONTEXTS` reserve numeric positions only. A baseline device **MUST NOT**
-advertise them and a baseline driver **MUST NOT** accept them. Advertising one before its normative
-semantics and conformance tests are complete is a protocol error.
+advertise them and a baseline driver **MUST NOT** accept them. Protocol 1.0 assigns no semantics to
+these positions.
 
 Unknown device-specific feature bits **MUST NOT** be accepted by a driver. A device **MUST NOT**
 offer a feature it cannot honor if accepted.
@@ -242,28 +242,26 @@ If enabling a backend capability would require different descriptor direction, a
 new synchronization, or changed lifetime rules, the device **MUST** also negotiate an appropriate
 transport feature.
 
-The exact v1 meanings of host-visible memory, device-local memory, secure contexts, and execution
-queue flags are frozen by issues #21 and #9. Until then, the reference implementation **MUST NOT**
-translate an underspecified capability into additional wire behavior.
+The exact backend meanings of host-visible memory, device-local memory, secure contexts, and
+execution-queue flags are tracked by issue #21. Protocol 1.0 accepts only the wire values explicitly
+listed in [wire-abi.md](wire-abi.md); the reference implementation **MUST NOT** translate an
+underspecified capability into additional wire behavior.
 
 ### 5.4 Request and object flags
 
-All request-header flags are zero in the mandatory draft baseline. `NO_WAIT` retains a draft numeric
-assignment but is unadvertised and **MUST NOT** be sent until its command-specific semantics are
-defined by issue #9.
+All request-header flags are zero in protocol 1.0. The former draft `NO_WAIT` position, bit zero, is
+reserved and **MUST** be zero.
 
 Unknown request, context, execution-queue, submission, buffer-usage, or binding-access flag bits
 **MUST** be rejected before backend invocation. Reserved fields **MUST** be zero.
 
 ## 6. Versioning and compatibility
 
-### 6.1 Draft version
+### 6.1 Frozen version
 
-Protocol major zero is pre-stable. The current `0.1` wire values may change incompatibly while the
-v1 issues remain open. Implementations **MUST NOT** claim stable interoperability from a major-zero
-version.
-
-The first frozen release will use protocol version `1.0`.
+This specification freezes protocol version `1.0`. Implementations **MUST** expose major `1` and
+minor `0` in device-specific configuration and **MUST NOT** claim protocol 1.0 conformance unless
+they satisfy the normative wire, queue, lifecycle, and compatibility requirements.
 
 ### 6.2 Stable major versions
 
@@ -363,20 +361,17 @@ expose different semantics by host OS.
 
 ## 11. Tracked semantic freezes
 
-This document resolves the shared vocabulary and compatibility model. The following details remain
-explicitly tracked rather than silently decided here:
+This document, [wire-abi.md](wire-abi.md), and [virtqueue.md](virtqueue.md) freeze the driver/device
+protocol. The following implementation and provider details remain explicitly tracked rather than
+silently decided here:
 
-- issue #9 freezes every numeric ABI value, payload, status, request flag, and exact capability
-  mapping;
-- issue #10 freezes descriptor-chain framing, used length, ordering, notification, and reset
-  behavior;
 - issue #21 freezes the complete backend capability, memory-domain, execution-queue, blocking,
-  concurrency, and release semantics;
+  concurrency, and release semantics without changing the 1.0 wire contract;
 - issue #25 turns the trust assumptions into enforceable resource and threat-model limits; and
 - issue #32 defines post-1.0 semver and wire-evolution policy.
 
-No implementation **MAY** advertise an underspecified optional feature merely because a draft Rust
-constant already exists.
+No implementation **MAY** advertise a reserved optional feature merely because a Rust constant
+records its numeric position.
 
 ## Appendix A: Rust surface mapping
 
@@ -389,9 +384,9 @@ model or is identified as an implementation helper.
 | `AcceleratorClass` | Extensible device class in device identity |
 | `Capabilities` | Semantic backend capabilities; not Virtio feature bits |
 | `DeviceIdentity` | Device instance identity |
-| `DeviceLimits` | Semantic limits enforced before backend invocation |
+| `DeviceLimits` | Context, buffer, program, execution-queue, event, binding, and byte limits enforced before backend invocation |
 | `DeviceInfo` | Device identity, semantic capabilities, and limits |
-| `ContextFlags`, `ContextDesc` | Context creation intent; nonzero draft flags remain subject to #9/#21 |
+| `ContextFlags`, `ContextDesc` | Context creation intent; protocol 1.0 accepts only empty context flags |
 | `MemoryDomain` | Requested buffer placement class |
 | `BufferUsage`, `BufferDesc`, `BufferRange` | Buffer allocation intent and checked byte range |
 | `AccessMode` | Binding read/write intent |
@@ -404,15 +399,17 @@ model or is identified as an implementation helper.
 | `ReleaseFailure` | Rejected versus indeterminate resource-release boundary |
 | `Accelerator` | Accelerator backend contract |
 | `Le16`, `Le32`, `Le64` | Wire implementation aliases; not semantic API |
-| `PROTOCOL_MAJOR`, `PROTOCOL_MINOR` | Draft/stable compatibility version |
+| `PROTOCOL_MAJOR`, `PROTOCOL_MINOR` | Frozen protocol version 1.0 |
 | `COMMAND_QUEUE` | Baseline command virtqueue index |
+| `BASELINE_COMMAND_QUEUES`, `HARD_MAX_*`, `MIN_MAX_*` | Frozen queue, frame, binding, and configuration bounds |
+| `KNOWN_*_BITS`, `RESERVED_REQUEST_FLAG_NO_WAIT` | Assigned and reserved-zero flag namespaces |
 | `FeatureBits` | Device-specific Virtio transport features |
 | `BASELINE_FEATURES` | Mandatory feature set, currently empty |
-| `UNADVERTISED_DRAFT_FEATURES` | Reserved namespace that must not be advertised |
-| `RequestFlags` | Per-request wire flags; zero in the mandatory draft baseline |
+| `RESERVED_FEATURES` | Reserved namespace that must not be advertised |
+| `RequestFlags` | Per-request wire flags; empty in protocol 1.0 |
 | `KnownOpcode`, `UnknownOpcode` | Validated command namespace and opaque unknown opcode |
 | `StatusCode` | Extensible response status namespace |
-| `WireConfig` | Device-specific configuration fields |
+| `WireConfig`, `ConfigError` | Device-specific configuration and executable validity rules |
 | `RequestHeader`, `ResponseHeader` | Request and response frame headers |
 | `WireDeviceInfo` | Device-information response payload |
 | `CreateContextRequest` | Context-create request payload |
@@ -422,7 +419,8 @@ model or is identified as an implementation helper.
 | `LoadProgramRequest` | Program-load request prefix |
 | `CreateQueueRequest` | Accelerator execution-queue-create payload |
 | `SubmitRequest`, `WireBinding` | Submission prefix and binding array entry |
-| `WireEventState` | Event-poll response payload |
+| `SubmitResponse` | Event ownership payload for accepted or indeterminate submission |
+| `WireEventState`, `KnownEventState`, `UnknownEventState` | Event-poll response payload and extensible raw state handling |
 | `DecodeError`, `read_exact`, `checked_array_bytes` | Protocol decoding helpers; implementation-only |
 | `ObjectKind`, `ObjectId` | Device-private typed object identity |
 | `ObjectTable`, `ObjectTableError` | Device implementation state; encoding is not wire ABI |

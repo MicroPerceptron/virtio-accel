@@ -82,8 +82,10 @@ pub struct DeviceIdentity {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeviceLimits {
     pub max_contexts: u32,
-    pub max_queues_per_context: u32,
     pub max_buffers_per_context: u32,
+    pub max_programs_per_context: u32,
+    pub max_queues_per_context: u32,
+    pub max_events_per_context: u32,
     pub max_bindings_per_submission: u32,
     pub max_buffer_bytes: u64,
     pub max_artifact_bytes: u64,

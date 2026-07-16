@@ -7,7 +7,7 @@ readonly packages=(
 )
 
 for package in "${packages[@]}"; do
-  tree="$(cargo tree -p "$package" -e features --prefix none)"
+  tree="$(cargo tree -p "$package" -e normal,build,features --prefix none)"
   if grep -Eq 'feature "(std|alloc)"' <<<"$tree"; then
     echo "$package unexpectedly enables a std or alloc dependency feature:" >&2
     echo "$tree" >&2
