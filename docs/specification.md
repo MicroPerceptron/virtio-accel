@@ -1,6 +1,7 @@
 # virtio-accel portable protocol foundations
 
-Status: frozen portable protocol 1.0. Implementation conformance remains in progress.
+Status: portable protocol 1.0 candidate. Implementation conformance and the final freeze audit
+remain in progress.
 
 This document defines the portable semantic foundation for `virtio-accel`. It does not assign a
 Virtio device ID and is not an OASIS Virtio specification. The transport model is intended to remain
@@ -8,8 +9,8 @@ compatible with the general facilities defined by the
 [Virtio specification](https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html).
 
 Sections 1 through 11, [wire-abi.md](wire-abi.md), and [virtqueue.md](virtqueue.md) are normative for
-portable protocol 1.0. Appendix A maps the current Rust surface to the terms in this document and is
-non-normative implementation guidance.
+the portable protocol 1.0 candidate. Appendix A maps the current Rust surface to the terms in this
+document and is non-normative implementation guidance.
 
 ## 1. Normative language
 
@@ -257,11 +258,16 @@ Unknown request, context, execution-queue, submission, buffer-usage, or binding-
 
 ## 6. Versioning and compatibility
 
-### 6.1 Frozen version
+### 6.1 Candidate version
 
-This specification freezes protocol version `1.0`. Implementations **MUST** expose major `1` and
-minor `0` in device-specific configuration and **MUST NOT** claim protocol 1.0 conformance unless
-they satisfy the normative wire, queue, lifecycle, and compatibility requirements.
+This specification assigns version `1.0` to the candidate exercised by the conformance artifacts.
+Candidate implementations **MUST** expose major `1` and minor `0` in device-specific configuration
+and **MUST NOT** claim candidate protocol 1.0 conformance unless they satisfy the normative wire,
+queue, lifecycle, and compatibility requirements.
+
+Protocol 1.0 does not become a stable compatibility promise until the final audit tracked by issue
+#33. Before that audit, an intentional candidate revision **MUST** follow the coordinated procedure
+in [wire-abi.md](wire-abi.md) and **MUST NOT** be described as a frozen or stable release.
 
 ### 6.2 Stable major versions
 
@@ -359,16 +365,18 @@ Portable crates **MUST NOT** select an operating system, VMM, kernel, vendor API
 Platform adapters depend inward on the portable layers. A portable layer **MUST NOT** conditionally
 expose different semantics by host OS.
 
-## 11. Tracked semantic freezes
+## 11. Tracked completion work
 
-This document, [wire-abi.md](wire-abi.md), and [virtqueue.md](virtqueue.md) freeze the driver/device
-protocol. The following implementation and provider details remain explicitly tracked rather than
-silently decided here:
+This document, [wire-abi.md](wire-abi.md), and [virtqueue.md](virtqueue.md) define the current
+driver/device protocol candidate. The following implementation, provider, and verification details
+remain explicitly tracked rather than silently decided here:
 
-- issue #21 freezes the complete backend capability, memory-domain, execution-queue, blocking,
-  concurrency, and release semantics without changing the 1.0 wire contract;
+- issue #21 completes the backend capability, memory-domain, execution-queue, blocking,
+  concurrency, and release semantics before the wire contract freezes;
 - issue #25 turns the trust assumptions into enforceable resource and threat-model limits; and
-- issue #32 defines post-1.0 semver and wire-evolution policy.
+- issue #32 defines post-1.0 semver and wire-evolution policy; and
+- issue #33 performs the final protocol and API audit, including independent clean-room review,
+  before freezing protocol 1.0.
 
 No implementation **MAY** advertise a reserved optional feature merely because a Rust constant
 records its numeric position.
@@ -399,9 +407,9 @@ model or is identified as an implementation helper.
 | `ReleaseFailure` | Rejected versus indeterminate resource-release boundary |
 | `Accelerator` | Accelerator backend contract |
 | `Le16`, `Le32`, `Le64` | Wire implementation aliases; not semantic API |
-| `PROTOCOL_MAJOR`, `PROTOCOL_MINOR` | Frozen protocol version 1.0 |
+| `PROTOCOL_MAJOR`, `PROTOCOL_MINOR` | Candidate protocol version 1.0 |
 | `COMMAND_QUEUE` | Baseline command virtqueue index |
-| `BASELINE_COMMAND_QUEUES`, `HARD_MAX_*`, `MIN_MAX_*` | Frozen queue, frame, binding, and configuration bounds |
+| `BASELINE_COMMAND_QUEUES`, `HARD_MAX_*`, `MIN_MAX_*` | Candidate queue, frame, binding, and configuration bounds |
 | `KNOWN_*_BITS`, `RESERVED_REQUEST_FLAG_NO_WAIT` | Assigned and reserved-zero flag namespaces |
 | `FeatureBits` | Device-specific Virtio transport features |
 | `BASELINE_FEATURES` | Mandatory feature set, currently empty |

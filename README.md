@@ -34,11 +34,12 @@ transport adapters (future: rust-vmm, bare metal, tests)
 Neither the wire protocol nor the device-state layer is allowed to leak transport descriptors or
 guest addresses into a provider backend.
 
-## Frozen protocol surface
+## Protocol 1.0 candidate surface
 
-Portable protocol 1.0 defines fixed headers and payloads for device discovery, contexts, buffers,
-programs, execution queues, submissions, and events. Unknown opcodes, statuses, and event states
-remain raw integers until validated, so decoding untrusted bytes never creates an invalid Rust enum.
+The portable protocol 1.0 candidate defines fixed headers and payloads for device discovery,
+contexts, buffers, programs, execution queues, submissions, and events. Unknown opcodes, statuses,
+and event states remain raw integers until validated, so decoding untrusted bytes never creates an
+invalid Rust enum.
 
 Core execution is asynchronous at the ownership boundary: a successful submit returns an event,
 while an indeterminate failure must also return an event that retains the operation's resources.
@@ -62,5 +63,13 @@ cargo test --workspace --all-targets --all-features
 ```
 
 The project remains pre-standardization work and claims no Virtio device ID. Protocol 1.0 numeric
-opcodes, statuses, and payload layouts are nevertheless frozen for independent implementation;
+opcodes, statuses, and payload layouts are versioned review inputs for independent implementation.
+They remain pre-release candidates until the final freeze audit in
+[issue #33](https://github.com/MicroPerceptron/virtio-accel/issues/33). Candidate changes must follow
+the coordinated change procedure in [docs/wire-abi.md](docs/wire-abi.md); after the freeze,
 incompatible changes require a new protocol major version.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT)
+at your option.

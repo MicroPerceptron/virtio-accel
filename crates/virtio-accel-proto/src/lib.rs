@@ -1,7 +1,8 @@
 //! Pointer-free, little-endian wire structures for portable virtio-accel protocol 1.0.
 //!
-//! The byte contract is frozen for independent implementation. It intentionally does not assign or
-//! claim a Virtio device ID or standardize provider artifact contents.
+//! The versioned byte contract is a candidate for independent implementation and final audit. It
+//! intentionally does not assign or claim a Virtio device ID or standardize provider artifact
+//! contents.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -14,9 +15,9 @@ pub type Le16 = U16<LE>;
 pub type Le32 = U32<LE>;
 pub type Le64 = U64<LE>;
 
-/// Frozen portable protocol major version.
+/// Candidate portable protocol major version.
 pub const PROTOCOL_MAJOR: u16 = 1;
-/// Frozen portable protocol minor version.
+/// Candidate portable protocol minor version.
 pub const PROTOCOL_MINOR: u16 = 0;
 /// Index of the baseline command virtqueue.
 ///
@@ -514,7 +515,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_layouts_match_the_frozen_manifest() {
+    fn wire_layouts_match_the_versioned_manifest() {
         assert_layout::<WireConfig>(
             "WireConfig",
             &[
@@ -691,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_constants_match_the_frozen_rust_namespace() {
+    fn manifest_constants_match_the_candidate_rust_namespace() {
         let manifest = layout_manifest();
         assert_eq!(manifest["protocol"]["major"], PROTOCOL_MAJOR);
         assert_eq!(manifest["protocol"]["minor"], PROTOCOL_MINOR);
