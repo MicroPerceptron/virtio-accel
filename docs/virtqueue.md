@@ -196,6 +196,12 @@ When reset begins, the device:
 5. invalidates all object IDs and request tracking from the old reset epoch; and
 6. resets command-queue available/used state as required by the base transport.
 
+After steps 1 and 2 quiesce queue access, the transport gives exclusive ownership to the portable
+command processor for one bounded teardown pass. A reusable result permits queue and object-table
+reinitialization with a fresh namespace. A discard-required result forbids further backend calls;
+the transport discards that processor/backend instance and creates a new one before exposing new
+queues.
+
 Descriptor chains that were available or in progress when reset began are not completed after reset.
 Once the driver has observed reset completion, it may reclaim all queue memory and descriptors under
 the base Virtio reset rule. It **MUST NOT** expect response bytes or used entries for those chains.

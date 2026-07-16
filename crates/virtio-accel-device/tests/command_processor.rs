@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::vec::Vec;
 
@@ -10,7 +11,8 @@ use virtio_accel_core::{
 use virtio_accel_device::{
     ChainRegion, CommandOutcome, CommandProcessError, CommandProcessor, CommandProcessorInitError,
     DecoderLimitsError, DeviceHealth, DeviceStateError, ObjectId, ObjectNamespace,
-    ResponseWriteError, SegmentedSink, SegmentedSource, UnusableFrame,
+    ResetDisposition, ResetError, ResourceCounts, ResponseWriteError, SegmentedSink,
+    SegmentedSource, UnusableFrame,
 };
 use virtio_accel_mock::{
     MockAccelerator, MockBuffer, MockContext, MockEvent, MockProgram, MockQueue,
@@ -29,7 +31,7 @@ const REQUEST_ID: u64 = 0x0102_0304_0506_0708;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReleaseMode {
     Pass,
-    Reject,
+    Reject(BackendError),
     Indeterminate,
 }
 
@@ -46,8 +48,12 @@ struct RecordingBackend {
     device_info_calls: Rc<Cell<u32>>,
     create_context_error: Cell<Option<BackendError>>,
     create_context_calls: Cell<u32>,
+    context_release_mode: Cell<ReleaseMode>,
     free_mode: Cell<ReleaseMode>,
     free_calls: Cell<u32>,
+    program_release_mode: Cell<ReleaseMode>,
+    queue_release_mode: Cell<ReleaseMode>,
+    release_log: RefCell<Vec<&'static str>>,
     write_calls: Cell<u32>,
     read_calls: Cell<u32>,
     segmented_write: Cell<bool>,
@@ -72,8 +78,12 @@ impl Default for RecordingBackend {
             device_info_calls: Rc::new(Cell::new(0)),
             create_context_error: Cell::new(None),
             create_context_calls: Cell::new(0),
+            context_release_mode: Cell::new(ReleaseMode::Pass),
             free_mode: Cell::new(ReleaseMode::Pass),
             free_calls: Cell::new(0),
+            program_release_mode: Cell::new(ReleaseMode::Pass),
+            queue_release_mode: Cell::new(ReleaseMode::Pass),
+            release_log: RefCell::new(Vec::new()),
             write_calls: Cell::new(0),
             read_calls: Cell::new(0),
             segmented_write: Cell::new(false),
@@ -117,7 +127,17 @@ impl Accelerator for RecordingBackend {
     }
 
     fn destroy_context(&self, context: Self::Context) -> Result<(), ReleaseFailure<Self::Context>> {
-        self.inner.destroy_context(context)
+        self.release_log.borrow_mut().push("context");
+        match self.context_release_mode.get() {
+            ReleaseMode::Pass => self.inner.destroy_context(context),
+            ReleaseMode::Reject(error) => Err(ReleaseFailure::Rejected {
+                error,
+                resource: context,
+            }),
+            ReleaseMode::Indeterminate => Err(ReleaseFailure::Indeterminate {
+                error: BackendError::DeviceLost,
+            }),
+        }
     }
 
     fn allocate_buffer(
@@ -152,10 +172,11 @@ impl Accelerator for RecordingBackend {
 
     fn free_buffer(&self, buffer: Self::Buffer) -> Result<(), ReleaseFailure<Self::Buffer>> {
         self.free_calls.set(self.free_calls.get() + 1);
+        self.release_log.borrow_mut().push("buffer");
         match self.free_mode.get() {
             ReleaseMode::Pass => self.inner.free_buffer(buffer),
-            ReleaseMode::Reject => Err(ReleaseFailure::Rejected {
-                error: BackendError::Busy,
+            ReleaseMode::Reject(error) => Err(ReleaseFailure::Rejected {
+                error,
                 resource: buffer,
             }),
             ReleaseMode::Indeterminate => Err(ReleaseFailure::Indeterminate {
@@ -175,7 +196,17 @@ impl Accelerator for RecordingBackend {
     }
 
     fn unload_program(&self, program: Self::Program) -> Result<(), ReleaseFailure<Self::Program>> {
-        self.inner.unload_program(program)
+        self.release_log.borrow_mut().push("program");
+        match self.program_release_mode.get() {
+            ReleaseMode::Pass => self.inner.unload_program(program),
+            ReleaseMode::Reject(error) => Err(ReleaseFailure::Rejected {
+                error,
+                resource: program,
+            }),
+            ReleaseMode::Indeterminate => Err(ReleaseFailure::Indeterminate {
+                error: BackendError::DeviceLost,
+            }),
+        }
     }
 
     fn create_queue(
@@ -187,7 +218,17 @@ impl Accelerator for RecordingBackend {
     }
 
     fn destroy_queue(&self, queue: Self::Queue) -> Result<(), ReleaseFailure<Self::Queue>> {
-        self.inner.destroy_queue(queue)
+        self.release_log.borrow_mut().push("queue");
+        match self.queue_release_mode.get() {
+            ReleaseMode::Pass => self.inner.destroy_queue(queue),
+            ReleaseMode::Reject(error) => Err(ReleaseFailure::Rejected {
+                error,
+                resource: queue,
+            }),
+            ReleaseMode::Indeterminate => Err(ReleaseFailure::Indeterminate {
+                error: BackendError::DeviceLost,
+            }),
+        }
     }
 
     fn submit(
@@ -227,12 +268,14 @@ impl Accelerator for RecordingBackend {
 
     fn cancel_event(&self, event: &Self::Event) -> Result<(), BackendError> {
         self.cancel_calls.set(self.cancel_calls.get() + 1);
+        self.release_log.borrow_mut().push("cancel_event");
         self.inner.cancel_event(event)
     }
 
     fn destroy_event(&self, event: Self::Event) -> Result<(), ReleaseFailure<Self::Event>> {
         self.destroy_event_calls
             .set(self.destroy_event_calls.get() + 1);
+        self.release_log.borrow_mut().push("event");
         match self.event_release_mode.get() {
             ReleaseMode::Pass => match self.event_state_override.get() {
                 Some(EventState::Complete | EventState::Failed(_) | EventState::Cancelled) => {
@@ -240,8 +283,8 @@ impl Accelerator for RecordingBackend {
                 }
                 Some(EventState::Pending) | None => self.inner.destroy_event(event),
             },
-            ReleaseMode::Reject => Err(ReleaseFailure::Rejected {
-                error: BackendError::Busy,
+            ReleaseMode::Reject(error) => Err(ReleaseFailure::Rejected {
+                error,
                 resource: event,
             }),
             ReleaseMode::Indeterminate => Err(ReleaseFailure::Indeterminate {
@@ -742,7 +785,10 @@ fn rejected_release_restores_the_id_and_indeterminate_release_requires_reset() {
     let buffer = allocate_buffer(&mut processor, context);
     let free = object_request(virtio_accel_proto::KnownOpcode::FreeBuffer, buffer);
 
-    processor.accelerator().free_mode.set(ReleaseMode::Reject);
+    processor
+        .accelerator()
+        .free_mode
+        .set(ReleaseMode::Reject(BackendError::Busy));
     assert_eq!(status(run(&mut processor, &free, 16).0), StatusCode::BUSY);
     assert!(processor.state().buffer_record(buffer).is_ok());
 
@@ -769,7 +815,7 @@ fn rejected_release_restores_the_id_and_indeterminate_release_requires_reset() {
         ),
         StatusCode::DEVICE_LOST
     );
-    assert_eq!(processor.health(), DeviceHealth::NeedsReset);
+    assert_eq!(processor.health(), DeviceHealth::BackendDiscardRequired);
     assert_eq!(
         processor.state().buffer_record(second).unwrap_err(),
         DeviceStateError::StaleObject
@@ -786,6 +832,16 @@ fn rejected_release_restores_the_id_and_indeterminate_release_requires_reset() {
             .0,
         ),
         StatusCode::DEVICE_LOST
+    );
+    let report = processor.reset(ObjectNamespace::new(2).unwrap()).unwrap();
+    assert_eq!(report.disposition, ResetDisposition::BackendDiscardRequired);
+    assert_eq!(
+        report.quarantined,
+        ResourceCounts {
+            contexts: 1,
+            buffers: 1,
+            ..ResourceCounts::default()
+        }
     );
 }
 
@@ -816,6 +872,30 @@ fn response_failure_after_creation_requires_reset() {
     );
     assert_eq!(processor.state().context_count(), 1);
     assert_eq!(processor.health(), DeviceHealth::NeedsReset);
+
+    let create_calls = processor.accelerator().create_context_calls.get();
+    assert_eq!(
+        status(run(&mut processor, &create, 24).0),
+        StatusCode::DEVICE_LOST
+    );
+    assert_eq!(
+        processor.accelerator().create_context_calls.get(),
+        create_calls
+    );
+    assert_eq!(processor.state().context_count(), 1);
+
+    let report = processor.reset(ObjectNamespace::new(2).unwrap()).unwrap();
+    assert_eq!(report.disposition, ResetDisposition::BackendReusable);
+    assert_eq!(
+        report.released,
+        ResourceCounts {
+            contexts: 1,
+            ..ResourceCounts::default()
+        }
+    );
+    assert!(report.quarantined.is_empty());
+    assert_eq!(processor.health(), DeviceHealth::Running);
+    assert!(processor.state().is_empty());
 }
 
 #[test]
@@ -1124,7 +1204,7 @@ fn event_release_rejection_retries_and_indeterminate_release_requires_reset() {
     processor
         .accelerator()
         .event_release_mode
-        .set(ReleaseMode::Reject);
+        .set(ReleaseMode::Reject(BackendError::Busy));
     assert_eq!(
         status(run(&mut processor, &destroy, 16).0),
         StatusCode::BUSY
@@ -1163,7 +1243,7 @@ fn event_release_rejection_retries_and_indeterminate_release_requires_reset() {
         status(run(&mut processor, &destroy, 16).0),
         StatusCode::DEVICE_LOST
     );
-    assert_eq!(processor.health(), DeviceHealth::NeedsReset);
+    assert_eq!(processor.health(), DeviceHealth::BackendDiscardRequired);
     assert_eq!(
         processor.state().event_record(second_event).unwrap_err(),
         DeviceStateError::StaleObject
@@ -1191,8 +1271,58 @@ fn event_faults_and_unreportable_admission_require_recovery() {
         status(run(&mut poll_processor, &poll, 24).0),
         StatusCode::DEVICE_LOST
     );
-    assert_eq!(poll_processor.health(), DeviceHealth::NeedsReset);
+    assert_eq!(
+        poll_processor.health(),
+        DeviceHealth::BackendDiscardRequired
+    );
     assert_eq!(poll_processor.state().event_count(), 1);
+
+    let mut terminal_processor = processor();
+    let (_context, buffer, program, queue) =
+        submission_objects(&mut terminal_processor, BufferUsage::PROGRAM_INPUT);
+    let submit = submit_request(queue, program, buffer, 0, 8, AccessMode::Read);
+    let (_, response) = run(&mut terminal_processor, &submit, 24);
+    let event = event_id(&response);
+    terminal_processor
+        .accelerator()
+        .event_state_override
+        .set(Some(EventState::Failed(BackendError::DeviceLost)));
+    let poll = object_request(virtio_accel_proto::KnownOpcode::PollEvent, event);
+    let (outcome, response) = run(&mut terminal_processor, &poll, 24);
+    assert_eq!(status(outcome), StatusCode::OK);
+    let state = event_state(&response);
+    assert_eq!(state.known_state().unwrap(), KnownEventState::Failed);
+    assert_eq!(state.error.get(), StatusCode::DEVICE_LOST.0);
+    assert_eq!(
+        terminal_processor.health(),
+        DeviceHealth::BackendDiscardRequired
+    );
+    let poll_calls = terminal_processor.accelerator().poll_calls.get();
+    let report = terminal_processor
+        .reset(ObjectNamespace::new(2).unwrap())
+        .unwrap();
+    assert_eq!(report.disposition, ResetDisposition::BackendDiscardRequired);
+    assert_eq!(
+        report.quarantined,
+        ResourceCounts {
+            contexts: 1,
+            buffers: 1,
+            programs: 1,
+            queues: 1,
+            events: 1,
+        }
+    );
+    assert_eq!(
+        terminal_processor.accelerator().poll_calls.get(),
+        poll_calls
+    );
+    assert!(
+        terminal_processor
+            .accelerator()
+            .release_log
+            .borrow()
+            .is_empty()
+    );
 
     let mut completion_processor = processor();
     let (_context, buffer, program, queue) =
@@ -1288,4 +1418,291 @@ fn cancellation_is_not_forwarded_without_the_capability() {
         event_state(&response).known_state().unwrap(),
         KnownEventState::Pending
     );
+}
+
+#[test]
+fn idle_reset_renews_the_namespace_without_backend_work() {
+    let mut processor = processor();
+
+    let first = processor.reset(ObjectNamespace::new(2).unwrap()).unwrap();
+    assert_eq!(first.disposition, ResetDisposition::BackendReusable);
+    assert!(first.released.is_empty());
+    assert!(first.quarantined.is_empty());
+    assert!(processor.accelerator().release_log.borrow().is_empty());
+
+    assert_eq!(
+        processor.reset(ObjectNamespace::new(2).unwrap()),
+        Err(ResetError::NamespaceReuse)
+    );
+    let second = processor.reset(ObjectNamespace::new(3).unwrap()).unwrap();
+    assert_eq!(second.disposition, ResetDisposition::BackendReusable);
+    assert!(second.released.is_empty());
+    assert!(processor.accelerator().release_log.borrow().is_empty());
+}
+
+#[test]
+fn discard_report_supersedes_a_prior_successful_reset() {
+    let mut processor = processor();
+    let first = processor.reset(ObjectNamespace::new(2).unwrap()).unwrap();
+    assert_eq!(first.disposition, ResetDisposition::BackendReusable);
+
+    let context = create_context(&mut processor);
+    let buffer = allocate_buffer(&mut processor, context);
+    processor
+        .accelerator()
+        .free_mode
+        .set(ReleaseMode::Indeterminate);
+    let free = object_request(virtio_accel_proto::KnownOpcode::FreeBuffer, buffer);
+    assert_eq!(
+        status(run(&mut processor, &free, 16).0),
+        StatusCode::DEVICE_LOST
+    );
+
+    let report = processor.reset(ObjectNamespace::new(3).unwrap()).unwrap();
+    assert_eq!(report.disposition, ResetDisposition::BackendDiscardRequired);
+    assert_eq!(
+        report.quarantined,
+        ResourceCounts {
+            contexts: 1,
+            buffers: 1,
+            ..ResourceCounts::default()
+        }
+    );
+}
+
+#[test]
+fn reset_cancels_pending_events_then_tears_down_child_before_parent() {
+    let mut processor = processor();
+    let (context, buffer, program, queue) =
+        submission_objects(&mut processor, BufferUsage::PROGRAM_INPUT);
+    let submit = submit_request(queue, program, buffer, 0, 8, AccessMode::Read);
+    let (_, response) = run(&mut processor, &submit, 24);
+    let event = event_id(&response);
+
+    let report = processor.reset(ObjectNamespace::new(2).unwrap()).unwrap();
+    assert_eq!(report.disposition, ResetDisposition::BackendReusable);
+    assert_eq!(
+        report.released,
+        ResourceCounts {
+            contexts: 1,
+            buffers: 1,
+            programs: 1,
+            queues: 1,
+            events: 1,
+        }
+    );
+    assert!(report.quarantined.is_empty());
+    assert_eq!(
+        processor.accelerator().release_log.borrow().as_slice(),
+        [
+            "cancel_event",
+            "event",
+            "queue",
+            "program",
+            "buffer",
+            "context"
+        ]
+    );
+    assert_eq!(processor.health(), DeviceHealth::Running);
+    assert!(processor.state().is_empty());
+
+    for (opcode, id) in [
+        (virtio_accel_proto::KnownOpcode::DestroyContext, context),
+        (virtio_accel_proto::KnownOpcode::FreeBuffer, buffer),
+        (virtio_accel_proto::KnownOpcode::UnloadProgram, program),
+        (virtio_accel_proto::KnownOpcode::DestroyQueue, queue),
+        (virtio_accel_proto::KnownOpcode::DestroyEvent, event),
+    ] {
+        assert_eq!(
+            status(run(&mut processor, &object_request(opcode, id), 16).0),
+            StatusCode::STALE_OBJECT
+        );
+    }
+
+    let new_context = create_context(&mut processor);
+    assert_ne!(new_context, context);
+}
+
+#[test]
+fn reset_reclaims_completed_and_cancelled_events_exactly_once() {
+    let mut processor = processor();
+    let (_context, buffer, program, queue) =
+        submission_objects(&mut processor, BufferUsage::PROGRAM_INPUT);
+    let submit = submit_request(queue, program, buffer, 0, 8, AccessMode::Read);
+    let (_, response) = run(&mut processor, &submit, 24);
+    let completed = event_id(&response);
+    let (_, response) = run(&mut processor, &submit, 24);
+    let cancelled = event_id(&response);
+
+    let event = processor
+        .state()
+        .event_record(completed)
+        .unwrap()
+        .resource()
+        .unwrap();
+    processor.accelerator().inner.complete(event).unwrap();
+    let cancel = object_request(virtio_accel_proto::KnownOpcode::CancelEvent, cancelled);
+    assert_eq!(status(run(&mut processor, &cancel, 16).0), StatusCode::OK);
+    processor.accelerator().release_log.borrow_mut().clear();
+
+    let report = processor.reset(ObjectNamespace::new(2).unwrap()).unwrap();
+    assert_eq!(report.disposition, ResetDisposition::BackendReusable);
+    assert_eq!(report.released.events, 2);
+    assert_eq!(report.released.total(), 6);
+    assert!(report.quarantined.is_empty());
+    assert_eq!(
+        processor.accelerator().release_log.borrow().as_slice(),
+        ["event", "event", "queue", "program", "buffer", "context"]
+    );
+}
+
+#[test]
+fn rejected_reset_release_is_quarantined_and_reset_is_idempotent() {
+    let mut processor = processor();
+    submission_objects(&mut processor, BufferUsage::PROGRAM_INPUT);
+    processor
+        .accelerator()
+        .free_mode
+        .set(ReleaseMode::Reject(BackendError::Busy));
+
+    let first = processor.reset(ObjectNamespace::new(2).unwrap()).unwrap();
+    assert_eq!(first.disposition, ResetDisposition::BackendDiscardRequired);
+    assert_eq!(
+        first.released,
+        ResourceCounts {
+            programs: 1,
+            queues: 1,
+            ..ResourceCounts::default()
+        }
+    );
+    assert_eq!(
+        first.quarantined,
+        ResourceCounts {
+            contexts: 1,
+            buffers: 1,
+            ..ResourceCounts::default()
+        }
+    );
+    assert_eq!(
+        processor.accelerator().release_log.borrow().as_slice(),
+        ["queue", "program", "buffer"]
+    );
+    assert_eq!(processor.health(), DeviceHealth::BackendDiscardRequired);
+
+    let calls = processor.accelerator().release_log.borrow().len();
+    let second = processor.reset(ObjectNamespace::new(3).unwrap()).unwrap();
+    assert_eq!(second, first);
+    assert_eq!(processor.accelerator().release_log.borrow().len(), calls);
+}
+
+#[test]
+fn reset_stops_backend_calls_after_device_lost_release_rejection() {
+    let mut processor = processor();
+    submission_objects(&mut processor, BufferUsage::PROGRAM_INPUT);
+    create_context(&mut processor);
+    processor
+        .accelerator()
+        .free_mode
+        .set(ReleaseMode::Reject(BackendError::DeviceLost));
+
+    let report = processor.reset(ObjectNamespace::new(2).unwrap()).unwrap();
+    assert_eq!(report.disposition, ResetDisposition::BackendDiscardRequired);
+    assert_eq!(
+        report.released,
+        ResourceCounts {
+            programs: 1,
+            queues: 1,
+            ..ResourceCounts::default()
+        }
+    );
+    assert_eq!(
+        report.quarantined,
+        ResourceCounts {
+            contexts: 2,
+            buffers: 1,
+            ..ResourceCounts::default()
+        }
+    );
+    assert_eq!(
+        processor.accelerator().release_log.borrow().as_slice(),
+        ["queue", "program", "buffer"]
+    );
+}
+
+#[test]
+fn indeterminate_event_release_quarantines_the_complete_object_graph() {
+    let mut processor = processor();
+    let (_context, buffer, program, queue) =
+        submission_objects(&mut processor, BufferUsage::PROGRAM_INPUT);
+    let submit = submit_request(queue, program, buffer, 0, 8, AccessMode::Read);
+    let (_, response) = run(&mut processor, &submit, 24);
+    let event_id = event_id(&response);
+    let event = processor
+        .state()
+        .event_record(event_id)
+        .unwrap()
+        .resource()
+        .unwrap();
+    processor.accelerator().inner.complete(event).unwrap();
+    processor
+        .accelerator()
+        .event_release_mode
+        .set(ReleaseMode::Indeterminate);
+
+    let first = processor.reset(ObjectNamespace::new(2).unwrap()).unwrap();
+    assert_eq!(first.disposition, ResetDisposition::BackendDiscardRequired);
+    assert!(first.released.is_empty());
+    assert_eq!(
+        first.quarantined,
+        ResourceCounts {
+            contexts: 1,
+            buffers: 1,
+            programs: 1,
+            queues: 1,
+            events: 1,
+        }
+    );
+    assert_eq!(
+        processor.accelerator().release_log.borrow().as_slice(),
+        ["event"]
+    );
+
+    let second = processor.reset(ObjectNamespace::new(3).unwrap()).unwrap();
+    assert_eq!(second, first);
+    assert_eq!(
+        processor.accelerator().release_log.borrow().as_slice(),
+        ["event"]
+    );
+}
+
+#[test]
+fn pending_event_without_cancellation_requires_backend_discard() {
+    let backend = RecordingBackend::default();
+    let mut info = backend.device_info().unwrap();
+    backend.device_info_calls.set(0);
+    info.capabilities.remove(Capabilities::EVENT_CANCELLATION);
+    backend.info_override.set(Some(info));
+    let mut processor =
+        CommandProcessor::new(backend, &config(), ObjectNamespace::new(1).unwrap()).unwrap();
+    let (_context, buffer, program, queue) =
+        submission_objects(&mut processor, BufferUsage::PROGRAM_INPUT);
+    let submit = submit_request(queue, program, buffer, 0, 8, AccessMode::Read);
+    run(&mut processor, &submit, 24);
+
+    let report = processor.reset(ObjectNamespace::new(2).unwrap()).unwrap();
+    assert_eq!(report.disposition, ResetDisposition::BackendDiscardRequired);
+    assert!(report.released.is_empty());
+    assert_eq!(
+        report.quarantined,
+        ResourceCounts {
+            contexts: 1,
+            buffers: 1,
+            programs: 1,
+            queues: 1,
+            events: 1,
+        }
+    );
+    assert_eq!(processor.accelerator().cancel_calls.get(), 0);
+    assert_eq!(processor.accelerator().destroy_event_calls.get(), 0);
+    assert!(processor.accelerator().release_log.borrow().is_empty());
 }

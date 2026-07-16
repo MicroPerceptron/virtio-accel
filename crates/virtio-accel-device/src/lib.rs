@@ -22,7 +22,7 @@ pub use decoder::{
 };
 pub use engine::{
     AcceleratorState, CommandOutcome, CommandProcessError, CommandProcessor,
-    CommandProcessorInitError, DeviceHealth,
+    CommandProcessorInitError, DeviceHealth, ResetDisposition, ResetError, ResetReport,
 };
 pub use frame::{FramePreflight, FramePreflightError, UnusableFrame, preflight_command_frame};
 pub use object_table::{ObjectId, ObjectKind, ObjectNamespace, ObjectTable, ObjectTableError};
@@ -33,8 +33,8 @@ pub use regions::{
 pub use response::{ResponsePayload, ResponseWriteError, ResponseWriter};
 pub use state::{
     BufferRecord, ChildCounts, ContextRecord, CreateError, DeviceState, DeviceStateConfigError,
-    DeviceStateError, EventRecord, ProgramRecord, QueueRecord, ReleaseState, RestoreError,
-    SubmissionResources,
+    DeviceStateError, EventRecord, ProgramRecord, QueueRecord, ReleaseState, ResourceCounts,
+    RestoreError, SubmissionResources,
 };
 use virtio_accel_core::BackendError;
 use virtio_accel_proto::StatusCode;

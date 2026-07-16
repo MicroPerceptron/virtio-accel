@@ -1,7 +1,7 @@
 {
   "schema": "virtio-accel-normative-requirements-1",
   "generated_by": "ci/check-normative-requirements.py",
-  "requirement_count": 126,
+  "requirement_count": 131,
   "requirements": [
     {
       "id": "REQ-SPEC-A29885B44214",
@@ -646,9 +646,102 @@
       }
     },
     {
-      "id": "REQ-SPEC-AEC4DC4C1559",
+      "id": "REQ-SPEC-272CA136CE9D",
       "source": "docs/specification.md",
-      "line": 252,
+      "line": 246,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST",
+      "statement": "The transport **MUST** stop fetching command chains and publishing completions before portable",
+      "coverage": {
+        "status": "mixed",
+        "evidence": [
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "docs/virtqueue.md"
+        ],
+        "issues": [
+          "#17",
+          "#18"
+        ],
+        "rationale": "The portable reset admission gate is executable; stopping queue fetch and publication requires the transport adapter and split-ring model."
+      }
+    },
+    {
+      "id": "REQ-SPEC-41456A985BB5",
+      "source": "docs/specification.md",
+      "line": 247,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST",
+      "statement": "object teardown begins. Teardown **MUST** be bounded and child-before-parent: events precede their",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs"
+        ],
+        "issues": [],
+        "rationale": "The reset engine and tests enforce bounded child-before-parent teardown, sticky backend discard, explicit quarantine accounting, and fresh object namespaces."
+      }
+    },
+    {
+      "id": "REQ-SPEC-A063CFA84B1F",
+      "source": "docs/specification.md",
+      "line": 250,
+      "section": "4. Terminology and object model",
+      "keyword": "MAY",
+      "statement": "The device **MAY** reuse a backend instance only when every known resource is released",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs"
+        ],
+        "issues": [],
+        "rationale": "The reset engine and tests enforce bounded child-before-parent teardown, sticky backend discard, explicit quarantine accounting, and fresh object namespaces."
+      }
+    },
+    {
+      "id": "REQ-SPEC-397D57FDA629",
+      "source": "docs/specification.md",
+      "line": 253,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST NOT",
+      "statement": "instance. Once discard is required, repeated reset attempts **MUST NOT** invoke that backend again.",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs"
+        ],
+        "issues": [],
+        "rationale": "The reset engine and tests enforce bounded child-before-parent teardown, sticky backend discard, explicit quarantine accounting, and fresh object namespaces."
+      }
+    },
+    {
+      "id": "REQ-SPEC-32D43F9A9F21",
+      "source": "docs/specification.md",
+      "line": 255,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST",
+      "statement": "Successful reinitialization **MUST** use a fresh nonzero object namespace. No object ID created",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs"
+        ],
+        "issues": [],
+        "rationale": "The reset engine and tests enforce bounded child-before-parent teardown, sticky backend discard, explicit quarantine accounting, and fresh object namespaces."
+      }
+    },
+    {
+      "id": "REQ-SPEC-6D83CC8BDB22",
+      "source": "docs/specification.md",
+      "line": 262,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "The portable v1 baseline **MUST** provide:",
@@ -666,9 +759,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-AFBF838B4F2D",
+      "id": "REQ-SPEC-E4E71AC72ACA",
       "source": "docs/specification.md",
-      "line": 267,
+      "line": 277,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "advertise semantic event-cancellation capability, the device **MUST** return `UNSUPPORTED` without",
@@ -686,9 +779,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-86C7CC9E6BDB",
+      "id": "REQ-SPEC-D50B70E6702F",
       "source": "docs/specification.md",
-      "line": 276,
+      "line": 286,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
       "statement": "`TIMELINE_FENCES`, and `SECURE_CONTEXTS` reserve numeric positions only. A baseline device **MUST NOT**",
@@ -706,9 +799,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-0206502CFC72",
+      "id": "REQ-SPEC-4EB42592CD49",
       "source": "docs/specification.md",
-      "line": 277,
+      "line": 287,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
       "statement": "advertise them and a baseline driver **MUST NOT** accept them. Protocol 1.0 assigns no semantics to",
@@ -726,9 +819,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-7643E8E58065",
+      "id": "REQ-SPEC-295FDC8F1AFE",
       "source": "docs/specification.md",
-      "line": 280,
+      "line": 290,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
       "statement": "Unknown device-specific feature bits **MUST NOT** be accepted by a driver. A device **MUST NOT**",
@@ -746,9 +839,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-EE0B8056BD02",
+      "id": "REQ-SPEC-D360B56C13CD",
       "source": "docs/specification.md",
-      "line": 280,
+      "line": 290,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
       "statement": "Unknown device-specific feature bits **MUST NOT** be accepted by a driver. A device **MUST NOT**",
@@ -766,9 +859,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-F0DC58280363",
+      "id": "REQ-SPEC-BCB2C7BE23D5",
       "source": "docs/specification.md",
-      "line": 298,
+      "line": 308,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
       "statement": "ownership, synchronization, and isolation rules are specified. A protocol 1.0 device **MUST NOT**",
@@ -786,9 +879,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-A8A5BBCC23A0",
+      "id": "REQ-SPEC-C384FB585A75",
       "source": "docs/specification.md",
-      "line": 301,
+      "line": 311,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "The device **MUST** reject an allocation for an unsupported memory domain before invoking the",
@@ -806,9 +899,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-C2EEBEA200DF",
+      "id": "REQ-SPEC-310DA03F3289",
       "source": "docs/specification.md",
-      "line": 307,
+      "line": 317,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "new synchronization, or changed lifetime rules, the device **MUST** also negotiate an appropriate",
@@ -826,9 +919,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-013430EC73B8",
+      "id": "REQ-SPEC-88D1E0A07A40",
       "source": "docs/specification.md",
-      "line": 312,
+      "line": 322,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
       "statement": "implementation **MUST NOT** translate an underspecified capability into additional wire behavior.",
@@ -846,9 +939,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-AEC435BFF0AF",
+      "id": "REQ-SPEC-2B52FA3DDCAD",
       "source": "docs/specification.md",
-      "line": 317,
+      "line": 327,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "reserved and **MUST** be zero.",
@@ -866,9 +959,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-6008D0C2488F",
+      "id": "REQ-SPEC-53CBDDF2F9E6",
       "source": "docs/specification.md",
-      "line": 320,
+      "line": 330,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "**MUST** be rejected before backend invocation. Reserved fields **MUST** be zero.",
@@ -886,9 +979,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-AD1B44BE1427",
+      "id": "REQ-SPEC-5B0DC6A13B5B",
       "source": "docs/specification.md",
-      "line": 320,
+      "line": 330,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "**MUST** be rejected before backend invocation. Reserved fields **MUST** be zero.",
@@ -906,9 +999,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-75AB5333C8C4",
+      "id": "REQ-SPEC-C15BB0E55C0A",
       "source": "docs/specification.md",
-      "line": 327,
+      "line": 337,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "Candidate implementations **MUST** expose major `1` and minor `0` in device-specific configuration",
@@ -927,9 +1020,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-20BBDCCEEC92",
+      "id": "REQ-SPEC-200066C129F2",
       "source": "docs/specification.md",
-      "line": 328,
+      "line": 338,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "and **MUST NOT** claim candidate protocol 1.0 conformance unless they satisfy the normative wire,",
@@ -948,9 +1041,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-5348BBC0D8FD",
+      "id": "REQ-SPEC-14CBA0A183EB",
       "source": "docs/specification.md",
-      "line": 332,
+      "line": 342,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "#33. Before that audit, an intentional candidate revision **MUST** follow the coordinated procedure",
@@ -969,9 +1062,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-6121F6E1EB77",
+      "id": "REQ-SPEC-5ECE338A6907",
       "source": "docs/specification.md",
-      "line": 333,
+      "line": 343,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "in [wire-abi.md](wire-abi.md) and **MUST NOT** be described as a frozen or stable release.",
@@ -990,9 +1083,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-72DE383CDBC0",
+      "id": "REQ-SPEC-95AD226E6215",
       "source": "docs/specification.md",
-      "line": 339,
+      "line": 349,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "- a driver **MUST** reject a device with an unsupported major version;",
@@ -1011,9 +1104,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-3803DA96468A",
+      "id": "REQ-SPEC-B767A7B1C839",
       "source": "docs/specification.md",
-      "line": 341,
+      "line": 351,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "- a driver **MUST NOT** use behavior newer than the device minor version it observed; and",
@@ -1032,9 +1125,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-6E4D852251B8",
+      "id": "REQ-SPEC-AE218946BDCC",
       "source": "docs/specification.md",
-      "line": 350,
+      "line": 360,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "Therefore a minor version alone **MUST NOT** append fields to an existing response that an older",
@@ -1053,9 +1146,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-756F68A7AAFD",
+      "id": "REQ-SPEC-016999BA61E1",
       "source": "docs/specification.md",
-      "line": 354,
+      "line": 364,
       "section": "6. Versioning and compatibility",
       "keyword": "SHOULD",
       "statement": "negotiated feature explicitly selects a different layout. Extensions **SHOULD** use a new opcode or",
@@ -1074,9 +1167,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-D0F8BB882F40",
+      "id": "REQ-SPEC-1C37D20890C7",
       "source": "docs/specification.md",
-      "line": 357,
+      "line": 367,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "Without such a feature, a receiver **MUST** require the exact payload length for the opcode and",
@@ -1095,9 +1188,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-B8E6FB0D7274",
+      "id": "REQ-SPEC-7EA21D16DE58",
       "source": "docs/specification.md",
-      "line": 358,
+      "line": 368,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "**MUST** reject trailing bytes. It **MUST NOT** silently reinterpret or ignore an unknown tail.",
@@ -1116,9 +1209,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-9EC4D79F120D",
+      "id": "REQ-SPEC-E3E8676ED37E",
       "source": "docs/specification.md",
-      "line": 358,
+      "line": 368,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "**MUST** reject trailing bytes. It **MUST NOT** silently reinterpret or ignore an unknown tail.",
@@ -1137,9 +1230,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-E44726AD481F",
+      "id": "REQ-SPEC-A2CB96B8A1C3",
       "source": "docs/specification.md",
-      "line": 365,
+      "line": 375,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "- An unknown response status is an opaque failure. A driver **MUST NOT** treat it as success or",
@@ -1158,9 +1251,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-FC0B92A06782",
+      "id": "REQ-SPEC-D3C51FC19E65",
       "source": "docs/specification.md",
-      "line": 372,
+      "line": 382,
       "section": "7. Ownership and destruction",
       "keyword": "MUST",
       "statement": "The device owns the mapping from opaque object IDs to backend handles. The mapping **MUST** reject:",
@@ -1179,9 +1272,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-56593F42BA6E",
+      "id": "REQ-SPEC-1A8E3B4C24C2",
       "source": "docs/specification.md",
-      "line": 380,
+      "line": 390,
       "section": "7. Ownership and destruction",
       "keyword": "MUST NOT",
       "statement": "Object-ID encoding is implementation-private. Drivers **MUST NOT** infer slot, kind, generation, or",
@@ -1200,9 +1293,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-231C9BFD9771",
+      "id": "REQ-SPEC-AB23FAC11CFD",
       "source": "docs/specification.md",
-      "line": 385,
+      "line": 395,
       "section": "7. Ownership and destruction",
       "keyword": "MUST",
       "statement": "- a rejected release returns the still-live handle and the device **MUST** restore it for retry;",
@@ -1221,9 +1314,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-D59392AFA174",
+      "id": "REQ-SPEC-C2F6D1492668",
       "source": "docs/specification.md",
-      "line": 387,
+      "line": 397,
       "section": "7. Ownership and destruction",
       "keyword": "MUST NOT",
       "statement": "- an indeterminate release invalidates the guest ID and requires recovery. The device **MUST NOT**",
@@ -1242,9 +1335,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-0198899B57F8",
+      "id": "REQ-SPEC-00E07DBCC21D",
       "source": "docs/specification.md",
-      "line": 390,
+      "line": 400,
       "section": "7. Ownership and destruction",
       "keyword": "MUST NOT",
       "statement": "`Drop` may provide defensive cleanup inside an implementation but **MUST NOT** be used as",
@@ -1263,9 +1356,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-B35C802C4CE1",
+      "id": "REQ-SPEC-4FCCE03626EA",
       "source": "docs/specification.md",
-      "line": 396,
+      "line": 406,
       "section": "8. Time and progress",
       "keyword": "MUST NOT",
       "statement": "infinite. Absolute guest timestamps **MUST NOT** be compared with a host clock because their",
@@ -1282,9 +1375,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-A3E630EEB53C",
+      "id": "REQ-SPEC-32BEB66EDC72",
       "source": "docs/specification.md",
-      "line": 399,
+      "line": 409,
       "section": "8. Time and progress",
       "keyword": "MUST",
       "statement": "Polling an event **MUST** be nonblocking and bounded. The portable contract creates no background",
@@ -1301,9 +1394,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-9A070026FAAE",
+      "id": "REQ-SPEC-87204B0486BE",
       "source": "docs/specification.md",
-      "line": 403,
+      "line": 413,
       "section": "8. Time and progress",
       "keyword": "MUST",
       "statement": "cannot prove rejection is indeterminate and **MUST** retain an event.",
@@ -1320,9 +1413,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-B87D11017952",
+      "id": "REQ-SPEC-FF88F37F2002",
       "source": "docs/specification.md",
-      "line": 412,
+      "line": 422,
       "section": "9. Errors",
       "keyword": "MUST",
       "statement": "A device **MUST** map errors deterministically and **MUST NOT** expose uninitialized response bytes.",
@@ -1340,9 +1433,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-9DA3CA594109",
+      "id": "REQ-SPEC-9BF9C2113FC0",
       "source": "docs/specification.md",
-      "line": 412,
+      "line": 422,
       "section": "9. Errors",
       "keyword": "MUST NOT",
       "statement": "A device **MUST** map errors deterministically and **MUST NOT** expose uninitialized response bytes.",
@@ -1360,9 +1453,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-549D7EA018D8",
+      "id": "REQ-SPEC-5B13C15F8588",
       "source": "docs/specification.md",
-      "line": 416,
+      "line": 426,
       "section": "9. Errors",
       "keyword": "MUST NOT",
       "statement": "An error response **MUST NOT** imply that a backend operation was rejected when acceptance was",
@@ -1380,9 +1473,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-C38079758E77",
+      "id": "REQ-SPEC-992422D1DC7C",
       "source": "docs/specification.md",
-      "line": 421,
+      "line": 431,
       "section": "10. Portability requirements",
       "keyword": "MUST NOT",
       "statement": "Portable crates **MUST NOT** select an operating system, VMM, kernel, vendor API, or global runtime.",
@@ -1398,9 +1491,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-15A354D61BD7",
+      "id": "REQ-SPEC-A6D1EA8B8FFD",
       "source": "docs/specification.md",
-      "line": 428,
+      "line": 438,
       "section": "10. Portability requirements",
       "keyword": "MUST NOT",
       "statement": "Platform adapters depend inward on the portable layers. A portable layer **MUST NOT** conditionally",
@@ -1416,9 +1509,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-0E2CA4544542",
+      "id": "REQ-SPEC-ABF529AA1C73",
       "source": "docs/specification.md",
-      "line": 444,
+      "line": 454,
       "section": "11. Tracked completion work",
       "keyword": "MAY",
       "statement": "No implementation **MAY** advertise a reserved optional feature merely because a Rust constant",
@@ -2403,9 +2496,9 @@
       }
     },
     {
-      "id": "REQ-VIRTQ-323D67240916",
+      "id": "REQ-VIRTQ-0846530CF878",
       "source": "docs/virtqueue.md",
-      "line": 201,
+      "line": 207,
       "section": "11. Device reset and split-ring disposition",
       "keyword": "MUST NOT",
       "statement": "the base Virtio reset rule. It **MUST NOT** expect response bytes or used entries for those chains.",
@@ -2423,9 +2516,9 @@
       }
     },
     {
-      "id": "REQ-VIRTQ-FF01B37600D9",
+      "id": "REQ-VIRTQ-4738D0B93331",
       "source": "docs/virtqueue.md",
-      "line": 219,
+      "line": 225,
       "section": "12. `DEVICE_NEEDS_RESET`",
       "keyword": "SHOULD",
       "statement": "After observing `DEVICE_NEEDS_RESET`, the driver **SHOULD** stop submitting commands and perform",
@@ -2442,9 +2535,9 @@
       }
     },
     {
-      "id": "REQ-VIRTQ-718233B6C44C",
+      "id": "REQ-VIRTQ-7267CD2CC117",
       "source": "docs/virtqueue.md",
-      "line": 221,
+      "line": 227,
       "section": "12. `DEVICE_NEEDS_RESET`",
       "keyword": "MUST NOT",
       "statement": "but it **MUST NOT** accept new semantic work.",
