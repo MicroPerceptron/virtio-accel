@@ -213,6 +213,8 @@ pub enum MalformedChain {
     DescriptorLoop,
     /// A descriptor index is outside the configured queue.
     DescriptorIndex,
+    /// A descriptor contains flags outside the negotiated split-ring profile.
+    DescriptorFlags,
     /// The flattened descriptor count is invalid.
     DescriptorCount,
     /// A descriptor has zero length.

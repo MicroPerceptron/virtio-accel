@@ -656,14 +656,15 @@
         "status": "mixed",
         "evidence": [
           "crates/virtio-accel-transport/src/queue.rs",
+          "crates/virtio-accel-split-queue/src/queue.rs",
           "crates/virtio-accel-device/src/engine.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
           "docs/virtqueue.md"
         ],
         "issues": [
-          "#18"
+          "#20"
         ],
-        "rationale": "Queue reset epochs and the portable reset admission gate are executable; stopping concrete split-ring fetch and publication remains tracked."
+        "rationale": "The split model stops fetch and publication while atomically invalidating old byte ports; full transport-to-engine reset remains tracked."
       }
     },
     {
@@ -2142,15 +2143,15 @@
       "keyword": "MUST",
       "statement": "Before backend invocation, the device **MUST** validate the complete readable frame and enough",
       "coverage": {
-        "status": "tracked",
+        "status": "mixed",
         "evidence": [
-          "conformance/v1.0/vectors.json"
+          "conformance/v1.0/vectors.json",
+          "crates/virtio-accel-split-queue/src/queue.rs"
         ],
         "issues": [
-          "#18",
           "#20"
         ],
-        "rationale": "Error shapes are fixed, while writable preflight and post-mutation response atomicity require queue execution."
+        "rationale": "Queue-level used accounting and preflight failures are executable; post-mutation command response atomicity requires full-path execution."
       }
     },
     {
@@ -2161,15 +2162,15 @@
       "keyword": "MUST",
       "statement": "writable capacity for every possible response shape of that command. It **MUST** initialize every",
       "coverage": {
-        "status": "tracked",
+        "status": "mixed",
         "evidence": [
-          "conformance/v1.0/vectors.json"
+          "conformance/v1.0/vectors.json",
+          "crates/virtio-accel-split-queue/src/queue.rs"
         ],
         "issues": [
-          "#18",
           "#20"
         ],
-        "rationale": "Error shapes are fixed, while writable preflight and post-mutation response atomicity require queue execution."
+        "rationale": "Queue-level used accounting and preflight failures are executable; post-mutation command response atomicity requires full-path execution."
       }
     },
     {
@@ -2180,15 +2181,15 @@
       "keyword": "MUST",
       "statement": "occurs after semantic mutation, or a release becomes indeterminate, the device **MUST** enter",
       "coverage": {
-        "status": "tracked",
+        "status": "mixed",
         "evidence": [
-          "conformance/v1.0/vectors.json"
+          "conformance/v1.0/vectors.json",
+          "crates/virtio-accel-split-queue/src/queue.rs"
         ],
         "issues": [
-          "#18",
           "#20"
         ],
-        "rationale": "Error shapes are fixed, while writable preflight and post-mutation response atomicity require queue execution."
+        "rationale": "Queue-level used accounting and preflight failures are executable; post-mutation command response atomicity requires full-path execution."
       }
     },
     {
@@ -2199,15 +2200,15 @@
       "keyword": "MUST NOT",
       "statement": "recovery and expose the Virtio `DEVICE_NEEDS_RESET` condition. It **MUST NOT** report an ordinary",
       "coverage": {
-        "status": "tracked",
+        "status": "mixed",
         "evidence": [
-          "conformance/v1.0/vectors.json"
+          "conformance/v1.0/vectors.json",
+          "crates/virtio-accel-split-queue/src/queue.rs"
         ],
         "issues": [
-          "#18",
           "#20"
         ],
-        "rationale": "Error shapes are fixed, while writable preflight and post-mutation response atomicity require queue execution."
+        "rationale": "Queue-level used accounting and preflight failures are executable; post-mutation command response atomicity requires full-path execution."
       }
     },
     {
@@ -2256,14 +2257,13 @@
       "keyword": "MUST NOT",
       "statement": "The reference device **MUST NOT** offer `VIRTIO_F_RING_PACKED`, `VIRTIO_F_IN_ORDER`,",
       "coverage": {
-        "status": "tracked",
+        "status": "executable",
         "evidence": [
-          "docs/virtqueue.md"
+          "crates/virtio-accel-proto/src/lib.rs",
+          "crates/virtio-accel-split-queue/src/chain.rs"
         ],
-        "issues": [
-          "#18"
-        ],
-        "rationale": "The negotiated reference profile is specified; transport feature enforcement requires the queue adapter."
+        "issues": [],
+        "rationale": "The baseline features and direct split-ring profile are tested, including rejection of indirect and unknown descriptor flags."
       }
     },
     {
@@ -2274,16 +2274,15 @@
       "keyword": "MUST NOT",
       "statement": "The command engine sees region lengths and byte access only. It **MUST NOT** receive guest physical",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
+          "crates/virtio-accel-split-queue/src/chain.rs",
+          "crates/virtio-accel-split-queue/src/queue.rs",
           "crates/virtio-accel-transport/src/queue.rs",
-          "crates/virtio-accel-transport/src/regions.rs",
-          "docs/virtqueue.md"
+          "crates/virtio-accel-transport/src/regions.rs"
         ],
-        "issues": [
-          "#18"
-        ],
-        "rationale": "The flattened address-free region and chain contracts are executable; concrete descriptor mapping remains tracked."
+        "issues": [],
+        "rationale": "The split model maps direct descriptor tables into address-free segmented byte ports and reset-scoped completion tokens."
       }
     },
     {
@@ -2294,15 +2293,15 @@
       "keyword": "MUST",
       "statement": "The transport adapter **MUST** validate the descriptor topology and map every readable and required",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-device/src/frame.rs",
+          "crates/virtio-accel-split-queue/src/chain.rs",
+          "crates/virtio-accel-split-queue/src/queue.rs",
           "crates/virtio-accel-transport/src/regions.rs"
         ],
-        "issues": [
-          "#18"
-        ],
-        "rationale": "Direction, count, length, and byte-port totals are executable; split-ring topology and mapping remain tracked."
+        "issues": [],
+        "rationale": "Topology, direction, count, nonzero length, addressability, arithmetic, and command-frame limits are executable."
       }
     },
     {
@@ -2317,12 +2316,14 @@
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "crates/virtio-accel-device/src/frame.rs",
+          "crates/virtio-accel-split-queue/src/chain.rs",
+          "crates/virtio-accel-split-queue/src/queue.rs",
           "crates/virtio-accel-transport/src/regions.rs"
         ],
         "issues": [
-          "#18"
+          "#20"
         ],
-        "rationale": "Frame exactness and cross-region port validation are executable; descriptor-backed presentation remains tracked."
+        "rationale": "Descriptor-backed segmented presentation and frame exactness are executable; one-command full-path behavior remains tracked."
       }
     },
     {
@@ -2335,13 +2336,14 @@
       "coverage": {
         "status": "tracked",
         "evidence": [
-          "conformance/rust-clean-room/tests/vectors.rs"
+          "conformance/rust-clean-room/tests/vectors.rs",
+          "crates/virtio-accel-split-queue/src/chain.rs",
+          "crates/virtio-accel-split-queue/src/queue.rs"
         ],
         "issues": [
-          "#18",
           "#20"
         ],
-        "rationale": "Response bytes and lengths are defined; scatter writes and post-mutation failure require queue execution."
+        "rationale": "Scatter writes and used-length accounting are executable; post-mutation command failure requires full-path execution."
       }
     },
     {
@@ -2354,13 +2356,14 @@
       "coverage": {
         "status": "tracked",
         "evidence": [
-          "conformance/rust-clean-room/tests/vectors.rs"
+          "conformance/rust-clean-room/tests/vectors.rs",
+          "crates/virtio-accel-split-queue/src/chain.rs",
+          "crates/virtio-accel-split-queue/src/queue.rs"
         ],
         "issues": [
-          "#18",
           "#20"
         ],
-        "rationale": "Response bytes and lengths are defined; scatter writes and post-mutation failure require queue execution."
+        "rationale": "Scatter writes and used-length accounting are executable; post-mutation command failure requires full-path execution."
       }
     },
     {
@@ -2373,13 +2376,14 @@
       "coverage": {
         "status": "tracked",
         "evidence": [
-          "conformance/rust-clean-room/tests/vectors.rs"
+          "conformance/rust-clean-room/tests/vectors.rs",
+          "crates/virtio-accel-split-queue/src/chain.rs",
+          "crates/virtio-accel-split-queue/src/queue.rs"
         ],
         "issues": [
-          "#18",
           "#20"
         ],
-        "rationale": "Response bytes and lengths are defined; scatter writes and post-mutation failure require queue execution."
+        "rationale": "Scatter writes and used-length accounting are executable; post-mutation command failure requires full-path execution."
       }
     },
     {
@@ -2390,15 +2394,15 @@
       "keyword": "MUST",
       "statement": "The baseline command queue permits out-of-order command completion. The device **MUST** consume",
       "coverage": {
-        "status": "tracked",
+        "status": "mixed",
         "evidence": [
+          "crates/virtio-accel-split-queue/src/queue.rs",
           "docs/virtqueue.md"
         ],
         "issues": [
-          "#18",
           "#20"
         ],
-        "rationale": "Stable VQ ordering cases exist; concurrent publication and completion behavior awaits the queue model."
+        "rationale": "Available-order consumption and out-of-order used publication are executable; command/event distinction awaits the full path."
       }
     },
     {
@@ -2409,15 +2413,15 @@
       "keyword": "MUST NOT",
       "statement": "Request-ID uniqueness lasts until the corresponding chain is returned used. A driver **MUST NOT**",
       "coverage": {
-        "status": "tracked",
+        "status": "mixed",
         "evidence": [
+          "crates/virtio-accel-split-queue/src/queue.rs",
           "docs/virtqueue.md"
         ],
         "issues": [
-          "#18",
           "#20"
         ],
-        "rationale": "Stable VQ ordering cases exist; concurrent publication and completion behavior awaits the queue model."
+        "rationale": "Available-order consumption and out-of-order used publication are executable; command/event distinction awaits the full path."
       }
     },
     {
@@ -2428,15 +2432,15 @@
       "keyword": "MUST NOT",
       "statement": "Implementations may serialize command execution, but they **MUST NOT** promise in-order completion",
       "coverage": {
-        "status": "tracked",
+        "status": "mixed",
         "evidence": [
+          "crates/virtio-accel-split-queue/src/queue.rs",
           "docs/virtqueue.md"
         ],
         "issues": [
-          "#18",
           "#20"
         ],
-        "rationale": "Stable VQ ordering cases exist; concurrent publication and completion behavior awaits the queue model."
+        "rationale": "Available-order consumption and out-of-order used publication are executable; command/event distinction awaits the full path."
       }
     },
     {
@@ -2449,6 +2453,7 @@
       "coverage": {
         "status": "mixed",
         "evidence": [
+          "crates/virtio-accel-split-queue/src/queue.rs",
           "crates/virtio-accel-transport/src/queue.rs",
           "docs/virtqueue.md"
         ],
@@ -2469,6 +2474,7 @@
       "coverage": {
         "status": "mixed",
         "evidence": [
+          "crates/virtio-accel-split-queue/src/queue.rs",
           "crates/virtio-accel-transport/src/queue.rs",
           "docs/virtqueue.md"
         ],
@@ -2487,15 +2493,16 @@
       "keyword": "MUST NOT",
       "statement": "limiting **MUST NOT** change object ownership or fabricate successful responses.",
       "coverage": {
-        "status": "tracked",
+        "status": "mixed",
         "evidence": [
-          "conformance/rust-clean-room/tests/vectors.rs"
+          "conformance/rust-clean-room/tests/vectors.rs",
+          "crates/virtio-accel-split-queue/src/chain.rs",
+          "crates/virtio-accel-split-queue/src/queue.rs"
         ],
         "issues": [
-          "#18",
           "#20"
         ],
-        "rationale": "Malformed frame behavior is executable; malformed descriptor-chain isolation requires queue execution."
+        "rationale": "Malformed frames and descriptor chains are isolated separately; full command-chain continuation remains tracked."
       }
     },
     {
@@ -2509,15 +2516,15 @@
         "status": "mixed",
         "evidence": [
           "crates/virtio-accel-transport/src/queue.rs",
+          "crates/virtio-accel-split-queue/src/queue.rs",
           "crates/virtio-accel-device/src/engine.rs",
           "docs/virtqueue.md"
         ],
         "issues": [
-          "#18",
           "#19",
           "#20"
         ],
-        "rationale": "Reset epochs, consuming completion, reclamation ownership, and engine reset are executable; concrete ring and full-path reset remain tracked."
+        "rationale": "Split-ring and engine reset are executable separately; guest reclamation and full-path reset remain tracked."
       }
     },
     {

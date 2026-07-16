@@ -257,8 +257,9 @@ The byte vectors under [`conformance/v1.0`](../conformance/v1.0/) cover protocol
 implementations consume the case identifiers above so the same behavioral scenarios can be reused
 by the in-memory split ring and future platform transports. The dependency-free
 `virtio-accel-transport` crate provides the executable region, ownership, reset-epoch, backpressure,
-and notification port contracts. Split-ring assertions remain tracked by issue #18, guest
-compatibility behavior by #19, and full-path assertions by #20.
+and notification port contracts. `virtio-accel-split-queue` exercises the ring-level portions of
+`VQ-001`, `VQ-003` through `VQ-006`, `VQ-013`, `VQ-014`, and `VQ-016` through `VQ-018`. Guest
+compatibility behavior remains tracked by #19 and full-path semantic assertions by #20.
 
 ## Appendix A: portable Rust queue-port mapping
 
@@ -276,3 +277,22 @@ All steady-state queue-port methods are specified as nonblocking and allocation-
 documentation. Publication/completion establish release ordering, their peer-side pops establish
 acquire ordering, and notification enablement returns `WorkPending` when its mandatory recheck finds
 work that raced with suppression.
+
+## Appendix B: in-memory split-ring model
+
+This appendix is non-normative. `SplitQueue` preallocates one descriptor-ownership table, chain
+record table, available ring, and used ring from a validated power-of-two `QueueSize`. Publication,
+available consumption, out-of-order completion, used consumption, and notification rechecks move
+owned values or update fixed slots; none allocates or coalesces payload bytes.
+
+`DriverChain::direct` constructs the baseline direct profile. `DriverChain::raw` retains malformed
+topology for deterministic device tests, while `SplitQueue::inject_available` bypasses only normal
+driver-side profile validation. Traversal remains bounded by the supplied descriptor table and
+never allocates from a descriptor byte length, `next` value, or other guest-controlled scalar.
+Unknown flags and `VIRTQ_DESC_F_INDIRECT` are rejected because protocol 1.0 negotiates neither.
+
+The four public `RingCounters` use the split ring's wrapping `u16` index arithmetic. Test hooks can
+place an empty queue at a chosen index and choose the next descriptor allocation slot, making ring
+wrap, descriptor wrap, exhaustion, and notification races reproducible without timing or threads.
+Reset publishes a new atomic epoch before removing ring storage; every old `ChainIo` byte access and
+completion checks that epoch before touching a payload or used entry.

@@ -6,9 +6,11 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+mod bytes;
 mod queue;
 mod regions;
 
+pub use bytes::{ByteAccessError, ReadableBytes, WritableBytes};
 pub use queue::{
     ChainError, ChainId, ChainIo, ChainIoResult, DeviceChain, DeviceQueue, DriverQueue,
     MAX_SPLIT_QUEUE_SIZE, MalformedChain, NotificationHint, NotificationRecheck, PublishError,

@@ -6,6 +6,7 @@ readonly packages=(
   virtio-accel-proto
   virtio-accel-transport
   virtio-accel-core
+  virtio-accel-split-queue
 )
 
 for package in "${packages[@]}"; do
