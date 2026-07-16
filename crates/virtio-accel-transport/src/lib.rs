@@ -10,7 +10,7 @@ mod bytes;
 mod queue;
 mod regions;
 
-pub use bytes::{ByteAccessError, ReadableBytes, WritableBytes};
+pub use bytes::{ByteAccessError, DriverChainBuffer, ReadableBytes, WritableBytes};
 pub use queue::{
     ChainError, ChainId, ChainIo, ChainIoResult, DeviceChain, DeviceQueue, DriverQueue,
     MAX_SPLIT_QUEUE_SIZE, MalformedChain, NotificationHint, NotificationRecheck, PublishError,

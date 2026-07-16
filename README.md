@@ -14,6 +14,7 @@ claimed virtio device ID.
 - `virtio-accel-transport`: dependency-free `no_std` descriptor-chain, queue, reset, and
   notification ports.
 - `virtio-accel-split-queue`: `no_std + alloc` bounded in-memory split-ring reference model.
+- `virtio-accel-guest`: `no_std + alloc` typed reference client with bounded request tracking.
 - `virtio-accel-core`: `no_std` backend lifecycle, memory, program, queue, and event contracts.
 - `virtio-accel-device`: `no_std + alloc` device-owned state, including bounded generational IDs.
 - `virtio-accel-mock`: cross-platform in-memory backend that exercises the complete lifecycle.
@@ -31,6 +32,10 @@ virtio-accel-device ----------+-------+------> virtio-accel-core
           |                                          |
           +-----> virtio-accel-proto                 v
                                              provider adapters
+
+virtio-accel-guest -----------> virtio-accel-transport
+          |
+          +--------------------> virtio-accel-proto
 ```
 
 Arrows point from a crate to its dependency. The transport crate exposes reset-scoped chain
