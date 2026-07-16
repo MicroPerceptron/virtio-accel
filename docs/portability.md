@@ -13,8 +13,8 @@ Rust 2024 edition selected by the workspace. Every package inherits the same `ru
 | `style-and-api` | Current stable on Ubuntu | Formatting, Clippy with warnings denied, and warning-free public docs |
 | `native-test` | Current stable on Ubuntu, macOS, and Windows | All workspace unit, integration, target, feature, and documentation tests plus release-profile checking |
 | `msrv` | Rust 1.85.0 on Ubuntu | Every workspace target and test continues to compile at the declared MSRV |
-| `portable-target` | Stable `aarch64-unknown-none`, `riscv64gc-unknown-none-elf`, and `wasm32-unknown-unknown` | `proto` and `core` remain `no_std`; device/facade layers require at most `alloc`; Wasm also checks the std reference crates |
-| `feature-sets-and-dependencies` | Stable on Ubuntu | Every Cargo feature combination plus a guard against `std`/`alloc` feature leakage into `proto` and `core` |
+| `portable-target` | Stable `aarch64-unknown-none`, `riscv64gc-unknown-none-elf`, and `wasm32-unknown-unknown` | `cleanroom`, `proto`, and `core` remain `no_std`; device/facade layers require at most `alloc`; Wasm also checks the std reference crates |
+| `feature-sets-and-dependencies` | Stable on Ubuntu | Every Cargo feature combination plus dependency and `std`/`alloc` leakage guards for the portable codecs and core |
 | `dependency-policy` | Cargo-deny with Rust 1.85.0 | Advisories, yanked crates, duplicate versions, wildcard requirements, licenses, and dependency sources |
 | `fuzz-smoke` | Nightly on Ubuntu when `fuzz/Cargo.toml` exists | Every fuzz target gets bounded smoke iterations; issue #26 activates the job by adding the fuzz workspace |
 
@@ -26,7 +26,7 @@ the concrete runner versions used for the release.
 
 | Tier | Crates | Allowed runtime surface |
 |---|---|---|
-| `core-only` | `virtio-accel-proto`, `virtio-accel-core` | `core`; proc-macros may execute with `std` on the build host, but target dependencies may not enable `std` or `alloc` |
+| `core-only` | `virtio-accel-cleanroom`, `virtio-accel-proto`, `virtio-accel-core` | `core`; the clean-room codec has no normal/build dependencies, while proc-macros used by other crates may execute with `std` on the build host |
 | `alloc-portable` | `virtio-accel-device`, `virtio-accel` | `core + alloc`; no OS, filesystem, sockets, threads, or host synchronization |
 | `std-reference` | `virtio-accel-mock` | Portable `std`; no host-OS or vendor-specific API |
 
@@ -40,10 +40,12 @@ CI runs `cargo hack check --feature-powerset --no-dev-deps` across the workspace
 additive: disabling default features may remove convenience behavior but must not select a different
 protocol interpretation.
 
-The portable dependency guard inspects normal and build target features for `virtio-accel-proto`
-and `virtio-accel-core`; test-only development dependencies are intentionally outside the target
-runtime graph. A dependency’s host-side derive macro may use `std`, but the target graph for these
-crates must not enable a dependency feature named `std` or `alloc`.
+The portable dependency guard inspects normal and build target features for
+`virtio-accel-cleanroom`, `virtio-accel-proto`, and `virtio-accel-core`; test-only development
+dependencies are intentionally outside the target runtime graph. It additionally proves that the
+clean-room codec has no normal or build dependencies at all. A dependency’s host-side derive macro
+may use `std`, but the target graph for these crates must not enable a dependency feature named
+`std` or `alloc`.
 
 ## Dependency policy
 
@@ -81,6 +83,7 @@ Target checks require the corresponding Rust standard libraries:
 ```sh
 rustup target add aarch64-unknown-none riscv64gc-unknown-none-elf wasm32-unknown-unknown
 cargo check \
+  -p virtio-accel-cleanroom \
   -p virtio-accel-proto \
   -p virtio-accel-core \
   -p virtio-accel-device \

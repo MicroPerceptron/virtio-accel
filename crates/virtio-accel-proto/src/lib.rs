@@ -459,6 +459,7 @@ mod tests {
     use core::mem::{align_of, offset_of, size_of};
     use serde_json::Value;
     use std::collections::BTreeSet;
+    use virtio_accel_cleanroom as cleanroom;
     use zerocopy::IntoBytes;
 
     const REQUEST_ID: u64 = 0x0102_0304_0506_0708;
@@ -488,6 +489,35 @@ mod tests {
             .find(|entry| entry["name"] == name)
             .unwrap_or_else(|| panic!("missing vector {name}"));
         decode_hex(entry["hex"].as_str().unwrap())
+    }
+
+    fn cleanroom_response_context(name: &str) -> cleanroom::ResponseContext {
+        let opcode = match name {
+            "response_get_device_info" => Some(cleanroom::Opcode::GetDeviceInfo),
+            "response_create_context" => Some(cleanroom::Opcode::CreateContext),
+            "response_destroy_context" => Some(cleanroom::Opcode::DestroyContext),
+            "response_allocate_buffer" => Some(cleanroom::Opcode::AllocateBuffer),
+            "response_free_buffer" => Some(cleanroom::Opcode::FreeBuffer),
+            "response_write_buffer" => Some(cleanroom::Opcode::WriteBuffer),
+            "response_read_buffer" => Some(cleanroom::Opcode::ReadBuffer),
+            "response_load_program" => Some(cleanroom::Opcode::LoadProgram),
+            "response_unload_program" => Some(cleanroom::Opcode::UnloadProgram),
+            "response_create_queue" => Some(cleanroom::Opcode::CreateQueue),
+            "response_destroy_queue" => Some(cleanroom::Opcode::DestroyQueue),
+            "response_submit_accepted" | "response_submit_indeterminate" => {
+                Some(cleanroom::Opcode::Submit)
+            }
+            name if name.starts_with("response_poll_event_") => Some(cleanroom::Opcode::PollEvent),
+            "response_cancel_event" => Some(cleanroom::Opcode::CancelEvent),
+            "response_destroy_event" => Some(cleanroom::Opcode::DestroyEvent),
+            "response_unknown_opcode" => None,
+            other => panic!("no independent response context for {other}"),
+        };
+        cleanroom::ResponseContext {
+            opcode,
+            request_id: REQUEST_ID,
+            read_bytes: (opcode == Some(cleanroom::Opcode::ReadBuffer)).then_some(4),
+        }
     }
 
     fn assert_layout<T>(name: &str, fields: &[(&str, usize)]) {
@@ -1038,6 +1068,50 @@ mod tests {
             failed_event.as_bytes(),
             &vector("frames", "response_poll_event_failed")[16..]
         );
+    }
+
+    #[test]
+    fn independent_codec_interoperates_with_primary_wire_types() {
+        for frame in corpus()["frames"].as_array().unwrap() {
+            let name = frame["name"].as_str().unwrap();
+            let bytes = decode_hex(frame["hex"].as_str().unwrap());
+            let mut independent_bytes = std::vec![0_u8; bytes.len()];
+
+            match frame["kind"].as_str().unwrap() {
+                "config" => {
+                    let primary = read_exact::<WireConfig>(&bytes).unwrap();
+                    let independent = cleanroom::decode_config(&bytes, 256).unwrap();
+                    assert_eq!(primary.protocol_major.get(), independent.protocol_major);
+                    assert_eq!(primary.protocol_minor.get(), independent.protocol_minor);
+                    assert_eq!(
+                        primary.max_chain_descriptors.get(),
+                        independent.max_chain_descriptors
+                    );
+                    independent.encode(256, &mut independent_bytes).unwrap();
+                }
+                "request" => {
+                    let primary =
+                        read_exact::<RequestHeader>(&bytes[..size_of::<RequestHeader>()]).unwrap();
+                    let independent = cleanroom::decode_request(&bytes).unwrap();
+                    assert_eq!(primary.opcode.get(), independent.body.opcode() as u16);
+                    assert_eq!(primary.request_id.get(), independent.request_id);
+                    independent.encode(&mut independent_bytes).unwrap();
+                }
+                "response" => {
+                    let primary =
+                        read_exact::<ResponseHeader>(&bytes[..size_of::<ResponseHeader>()])
+                            .unwrap();
+                    let context = cleanroom_response_context(name);
+                    let independent = cleanroom::decode_response(&bytes, context).unwrap();
+                    assert_eq!(primary.status.get(), independent.status);
+                    assert_eq!(primary.request_id.get(), independent.request_id);
+                    independent.encode(context, &mut independent_bytes).unwrap();
+                }
+                other => panic!("unknown frame kind {other}"),
+            }
+
+            assert_eq!(independent_bytes, bytes, "{name}");
+        }
     }
 
     #[test]

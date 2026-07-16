@@ -124,6 +124,7 @@ jobs:
       - name: Check no_std and alloc portable crates
         run: >-
           cargo check
+          -p virtio-accel-cleanroom
           -p virtio-accel-proto
           -p virtio-accel-core
           -p virtio-accel-device

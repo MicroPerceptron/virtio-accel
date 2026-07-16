@@ -14,6 +14,8 @@ claimed virtio device ID.
 - `virtio-accel-core`: `no_std` backend lifecycle, memory, program, queue, and event contracts.
 - `virtio-accel-device`: `no_std + alloc` device-owned state, including bounded generational IDs.
 - `virtio-accel-mock`: cross-platform in-memory backend that exercises the complete lifecycle.
+- `virtio-accel-cleanroom`: dependency-free `no_std` conformance codec implemented without shared
+  protocol types.
 - `virtio-accel`: small `no_std` facade re-exporting the portable layers.
 
 The crate dependency direction is:
@@ -53,6 +55,10 @@ model, compatibility rules, and mandatory baseline. The exact byte layouts live 
 [conformance/v1.0](conformance/v1.0/README.md). See
 [docs/architecture.md](docs/architecture.md) for implementation invariants and
 [docs/portability.md](docs/portability.md) for the enforced target matrix.
+
+The primary `zerocopy` ABI and the manual clean-room codec both decode and re-encode every canonical
+frame. Their bridge test exchanges bytes only, providing an independent implementation check
+without making the conformance codec a production dependency.
 
 ## Development
 

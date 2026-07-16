@@ -108,6 +108,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "virtio-accel-cleanroom"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "virtio-accel-core"
 version = "0.1.0"
 dependencies = [
@@ -135,6 +142,7 @@ version = "0.1.0"
 dependencies = [
  "bitflags",
  "serde_json",
+ "virtio-accel-cleanroom",
  "zerocopy",
 ]
 

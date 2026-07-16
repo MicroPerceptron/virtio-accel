@@ -1,0 +1,11 @@
+[package]
+name = "virtio-accel-cleanroom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Independent manual codec for virtio-accel protocol conformance"
+publish = false
+
+[dev-dependencies]
+serde_json.workspace = true
