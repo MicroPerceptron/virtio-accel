@@ -8,7 +8,8 @@ use virtio_accel_core::{ByteSink, ByteSource};
 use virtio_accel_proto::{ResponseHeader, StatusCode};
 use zerocopy::IntoBytes;
 
-const RESPONSE_HEADER_BYTES: u64 = core::mem::size_of::<virtio_accel_proto::ResponseHeader>() as u64;
+const RESPONSE_HEADER_BYTES: u64 =
+    core::mem::size_of::<virtio_accel_proto::ResponseHeader>() as u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResponseWriteError {
