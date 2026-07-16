@@ -1,0 +1,301 @@
+{
+  "schema": "virtio-accel-vectors-1",
+  "protocol": "1.0",
+  "note": "Immutable reviewed inputs. Ordinary tests must not regenerate this file.",
+  "frames": [
+    {
+      "name": "config_minimum",
+      "kind": "config",
+      "hex": "0100000001000200610000005c000000"
+    },
+    {
+      "name": "config_maximum",
+      "kind": "config",
+      "hex": "01000000010000010000000100000001"
+    },
+    {
+      "name": "request_get_device_info",
+      "kind": "request",
+      "opcode": "GET_DEVICE_INFO",
+      "hex": "01000000000000000807060504030201"
+    },
+    {
+      "name": "request_create_context",
+      "kind": "request",
+      "opcode": "CREATE_CONTEXT",
+      "hex": "000100000800000008070605040302010000000000000000"
+    },
+    {
+      "name": "request_destroy_context",
+      "kind": "request",
+      "opcode": "DESTROY_CONTEXT",
+      "hex": "010100000800000008070605040302011817161514131211"
+    },
+    {
+      "name": "request_allocate_buffer",
+      "kind": "request",
+      "opcode": "ALLOCATE_BUFFER",
+      "hex": "0002000028000000080706050403020118171615141312110010000000000000400000000000000003000000000000000c00000000000000"
+    },
+    {
+      "name": "request_free_buffer",
+      "kind": "request",
+      "opcode": "FREE_BUFFER",
+      "hex": "010200000800000008070605040302012827262524232221"
+    },
+    {
+      "name": "request_write_buffer",
+      "kind": "request",
+      "opcode": "WRITE_BUFFER",
+      "hex": "020200001c0000000807060504030201282726252423222104000000000000000400000000000000deadbeef"
+    },
+    {
+      "name": "request_read_buffer",
+      "kind": "request",
+      "opcode": "READ_BUFFER",
+      "hex": "03020000180000000807060504030201282726252423222104000000000000000400000000000000"
+    },
+    {
+      "name": "request_load_program",
+      "kind": "request",
+      "opcode": "LOAD_PROGRAM",
+      "hex": "0003000054000000080706050403020118171615141312110100000000000000000000000100000002000000030000000400000005000000060000000700000008000000090000000a0000000b00000004000000000000000010000000000000a1b2c3d4"
+    },
+    {
+      "name": "request_unload_program",
+      "kind": "request",
+      "opcode": "UNLOAD_PROGRAM",
+      "hex": "010300000800000008070605040302013837363534333231"
+    },
+    {
+      "name": "request_create_queue",
+      "kind": "request",
+      "opcode": "CREATE_QUEUE",
+      "hex": "0004000010000000080706050403020118171615141312110000000000000000"
+    },
+    {
+      "name": "request_destroy_queue",
+      "kind": "request",
+      "opcode": "DESTROY_QUEUE",
+      "hex": "010400000800000008070605040302014847464544434241"
+    },
+    {
+      "name": "request_submit",
+      "kind": "request",
+      "opcode": "SUBMIT",
+      "hex": "0005000040000000080706050403020148474645444342413837363534333231010000000000000040420f00000000002827262524232221000000000000000000100000000000000700000003000000"
+    },
+    {
+      "name": "request_poll_event",
+      "kind": "request",
+      "opcode": "POLL_EVENT",
+      "hex": "010500000800000008070605040302015857565554535251"
+    },
+    {
+      "name": "request_cancel_event",
+      "kind": "request",
+      "opcode": "CANCEL_EVENT",
+      "hex": "020500000800000008070605040302015857565554535251"
+    },
+    {
+      "name": "request_destroy_event",
+      "kind": "request",
+      "opcode": "DESTROY_EVENT",
+      "hex": "030500000800000008070605040302015857565554535251"
+    },
+    {
+      "name": "response_get_device_info",
+      "kind": "response",
+      "status": "OK",
+      "hex": "000000004c000000080706050403020176697274696f2d616363656c6d6f636b0100000078563412f0debc9a070000000000000040000000000400000001000010000000001000000001000000000040000000000000000100000000"
+    },
+    {
+      "name": "response_create_context",
+      "kind": "response",
+      "status": "OK",
+      "hex": "000000000800000008070605040302011817161514131211"
+    },
+    {
+      "name": "response_destroy_context",
+      "kind": "response",
+      "status": "OK",
+      "hex": "00000000000000000807060504030201"
+    },
+    {
+      "name": "response_allocate_buffer",
+      "kind": "response",
+      "status": "OK",
+      "hex": "000000000800000008070605040302012827262524232221"
+    },
+    {
+      "name": "response_free_buffer",
+      "kind": "response",
+      "status": "OK",
+      "hex": "00000000000000000807060504030201"
+    },
+    {
+      "name": "response_write_buffer",
+      "kind": "response",
+      "status": "OK",
+      "hex": "00000000000000000807060504030201"
+    },
+    {
+      "name": "response_read_buffer",
+      "kind": "response",
+      "status": "OK",
+      "hex": "00000000040000000807060504030201deadbeef"
+    },
+    {
+      "name": "response_load_program",
+      "kind": "response",
+      "status": "OK",
+      "hex": "000000000800000008070605040302013837363534333231"
+    },
+    {
+      "name": "response_unload_program",
+      "kind": "response",
+      "status": "OK",
+      "hex": "00000000000000000807060504030201"
+    },
+    {
+      "name": "response_create_queue",
+      "kind": "response",
+      "status": "OK",
+      "hex": "000000000800000008070605040302014847464544434241"
+    },
+    {
+      "name": "response_destroy_queue",
+      "kind": "response",
+      "status": "OK",
+      "hex": "00000000000000000807060504030201"
+    },
+    {
+      "name": "response_submit_accepted",
+      "kind": "response",
+      "status": "OK",
+      "hex": "000000000800000008070605040302015857565554535251"
+    },
+    {
+      "name": "response_submit_indeterminate",
+      "kind": "response",
+      "status": "DEVICE_LOST",
+      "hex": "090000000800000008070605040302015857565554535251"
+    },
+    {
+      "name": "response_poll_event_pending",
+      "kind": "response",
+      "status": "OK",
+      "hex": "000000000800000008070605040302010000000000000000"
+    },
+    {
+      "name": "response_poll_event_complete",
+      "kind": "response",
+      "status": "OK",
+      "hex": "000000000800000008070605040302010100000000000000"
+    },
+    {
+      "name": "response_poll_event_failed",
+      "kind": "response",
+      "status": "OK",
+      "hex": "000000000800000008070605040302010200090000000000"
+    },
+    {
+      "name": "response_poll_event_cancelled",
+      "kind": "response",
+      "status": "OK",
+      "hex": "000000000800000008070605040302010300000000000000"
+    },
+    {
+      "name": "response_cancel_event",
+      "kind": "response",
+      "status": "OK",
+      "hex": "00000000000000000807060504030201"
+    },
+    {
+      "name": "response_destroy_event",
+      "kind": "response",
+      "status": "OK",
+      "hex": "00000000000000000807060504030201"
+    },
+    {
+      "name": "response_unknown_opcode",
+      "kind": "response",
+      "status": "UNSUPPORTED",
+      "hex": "01000000000000000807060504030201"
+    }
+  ],
+  "edge_cases": [
+    {
+      "name": "config_descriptor_limit_above_hard_max",
+      "kind": "config",
+      "expected": "ChainDescriptorLimit",
+      "hex": "01000000010001010000100000001000"
+    },
+    {
+      "name": "config_future_minor_compatible",
+      "kind": "config",
+      "expected": "compatible-baseline",
+      "hex": "0100010001000200610000005c000000"
+    },
+    {
+      "name": "config_unknown_major",
+      "kind": "config",
+      "expected": "Version",
+      "hex": "0200000001000200610000005c000000"
+    },
+    {
+      "name": "request_header_truncated",
+      "kind": "request",
+      "expected": "Size",
+      "hex": "010000000000000008070605040302"
+    },
+    {
+      "name": "request_unknown_opcode",
+      "kind": "request",
+      "expected": "UNSUPPORTED",
+      "hex": "adde0000000000000807060504030201"
+    },
+    {
+      "name": "request_reserved_flag",
+      "kind": "request",
+      "expected": "UNSUPPORTED",
+      "hex": "01000100000000000807060504030201"
+    },
+    {
+      "name": "request_trailing_byte",
+      "kind": "request",
+      "expected": "INVALID_ARGUMENT",
+      "hex": "0100000000000000080706050403020100"
+    },
+    {
+      "name": "request_reserved_context_flag",
+      "kind": "request",
+      "expected": "UNSUPPORTED",
+      "hex": "000100000800000008070605040302010100000000000000"
+    },
+    {
+      "name": "request_unknown_memory_domain",
+      "kind": "request",
+      "expected": "INVALID_ARGUMENT",
+      "hex": "00020000280000000807060504030201181716151413121100100000000000004000000000000000ff000000000000000c00000000000000"
+    },
+    {
+      "name": "request_binding_count_overflow",
+      "kind": "request",
+      "expected": "RESOURCE_LIMIT",
+      "hex": "0005000020000000080706050403020148474645444342413837363534333231ffffffff000000000000000000000000"
+    },
+    {
+      "name": "response_unknown_status",
+      "kind": "response",
+      "expected": "opaque-failure",
+      "hex": "34120000000000000807060504030201"
+    },
+    {
+      "name": "response_unknown_event_state",
+      "kind": "response",
+      "expected": "recovery",
+      "hex": "00000000080000000807060504030201ffff000000000000"
+    }
+  ]
+}

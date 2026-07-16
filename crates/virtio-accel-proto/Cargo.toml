@@ -4,9 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Pointer-free experimental virtio accelerator wire protocol"
+description = "Pointer-free portable virtio accelerator protocol 1.0 ABI"
 publish = false
 
 [dependencies]
 bitflags.workspace = true
 zerocopy.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

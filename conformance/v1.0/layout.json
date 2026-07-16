@@ -1,0 +1,216 @@
+{
+  "schema": "virtio-accel-layout-1",
+  "protocol": {
+    "major": 1,
+    "minor": 0
+  },
+  "queue": {
+    "command_index": 0,
+    "baseline_count": 1,
+    "hard_max_chain_descriptors": 256,
+    "min_max_request_bytes": 97,
+    "min_max_response_bytes": 92,
+    "hard_max_request_bytes": 16777216,
+    "hard_max_response_bytes": 16777216,
+    "hard_max_bindings": 4096
+  },
+  "features": {
+    "baseline": "0x0000000000000000",
+    "reserved": {
+      "MULTI_QUEUE": "0x0000000000000001",
+      "EVENT_QUEUE": "0x0000000000000002",
+      "EXTERNAL_MEMORY": "0x0000000000000004",
+      "TIMELINE_FENCES": "0x0000000000000008",
+      "SECURE_CONTEXTS": "0x0000000000000010"
+    }
+  },
+  "opcodes": {
+    "GET_DEVICE_INFO": "0x0001",
+    "CREATE_CONTEXT": "0x0100",
+    "DESTROY_CONTEXT": "0x0101",
+    "ALLOCATE_BUFFER": "0x0200",
+    "FREE_BUFFER": "0x0201",
+    "WRITE_BUFFER": "0x0202",
+    "READ_BUFFER": "0x0203",
+    "LOAD_PROGRAM": "0x0300",
+    "UNLOAD_PROGRAM": "0x0301",
+    "CREATE_QUEUE": "0x0400",
+    "DESTROY_QUEUE": "0x0401",
+    "SUBMIT": "0x0500",
+    "POLL_EVENT": "0x0501",
+    "CANCEL_EVENT": "0x0502",
+    "DESTROY_EVENT": "0x0503"
+  },
+  "statuses": {
+    "OK": 0,
+    "UNSUPPORTED": 1,
+    "INCOMPATIBLE": 2,
+    "INVALID_ARGUMENT": 3,
+    "OUT_OF_BOUNDS": 4,
+    "BUSY": 5,
+    "OUT_OF_MEMORY": 6,
+    "RESOURCE_LIMIT": 7,
+    "DEADLINE_EXPIRED": 8,
+    "DEVICE_LOST": 9,
+    "PERMISSION_DENIED": 10,
+    "STALE_OBJECT": 11,
+    "INTERNAL_ERROR": 65535
+  },
+  "event_states": {
+    "PENDING": 0,
+    "COMPLETE": 1,
+    "FAILED": 2,
+    "CANCELLED": 3
+  },
+  "structures": {
+    "WireConfig": {
+      "size": 16,
+      "align": 1,
+      "fields": {
+        "protocol_major": 0,
+        "protocol_minor": 2,
+        "command_queue_count": 4,
+        "max_chain_descriptors": 6,
+        "max_request_bytes": 8,
+        "max_response_bytes": 12
+      }
+    },
+    "RequestHeader": {
+      "size": 16,
+      "align": 1,
+      "fields": {
+        "opcode": 0,
+        "flags": 2,
+        "payload_bytes": 4,
+        "request_id": 8
+      }
+    },
+    "ResponseHeader": {
+      "size": 16,
+      "align": 1,
+      "fields": {
+        "status": 0,
+        "flags": 2,
+        "payload_bytes": 4,
+        "request_id": 8
+      }
+    },
+    "WireDeviceInfo": {
+      "size": 76,
+      "align": 1,
+      "fields": {
+        "uuid": 0,
+        "class": 16,
+        "reserved": 18,
+        "vendor_id": 20,
+        "device_id": 24,
+        "capabilities": 28,
+        "max_contexts": 36,
+        "max_buffers_per_context": 40,
+        "max_programs_per_context": 44,
+        "max_queues_per_context": 48,
+        "max_events_per_context": 52,
+        "max_bindings_per_submission": 56,
+        "max_buffer_bytes": 60,
+        "max_artifact_bytes": 68
+      }
+    },
+    "CreateContextRequest": {
+      "size": 8,
+      "align": 1,
+      "fields": {
+        "flags": 0,
+        "reserved": 4
+      }
+    },
+    "ObjectPayload": {
+      "size": 8,
+      "align": 1,
+      "fields": {
+        "object_id": 0
+      }
+    },
+    "AllocateBufferRequest": {
+      "size": 40,
+      "align": 1,
+      "fields": {
+        "context_id": 0,
+        "bytes": 8,
+        "alignment": 16,
+        "memory_domain": 24,
+        "reserved0": 25,
+        "usage": 32,
+        "reserved1": 36
+      }
+    },
+    "TransferBufferRequest": {
+      "size": 24,
+      "align": 1,
+      "fields": {
+        "buffer_id": 0,
+        "offset": 8,
+        "bytes": 16
+      }
+    },
+    "LoadProgramRequest": {
+      "size": 80,
+      "align": 1,
+      "fields": {
+        "context_id": 0,
+        "format": 8,
+        "flags": 12,
+        "target": 16,
+        "payload_bytes": 64,
+        "resident_bytes": 72
+      }
+    },
+    "CreateQueueRequest": {
+      "size": 16,
+      "align": 1,
+      "fields": {
+        "context_id": 0,
+        "flags": 8,
+        "reserved": 12
+      }
+    },
+    "SubmitRequest": {
+      "size": 32,
+      "align": 1,
+      "fields": {
+        "queue_id": 0,
+        "program_id": 8,
+        "binding_count": 16,
+        "flags": 20,
+        "timeout_ns": 24
+      }
+    },
+    "WireBinding": {
+      "size": 32,
+      "align": 1,
+      "fields": {
+        "buffer_id": 0,
+        "offset": 8,
+        "bytes": 16,
+        "slot": 24,
+        "access": 28,
+        "reserved": 29
+      }
+    },
+    "SubmitResponse": {
+      "size": 8,
+      "align": 1,
+      "fields": {
+        "event_id": 0
+      }
+    },
+    "WireEventState": {
+      "size": 8,
+      "align": 1,
+      "fields": {
+        "state": 0,
+        "error": 2,
+        "reserved": 4
+      }
+    }
+  }
+}

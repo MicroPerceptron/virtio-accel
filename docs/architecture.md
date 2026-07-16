@@ -6,8 +6,13 @@ The portable layers define the semantics that must agree across every guest tran
 machine monitor, host operating system, and hardware provider. Platform integrations are adapters;
 they do not own accelerator semantics.
 
-The draft does not yet assign a virtio device ID. It also does not standardize vendor executable
+Protocol 1.0 does not assign a Virtio device ID. It also does not standardize vendor executable
 formats: artifact format identifiers and target words remain opaque to the transport.
+
+The normative terminology, object model, and compatibility rules live in
+[specification.md](specification.md), with exact layouts in [wire-abi.md](wire-abi.md) and command
+queue rules in [virtqueue.md](virtqueue.md). This document explains the implementation boundaries
+that preserve those rules.
 
 ## Load-bearing invariants
 
@@ -61,14 +66,17 @@ and threat-model pass.
 
 ## Queue model
 
-Queue zero is the baseline bidirectional command queue. One descriptor chain contains device-readable
-request bytes and device-writable response bytes. Completion may be out of submission order, keyed by
-the request ID.
+Command virtqueue zero is the baseline bidirectional transport queue. One descriptor chain contains
+device-readable request bytes and device-writable response bytes. Completion may be out of
+submission order, keyed by the request ID.
 
 The baseline `SUBMIT` command returns an event object; `POLL_EVENT` provides portable progress without
 requiring unsolicited device writes. Optional multi-queue and event-queue features are reserved for
 later validation. Split and packed virtqueue mechanics belong to transport adapters, not the command
 engine.
+
+An accelerator execution queue is a separate context-scoped backend object. It never denotes a
+Virtio queue index.
 
 ## Performance posture
 

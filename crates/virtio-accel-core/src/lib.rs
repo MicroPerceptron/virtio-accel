@@ -57,6 +57,10 @@ impl AcceleratorClass {
 
 bitflags! {
     /// Semantic capabilities exposed by a backend, independent of virtio feature negotiation.
+    ///
+    /// Capabilities describe which accelerator operations the backend can perform. They do not
+    /// change the wire layout. A transport feature bit is required separately whenever enabling a
+    /// capability would change descriptor framing or any other device/driver protocol behavior.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct Capabilities: u64 {
         const HOST_VISIBLE_MEMORY = 1 << 0;
@@ -78,8 +82,10 @@ pub struct DeviceIdentity {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeviceLimits {
     pub max_contexts: u32,
-    pub max_queues_per_context: u32,
     pub max_buffers_per_context: u32,
+    pub max_programs_per_context: u32,
+    pub max_queues_per_context: u32,
+    pub max_events_per_context: u32,
     pub max_bindings_per_submission: u32,
     pub max_buffer_bytes: u64,
     pub max_artifact_bytes: u64,
@@ -250,6 +256,10 @@ pub struct ArtifactRef<'a> {
 }
 
 bitflags! {
+    /// Flags for an accelerator execution queue.
+    ///
+    /// This queue is a backend object used to submit programs. It is not a virtqueue; the v1
+    /// protocol uses the term *command virtqueue* for the transport queue carrying requests.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct QueueFlags: u32 {
         const IN_ORDER = 1 << 0;
@@ -349,6 +359,9 @@ impl<R> ReleaseFailure<R> {
 ///
 /// Destructive methods consume handles. A transport adapter must reject parent destruction while
 /// child objects or in-flight events still exist; it must not use `Drop` timing as protocol state.
+///
+/// [`Self::Queue`] is an accelerator execution queue. It must not be confused with the command
+/// virtqueue used by a transport adapter to deliver protocol requests.
 pub trait Accelerator {
     type Context;
     type Buffer;
