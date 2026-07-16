@@ -57,6 +57,23 @@ Provider releases have an explicit failure boundary too. A rejected release retu
 handle for retry. An indeterminate release invalidates the guest ID and requires device recovery;
 the adapter must never guess that the resource is either safe to reuse or safe to free.
 
+### Reset and quarantine
+
+The transport stops fetching chains and publishing completions before handing exclusive ownership
+to `CommandProcessor::reset`. The processor then makes one bounded pass: events first, followed by
+execution queues, programs, buffers, and contexts. Pending events are cancelled only when the
+backend advertises cancellation; no reset path spins, waits, or creates a background executor.
+
+A completely drained graph receives a fresh `ObjectNamespace` and may continue with the same
+backend. Any unresolved pending event, rejected reset release, indeterminate release, device loss,
+or accounting contradiction produces `BackendDiscardRequired`. That result reports both resources
+released during the pass and resources still represented or previously orphaned in quarantine.
+The result is sticky: later reset calls make no provider calls, and the complete processor/backend
+instance must be discarded rather than reattached to newly initialized queues.
+
+This keeps synchronization at the existing owner boundary. Reset needs no per-record atomics or
+locks; provider completion tokens remain responsible for the cancellation/completion race.
+
 ### Submission acceptance
 
 A rejected submission guarantees that the backend accepted no execution and retained no resources.
@@ -176,6 +193,6 @@ baseline processor:
 4. Passes transfer and artifact regions directly to backend byte ports.
 5. Produces a response without knowing about rust-vmm or a host operating system.
 
-Submission/event retention and deterministic reset complete this engine before a thin rust-vmm
-adapter supplies `virtio-device`, `virtio-queue`, and `vm-memory` integration. Linux vhost-user and
-an in-kernel guest driver remain later platform layers.
+Submission/event retention and deterministic reset complete the engine. The next boundary is a thin
+rust-vmm adapter supplying `virtio-device`, `virtio-queue`, and `vm-memory` integration. Linux
+vhost-user and an in-kernel guest driver remain later platform layers.

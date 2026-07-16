@@ -243,7 +243,17 @@ A **reset** stops admission, disposes or quarantines in-flight state according t
 invalidates every guest-visible object ID, advances the device epoch, resets command queues, and
 returns the device to its initial negotiation state.
 
-No object ID created before reset may resolve after reset.
+The transport **MUST** stop fetching command chains and publishing completions before portable
+object teardown begins. Teardown **MUST** be bounded and child-before-parent: events precede their
+execution queues, programs, and buffers, and all context children precede the context.
+
+The device **MAY** reuse a backend instance only when every known resource is released
+successfully. An unresolved pending event, a rejected reset-time release, an indeterminate release,
+backend device loss, or an accounting contradiction requires discarding the complete backend
+instance. Once discard is required, repeated reset attempts **MUST NOT** invoke that backend again.
+
+Successful reinitialization **MUST** use a fresh nonzero object namespace. No object ID created
+before reset may resolve after reset.
 
 ## 5. Baseline capabilities and feature policy
 
@@ -471,6 +481,8 @@ model or is identified as an implementation helper.
 | `SubmitFailure` | Rejected versus indeterminate submission acceptance boundary |
 | `ReleaseFailure` | Rejected versus indeterminate resource-release boundary |
 | `Accelerator` | Accelerator backend contract |
+| `DeviceHealth` | Running, known-state reset required, or backend-discard-required processor state |
+| `ResourceCounts`, `ResetDisposition`, `ResetReport`, `ResetError` | Reset accounting, reuse decision, and namespace validation |
 | `Le16`, `Le32`, `Le64` | Wire implementation aliases; not semantic API |
 | `PROTOCOL_MAJOR`, `PROTOCOL_MINOR` | Candidate protocol version 1.0 |
 | `COMMAND_QUEUE` | Baseline command virtqueue index |

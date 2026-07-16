@@ -20,7 +20,7 @@ use zerocopy::IntoBytes;
 use crate::{
     BufferRecord, ChainRegion, CreateError, DecodedBinding, DecodedRequest, DecodedRequestBody,
     DecoderLimits, DecoderLimitsError, DeviceState, DeviceStateConfigError, DeviceStateError,
-    FrameDecoder, FramePreflight, FramePreflightError, ObjectId, ObjectNamespace,
+    FrameDecoder, FramePreflight, FramePreflightError, ObjectId, ObjectNamespace, ResourceCounts,
     ResponseWriteError, ResponseWriter, UnusableFrame, preflight_command_frame,
     status_from_backend_error, status_from_device_state_error,
 };
@@ -37,6 +37,26 @@ pub type AcceleratorState<A> = DeviceState<
 pub enum DeviceHealth {
     Running,
     NeedsReset,
+    BackendDiscardRequired,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResetDisposition {
+    BackendReusable,
+    BackendDiscardRequired,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResetReport {
+    pub disposition: ResetDisposition,
+    pub released: ResourceCounts,
+    pub quarantined: ResourceCounts,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResetError {
+    NamespaceReuse,
+    State(DeviceStateConfigError),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,11 +96,13 @@ enum SubmitCreateError {
 /// for decoding, validation, and discovery responses. This prevents limits from changing beneath
 /// live object state and removes a backend call from the discovery path.
 pub struct CommandProcessor<A: Accelerator> {
+    state: AcceleratorState<A>,
     accelerator: A,
     info: DeviceInfo,
     decoder: FrameDecoder,
-    state: AcceleratorState<A>,
     health: DeviceHealth,
+    quarantined: ResourceCounts,
+    last_reset: Option<ResetReport>,
 }
 
 impl<A: Accelerator> core::fmt::Debug for CommandProcessor<A> {
@@ -111,11 +133,13 @@ impl<A: Accelerator> CommandProcessor<A> {
         let state =
             DeviceState::new(namespace, info.limits).map_err(CommandProcessorInitError::State)?;
         Ok(Self {
+            state,
             accelerator,
             info,
             decoder: FrameDecoder::new(limits),
-            state,
             health: DeviceHealth::Running,
+            quarantined: ResourceCounts::default(),
+            last_reset: None,
         })
     }
 
@@ -137,6 +161,72 @@ impl<A: Accelerator> CommandProcessor<A> {
 
     pub const fn state(&self) -> &AcceleratorState<A> {
         &self.state
+    }
+
+    /// Perform one bounded, child-before-parent reset pass.
+    ///
+    /// The transport must stop fetching command chains and stop publishing completions before
+    /// calling this method. A reusable result renews every object table with `namespace`; every
+    /// prior ID is then stale. A discard-required result is sticky and makes no backend calls on
+    /// later reset attempts. The caller must discard the complete processor/backend instance.
+    pub fn reset(&mut self, namespace: ObjectNamespace) -> Result<ResetReport, ResetError> {
+        if self.health == DeviceHealth::BackendDiscardRequired {
+            let report = match self.last_reset {
+                Some(report) => report,
+                None => {
+                    let report = self.discard_report(ResourceCounts::default());
+                    self.last_reset = Some(report);
+                    report
+                }
+            };
+            return Ok(report);
+        }
+        if namespace == self.state.namespace() {
+            return Err(ResetError::NamespaceReuse);
+        }
+
+        self.health = DeviceHealth::NeedsReset;
+        self.last_reset = None;
+        let mut released = ResourceCounts::default();
+        let mut progress = ResetProgress::default();
+
+        self.reset_events(&mut released, &mut progress);
+        if progress.backend_callable {
+            self.reset_queues(&mut released, &mut progress);
+        }
+        if progress.backend_callable {
+            self.reset_programs(&mut released, &mut progress);
+        }
+        if progress.backend_callable {
+            self.reset_buffers(&mut released, &mut progress);
+        }
+        if progress.backend_callable {
+            self.reset_contexts(&mut released, &mut progress);
+        }
+
+        let remaining = self.state.resource_counts();
+        let quarantined = self.quarantined.saturating_add(remaining);
+        if progress.backend_reusable && self.state.is_empty() && quarantined.is_empty() {
+            self.state =
+                DeviceState::new(namespace, self.info.limits).map_err(ResetError::State)?;
+            self.health = DeviceHealth::Running;
+            let report = ResetReport {
+                disposition: ResetDisposition::BackendReusable,
+                released,
+                quarantined,
+            };
+            self.last_reset = None;
+            return Ok(report);
+        }
+
+        self.health = DeviceHealth::BackendDiscardRequired;
+        let report = ResetReport {
+            disposition: ResetDisposition::BackendDiscardRequired,
+            released,
+            quarantined,
+        };
+        self.last_reset = Some(report);
+        Ok(report)
     }
 
     /// Process one complete flattened command chain.
@@ -164,7 +254,7 @@ impl<A: Accelerator> CommandProcessor<A> {
             }),
             FramePreflight::Unusable(error) => Ok(CommandOutcome::Unusable(error)),
             FramePreflight::Ready(request) => {
-                if self.health == DeviceHealth::NeedsReset {
+                if self.health != DeviceHealth::Running {
                     return self.respond_empty(
                         response,
                         StatusCode::DEVICE_LOST,
@@ -172,6 +262,7 @@ impl<A: Accelerator> CommandProcessor<A> {
                         false,
                     );
                 }
+                self.last_reset = None;
                 self.dispatch(request, response)
             }
         }
@@ -313,6 +404,7 @@ impl<A: Accelerator> CommandProcessor<A> {
 
         let accelerator = &self.accelerator;
         let mut admission_status = StatusCode::OK;
+        let mut admission_requires_discard = false;
         let result = self
             .state
             .create_event_with(queue_id, program_id, buffer_ids, |resources| {
@@ -348,6 +440,7 @@ impl<A: Accelerator> CommandProcessor<A> {
                     Err(SubmitFailure::Rejected(error)) => Err(SubmitCreateError::Rejected(error)),
                     Err(SubmitFailure::Indeterminate { error, event }) => {
                         admission_status = status_from_backend_error(error);
+                        admission_requires_discard = error == BackendError::DeviceLost;
                         Ok(event)
                     }
                 }
@@ -355,6 +448,9 @@ impl<A: Accelerator> CommandProcessor<A> {
 
         match result {
             Ok(event_id) => {
+                if admission_requires_discard {
+                    self.require_backend_discard();
+                }
                 self.respond_event_id(response, admission_status, request_id, event_id, true)
             }
             Err(CreateError::State(error)) => self.respond_state_error(response, request_id, error),
@@ -368,7 +464,306 @@ impl<A: Accelerator> CommandProcessor<A> {
                 self.respond_empty(response, status, request_id, false)
             }
             Err(CreateError::Provider(SubmitCreateError::State(_))) => {
-                self.recovery_response(response, request_id)
+                self.discard_response(response, request_id)
+            }
+        }
+    }
+
+    fn reset_events(&mut self, released: &mut ResourceCounts, progress: &mut ResetProgress) {
+        let mut cursor = 0;
+        while let Some((next, id)) = self.state.next_event_id(cursor) {
+            cursor = next;
+            if !progress.backend_callable {
+                break;
+            }
+            self.reset_event(id, released, progress);
+        }
+    }
+
+    fn reset_event(
+        &mut self,
+        id: ObjectId,
+        released: &mut ResourceCounts,
+        progress: &mut ResetProgress,
+    ) {
+        let mut event_state = {
+            let event = match self
+                .state
+                .event_record(id)
+                .and_then(|record| record.resource())
+            {
+                Ok(event) => event,
+                Err(_) => {
+                    progress.backend_reusable = false;
+                    return;
+                }
+            };
+            match self.accelerator.poll_event(event) {
+                Ok(state) => state,
+                Err(error) => {
+                    progress.backend_reusable = false;
+                    if error == BackendError::DeviceLost {
+                        progress.backend_callable = false;
+                    }
+                    return;
+                }
+            }
+        };
+
+        if event_state == EventState::Pending {
+            if !self
+                .info
+                .capabilities
+                .contains(Capabilities::EVENT_CANCELLATION)
+            {
+                progress.backend_reusable = false;
+                return;
+            }
+            let cancel_result = {
+                let event = match self
+                    .state
+                    .event_record(id)
+                    .and_then(|record| record.resource())
+                {
+                    Ok(event) => event,
+                    Err(_) => {
+                        progress.backend_reusable = false;
+                        return;
+                    }
+                };
+                self.accelerator.cancel_event(event)
+            };
+            match cancel_result {
+                Ok(()) => event_state = EventState::Cancelled,
+                Err(BackendError::Busy) => {
+                    let event = match self
+                        .state
+                        .event_record(id)
+                        .and_then(|record| record.resource())
+                    {
+                        Ok(event) => event,
+                        Err(_) => {
+                            progress.backend_reusable = false;
+                            return;
+                        }
+                    };
+                    match self.accelerator.poll_event(event) {
+                        Ok(state) => event_state = state,
+                        Err(error) => {
+                            progress.backend_reusable = false;
+                            if error == BackendError::DeviceLost {
+                                progress.backend_callable = false;
+                            }
+                            return;
+                        }
+                    }
+                }
+                Err(error) => {
+                    progress.backend_reusable = false;
+                    if error == BackendError::DeviceLost {
+                        progress.backend_callable = false;
+                    }
+                    return;
+                }
+            }
+        }
+
+        match event_state {
+            EventState::Pending => {
+                progress.backend_reusable = false;
+                return;
+            }
+            EventState::Failed(BackendError::DeviceLost) => {
+                progress.backend_reusable = false;
+                progress.backend_callable = false;
+                return;
+            }
+            EventState::Complete | EventState::Failed(_) | EventState::Cancelled => {}
+        }
+
+        let event = match self.state.begin_event_release(id) {
+            Ok(event) => event,
+            Err(_) => {
+                progress.backend_reusable = false;
+                return;
+            }
+        };
+        match self.accelerator.destroy_event(event) {
+            Ok(()) => match self.state.commit_event_release(id) {
+                Ok(()) => released.events += 1,
+                Err(_) => {
+                    progress.backend_reusable = false;
+                    progress.backend_callable = false;
+                }
+            },
+            Err(ReleaseFailure::Rejected { error, resource }) => {
+                progress.backend_reusable = false;
+                if error == BackendError::DeviceLost {
+                    progress.backend_callable = false;
+                }
+                if self.state.restore_event_release(id, resource).is_err() {
+                    progress.backend_callable = false;
+                }
+            }
+            Err(ReleaseFailure::Indeterminate { .. }) => {
+                progress.backend_reusable = false;
+                progress.backend_callable = false;
+            }
+        }
+    }
+
+    fn reset_queues(&mut self, released: &mut ResourceCounts, progress: &mut ResetProgress) {
+        let mut cursor = 0;
+        while let Some((next, id)) = self.state.next_queue_id(cursor) {
+            cursor = next;
+            let queue = match self.state.begin_queue_release(id) {
+                Ok(queue) => queue,
+                Err(_) => {
+                    progress.backend_reusable = false;
+                    continue;
+                }
+            };
+            match self.accelerator.destroy_queue(queue) {
+                Ok(()) => match self.state.commit_queue_release(id) {
+                    Ok(()) => released.queues += 1,
+                    Err(_) => {
+                        progress.backend_reusable = false;
+                        progress.backend_callable = false;
+                        break;
+                    }
+                },
+                Err(ReleaseFailure::Rejected { error, resource }) => {
+                    progress.backend_reusable = false;
+                    if error == BackendError::DeviceLost {
+                        progress.backend_callable = false;
+                    }
+                    if self.state.restore_queue_release(id, resource).is_err() {
+                        progress.backend_callable = false;
+                        break;
+                    }
+                }
+                Err(ReleaseFailure::Indeterminate { .. }) => {
+                    progress.backend_reusable = false;
+                    progress.backend_callable = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn reset_programs(&mut self, released: &mut ResourceCounts, progress: &mut ResetProgress) {
+        let mut cursor = 0;
+        while let Some((next, id)) = self.state.next_program_id(cursor) {
+            cursor = next;
+            let program = match self.state.begin_program_release(id) {
+                Ok(program) => program,
+                Err(_) => {
+                    progress.backend_reusable = false;
+                    continue;
+                }
+            };
+            match self.accelerator.unload_program(program) {
+                Ok(()) => match self.state.commit_program_release(id) {
+                    Ok(()) => released.programs += 1,
+                    Err(_) => {
+                        progress.backend_reusable = false;
+                        progress.backend_callable = false;
+                        break;
+                    }
+                },
+                Err(ReleaseFailure::Rejected { error, resource }) => {
+                    progress.backend_reusable = false;
+                    if error == BackendError::DeviceLost {
+                        progress.backend_callable = false;
+                    }
+                    if self.state.restore_program_release(id, resource).is_err() {
+                        progress.backend_callable = false;
+                        break;
+                    }
+                }
+                Err(ReleaseFailure::Indeterminate { .. }) => {
+                    progress.backend_reusable = false;
+                    progress.backend_callable = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn reset_buffers(&mut self, released: &mut ResourceCounts, progress: &mut ResetProgress) {
+        let mut cursor = 0;
+        while let Some((next, id)) = self.state.next_buffer_id(cursor) {
+            cursor = next;
+            let buffer = match self.state.begin_buffer_release(id) {
+                Ok(buffer) => buffer,
+                Err(_) => {
+                    progress.backend_reusable = false;
+                    continue;
+                }
+            };
+            match self.accelerator.free_buffer(buffer) {
+                Ok(()) => match self.state.commit_buffer_release(id) {
+                    Ok(()) => released.buffers += 1,
+                    Err(_) => {
+                        progress.backend_reusable = false;
+                        progress.backend_callable = false;
+                        break;
+                    }
+                },
+                Err(ReleaseFailure::Rejected { error, resource }) => {
+                    progress.backend_reusable = false;
+                    if error == BackendError::DeviceLost {
+                        progress.backend_callable = false;
+                    }
+                    if self.state.restore_buffer_release(id, resource).is_err() {
+                        progress.backend_callable = false;
+                        break;
+                    }
+                }
+                Err(ReleaseFailure::Indeterminate { .. }) => {
+                    progress.backend_reusable = false;
+                    progress.backend_callable = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn reset_contexts(&mut self, released: &mut ResourceCounts, progress: &mut ResetProgress) {
+        let mut cursor = 0;
+        while let Some((next, id)) = self.state.next_context_id(cursor) {
+            cursor = next;
+            let context = match self.state.begin_context_release(id) {
+                Ok(context) => context,
+                Err(_) => {
+                    progress.backend_reusable = false;
+                    continue;
+                }
+            };
+            match self.accelerator.destroy_context(context) {
+                Ok(()) => match self.state.commit_context_release(id) {
+                    Ok(()) => released.contexts += 1,
+                    Err(_) => {
+                        progress.backend_reusable = false;
+                        progress.backend_callable = false;
+                        break;
+                    }
+                },
+                Err(ReleaseFailure::Rejected { error, resource }) => {
+                    progress.backend_reusable = false;
+                    if error == BackendError::DeviceLost {
+                        progress.backend_callable = false;
+                    }
+                    if self.state.restore_context_release(id, resource).is_err() {
+                        progress.backend_callable = false;
+                        break;
+                    }
+                }
+                Err(ReleaseFailure::Indeterminate { .. }) => {
+                    progress.backend_reusable = false;
+                    progress.backend_callable = false;
+                    break;
+                }
             }
         }
     }
@@ -388,6 +783,9 @@ impl<A: Accelerator> CommandProcessor<A> {
         };
         match self.accelerator.poll_event(event) {
             Ok(state) => {
+                if state == EventState::Failed(BackendError::DeviceLost) {
+                    self.require_backend_discard();
+                }
                 let payload = wire_event_state(state);
                 self.respond_bytes(
                     response,
@@ -447,6 +845,10 @@ impl<A: Accelerator> CommandProcessor<A> {
             Ok(EventState::Pending) => {
                 return self.respond_empty(response, StatusCode::BUSY, request_id, false);
             }
+            Ok(EventState::Failed(BackendError::DeviceLost)) => {
+                self.require_backend_discard();
+                return self.respond_empty(response, StatusCode::DEVICE_LOST, request_id, false);
+            }
             Ok(EventState::Complete | EventState::Failed(_) | EventState::Cancelled) => {}
             Err(error) => {
                 return self.respond_backend_error(response, request_id, error, false);
@@ -460,17 +862,19 @@ impl<A: Accelerator> CommandProcessor<A> {
         match self.accelerator.destroy_event(event) {
             Ok(()) => match self.state.commit_event_release(event_id) {
                 Ok(()) => self.respond_empty(response, StatusCode::OK, request_id, true),
-                Err(_) => self.recovery_response(response, request_id),
+                Err(_) => self.discard_response(response, request_id),
             },
             Err(ReleaseFailure::Rejected { error, resource }) => {
                 match self.state.restore_event_release(event_id, resource) {
                     Ok(()) => self.respond_backend_error(response, request_id, error, false),
-                    Err(_) => self.recovery_response(response, request_id),
+                    Err(_) => self.discard_response(response, request_id),
                 }
             }
             Err(ReleaseFailure::Indeterminate { .. }) => {
-                let _ = self.state.commit_event_release(event_id);
-                self.recovery_response(response, request_id)
+                if self.state.commit_event_release(event_id).is_ok() {
+                    self.quarantined.events += 1;
+                }
+                self.discard_response(response, request_id)
             }
         }
     }
@@ -566,17 +970,19 @@ impl<A: Accelerator> CommandProcessor<A> {
         match self.accelerator.destroy_context(resource) {
             Ok(()) => match self.state.commit_context_release(id) {
                 Ok(()) => self.respond_empty(response, StatusCode::OK, request_id, true),
-                Err(_) => self.recovery_response(response, request_id),
+                Err(_) => self.discard_response(response, request_id),
             },
             Err(ReleaseFailure::Rejected { error, resource }) => {
                 match self.state.restore_context_release(id, resource) {
                     Ok(()) => self.respond_backend_error(response, request_id, error, false),
-                    Err(_) => self.recovery_response(response, request_id),
+                    Err(_) => self.discard_response(response, request_id),
                 }
             }
             Err(ReleaseFailure::Indeterminate { .. }) => {
-                let _ = self.state.commit_context_release(id);
-                self.recovery_response(response, request_id)
+                if self.state.commit_context_release(id).is_ok() {
+                    self.quarantined.contexts += 1;
+                }
+                self.discard_response(response, request_id)
             }
         }
     }
@@ -594,17 +1000,19 @@ impl<A: Accelerator> CommandProcessor<A> {
         match self.accelerator.free_buffer(resource) {
             Ok(()) => match self.state.commit_buffer_release(id) {
                 Ok(()) => self.respond_empty(response, StatusCode::OK, request_id, true),
-                Err(_) => self.recovery_response(response, request_id),
+                Err(_) => self.discard_response(response, request_id),
             },
             Err(ReleaseFailure::Rejected { error, resource }) => {
                 match self.state.restore_buffer_release(id, resource) {
                     Ok(()) => self.respond_backend_error(response, request_id, error, false),
-                    Err(_) => self.recovery_response(response, request_id),
+                    Err(_) => self.discard_response(response, request_id),
                 }
             }
             Err(ReleaseFailure::Indeterminate { .. }) => {
-                let _ = self.state.commit_buffer_release(id);
-                self.recovery_response(response, request_id)
+                if self.state.commit_buffer_release(id).is_ok() {
+                    self.quarantined.buffers += 1;
+                }
+                self.discard_response(response, request_id)
             }
         }
     }
@@ -622,17 +1030,19 @@ impl<A: Accelerator> CommandProcessor<A> {
         match self.accelerator.unload_program(resource) {
             Ok(()) => match self.state.commit_program_release(id) {
                 Ok(()) => self.respond_empty(response, StatusCode::OK, request_id, true),
-                Err(_) => self.recovery_response(response, request_id),
+                Err(_) => self.discard_response(response, request_id),
             },
             Err(ReleaseFailure::Rejected { error, resource }) => {
                 match self.state.restore_program_release(id, resource) {
                     Ok(()) => self.respond_backend_error(response, request_id, error, false),
-                    Err(_) => self.recovery_response(response, request_id),
+                    Err(_) => self.discard_response(response, request_id),
                 }
             }
             Err(ReleaseFailure::Indeterminate { .. }) => {
-                let _ = self.state.commit_program_release(id);
-                self.recovery_response(response, request_id)
+                if self.state.commit_program_release(id).is_ok() {
+                    self.quarantined.programs += 1;
+                }
+                self.discard_response(response, request_id)
             }
         }
     }
@@ -650,17 +1060,19 @@ impl<A: Accelerator> CommandProcessor<A> {
         match self.accelerator.destroy_queue(resource) {
             Ok(()) => match self.state.commit_queue_release(id) {
                 Ok(()) => self.respond_empty(response, StatusCode::OK, request_id, true),
-                Err(_) => self.recovery_response(response, request_id),
+                Err(_) => self.discard_response(response, request_id),
             },
             Err(ReleaseFailure::Rejected { error, resource }) => {
                 match self.state.restore_queue_release(id, resource) {
                     Ok(()) => self.respond_backend_error(response, request_id, error, false),
-                    Err(_) => self.recovery_response(response, request_id),
+                    Err(_) => self.discard_response(response, request_id),
                 }
             }
             Err(ReleaseFailure::Indeterminate { .. }) => {
-                let _ = self.state.commit_queue_release(id);
-                self.recovery_response(response, request_id)
+                if self.state.commit_queue_release(id).is_ok() {
+                    self.quarantined.queues += 1;
+                }
+                self.discard_response(response, request_id)
             }
         }
     }
@@ -706,18 +1118,33 @@ impl<A: Accelerator> CommandProcessor<A> {
 
     fn backend_status(&mut self, error: BackendError) -> StatusCode {
         if error == BackendError::DeviceLost {
-            self.health = DeviceHealth::NeedsReset;
+            self.require_backend_discard();
         }
         status_from_backend_error(error)
     }
 
-    fn recovery_response(
+    fn require_backend_discard(&mut self) {
+        self.health = DeviceHealth::BackendDiscardRequired;
+        self.last_reset = None;
+    }
+
+    fn discard_response(
         &mut self,
         response: &mut dyn ByteSink,
         request_id: u64,
     ) -> Result<CommandOutcome, CommandProcessError> {
-        self.health = DeviceHealth::NeedsReset;
+        self.require_backend_discard();
         self.respond_empty(response, StatusCode::DEVICE_LOST, request_id, true)
+    }
+
+    fn discard_report(&self, released: ResourceCounts) -> ResetReport {
+        ResetReport {
+            disposition: ResetDisposition::BackendDiscardRequired,
+            released,
+            quarantined: self
+                .quarantined
+                .saturating_add(self.state.resource_counts()),
+        }
     }
 
     fn respond_object(
@@ -801,11 +1228,27 @@ impl<A: Accelerator> CommandProcessor<A> {
                 used,
             }),
             Err(error) => {
-                if mutated {
+                if mutated && self.health == DeviceHealth::Running {
                     self.health = DeviceHealth::NeedsReset;
+                    self.last_reset = None;
                 }
                 Err(CommandProcessError::ResponseWrite(error))
             }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ResetProgress {
+    backend_reusable: bool,
+    backend_callable: bool,
+}
+
+impl Default for ResetProgress {
+    fn default() -> Self {
+        Self {
+            backend_reusable: true,
+            backend_callable: true,
         }
     }
 }

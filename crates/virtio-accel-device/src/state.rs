@@ -117,6 +117,43 @@ impl ChildCounts {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResourceCounts {
+    pub contexts: u64,
+    pub buffers: u64,
+    pub programs: u64,
+    pub queues: u64,
+    pub events: u64,
+}
+
+impl ResourceCounts {
+    pub const fn is_empty(self) -> bool {
+        self.contexts == 0
+            && self.buffers == 0
+            && self.programs == 0
+            && self.queues == 0
+            && self.events == 0
+    }
+
+    pub const fn total(self) -> u64 {
+        self.contexts
+            .saturating_add(self.buffers)
+            .saturating_add(self.programs)
+            .saturating_add(self.queues)
+            .saturating_add(self.events)
+    }
+
+    pub(crate) const fn saturating_add(self, other: Self) -> Self {
+        Self {
+            contexts: self.contexts.saturating_add(other.contexts),
+            buffers: self.buffers.saturating_add(other.buffers),
+            programs: self.programs.saturating_add(other.programs),
+            queues: self.queues.saturating_add(other.queues),
+            events: self.events.saturating_add(other.events),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ContextRecord<C> {
     resource: ResourceSlot<C>,
@@ -320,6 +357,7 @@ impl<'a, B, P, Q> SubmissionResources<'a, B, P, Q> {
 
 /// Complete typed object graph for one device instance.
 pub struct DeviceState<C, B, P, Q, E> {
+    namespace: ObjectNamespace,
     limits: DeviceLimits,
     contexts: ObjectTable<ContextRecord<C>>,
     buffers: ObjectTable<BufferRecord<B>>,
@@ -357,6 +395,7 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
         let events = aggregate_slots(limits.max_contexts, limits.max_events_per_context)?;
 
         Ok(Self {
+            namespace,
             limits,
             contexts: ObjectTable::with_namespace(
                 ObjectKind::Context,
@@ -372,6 +411,28 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
 
     pub const fn limits(&self) -> DeviceLimits {
         self.limits
+    }
+
+    pub const fn namespace(&self) -> ObjectNamespace {
+        self.namespace
+    }
+
+    pub const fn resource_counts(&self) -> ResourceCounts {
+        ResourceCounts {
+            contexts: self.context_count() as u64,
+            buffers: self.buffer_count() as u64,
+            programs: self.program_count() as u64,
+            queues: self.queue_count() as u64,
+            events: self.event_count() as u64,
+        }
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.contexts.is_empty()
+            && self.buffers.is_empty()
+            && self.programs.is_empty()
+            && self.queues.is_empty()
+            && self.events.is_empty()
     }
 
     pub const fn context_count(&self) -> u32 {
@@ -419,6 +480,26 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
 
     pub fn event_record(&self, id: ObjectId) -> Result<&EventRecord<E>, DeviceStateError> {
         self.events.get(id).map_err(map_table_error)
+    }
+
+    pub(crate) fn next_context_id(&self, start: usize) -> Option<(usize, ObjectId)> {
+        self.contexts.next_id_from(start)
+    }
+
+    pub(crate) fn next_buffer_id(&self, start: usize) -> Option<(usize, ObjectId)> {
+        self.buffers.next_id_from(start)
+    }
+
+    pub(crate) fn next_program_id(&self, start: usize) -> Option<(usize, ObjectId)> {
+        self.programs.next_id_from(start)
+    }
+
+    pub(crate) fn next_queue_id(&self, start: usize) -> Option<(usize, ObjectId)> {
+        self.queues.next_id_from(start)
+    }
+
+    pub(crate) fn next_event_id(&self, start: usize) -> Option<(usize, ObjectId)> {
+        self.events.next_id_from(start)
     }
 
     pub fn create_context_with<ProviderError>(

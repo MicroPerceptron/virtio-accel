@@ -274,6 +274,41 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
     ),
 }
 
+RESET_ENGINE_COVERAGE: Final = coverage(
+    "executable",
+    (
+        "crates/virtio-accel-device/src/engine.rs",
+        "crates/virtio-accel-device/src/object_table.rs",
+        "crates/virtio-accel-device/tests/command_processor.rs",
+    ),
+    rationale="The reset engine and tests enforce bounded child-before-parent teardown, sticky backend discard, explicit quarantine accounting, and fresh object namespaces.",
+)
+RESET_TRANSPORT_COVERAGE: Final = coverage(
+    "mixed",
+    (
+        "crates/virtio-accel-device/src/engine.rs",
+        "crates/virtio-accel-device/tests/command_processor.rs",
+        "docs/virtqueue.md",
+    ),
+    ("#17", "#18"),
+    "The portable reset admission gate is executable; stopping queue fetch and publication requires the transport adapter and split-ring model.",
+)
+RESET_ENGINE_MARKERS: Final = (
+    "Teardown **MUST** be bounded",
+    "The device **MAY** reuse a backend instance",
+    "repeated reset attempts **MUST NOT** invoke that backend again",
+    "Successful reinitialization **MUST** use a fresh nonzero object namespace",
+)
+
+
+def requirement_coverage(source_code: str, number: int, statement: str) -> Coverage | None:
+    if source_code == "SPEC" and number == 4:
+        if statement.startswith("The transport **MUST** stop fetching command chains"):
+            return RESET_TRANSPORT_COVERAGE
+        if any(marker in statement for marker in RESET_ENGINE_MARKERS):
+            return RESET_ENGINE_COVERAGE
+    return COVERAGE.get((source_code, number))
+
 
 def section_number(heading: str) -> int:
     match = SECTION.match(heading)
@@ -311,7 +346,7 @@ def generate() -> dict[str, object]:
             if not matches:
                 continue
             number = section_number(heading)
-            assigned = COVERAGE.get((source_code, number))
+            assigned = requirement_coverage(source_code, number, statement)
             if assigned is None:
                 raise ValueError(
                     f"no coverage mapping for {relative_source}:{line_number} ({heading})"

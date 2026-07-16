@@ -218,6 +218,22 @@ impl<T> ObjectTable<T> {
         Ok(value)
     }
 
+    pub(crate) fn next_id_from(&self, start: usize) -> Option<(usize, ObjectId)> {
+        self.slots
+            .iter()
+            .enumerate()
+            .skip(start)
+            .find_map(|(index, slot)| {
+                if slot.retired || slot.value.is_none() {
+                    return None;
+                }
+                Some((
+                    index + 1,
+                    ObjectId::new(index as u32, self.namespace, slot.generation, self.kind),
+                ))
+            })
+    }
+
     fn locate(&self, id: ObjectId) -> Result<usize, ObjectTableError> {
         let raw = id.get();
         let slot_number = raw as u32;
