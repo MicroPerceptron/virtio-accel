@@ -1,8 +1,11 @@
 use alloc::vec::Vec;
-use core::num::NonZeroU64;
+use core::num::{NonZeroU16, NonZeroU64};
 
 const KIND_MASK: u32 = 0b111;
-const GENERATION_STRIDE: u32 = KIND_MASK + 1;
+const GENERATION_BITS: u32 = 13;
+const GENERATION_MASK: u16 = (1 << GENERATION_BITS) - 1;
+const GENERATION_SHIFT: u32 = 3;
+const NAMESPACE_SHIFT: u32 = GENERATION_SHIFT + GENERATION_BITS;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -17,6 +20,28 @@ pub enum ObjectKind {
 impl ObjectKind {
     const fn tag(self) -> u32 {
         self as u32
+    }
+}
+
+/// Device-instance namespace encoded into every object ID.
+///
+/// A transport integration assigns a distinct nonzero namespace to each live device instance.
+/// IDs from different namespaces can therefore never resolve even when their slot, kind, and
+/// generation are otherwise identical.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct ObjectNamespace(NonZeroU16);
+
+impl ObjectNamespace {
+    pub const fn new(value: u16) -> Option<Self> {
+        match NonZeroU16::new(value) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+
+    pub const fn get(self) -> u16 {
+        self.0.get()
     }
 }
 
@@ -37,8 +62,11 @@ impl ObjectId {
         self.0.get()
     }
 
-    const fn new(index: u32, generation: u32) -> Self {
-        let raw = ((generation as u64) << 32) | (index as u64 + 1);
+    const fn new(index: u32, namespace: u16, generation: u16, kind: ObjectKind) -> Self {
+        let token = ((namespace as u32) << NAMESPACE_SHIFT)
+            | ((generation as u32) << GENERATION_SHIFT)
+            | kind.tag();
+        let raw = ((token as u64) << 32) | (index as u64 + 1);
         match NonZeroU64::new(raw) {
             Some(raw) => Self(raw),
             None => unreachable!(),
@@ -56,17 +84,18 @@ pub enum ObjectTableError {
 }
 
 struct Slot<T> {
-    generation: u32,
+    generation: u16,
     value: Option<T>,
     retired: bool,
 }
 
 /// Bounded generational object table for one resource kind.
 ///
-/// Kind tags occupy the low three generation bits. A slot is retired before generation overflow,
-/// so an old ID cannot become valid again after wraparound.
+/// Kind tags, generations, and device namespaces occupy separate token fields. A slot is retired
+/// before generation overflow, so an old ID cannot become valid again after wraparound.
 pub struct ObjectTable<T> {
     kind: ObjectKind,
+    namespace: u16,
     max_slots: u32,
     live: u32,
     slots: Vec<Slot<T>>,
@@ -77,6 +106,22 @@ impl<T> ObjectTable<T> {
     pub const fn new(kind: ObjectKind, max_slots: u32) -> Self {
         Self {
             kind,
+            namespace: 0,
+            max_slots,
+            live: 0,
+            slots: Vec::new(),
+            free: Vec::new(),
+        }
+    }
+
+    pub const fn with_namespace(
+        kind: ObjectKind,
+        max_slots: u32,
+        namespace: ObjectNamespace,
+    ) -> Self {
+        Self {
+            kind,
+            namespace: namespace.get(),
             max_slots,
             live: 0,
             slots: Vec::new(),
@@ -93,14 +138,15 @@ impl<T> ObjectTable<T> {
     }
 
     pub fn insert(&mut self, value: T) -> Result<ObjectId, ObjectTableError> {
-        if let Some(index) = self.free.pop() {
-            let slot = &mut self.slots[index as usize];
-            debug_assert!(slot.value.is_none() && !slot.retired);
-            slot.value = Some(value);
-            self.live += 1;
-            return Ok(ObjectId::new(index, slot.generation));
-        }
+        self.try_reserve_insert()?;
+        Ok(self.insert_prepared(value))
+    }
 
+    /// Reserve all capacity required by the next insertion without changing table state.
+    pub fn try_reserve_insert(&mut self) -> Result<(), ObjectTableError> {
+        if !self.free.is_empty() {
+            return Ok(());
+        }
         if self.slots.len() >= self.max_slots as usize {
             return Err(ObjectTableError::Full);
         }
@@ -113,15 +159,31 @@ impl<T> ObjectTable<T> {
                 .try_reserve(new_slot_count - self.free.len())
                 .map_err(|_| ObjectTableError::AllocationFailed)?;
         }
+        Ok(())
+    }
+
+    pub(crate) fn insert_prepared(&mut self, value: T) -> ObjectId {
+        if let Some(index) = self.free.pop() {
+            let slot = &mut self.slots[index as usize];
+            debug_assert!(slot.value.is_none() && !slot.retired);
+            slot.value = Some(value);
+            self.live += 1;
+            return ObjectId::new(index, self.namespace, slot.generation, self.kind);
+        }
+
+        debug_assert!(self.slots.len() < self.max_slots as usize);
+        debug_assert!(self.slots.len() < self.slots.capacity());
+        let new_slot_count = self.slots.len() + 1;
+        debug_assert!(self.free.capacity() >= new_slot_count);
         let index = self.slots.len() as u32;
-        let generation = self.kind.tag();
+        let generation = 0;
         self.slots.push(Slot {
             generation,
             value: Some(value),
             retired: false,
         });
         self.live += 1;
-        Ok(ObjectId::new(index, generation))
+        ObjectId::new(index, self.namespace, generation, self.kind)
     }
 
     pub fn get(&self, id: ObjectId) -> Result<&T, ObjectTableError> {
@@ -146,12 +208,11 @@ impl<T> ObjectTable<T> {
         let value = slot.value.take().ok_or(ObjectTableError::StaleId)?;
         self.live -= 1;
 
-        match slot.generation.checked_add(GENERATION_STRIDE) {
-            Some(next) => {
-                slot.generation = next;
-                self.free.push(index as u32);
-            }
-            None => slot.retired = true,
+        if slot.generation == GENERATION_MASK {
+            slot.retired = true;
+        } else {
+            slot.generation += 1;
+            self.free.push(index as u32);
         }
         Ok(value)
     }
@@ -162,10 +223,14 @@ impl<T> ObjectTable<T> {
         if slot_number == 0 {
             return Err(ObjectTableError::InvalidId);
         }
-        let generation = (raw >> 32) as u32;
-        if generation & KIND_MASK != self.kind.tag() {
+        let token = (raw >> 32) as u32;
+        if token & KIND_MASK != self.kind.tag() {
             return Err(ObjectTableError::WrongKind);
         }
+        if (token >> NAMESPACE_SHIFT) as u16 != self.namespace {
+            return Err(ObjectTableError::StaleId);
+        }
+        let generation = ((token >> GENERATION_SHIFT) as u16) & GENERATION_MASK;
         let index = (slot_number - 1) as usize;
         let slot = self.slots.get(index).ok_or(ObjectTableError::StaleId)?;
         if slot.generation != generation || slot.retired || slot.value.is_none() {
@@ -193,11 +258,38 @@ mod tests {
     }
 
     #[test]
+    fn exhausted_generations_retire_the_slot_before_an_id_can_revive() {
+        let mut table = ObjectTable::new(ObjectKind::Buffer, 1);
+        let first = table.insert(()).unwrap();
+        table.remove(first).unwrap();
+
+        for _ in 1..=GENERATION_MASK {
+            let current = table.insert(()).unwrap();
+            assert_ne!(current, first);
+            assert_eq!(table.get(first), Err(ObjectTableError::StaleId));
+            table.remove(current).unwrap();
+        }
+
+        assert_eq!(table.insert(()), Err(ObjectTableError::Full));
+        assert_eq!(table.get(first), Err(ObjectTableError::StaleId));
+    }
+
+    #[test]
     fn kind_tags_prevent_cross_table_aliasing() {
         let mut contexts = ObjectTable::new(ObjectKind::Context, 1);
         let id = contexts.insert(()).unwrap();
         let buffers = ObjectTable::<()>::new(ObjectKind::Buffer, 1);
         assert_eq!(buffers.get(id), Err(ObjectTableError::WrongKind));
+    }
+
+    #[test]
+    fn namespaces_prevent_cross_device_aliasing() {
+        let first_namespace = ObjectNamespace::new(1).unwrap();
+        let second_namespace = ObjectNamespace::new(2).unwrap();
+        let mut first = ObjectTable::with_namespace(ObjectKind::Context, 1, first_namespace);
+        let id = first.insert(()).unwrap();
+        let second = ObjectTable::<()>::with_namespace(ObjectKind::Context, 1, second_namespace);
+        assert_eq!(second.get(id), Err(ObjectTableError::StaleId));
     }
 
     #[test]

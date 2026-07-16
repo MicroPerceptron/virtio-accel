@@ -23,20 +23,27 @@ Every wire structure is fixed-width, little-endian, pointer-free, and valid at b
 are validated before conversion to semantic types, preserving forward compatibility without invalid
 Rust enum discriminants.
 
-Request and response buffers are untrusted. A future command engine must validate descriptor
+Request and response buffers are untrusted. The command-frame preflight validates descriptor
 direction, total byte counts, reserved-zero fields, array multiplication, configured limits, and
-object ownership before invoking a backend.
+command-specific response capacity before a decoded request can reach semantic dispatch.
 
 ### Object identity and ownership
 
-Guest-visible handles are opaque `u64` values. The current device table combines a slot number with
-a generation that contains a resource-kind tag. Removing an object increments its generation; a
-slot is permanently retired before generation overflow. Therefore stale or wrong-kind handles never
-alias a live object during the lifetime of a device instance.
+Guest-visible handles are opaque `u64` values. The device table combines a slot number with a
+device-instance namespace, resource-kind tag, and generation. Removing an object increments its
+generation; a slot is permanently retired before generation overflow. Therefore stale, wrong-kind,
+and cross-device handles never alias a live object during the lifetime of a device instance.
 
-The command engine must additionally track the parent context and live-child counts for buffers,
-programs, queues, and events. Destroying a context with children, a queue with in-flight work, or an
-event before terminal completion returns `BUSY`.
+`DeviceState` composes typed context, buffer, program, execution-queue, and event tables. Context
+records retain live-child counts, while event records retain queue, program, and buffer references
+until event destruction. Destroying a context with children or a referenced buffer, program, or
+queue returns `BUSY`.
+
+The state model has no internal locks or interior mutability. Every transition requires exclusive
+access, so a future concurrent command engine has one outer synchronization boundary and no nested
+resource-lock order. Creation checks quotas and reserves fallible table capacity before invoking a
+provider. Release moves a handle to an explicit `Releasing` state and either commits removal or
+restores the same live ID after a rejected provider release.
 
 Provider releases have an explicit failure boundary too. A rejected release returns the still-live
 handle for retry. An indeterminate release invalidates the guest ID and requires device recovery;

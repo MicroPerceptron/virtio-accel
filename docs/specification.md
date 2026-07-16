@@ -487,7 +487,12 @@ model or is identified as an implementation helper.
 | `SubmitResponse` | Event ownership payload for accepted or indeterminate submission |
 | `WireEventState`, `KnownEventState`, `UnknownEventState` | Event-poll response payload and extensible raw state handling |
 | `DecodeError`, `read_exact`, `checked_array_bytes` | Protocol decoding helpers; implementation-only |
-| `ObjectKind`, `ObjectId` | Device-private typed object identity |
+| `ChainRegion`, `ChainLayout`, `SegmentedSource`, `SegmentedSink` | Transport-neutral flattened-chain metadata and test/reference byte ports |
+| `FrameDecoder`, `DecodedRequest`, `DecodedRequestBody`, `FramePreflight` | Complete untrusted request validation before semantic dispatch |
+| `ResponseWriter`, `ResponsePayload` | Bounded response framing and exact direct payload destination |
+| `ObjectNamespace`, `ObjectKind`, `ObjectId` | Device-private namespaced typed object identity |
 | `ObjectTable`, `ObjectTableError` | Device implementation state; encoding is not wire ABI |
-| `status_from_backend_error`, `status_from_object_table_error` | Device implementation mapping helpers |
+| `DeviceState`, typed record types, `ChildCounts` | Context-scoped ownership graph, quotas, and in-flight reference accounting |
+| `ReleaseState`, `CreateError`, `RestoreError` | Device-state admission and release rollback helpers |
+| `status_from_backend_error`, `status_from_object_table_error`, `status_from_device_state_error` | Device implementation mapping helpers |
 | `MockAccelerator` and mock handle types | Reference/test implementation, not normative protocol |
