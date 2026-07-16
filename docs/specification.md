@@ -301,7 +301,7 @@ Protocol 1.0 assigns these semantic capability bits:
 |---:|---|---|
 | 0 | `HOST_VISIBLE_MEMORY` | `MemoryDomain::Host` allocation is supported |
 | 1 | `DEVICE_LOCAL_MEMORY` | `MemoryDomain::Device` allocation is supported |
-| 2 | `EVENT_CANCELLATION` | Pending events may support `CANCEL_EVENT` |
+| 2 | `EVENT_CANCELLATION` | `CANCEL_EVENT` is implemented for pending events |
 | 5 | `SHARED_MEMORY` | Provider-owned `MemoryDomain::Shared` allocation is supported |
 
 Semantic bits 3 (`EXTERNAL_MEMORY`) and 4 (`SECURE_CONTEXTS`) are reserved until their transport,
@@ -313,13 +313,24 @@ backend. Advertising a memory-domain capability commits the backend to the corre
 properties and direct-binding rules from section 4.4; capability reporting is not permission to
 substitute a staged implementation.
 
+A baseline backend **MUST** advertise at least one assigned memory-domain capability. Every
+resource-count, binding-count, and byte limit in `DeviceInfo` **MUST** be nonzero. Identity,
+capabilities, and limits **MUST** remain stable for the lifetime of one backend instance so the
+command engine can validate and cache them once before constructing object state.
+
+If `EVENT_CANCELLATION` is absent, the command engine **MUST** reject cancellation before backend
+invocation. If it is present, the backend **MUST** implement cancellation and **MUST NOT** return
+`UNSUPPORTED` for a valid pending event.
+
 If enabling a backend capability would require different descriptor direction, additional queues,
 new synchronization, or changed lifetime rules, the device **MUST** also negotiate an appropriate
 transport feature.
 
-The exact secure-context and execution-queue-flag semantics remain tracked by issue #21. Protocol
-1.0 accepts only the wire values explicitly listed in [wire-abi.md](wire-abi.md); the reference
-implementation **MUST NOT** translate an underspecified capability into additional wire behavior.
+`ContextFlags::SECURE` and `QueueFlags::IN_ORDER` reserve semantic API positions only. Protocol 1.0
+defines neither behavior and accepts only empty context and execution-queue flags. The command engine
+**MUST** reject nonempty values before backend invocation; a direct caller of the backend trait
+receives `UNSUPPORTED` without a retained resource. Enabling either reservation in a later version
+requires explicit ownership, ordering, synchronization, and negotiation rules.
 
 ### 5.4 Request and object flags
 
@@ -400,6 +411,12 @@ Destructive backend calls consume handles and have an explicit release boundary:
 `Drop` may provide defensive cleanup inside an implementation but **MUST NOT** be used as
 guest-visible protocol state.
 
+A creation method that returns an ordinary error **MUST NOT** retain a newly created resource. A
+failed explicit write may have modified part of its requested buffer range; that complete range is
+then unspecified, the buffer remains live, and a later successful full-range write reestablishes its
+contents. A failed explicit read may have partially initialized its destination but does not modify
+the buffer; the command engine **MUST NOT** publish that destination as a successful payload.
+
 ## 8. Time and progress
 
 Wire timeouts are relative nanosecond durations measured from backend admission. Zero means
@@ -408,6 +425,13 @@ monotonic epochs are unrelated.
 
 Polling an event **MUST** be nonblocking and bounded. The portable contract creates no background
 thread and selects no async executor.
+
+Discovery, context, allocation, transfer, program, execution-queue, and release methods may perform
+synchronous provider work. Submission performs validation and admission only and **MUST NOT** wait
+for execution to become terminal. Cancellation **MUST** also be nonblocking and bounded. No portable
+method requires a provider handle to contain a lock or atomic value; cross-thread calls are
+available only when the concrete backend and handle types opt into the corresponding Rust auto
+traits.
 
 A timeout before admission is rejected. A timeout or communication failure after admission that
 cannot prove rejection is indeterminate and **MUST** retain an event.
@@ -445,9 +469,7 @@ This document, [wire-abi.md](wire-abi.md), and [virtqueue.md](virtqueue.md) defi
 driver/device protocol candidate. The following implementation, provider, and verification details
 remain explicitly tracked rather than silently decided here:
 
-- issue #21 completes the backend capability, memory-domain, execution-queue, blocking,
-  concurrency, and release semantics before the wire contract freezes;
-- issue #25 turns the trust assumptions into enforceable resource and threat-model limits; and
+- issue #25 turns the trust assumptions into enforceable resource and threat-model limits;
 - issue #32 defines post-1.0 semver and wire-evolution policy; and
 - issue #33 performs the final protocol and API audit, including independent clean-room review,
   before freezing protocol 1.0.
@@ -468,6 +490,7 @@ model or is identified as an implementation helper.
 | `DeviceIdentity` | Device instance identity |
 | `DeviceLimits` | Context, buffer, program, execution-queue, event, binding, and byte limits enforced before backend invocation |
 | `DeviceInfo` | Device identity, semantic capabilities, and limits |
+| `DeviceInfoError` | Construction-time rejection of reserved capabilities, absent baseline memory domains, or zero limits |
 | `ContextFlags`, `ContextDesc` | Context creation intent; protocol 1.0 accepts only empty context flags |
 | `MemoryDomain` | Strict provider-owned buffer placement requirement |
 | `BufferUsage`, `BufferDesc`, `BufferRange` | Buffer allocation intent and checked byte range |

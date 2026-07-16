@@ -12,6 +12,8 @@ const CAPABILITY_RESERVED_SECURE_CONTEXTS: u64 = 1 << 4;
 const CAPABILITY_SHARED_MEMORY: u64 = 1 << 5;
 const RESERVED_CAPABILITIES: u64 =
     CAPABILITY_RESERVED_EXTERNAL_MEMORY | CAPABILITY_RESERVED_SECURE_CONTEXTS;
+const MEMORY_DOMAIN_CAPABILITIES: u64 =
+    CAPABILITY_HOST_VISIBLE_MEMORY | CAPABILITY_DEVICE_LOCAL_MEMORY | CAPABILITY_SHARED_MEMORY;
 
 bitflags! {
     /// Protocol 1.0 buffer usage bits.
@@ -324,6 +326,9 @@ impl DeviceInfo {
         if capabilities & RESERVED_CAPABILITIES != 0 {
             return Err(DeviceInfoError::ReservedCapabilities);
         }
+        if capabilities & MEMORY_DOMAIN_CAPABILITIES == 0 {
+            return Err(DeviceInfoError::MissingMemoryDomain);
+        }
         let limits = [
             wire.max_contexts.get(),
             wire.max_buffers_per_context.get(),
@@ -387,6 +392,8 @@ pub enum DeviceInfoError {
     Reserved,
     /// A reserved semantic capability was advertised.
     ReservedCapabilities,
+    /// No protocol 1.0 provider-owned memory domain is usable.
+    MissingMemoryDomain,
     /// A mandatory advertised limit is zero.
     ZeroLimit,
     /// Binding limit is outside protocol bounds.

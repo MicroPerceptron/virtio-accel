@@ -1,7 +1,7 @@
 {
   "schema": "virtio-accel-normative-requirements-1",
   "generated_by": "ci/check-normative-requirements.py",
-  "requirement_count": 131,
+  "requirement_count": 141,
   "requirements": [
     {
       "id": "REQ-SPEC-A29885B44214",
@@ -109,17 +109,15 @@
       "keyword": "MUST NOT",
       "statement": "Adding an integration listed above **MUST NOT** change the portable object lifecycle by convention.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "ci/check-portable-dependencies.sh",
           "crates/virtio-accel-transport/src/lib.rs",
-          "docs/architecture.md"
+          "docs/architecture.md",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20",
-          "#21"
-        ],
-        "rationale": "Portable queue and dependency boundaries are enforced now; concrete end-to-end and provider adapters remain tracked."
+        "issues": [],
+        "rationale": "Portable dependency, provider, queue, and end-to-end boundaries are directly enforced; concrete platform adapters are outside portable v1."
       }
     },
     {
@@ -130,17 +128,15 @@
       "keyword": "MUST",
       "statement": "The driver **MUST** treat all device-written bytes as untrusted.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "ci/check-portable-dependencies.sh",
           "crates/virtio-accel-transport/src/queue.rs",
-          "docs/architecture.md"
+          "docs/architecture.md",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20",
-          "#21"
-        ],
-        "rationale": "Layer and ownership boundaries are enforceable now; runtime provider integration remains tracked."
+        "issues": [],
+        "rationale": "Layer direction, queue ownership, provider ownership, and the complete portable lifecycle are executable."
       }
     },
     {
@@ -151,17 +147,15 @@
       "keyword": "MUST",
       "statement": "The device **MUST** treat all driver-written bytes, lengths, counts, object IDs, flags, and timing as",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "ci/check-portable-dependencies.sh",
           "crates/virtio-accel-transport/src/queue.rs",
-          "docs/architecture.md"
+          "docs/architecture.md",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20",
-          "#21"
-        ],
-        "rationale": "Layer and ownership boundaries are enforceable now; runtime provider integration remains tracked."
+        "issues": [],
+        "rationale": "Layer direction, queue ownership, provider ownership, and the complete portable lifecycle are executable."
       }
     },
     {
@@ -172,17 +166,15 @@
       "keyword": "MUST NOT",
       "statement": "A transport adapter **MUST NOT** expose guest addresses, descriptor objects, host mappings, or",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "ci/check-portable-dependencies.sh",
           "crates/virtio-accel-transport/src/queue.rs",
-          "docs/architecture.md"
+          "docs/architecture.md",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20",
-          "#21"
-        ],
-        "rationale": "Layer and ownership boundaries are enforceable now; runtime provider integration remains tracked."
+        "issues": [],
+        "rationale": "Layer direction, queue ownership, provider ownership, and the complete portable lifecycle are executable."
       }
     },
     {
@@ -193,17 +185,15 @@
       "keyword": "MUST NOT",
       "statement": "The command engine **MUST NOT** depend on an operating system, VMM, kernel, guest-memory crate, vendor",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "ci/check-portable-dependencies.sh",
           "crates/virtio-accel-transport/src/queue.rs",
-          "docs/architecture.md"
+          "docs/architecture.md",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20",
-          "#21"
-        ],
-        "rationale": "Layer and ownership boundaries are enforceable now; runtime provider integration remains tracked."
+        "issues": [],
+        "rationale": "Layer direction, queue ownership, provider ownership, and the complete portable lifecycle are executable."
       }
     },
     {
@@ -214,17 +204,15 @@
       "keyword": "MUST NOT",
       "statement": "A backend **MUST NOT** receive wire structures, object IDs, guest addresses, or virtqueue",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "ci/check-portable-dependencies.sh",
           "crates/virtio-accel-transport/src/queue.rs",
-          "docs/architecture.md"
+          "docs/architecture.md",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20",
-          "#21"
-        ],
-        "rationale": "Layer and ownership boundaries are enforceable now; runtime provider integration remains tracked."
+        "issues": [],
+        "rationale": "Layer direction, queue ownership, provider ownership, and the complete portable lifecycle are executable."
       }
     },
     {
@@ -238,15 +226,15 @@
         "status": "mixed",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-mock/src/lib.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
-          "#21",
           "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
       }
     },
     {
@@ -260,15 +248,15 @@
         "status": "mixed",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-mock/src/lib.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
-          "#21",
           "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
       }
     },
     {
@@ -282,15 +270,15 @@
         "status": "mixed",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-mock/src/lib.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
-          "#21",
           "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
       }
     },
     {
@@ -304,15 +292,15 @@
         "status": "mixed",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-mock/src/lib.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
-          "#21",
           "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
       }
     },
     {
@@ -326,15 +314,15 @@
         "status": "mixed",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-mock/src/lib.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
-          "#21",
           "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
       }
     },
     {
@@ -348,15 +336,15 @@
         "status": "mixed",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-mock/src/lib.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
-          "#21",
           "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
       }
     },
     {
@@ -370,15 +358,15 @@
         "status": "mixed",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-mock/src/lib.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
-          "#21",
           "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
       }
     },
     {
@@ -392,15 +380,15 @@
         "status": "mixed",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-mock/src/lib.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
-          "#21",
           "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
       }
     },
     {
@@ -414,15 +402,15 @@
         "status": "mixed",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-mock/src/lib.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
-          "#21",
           "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
       }
     },
     {
@@ -436,15 +424,15 @@
         "status": "mixed",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-mock/src/lib.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
-          "#21",
           "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
       }
     },
     {
@@ -458,15 +446,15 @@
         "status": "mixed",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-mock/src/lib.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
-          "#21",
           "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
       }
     },
     {
@@ -480,15 +468,15 @@
         "status": "mixed",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-mock/src/lib.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
-          "#21",
           "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
       }
     },
     {
@@ -502,15 +490,15 @@
         "status": "mixed",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-mock/src/lib.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
-          "#21",
           "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
       }
     },
     {
@@ -524,15 +512,15 @@
         "status": "mixed",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-mock/src/lib.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
-          "#21",
           "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
       }
     },
     {
@@ -546,15 +534,15 @@
         "status": "mixed",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-mock/src/lib.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
-          "#21",
           "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
       }
     },
     {
@@ -568,15 +556,15 @@
         "status": "mixed",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-mock/src/lib.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
-          "#21",
           "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
       }
     },
     {
@@ -590,15 +578,15 @@
         "status": "mixed",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-mock/src/lib.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
-          "#21",
           "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
       }
     },
     {
@@ -612,15 +600,15 @@
         "status": "mixed",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-mock/src/lib.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
-          "#21",
           "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
       }
     },
     {
@@ -634,15 +622,15 @@
         "status": "mixed",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-mock/src/lib.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
-          "#21",
           "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
       }
     },
     {
@@ -653,18 +641,17 @@
       "keyword": "MUST",
       "statement": "The transport **MUST** stop fetching command chains and publishing completions before portable",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-transport/src/queue.rs",
           "crates/virtio-accel-split-queue/src/queue.rs",
           "crates/virtio-accel-device/src/engine.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
-          "docs/virtqueue.md"
+          "docs/virtqueue.md",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20"
-        ],
-        "rationale": "The split model stops fetch and publication while atomically invalidating old byte ports; full transport-to-engine reset remains tracked."
+        "issues": [],
+        "rationale": "The full path stops fetch and publication, atomically invalidates old byte ports, tears down backend state, and reclaims guest ownership."
       }
     },
     {
@@ -753,10 +740,9 @@
           "crates/virtio-accel-proto/src/lib.rs"
         ],
         "issues": [
-          "#20",
           "#32"
         ],
-        "rationale": "Namespaces and reserved values are executable; runtime negotiation and future evolution remain tracked."
+        "rationale": "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked."
       }
     },
     {
@@ -773,10 +759,9 @@
           "crates/virtio-accel-proto/src/lib.rs"
         ],
         "issues": [
-          "#20",
           "#32"
         ],
-        "rationale": "Namespaces and reserved values are executable; runtime negotiation and future evolution remain tracked."
+        "rationale": "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked."
       }
     },
     {
@@ -793,10 +778,9 @@
           "crates/virtio-accel-proto/src/lib.rs"
         ],
         "issues": [
-          "#20",
           "#32"
         ],
-        "rationale": "Namespaces and reserved values are executable; runtime negotiation and future evolution remain tracked."
+        "rationale": "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked."
       }
     },
     {
@@ -813,10 +797,9 @@
           "crates/virtio-accel-proto/src/lib.rs"
         ],
         "issues": [
-          "#20",
           "#32"
         ],
-        "rationale": "Namespaces and reserved values are executable; runtime negotiation and future evolution remain tracked."
+        "rationale": "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked."
       }
     },
     {
@@ -833,10 +816,9 @@
           "crates/virtio-accel-proto/src/lib.rs"
         ],
         "issues": [
-          "#20",
           "#32"
         ],
-        "rationale": "Namespaces and reserved values are executable; runtime negotiation and future evolution remain tracked."
+        "rationale": "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked."
       }
     },
     {
@@ -853,10 +835,9 @@
           "crates/virtio-accel-proto/src/lib.rs"
         ],
         "issues": [
-          "#20",
           "#32"
         ],
-        "rationale": "Namespaces and reserved values are executable; runtime negotiation and future evolution remain tracked."
+        "rationale": "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked."
       }
     },
     {
@@ -873,10 +854,9 @@
           "crates/virtio-accel-proto/src/lib.rs"
         ],
         "issues": [
-          "#20",
           "#32"
         ],
-        "rationale": "Namespaces and reserved values are executable; runtime negotiation and future evolution remain tracked."
+        "rationale": "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked."
       }
     },
     {
@@ -887,22 +867,149 @@
       "keyword": "MUST",
       "statement": "The device **MUST** reject an allocation for an unsupported memory domain before invoking the",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
-          "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/src/lib.rs"
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/decoder.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-guest/src/client.rs",
+          "crates/virtio-accel-mock/src/lib.rs"
         ],
-        "issues": [
-          "#20",
-          "#32"
-        ],
-        "rationale": "Namespaces and reserved values are executable; runtime negotiation and future evolution remain tracked."
+        "issues": [],
+        "rationale": "Construction-time metadata checks and operation preflight tests enforce stable limits, usable memory domains, reserved flags, and capability-to-method consistency."
       }
     },
     {
-      "id": "REQ-SPEC-310DA03F3289",
+      "id": "REQ-SPEC-BC626A25687E",
+      "source": "docs/specification.md",
+      "line": 316,
+      "section": "5. Baseline capabilities and feature policy",
+      "keyword": "MUST",
+      "statement": "A baseline backend **MUST** advertise at least one assigned memory-domain capability. Every",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/decoder.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-guest/src/client.rs",
+          "crates/virtio-accel-mock/src/lib.rs"
+        ],
+        "issues": [],
+        "rationale": "Construction-time metadata checks and operation preflight tests enforce stable limits, usable memory domains, reserved flags, and capability-to-method consistency."
+      }
+    },
+    {
+      "id": "REQ-SPEC-293DC68B231B",
       "source": "docs/specification.md",
       "line": 317,
+      "section": "5. Baseline capabilities and feature policy",
+      "keyword": "MUST",
+      "statement": "resource-count, binding-count, and byte limit in `DeviceInfo` **MUST** be nonzero. Identity,",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/decoder.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-guest/src/client.rs",
+          "crates/virtio-accel-mock/src/lib.rs"
+        ],
+        "issues": [],
+        "rationale": "Construction-time metadata checks and operation preflight tests enforce stable limits, usable memory domains, reserved flags, and capability-to-method consistency."
+      }
+    },
+    {
+      "id": "REQ-SPEC-58C9CD029E4E",
+      "source": "docs/specification.md",
+      "line": 318,
+      "section": "5. Baseline capabilities and feature policy",
+      "keyword": "MUST",
+      "statement": "capabilities, and limits **MUST** remain stable for the lifetime of one backend instance so the",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/decoder.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-guest/src/client.rs",
+          "crates/virtio-accel-mock/src/lib.rs"
+        ],
+        "issues": [],
+        "rationale": "Construction-time metadata checks and operation preflight tests enforce stable limits, usable memory domains, reserved flags, and capability-to-method consistency."
+      }
+    },
+    {
+      "id": "REQ-SPEC-ABEC6507C56E",
+      "source": "docs/specification.md",
+      "line": 321,
+      "section": "5. Baseline capabilities and feature policy",
+      "keyword": "MUST",
+      "statement": "If `EVENT_CANCELLATION` is absent, the command engine **MUST** reject cancellation before backend",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/decoder.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-guest/src/client.rs",
+          "crates/virtio-accel-mock/src/lib.rs"
+        ],
+        "issues": [],
+        "rationale": "Construction-time metadata checks and operation preflight tests enforce stable limits, usable memory domains, reserved flags, and capability-to-method consistency."
+      }
+    },
+    {
+      "id": "REQ-SPEC-3BDDC7B37721",
+      "source": "docs/specification.md",
+      "line": 322,
+      "section": "5. Baseline capabilities and feature policy",
+      "keyword": "MUST",
+      "statement": "invocation. If it is present, the backend **MUST** implement cancellation and **MUST NOT** return",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/decoder.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-guest/src/client.rs",
+          "crates/virtio-accel-mock/src/lib.rs"
+        ],
+        "issues": [],
+        "rationale": "Construction-time metadata checks and operation preflight tests enforce stable limits, usable memory domains, reserved flags, and capability-to-method consistency."
+      }
+    },
+    {
+      "id": "REQ-SPEC-B9DC00E86791",
+      "source": "docs/specification.md",
+      "line": 322,
+      "section": "5. Baseline capabilities and feature policy",
+      "keyword": "MUST NOT",
+      "statement": "invocation. If it is present, the backend **MUST** implement cancellation and **MUST NOT** return",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/decoder.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-guest/src/client.rs",
+          "crates/virtio-accel-mock/src/lib.rs"
+        ],
+        "issues": [],
+        "rationale": "Construction-time metadata checks and operation preflight tests enforce stable limits, usable memory domains, reserved flags, and capability-to-method consistency."
+      }
+    },
+    {
+      "id": "REQ-SPEC-E6868E4CF5B2",
+      "source": "docs/specification.md",
+      "line": 326,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "new synchronization, or changed lifetime rules, the device **MUST** also negotiate an appropriate",
@@ -913,36 +1020,36 @@
           "crates/virtio-accel-proto/src/lib.rs"
         ],
         "issues": [
-          "#20",
           "#32"
         ],
-        "rationale": "Namespaces and reserved values are executable; runtime negotiation and future evolution remain tracked."
+        "rationale": "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked."
       }
     },
     {
-      "id": "REQ-SPEC-88D1E0A07A40",
+      "id": "REQ-SPEC-1192C3C18A01",
       "source": "docs/specification.md",
-      "line": 322,
+      "line": 331,
       "section": "5. Baseline capabilities and feature policy",
-      "keyword": "MUST NOT",
-      "statement": "implementation **MUST NOT** translate an underspecified capability into additional wire behavior.",
+      "keyword": "MUST",
+      "statement": "**MUST** reject nonempty values before backend invocation; a direct caller of the backend trait",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
-          "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/src/lib.rs"
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/decoder.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-guest/src/client.rs",
+          "crates/virtio-accel-mock/src/lib.rs"
         ],
-        "issues": [
-          "#20",
-          "#32"
-        ],
-        "rationale": "Namespaces and reserved values are executable; runtime negotiation and future evolution remain tracked."
+        "issues": [],
+        "rationale": "Construction-time metadata checks and operation preflight tests enforce stable limits, usable memory domains, reserved flags, and capability-to-method consistency."
       }
     },
     {
-      "id": "REQ-SPEC-2B52FA3DDCAD",
+      "id": "REQ-SPEC-C438C1EA95F3",
       "source": "docs/specification.md",
-      "line": 327,
+      "line": 338,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "reserved and **MUST** be zero.",
@@ -953,16 +1060,15 @@
           "crates/virtio-accel-proto/src/lib.rs"
         ],
         "issues": [
-          "#20",
           "#32"
         ],
-        "rationale": "Namespaces and reserved values are executable; runtime negotiation and future evolution remain tracked."
+        "rationale": "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked."
       }
     },
     {
-      "id": "REQ-SPEC-53CBDDF2F9E6",
+      "id": "REQ-SPEC-034AAAED8CCB",
       "source": "docs/specification.md",
-      "line": 330,
+      "line": 341,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "**MUST** be rejected before backend invocation. Reserved fields **MUST** be zero.",
@@ -973,16 +1079,15 @@
           "crates/virtio-accel-proto/src/lib.rs"
         ],
         "issues": [
-          "#20",
           "#32"
         ],
-        "rationale": "Namespaces and reserved values are executable; runtime negotiation and future evolution remain tracked."
+        "rationale": "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked."
       }
     },
     {
-      "id": "REQ-SPEC-5B0DC6A13B5B",
+      "id": "REQ-SPEC-002AEF3E3100",
       "source": "docs/specification.md",
-      "line": 330,
+      "line": 341,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "**MUST** be rejected before backend invocation. Reserved fields **MUST** be zero.",
@@ -993,16 +1098,15 @@
           "crates/virtio-accel-proto/src/lib.rs"
         ],
         "issues": [
-          "#20",
           "#32"
         ],
-        "rationale": "Namespaces and reserved values are executable; runtime negotiation and future evolution remain tracked."
+        "rationale": "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked."
       }
     },
     {
-      "id": "REQ-SPEC-C15BB0E55C0A",
+      "id": "REQ-SPEC-C4038EE45051",
       "source": "docs/specification.md",
-      "line": 337,
+      "line": 348,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "Candidate implementations **MUST** expose major `1` and minor `0` in device-specific configuration",
@@ -1021,9 +1125,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-200066C129F2",
+      "id": "REQ-SPEC-6B4375F7AFED",
       "source": "docs/specification.md",
-      "line": 338,
+      "line": 349,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "and **MUST NOT** claim candidate protocol 1.0 conformance unless they satisfy the normative wire,",
@@ -1042,9 +1146,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-14CBA0A183EB",
+      "id": "REQ-SPEC-CE15155BCD7C",
       "source": "docs/specification.md",
-      "line": 342,
+      "line": 353,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "#33. Before that audit, an intentional candidate revision **MUST** follow the coordinated procedure",
@@ -1063,9 +1167,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-5ECE338A6907",
+      "id": "REQ-SPEC-7E361A949E8A",
       "source": "docs/specification.md",
-      "line": 343,
+      "line": 354,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "in [wire-abi.md](wire-abi.md) and **MUST NOT** be described as a frozen or stable release.",
@@ -1084,9 +1188,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-95AD226E6215",
+      "id": "REQ-SPEC-7959D696D2AB",
       "source": "docs/specification.md",
-      "line": 349,
+      "line": 360,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "- a driver **MUST** reject a device with an unsupported major version;",
@@ -1105,9 +1209,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-B767A7B1C839",
+      "id": "REQ-SPEC-8417B9694757",
       "source": "docs/specification.md",
-      "line": 351,
+      "line": 362,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "- a driver **MUST NOT** use behavior newer than the device minor version it observed; and",
@@ -1126,9 +1230,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-AE218946BDCC",
+      "id": "REQ-SPEC-A47B979280E4",
       "source": "docs/specification.md",
-      "line": 360,
+      "line": 371,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "Therefore a minor version alone **MUST NOT** append fields to an existing response that an older",
@@ -1147,9 +1251,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-016999BA61E1",
+      "id": "REQ-SPEC-F2E9A4914D27",
       "source": "docs/specification.md",
-      "line": 364,
+      "line": 375,
       "section": "6. Versioning and compatibility",
       "keyword": "SHOULD",
       "statement": "negotiated feature explicitly selects a different layout. Extensions **SHOULD** use a new opcode or",
@@ -1168,9 +1272,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-1C37D20890C7",
+      "id": "REQ-SPEC-B102AEC467EA",
       "source": "docs/specification.md",
-      "line": 367,
+      "line": 378,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "Without such a feature, a receiver **MUST** require the exact payload length for the opcode and",
@@ -1189,9 +1293,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-7EA21D16DE58",
+      "id": "REQ-SPEC-3F6D3B977243",
       "source": "docs/specification.md",
-      "line": 368,
+      "line": 379,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "**MUST** reject trailing bytes. It **MUST NOT** silently reinterpret or ignore an unknown tail.",
@@ -1210,9 +1314,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-E3E8676ED37E",
+      "id": "REQ-SPEC-130EBE2E9C2E",
       "source": "docs/specification.md",
-      "line": 368,
+      "line": 379,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "**MUST** reject trailing bytes. It **MUST NOT** silently reinterpret or ignore an unknown tail.",
@@ -1231,9 +1335,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-A2CB96B8A1C3",
+      "id": "REQ-SPEC-5F6759A95E05",
       "source": "docs/specification.md",
-      "line": 375,
+      "line": 386,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "- An unknown response status is an opaque failure. A driver **MUST NOT** treat it as success or",
@@ -1252,231 +1356,289 @@
       }
     },
     {
-      "id": "REQ-SPEC-D3C51FC19E65",
+      "id": "REQ-SPEC-8EAED13479BA",
       "source": "docs/specification.md",
-      "line": 382,
+      "line": 393,
       "section": "7. Ownership and destruction",
       "keyword": "MUST",
       "statement": "The device owns the mapping from opaque object IDs to backend handles. The mapping **MUST** reject:",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20",
-          "#21"
-        ],
-        "rationale": "Handle and generational-ID invariants are tested; end-to-end release recovery remains tracked."
+        "issues": [],
+        "rationale": "Handle ownership, generational IDs, rejected and indeterminate release, reset recovery, and transfer-failure publication are executable."
       }
     },
     {
-      "id": "REQ-SPEC-1A8E3B4C24C2",
+      "id": "REQ-SPEC-E8CBB7086059",
       "source": "docs/specification.md",
-      "line": 390,
+      "line": 401,
       "section": "7. Ownership and destruction",
       "keyword": "MUST NOT",
       "statement": "Object-ID encoding is implementation-private. Drivers **MUST NOT** infer slot, kind, generation, or",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20",
-          "#21"
-        ],
-        "rationale": "Handle and generational-ID invariants are tested; end-to-end release recovery remains tracked."
+        "issues": [],
+        "rationale": "Handle ownership, generational IDs, rejected and indeterminate release, reset recovery, and transfer-failure publication are executable."
       }
     },
     {
-      "id": "REQ-SPEC-AB23FAC11CFD",
+      "id": "REQ-SPEC-11FB6A43D16D",
       "source": "docs/specification.md",
-      "line": 395,
+      "line": 406,
       "section": "7. Ownership and destruction",
       "keyword": "MUST",
       "statement": "- a rejected release returns the still-live handle and the device **MUST** restore it for retry;",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20",
-          "#21"
-        ],
-        "rationale": "Handle and generational-ID invariants are tested; end-to-end release recovery remains tracked."
+        "issues": [],
+        "rationale": "Handle ownership, generational IDs, rejected and indeterminate release, reset recovery, and transfer-failure publication are executable."
       }
     },
     {
-      "id": "REQ-SPEC-C2F6D1492668",
+      "id": "REQ-SPEC-C5511AD39A09",
       "source": "docs/specification.md",
-      "line": 397,
+      "line": 408,
       "section": "7. Ownership and destruction",
       "keyword": "MUST NOT",
       "statement": "- an indeterminate release invalidates the guest ID and requires recovery. The device **MUST NOT**",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20",
-          "#21"
-        ],
-        "rationale": "Handle and generational-ID invariants are tested; end-to-end release recovery remains tracked."
+        "issues": [],
+        "rationale": "Handle ownership, generational IDs, rejected and indeterminate release, reset recovery, and transfer-failure publication are executable."
       }
     },
     {
-      "id": "REQ-SPEC-00E07DBCC21D",
+      "id": "REQ-SPEC-2C20B9BB974C",
       "source": "docs/specification.md",
-      "line": 400,
+      "line": 411,
       "section": "7. Ownership and destruction",
       "keyword": "MUST NOT",
       "statement": "`Drop` may provide defensive cleanup inside an implementation but **MUST NOT** be used as",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
           "crates/virtio-accel-device/src/object_table.rs",
-          "crates/virtio-accel-mock/src/lib.rs"
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20",
-          "#21"
-        ],
-        "rationale": "Handle and generational-ID invariants are tested; end-to-end release recovery remains tracked."
+        "issues": [],
+        "rationale": "Handle ownership, generational IDs, rejected and indeterminate release, reset recovery, and transfer-failure publication are executable."
       }
     },
     {
-      "id": "REQ-SPEC-4FCCE03626EA",
+      "id": "REQ-SPEC-E520D676CE05",
       "source": "docs/specification.md",
-      "line": 406,
+      "line": 414,
+      "section": "7. Ownership and destruction",
+      "keyword": "MUST NOT",
+      "statement": "A creation method that returns an ordinary error **MUST NOT** retain a newly created resource. A",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
+        ],
+        "issues": [],
+        "rationale": "Handle ownership, generational IDs, rejected and indeterminate release, reset recovery, and transfer-failure publication are executable."
+      }
+    },
+    {
+      "id": "REQ-SPEC-2AE3767049C0",
+      "source": "docs/specification.md",
+      "line": 418,
+      "section": "7. Ownership and destruction",
+      "keyword": "MUST NOT",
+      "statement": "the buffer; the command engine **MUST NOT** publish that destination as a successful payload.",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
+        ],
+        "issues": [],
+        "rationale": "Handle ownership, generational IDs, rejected and indeterminate release, reset recovery, and transfer-failure publication are executable."
+      }
+    },
+    {
+      "id": "REQ-SPEC-83A7B584B764",
+      "source": "docs/specification.md",
+      "line": 423,
       "section": "8. Time and progress",
       "keyword": "MUST NOT",
       "statement": "infinite. Absolute guest timestamps **MUST NOT** be compared with a host clock because their",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
-          "crates/virtio-accel-core/src/lib.rs"
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20",
-          "#21"
-        ],
-        "rationale": "Relative timeout semantics are tested; bounded polling and admission behavior require the command engine."
+        "issues": [],
+        "rationale": "Relative timeouts, bounded polling and cancellation, admission ownership, and end-to-end progress are executable."
       }
     },
     {
-      "id": "REQ-SPEC-32BEB66EDC72",
+      "id": "REQ-SPEC-E8A31804CE1C",
       "source": "docs/specification.md",
-      "line": 409,
+      "line": 426,
       "section": "8. Time and progress",
       "keyword": "MUST",
       "statement": "Polling an event **MUST** be nonblocking and bounded. The portable contract creates no background",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
-          "crates/virtio-accel-core/src/lib.rs"
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20",
-          "#21"
-        ],
-        "rationale": "Relative timeout semantics are tested; bounded polling and admission behavior require the command engine."
+        "issues": [],
+        "rationale": "Relative timeouts, bounded polling and cancellation, admission ownership, and end-to-end progress are executable."
       }
     },
     {
-      "id": "REQ-SPEC-87204B0486BE",
+      "id": "REQ-SPEC-FBC2CA09456D",
       "source": "docs/specification.md",
-      "line": 413,
+      "line": 430,
+      "section": "8. Time and progress",
+      "keyword": "MUST NOT",
+      "statement": "synchronous provider work. Submission performs validation and admission only and **MUST NOT** wait",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
+        ],
+        "issues": [],
+        "rationale": "Relative timeouts, bounded polling and cancellation, admission ownership, and end-to-end progress are executable."
+      }
+    },
+    {
+      "id": "REQ-SPEC-728D2CC1555F",
+      "source": "docs/specification.md",
+      "line": 431,
+      "section": "8. Time and progress",
+      "keyword": "MUST",
+      "statement": "for execution to become terminal. Cancellation **MUST** also be nonblocking and bounded. No portable",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
+        ],
+        "issues": [],
+        "rationale": "Relative timeouts, bounded polling and cancellation, admission ownership, and end-to-end progress are executable."
+      }
+    },
+    {
+      "id": "REQ-SPEC-056523814181",
+      "source": "docs/specification.md",
+      "line": 437,
       "section": "8. Time and progress",
       "keyword": "MUST",
       "statement": "cannot prove rejection is indeterminate and **MUST** retain an event.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
-          "crates/virtio-accel-core/src/lib.rs"
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20",
-          "#21"
-        ],
-        "rationale": "Relative timeout semantics are tested; bounded polling and admission behavior require the command engine."
+        "issues": [],
+        "rationale": "Relative timeouts, bounded polling and cancellation, admission ownership, and end-to-end progress are executable."
       }
     },
     {
-      "id": "REQ-SPEC-FF88F37F2002",
+      "id": "REQ-SPEC-96510D494634",
       "source": "docs/specification.md",
-      "line": 422,
+      "line": 446,
       "section": "9. Errors",
       "keyword": "MUST",
       "statement": "A device **MUST** map errors deterministically and **MUST NOT** expose uninitialized response bytes.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-core/src/lib.rs"
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20",
-          "#21"
-        ],
-        "rationale": "Wire error shapes and ownership-aware failures are executable; backend-to-device recovery is tracked."
+        "issues": [],
+        "rationale": "Wire error shapes, ownership-aware failures, deterministic provider mapping, and backend-to-device recovery are executable."
       }
     },
     {
-      "id": "REQ-SPEC-9BF9C2113FC0",
+      "id": "REQ-SPEC-0C9E311E20CF",
       "source": "docs/specification.md",
-      "line": 422,
+      "line": 446,
       "section": "9. Errors",
       "keyword": "MUST NOT",
       "statement": "A device **MUST** map errors deterministically and **MUST NOT** expose uninitialized response bytes.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-core/src/lib.rs"
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20",
-          "#21"
-        ],
-        "rationale": "Wire error shapes and ownership-aware failures are executable; backend-to-device recovery is tracked."
+        "issues": [],
+        "rationale": "Wire error shapes, ownership-aware failures, deterministic provider mapping, and backend-to-device recovery are executable."
       }
     },
     {
-      "id": "REQ-SPEC-5B13C15F8588",
+      "id": "REQ-SPEC-234F92227481",
       "source": "docs/specification.md",
-      "line": 426,
+      "line": 450,
       "section": "9. Errors",
       "keyword": "MUST NOT",
       "statement": "An error response **MUST NOT** imply that a backend operation was rejected when acceptance was",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-core/src/lib.rs"
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20",
-          "#21"
-        ],
-        "rationale": "Wire error shapes and ownership-aware failures are executable; backend-to-device recovery is tracked."
+        "issues": [],
+        "rationale": "Wire error shapes, ownership-aware failures, deterministic provider mapping, and backend-to-device recovery are executable."
       }
     },
     {
-      "id": "REQ-SPEC-992422D1DC7C",
+      "id": "REQ-SPEC-0CE0B3A3324E",
       "source": "docs/specification.md",
-      "line": 431,
+      "line": 455,
       "section": "10. Portability requirements",
       "keyword": "MUST NOT",
       "statement": "Portable crates **MUST NOT** select an operating system, VMM, kernel, vendor API, or global runtime.",
@@ -1492,9 +1654,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-3123035A074A",
+      "id": "REQ-SPEC-E51EF4A89805",
       "source": "docs/specification.md",
-      "line": 439,
+      "line": 463,
       "section": "10. Portability requirements",
       "keyword": "MUST NOT",
       "statement": "Platform adapters depend inward on the portable layers. A portable layer **MUST NOT** conditionally",
@@ -1510,9 +1672,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-7D81F01D02EB",
+      "id": "REQ-SPEC-4A9C77D20762",
       "source": "docs/specification.md",
-      "line": 455,
+      "line": 477,
       "section": "11. Tracked completion work",
       "keyword": "MAY",
       "statement": "No implementation **MAY** advertise a reserved optional feature merely because a Rust constant",
@@ -1522,7 +1684,6 @@
           "ci/check-normative-requirements.py"
         ],
         "issues": [
-          "#21",
           "#25",
           "#32",
           "#33"
@@ -1886,13 +2047,14 @@
         "status": "mixed",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/tests/semantic_interop.rs"
+          "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
           "#25"
         ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded; live-object and advertised-quota checks are tracked."
+        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
       }
     },
     {
@@ -1906,13 +2068,14 @@
         "status": "mixed",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/tests/semantic_interop.rs"
+          "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
           "#25"
         ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded; live-object and advertised-quota checks are tracked."
+        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
       }
     },
     {
@@ -1926,13 +2089,14 @@
         "status": "mixed",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/tests/semantic_interop.rs"
+          "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
           "#25"
         ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded; live-object and advertised-quota checks are tracked."
+        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
       }
     },
     {
@@ -1946,13 +2110,14 @@
         "status": "mixed",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/tests/semantic_interop.rs"
+          "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
           "#25"
         ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded; live-object and advertised-quota checks are tracked."
+        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
       }
     },
     {
@@ -1966,13 +2131,14 @@
         "status": "mixed",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/tests/semantic_interop.rs"
+          "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
           "#25"
         ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded; live-object and advertised-quota checks are tracked."
+        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
       }
     },
     {
@@ -1986,13 +2152,14 @@
         "status": "mixed",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/tests/semantic_interop.rs"
+          "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
           "#25"
         ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded; live-object and advertised-quota checks are tracked."
+        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
       }
     },
     {
@@ -2006,13 +2173,14 @@
         "status": "mixed",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/tests/semantic_interop.rs"
+          "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
           "#25"
         ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded; live-object and advertised-quota checks are tracked."
+        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
       }
     },
     {
@@ -2026,13 +2194,14 @@
         "status": "mixed",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/tests/semantic_interop.rs"
+          "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
           "#25"
         ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded; live-object and advertised-quota checks are tracked."
+        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
       }
     },
     {
@@ -2046,13 +2215,14 @@
         "status": "mixed",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/tests/semantic_interop.rs"
+          "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
           "#25"
         ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded; live-object and advertised-quota checks are tracked."
+        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
       }
     },
     {
@@ -2066,13 +2236,14 @@
         "status": "mixed",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/tests/semantic_interop.rs"
+          "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
           "#25"
         ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded; live-object and advertised-quota checks are tracked."
+        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
       }
     },
     {
@@ -2086,13 +2257,14 @@
         "status": "mixed",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/tests/semantic_interop.rs"
+          "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
           "#25"
         ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded; live-object and advertised-quota checks are tracked."
+        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
       }
     },
     {
@@ -2106,13 +2278,14 @@
         "status": "mixed",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/tests/semantic_interop.rs"
+          "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
           "#25"
         ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded; live-object and advertised-quota checks are tracked."
+        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
       }
     },
     {
@@ -2126,13 +2299,14 @@
         "status": "mixed",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/tests/semantic_interop.rs"
+          "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
           "#25"
         ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded; live-object and advertised-quota checks are tracked."
+        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
       }
     },
     {
@@ -2143,15 +2317,16 @@
       "keyword": "MUST",
       "statement": "Before backend invocation, the device **MUST** validate the complete readable frame and enough",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/v1.0/vectors.json",
-          "crates/virtio-accel-split-queue/src/queue.rs"
+          "crates/virtio-accel-device/src/response.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-split-queue/src/queue.rs",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20"
-        ],
-        "rationale": "Queue-level used accounting and preflight failures are executable; post-mutation command response atomicity requires full-path execution."
+        "issues": [],
+        "rationale": "Preflight, post-mutation response atomicity, exact used accounting, and short-completion rejection are executable through the full path."
       }
     },
     {
@@ -2162,15 +2337,16 @@
       "keyword": "MUST",
       "statement": "writable capacity for every possible response shape of that command. It **MUST** initialize every",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/v1.0/vectors.json",
-          "crates/virtio-accel-split-queue/src/queue.rs"
+          "crates/virtio-accel-device/src/response.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-split-queue/src/queue.rs",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20"
-        ],
-        "rationale": "Queue-level used accounting and preflight failures are executable; post-mutation command response atomicity requires full-path execution."
+        "issues": [],
+        "rationale": "Preflight, post-mutation response atomicity, exact used accounting, and short-completion rejection are executable through the full path."
       }
     },
     {
@@ -2181,15 +2357,16 @@
       "keyword": "MUST",
       "statement": "occurs after semantic mutation, or a release becomes indeterminate, the device **MUST** enter",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/v1.0/vectors.json",
-          "crates/virtio-accel-split-queue/src/queue.rs"
+          "crates/virtio-accel-device/src/response.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-split-queue/src/queue.rs",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20"
-        ],
-        "rationale": "Queue-level used accounting and preflight failures are executable; post-mutation command response atomicity requires full-path execution."
+        "issues": [],
+        "rationale": "Preflight, post-mutation response atomicity, exact used accounting, and short-completion rejection are executable through the full path."
       }
     },
     {
@@ -2200,15 +2377,16 @@
       "keyword": "MUST NOT",
       "statement": "recovery and expose the Virtio `DEVICE_NEEDS_RESET` condition. It **MUST NOT** report an ordinary",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/v1.0/vectors.json",
-          "crates/virtio-accel-split-queue/src/queue.rs"
+          "crates/virtio-accel-device/src/response.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-split-queue/src/queue.rs",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20"
-        ],
-        "rationale": "Queue-level used accounting and preflight failures are executable; post-mutation command response atomicity requires full-path execution."
+        "issues": [],
+        "rationale": "Preflight, post-mutation response atomicity, exact used accounting, and short-completion rejection are executable through the full path."
       }
     },
     {
@@ -2312,18 +2490,17 @@
       "keyword": "MUST",
       "statement": "is request-header byte zero. The readable total **MUST** equal:",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "crates/virtio-accel-device/src/frame.rs",
           "crates/virtio-accel-split-queue/src/chain.rs",
           "crates/virtio-accel-split-queue/src/queue.rs",
-          "crates/virtio-accel-transport/src/regions.rs"
+          "crates/virtio-accel-transport/src/regions.rs",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20"
-        ],
-        "rationale": "Descriptor-backed segmented presentation and frame exactness are executable; one-command full-path behavior remains tracked."
+        "issues": [],
+        "rationale": "Descriptor-backed segmented presentation, frame exactness, and complete command behavior are executable through the full path."
       }
     },
     {
@@ -2334,16 +2511,15 @@
       "keyword": "MUST",
       "statement": "The device **MUST** commit a response atomically from the protocol\u2019s point of view:",
       "coverage": {
-        "status": "tracked",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "crates/virtio-accel-split-queue/src/chain.rs",
-          "crates/virtio-accel-split-queue/src/queue.rs"
+          "crates/virtio-accel-split-queue/src/queue.rs",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20"
-        ],
-        "rationale": "Scatter writes and used-length accounting are executable; post-mutation command failure requires full-path execution."
+        "issues": [],
+        "rationale": "Scatter writes, used-length accounting, and post-mutation command failure are executable through the full path."
       }
     },
     {
@@ -2354,16 +2530,15 @@
       "keyword": "MUST",
       "statement": "Response bytes may span writable descriptors. A device **MUST** write them as if to one concatenated",
       "coverage": {
-        "status": "tracked",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "crates/virtio-accel-split-queue/src/chain.rs",
-          "crates/virtio-accel-split-queue/src/queue.rs"
+          "crates/virtio-accel-split-queue/src/queue.rs",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20"
-        ],
-        "rationale": "Scatter writes and used-length accounting are executable; post-mutation command failure requires full-path execution."
+        "issues": [],
+        "rationale": "Scatter writes, used-length accounting, and post-mutation command failure are executable through the full path."
       }
     },
     {
@@ -2374,16 +2549,15 @@
       "keyword": "MUST",
       "statement": "If mutation or uncertain backend acceptance has occurred, the device **MUST** set",
       "coverage": {
-        "status": "tracked",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "crates/virtio-accel-split-queue/src/chain.rs",
-          "crates/virtio-accel-split-queue/src/queue.rs"
+          "crates/virtio-accel-split-queue/src/queue.rs",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20"
-        ],
-        "rationale": "Scatter writes and used-length accounting are executable; post-mutation command failure requires full-path execution."
+        "issues": [],
+        "rationale": "Scatter writes, used-length accounting, and post-mutation command failure are executable through the full path."
       }
     },
     {
@@ -2394,15 +2568,14 @@
       "keyword": "MUST",
       "statement": "The baseline command queue permits out-of-order command completion. The device **MUST** consume",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-split-queue/src/queue.rs",
-          "docs/virtqueue.md"
+          "docs/virtqueue.md",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20"
-        ],
-        "rationale": "Available-order consumption and out-of-order used publication are executable; command/event distinction awaits the full path."
+        "issues": [],
+        "rationale": "Available-order consumption, out-of-order completion, and command/event distinction are executable through the full path."
       }
     },
     {
@@ -2413,15 +2586,14 @@
       "keyword": "MUST NOT",
       "statement": "Request-ID uniqueness lasts until the corresponding chain is returned used. A driver **MUST NOT**",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-split-queue/src/queue.rs",
-          "docs/virtqueue.md"
+          "docs/virtqueue.md",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20"
-        ],
-        "rationale": "Available-order consumption and out-of-order used publication are executable; command/event distinction awaits the full path."
+        "issues": [],
+        "rationale": "Available-order consumption, out-of-order completion, and command/event distinction are executable through the full path."
       }
     },
     {
@@ -2432,15 +2604,14 @@
       "keyword": "MUST NOT",
       "statement": "Implementations may serialize command execution, but they **MUST NOT** promise in-order completion",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-split-queue/src/queue.rs",
-          "docs/virtqueue.md"
+          "docs/virtqueue.md",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20"
-        ],
-        "rationale": "Available-order consumption and out-of-order used publication are executable; command/event distinction awaits the full path."
+        "issues": [],
+        "rationale": "Available-order consumption, out-of-order completion, and command/event distinction are executable through the full path."
       }
     },
     {
@@ -2451,17 +2622,16 @@
       "keyword": "MUST",
       "statement": "- A driver with no free descriptor head or insufficient writable buffers **MUST** retain the command",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
+          "crates/virtio-accel-guest/src/client.rs",
           "crates/virtio-accel-split-queue/src/queue.rs",
           "crates/virtio-accel-transport/src/queue.rs",
-          "docs/virtqueue.md"
+          "docs/virtqueue.md",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#19",
-          "#20"
-        ],
-        "rationale": "Publication ownership and retryable backpressure types are executable; guest behavior and full-path tests remain tracked."
+        "issues": [],
+        "rationale": "Publication ownership, guest retryable backpressure, and full-path completion are executable."
       }
     },
     {
@@ -2472,17 +2642,16 @@
       "keyword": "MUST NOT",
       "statement": "- It **MUST NOT** publish a partial command or reuse descriptors still owned by the device.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
+          "crates/virtio-accel-guest/src/client.rs",
           "crates/virtio-accel-split-queue/src/queue.rs",
           "crates/virtio-accel-transport/src/queue.rs",
-          "docs/virtqueue.md"
+          "docs/virtqueue.md",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#19",
-          "#20"
-        ],
-        "rationale": "Publication ownership and retryable backpressure types are executable; guest behavior and full-path tests remain tracked."
+        "issues": [],
+        "rationale": "Publication ownership, guest retryable backpressure, and full-path completion are executable."
       }
     },
     {
@@ -2493,16 +2662,15 @@
       "keyword": "MUST NOT",
       "statement": "limiting **MUST NOT** change object ownership or fabricate successful responses.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "crates/virtio-accel-split-queue/src/chain.rs",
-          "crates/virtio-accel-split-queue/src/queue.rs"
+          "crates/virtio-accel-split-queue/src/queue.rs",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#20"
-        ],
-        "rationale": "Malformed frames and descriptor chains are isolated separately; full command-chain continuation remains tracked."
+        "issues": [],
+        "rationale": "Malformed frames and descriptor chains are isolated while later command chains continue through the full path."
       }
     },
     {
@@ -2513,18 +2681,17 @@
       "keyword": "MUST NOT",
       "statement": "the base Virtio reset rule. It **MUST NOT** expect response bytes or used entries for those chains.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
+          "crates/virtio-accel-guest/src/client.rs",
           "crates/virtio-accel-transport/src/queue.rs",
           "crates/virtio-accel-split-queue/src/queue.rs",
           "crates/virtio-accel-device/src/engine.rs",
-          "docs/virtqueue.md"
+          "docs/virtqueue.md",
+          "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#19",
-          "#20"
-        ],
-        "rationale": "Split-ring and engine reset are executable separately; guest reclamation and full-path reset remain tracked."
+        "issues": [],
+        "rationale": "Split-ring invalidation, guest reclamation, engine teardown, and full-path reset are executable."
       }
     },
     {
@@ -2535,15 +2702,16 @@
       "keyword": "SHOULD",
       "statement": "After observing `DEVICE_NEEDS_RESET`, the driver **SHOULD** stop submitting commands and perform",
       "coverage": {
-        "status": "tracked",
+        "status": "mixed",
         "evidence": [
-          "crates/virtio-accel-core/src/lib.rs"
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
           "#25"
         ],
-        "rationale": "Ownership-aware failure types exist; DEVICE_NEEDS_RESET transitions require the command engine and threat limits."
+        "rationale": "Ownership-aware failures and DEVICE_NEEDS_RESET transitions are executable; the adversarial resource policy remains tracked."
       }
     },
     {
@@ -2554,15 +2722,16 @@
       "keyword": "MUST NOT",
       "statement": "but it **MUST NOT** accept new semantic work.",
       "coverage": {
-        "status": "tracked",
+        "status": "mixed",
         "evidence": [
-          "crates/virtio-accel-core/src/lib.rs"
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "tests/portable_end_to_end.rs"
         ],
         "issues": [
-          "#20",
           "#25"
         ],
-        "rationale": "Ownership-aware failure types exist; DEVICE_NEEDS_RESET transitions require the command engine and threat limits."
+        "rationale": "Ownership-aware failures and DEVICE_NEEDS_RESET transitions are executable; the adversarial resource policy remains tracked."
       }
     }
   ]

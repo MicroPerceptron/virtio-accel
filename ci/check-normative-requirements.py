@@ -48,34 +48,36 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
         rationale="Defines RFC 2119 and RFC 8174 terminology; it imposes no implementation behavior.",
     ),
     ("SPEC", 2): coverage(
-        "mixed",
+        "executable",
         (
             "ci/check-portable-dependencies.sh",
             "crates/virtio-accel-transport/src/lib.rs",
             "docs/architecture.md",
+            "tests/portable_end_to_end.rs",
         ),
-        ("#20", "#21"),
-        "Portable queue and dependency boundaries are enforced now; concrete end-to-end and provider adapters remain tracked.",
+        rationale="Portable dependency, provider, queue, and end-to-end boundaries are directly enforced; concrete platform adapters are outside portable v1.",
     ),
     ("SPEC", 3): coverage(
-        "mixed",
+        "executable",
         (
             "ci/check-portable-dependencies.sh",
             "crates/virtio-accel-transport/src/queue.rs",
             "docs/architecture.md",
+            "tests/portable_end_to_end.rs",
         ),
-        ("#20", "#21"),
-        "Layer and ownership boundaries are enforceable now; runtime provider integration remains tracked.",
+        rationale="Layer direction, queue ownership, provider ownership, and the complete portable lifecycle are executable.",
     ),
     ("SPEC", 4): coverage(
         "mixed",
         (
             "crates/virtio-accel-core/src/lib.rs",
+            "crates/virtio-accel-device/tests/command_processor.rs",
             "crates/virtio-accel-device/src/object_table.rs",
             "crates/virtio-accel-mock/src/lib.rs",
+            "tests/portable_end_to_end.rs",
         ),
-        ("#20", "#21", "#25"),
-        "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked.",
+        ("#25",),
+        "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked.",
     ),
     ("SPEC", 5): coverage(
         "mixed",
@@ -83,8 +85,8 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
             "conformance/rust-clean-room/tests/vectors.rs",
             "crates/virtio-accel-proto/src/lib.rs",
         ),
-        ("#20", "#32"),
-        "Namespaces and reserved values are executable; runtime negotiation and future evolution remain tracked.",
+        ("#32",),
+        "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked.",
     ),
     ("SPEC", 6): coverage(
         "mixed",
@@ -97,29 +99,33 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
         "Version and exact-length behavior is executable; release governance and the final freeze remain tracked.",
     ),
     ("SPEC", 7): coverage(
-        "mixed",
+        "executable",
         (
             "crates/virtio-accel-core/src/lib.rs",
             "crates/virtio-accel-device/src/object_table.rs",
-            "crates/virtio-accel-mock/src/lib.rs",
+            "crates/virtio-accel-device/tests/command_processor.rs",
+            "tests/portable_end_to_end.rs",
         ),
-        ("#20", "#21"),
-        "Handle and generational-ID invariants are tested; end-to-end release recovery remains tracked.",
+        rationale="Handle ownership, generational IDs, rejected and indeterminate release, reset recovery, and transfer-failure publication are executable.",
     ),
     ("SPEC", 8): coverage(
-        "mixed",
-        ("crates/virtio-accel-core/src/lib.rs",),
-        ("#20", "#21"),
-        "Relative timeout semantics are tested; bounded polling and admission behavior require the command engine.",
+        "executable",
+        (
+            "crates/virtio-accel-core/src/lib.rs",
+            "crates/virtio-accel-device/tests/command_processor.rs",
+            "tests/portable_end_to_end.rs",
+        ),
+        rationale="Relative timeouts, bounded polling and cancellation, admission ownership, and end-to-end progress are executable.",
     ),
     ("SPEC", 9): coverage(
-        "mixed",
+        "executable",
         (
             "conformance/rust-clean-room/tests/vectors.rs",
             "crates/virtio-accel-core/src/lib.rs",
+            "crates/virtio-accel-device/tests/command_processor.rs",
+            "tests/portable_end_to_end.rs",
         ),
-        ("#20", "#21"),
-        "Wire error shapes and ownership-aware failures are executable; backend-to-device recovery is tracked.",
+        rationale="Wire error shapes, ownership-aware failures, deterministic provider mapping, and backend-to-device recovery are executable.",
     ),
     ("SPEC", 10): coverage(
         "executable",
@@ -133,7 +139,7 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
     ("SPEC", 11): coverage(
         "mixed",
         ("ci/check-normative-requirements.py",),
-        ("#21", "#25", "#32", "#33"),
+        ("#25", "#32", "#33"),
         "The ledger prevents silent requirements; the section's named completion work remains explicitly tracked.",
     ),
     ("WIRE", 1): coverage(
@@ -174,27 +180,31 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
         (
             "conformance/rust-clean-room/tests/vectors.rs",
             "crates/virtio-accel-proto/tests/semantic_interop.rs",
+            "crates/virtio-accel-device/tests/command_processor.rs",
+            "tests/portable_end_to_end.rs",
         ),
-        ("#20", "#25"),
-        "Every payload layout and scalar invariant is cross-decoded; live-object and advertised-quota checks are tracked.",
+        ("#25",),
+        "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked.",
     ),
     ("WIRE", 6): coverage(
-        "mixed",
+        "executable",
         (
             "conformance/rust-clean-room/tests/vectors.rs",
             "crates/virtio-accel-core/src/lib.rs",
+            "crates/virtio-accel-device/tests/command_processor.rs",
         ),
-        ("#20", "#21"),
-        "Malformed input classifications and opaque statuses are executable; provider error mapping is tracked.",
+        rationale="Malformed input classifications, opaque statuses, and provider error mapping are executable.",
     ),
     ("WIRE", 7): coverage(
-        "mixed",
+        "executable",
         (
             "conformance/v1.0/vectors.json",
+            "crates/virtio-accel-device/src/response.rs",
+            "crates/virtio-accel-device/tests/command_processor.rs",
             "crates/virtio-accel-split-queue/src/queue.rs",
+            "tests/portable_end_to_end.rs",
         ),
-        ("#20",),
-        "Queue-level used accounting and preflight failures are executable; post-mutation command response atomicity requires full-path execution.",
+        rationale="Preflight, post-mutation response atomicity, exact used accounting, and short-completion rejection are executable through the full path.",
     ),
     ("WIRE", 8): coverage(
         "executable",
@@ -240,91 +250,99 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
         rationale="Topology, direction, count, nonzero length, addressability, arithmetic, and command-frame limits are executable.",
     ),
     ("VIRTQ", 4): coverage(
-        "mixed",
+        "executable",
         (
             "conformance/rust-clean-room/tests/vectors.rs",
             "crates/virtio-accel-device/src/frame.rs",
             "crates/virtio-accel-split-queue/src/chain.rs",
             "crates/virtio-accel-split-queue/src/queue.rs",
             "crates/virtio-accel-transport/src/regions.rs",
+            "tests/portable_end_to_end.rs",
         ),
-        ("#20",),
-        "Descriptor-backed segmented presentation and frame exactness are executable; one-command full-path behavior remains tracked.",
+        rationale="Descriptor-backed segmented presentation, frame exactness, and complete command behavior are executable through the full path.",
     ),
     ("VIRTQ", 5): coverage(
-        "tracked",
+        "executable",
         (
             "conformance/rust-clean-room/tests/vectors.rs",
+            "crates/virtio-accel-device/tests/command_processor.rs",
             "crates/virtio-accel-split-queue/src/queue.rs",
+            "tests/portable_end_to_end.rs",
         ),
-        ("#20",),
-        "Queue ordering and semantic validation classifications are executable separately; full failure atomicity requires their integration.",
+        rationale="Queue ordering, semantic validation, and full-path failure atomicity are executable.",
     ),
     ("VIRTQ", 6): coverage(
-        "tracked",
+        "executable",
         (
             "conformance/rust-clean-room/tests/vectors.rs",
             "crates/virtio-accel-split-queue/src/chain.rs",
             "crates/virtio-accel-split-queue/src/queue.rs",
+            "tests/portable_end_to_end.rs",
         ),
-        ("#20",),
-        "Scatter writes and used-length accounting are executable; post-mutation command failure requires full-path execution.",
+        rationale="Scatter writes, used-length accounting, and post-mutation command failure are executable through the full path.",
     ),
     ("VIRTQ", 7): coverage(
-        "mixed",
+        "executable",
         (
             "crates/virtio-accel-split-queue/src/queue.rs",
             "docs/virtqueue.md",
+            "tests/portable_end_to_end.rs",
         ),
-        ("#20",),
-        "Available-order consumption and out-of-order used publication are executable; command/event distinction awaits the full path.",
+        rationale="Available-order consumption, out-of-order completion, and command/event distinction are executable through the full path.",
     ),
     ("VIRTQ", 8): coverage(
-        "mixed",
+        "executable",
         (
+            "crates/virtio-accel-guest/src/client.rs",
             "crates/virtio-accel-split-queue/src/queue.rs",
             "crates/virtio-accel-transport/src/queue.rs",
             "docs/virtqueue.md",
+            "tests/portable_end_to_end.rs",
         ),
-        ("#19", "#20"),
-        "Publication ownership and retryable backpressure types are executable; guest behavior and full-path tests remain tracked.",
+        rationale="Publication ownership, guest retryable backpressure, and full-path completion are executable.",
     ),
     ("VIRTQ", 9): coverage(
-        "mixed",
+        "executable",
         (
+            "crates/virtio-accel-guest/src/client.rs",
             "crates/virtio-accel-split-queue/src/queue.rs",
             "crates/virtio-accel-transport/src/queue.rs",
             "docs/virtqueue.md",
+            "tests/portable_end_to_end.rs",
         ),
-        ("#19",),
-        "Base split-ring suppression and mandatory rechecks are executable; guest-side notification behavior remains tracked.",
+        rationale="Split-ring suppression, guest notification decisions, mandatory rechecks, and lost-wakeup scenarios are executable.",
     ),
     ("VIRTQ", 10): coverage(
-        "mixed",
+        "executable",
         (
             "conformance/rust-clean-room/tests/vectors.rs",
             "crates/virtio-accel-split-queue/src/chain.rs",
             "crates/virtio-accel-split-queue/src/queue.rs",
+            "tests/portable_end_to_end.rs",
         ),
-        ("#20",),
-        "Malformed frames and descriptor chains are isolated separately; full command-chain continuation remains tracked.",
+        rationale="Malformed frames and descriptor chains are isolated while later command chains continue through the full path.",
     ),
     ("VIRTQ", 11): coverage(
-        "mixed",
+        "executable",
         (
+            "crates/virtio-accel-guest/src/client.rs",
             "crates/virtio-accel-transport/src/queue.rs",
             "crates/virtio-accel-split-queue/src/queue.rs",
             "crates/virtio-accel-device/src/engine.rs",
             "docs/virtqueue.md",
+            "tests/portable_end_to_end.rs",
         ),
-        ("#19", "#20"),
-        "Split-ring and engine reset are executable separately; guest reclamation and full-path reset remain tracked.",
+        rationale="Split-ring invalidation, guest reclamation, engine teardown, and full-path reset are executable.",
     ),
     ("VIRTQ", 12): coverage(
-        "tracked",
-        ("crates/virtio-accel-core/src/lib.rs",),
-        ("#20", "#25"),
-        "Ownership-aware failure types exist; DEVICE_NEEDS_RESET transitions require the command engine and threat limits.",
+        "mixed",
+        (
+            "crates/virtio-accel-core/src/lib.rs",
+            "crates/virtio-accel-device/src/engine.rs",
+            "tests/portable_end_to_end.rs",
+        ),
+        ("#25",),
+        "Ownership-aware failures and DEVICE_NEEDS_RESET transitions are executable; the adversarial resource policy remains tracked.",
     ),
 }
 
@@ -337,23 +355,45 @@ RESET_ENGINE_COVERAGE: Final = coverage(
     ),
     rationale="The reset engine and tests enforce bounded child-before-parent teardown, sticky backend discard, explicit quarantine accounting, and fresh object namespaces.",
 )
+PROVIDER_CAPABILITY_COVERAGE: Final = coverage(
+    "executable",
+    (
+        "crates/virtio-accel-core/src/lib.rs",
+        "crates/virtio-accel-device/src/decoder.rs",
+        "crates/virtio-accel-device/src/engine.rs",
+        "crates/virtio-accel-device/tests/command_processor.rs",
+        "crates/virtio-accel-guest/src/client.rs",
+        "crates/virtio-accel-mock/src/lib.rs",
+    ),
+    rationale="Construction-time metadata checks and operation preflight tests enforce stable limits, usable memory domains, reserved flags, and capability-to-method consistency.",
+)
 RESET_TRANSPORT_COVERAGE: Final = coverage(
-    "mixed",
+    "executable",
     (
         "crates/virtio-accel-transport/src/queue.rs",
         "crates/virtio-accel-split-queue/src/queue.rs",
         "crates/virtio-accel-device/src/engine.rs",
         "crates/virtio-accel-device/tests/command_processor.rs",
         "docs/virtqueue.md",
+        "tests/portable_end_to_end.rs",
     ),
-    ("#20",),
-    "The split model stops fetch and publication while atomically invalidating old byte ports; full transport-to-engine reset remains tracked.",
+    rationale="The full path stops fetch and publication, atomically invalidates old byte ports, tears down backend state, and reclaims guest ownership.",
 )
 RESET_ENGINE_MARKERS: Final = (
     "Teardown **MUST** be bounded",
     "The device **MAY** reuse a backend instance",
     "repeated reset attempts **MUST NOT** invoke that backend again",
     "Successful reinitialization **MUST** use a fresh nonzero object namespace",
+)
+PROVIDER_CAPABILITY_MARKERS: Final = (
+    "If the backend does not advertise semantic event-cancellation capability",
+    "The device **MUST** reject an allocation for an unsupported memory domain",
+    "A baseline backend **MUST** advertise at least one assigned memory-domain capability",
+    "resource-count, binding-count, and byte limit in `DeviceInfo`",
+    "capabilities, and limits **MUST** remain stable",
+    "If `EVENT_CANCELLATION` is absent",
+    "invocation. If it is present, the backend",
+    "**MUST** reject nonempty values before backend invocation",
 )
 
 
@@ -363,6 +403,9 @@ def requirement_coverage(source_code: str, number: int, statement: str) -> Cover
             return RESET_TRANSPORT_COVERAGE
         if any(marker in statement for marker in RESET_ENGINE_MARKERS):
             return RESET_ENGINE_COVERAGE
+    if source_code == "SPEC" and number == 5:
+        if any(marker in statement for marker in PROVIDER_CAPABILITY_MARKERS):
+            return PROVIDER_CAPABILITY_COVERAGE
     return COVERAGE.get((source_code, number))
 
 

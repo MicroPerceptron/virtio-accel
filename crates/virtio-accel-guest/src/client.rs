@@ -1245,7 +1245,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::types::{MemoryDomain, SubmissionOutcome};
+    use crate::types::{DeviceInfoError, MemoryDomain, SubmissionOutcome};
 
     type TestClient = GuestClient<SplitQueue>;
 
@@ -1478,6 +1478,24 @@ mod tests {
             }
             _ => panic!("unknown status was not preserved"),
         }
+        assert!(client.device_info().is_none());
+    }
+
+    #[test]
+    fn discovery_rejects_a_device_without_a_baseline_memory_domain() {
+        let mut client = test_client(16, 8, 4);
+        let pending = client.get_device_info(chain(16, 92)).unwrap();
+        let mut info = device_info();
+        info.capabilities = Le64::new(1 << 2);
+        complete_next(&mut client, StatusCode::OK, info.as_bytes());
+
+        assert!(matches!(
+            client.poll(pending),
+            RequestPoll::Ready(Completion::InvalidResponse {
+                error: ResponseError::DeviceInfo(DeviceInfoError::MissingMemoryDomain),
+                ..
+            })
+        ));
         assert!(client.device_info().is_none());
     }
 

@@ -68,6 +68,7 @@ bitflags! {
         const HOST_VISIBLE_MEMORY = 1 << 0;
         /// Supports [`MemoryDomain::Device`] allocations.
         const DEVICE_LOCAL_MEMORY = 1 << 1;
+        /// [`Accelerator::cancel_event`] is implemented for pending events.
         const EVENT_CANCELLATION = 1 << 2;
         /// Reserved for post-v1 external-allocation import/export semantics.
         const EXTERNAL_MEMORY = 1 << 3;
@@ -75,6 +76,13 @@ bitflags! {
         const SECURE_CONTEXTS = 1 << 4;
         /// Supports provider-owned [`MemoryDomain::Shared`] allocations.
         const SHARED_MEMORY = 1 << 5;
+
+        /// Capabilities that make at least one provider-owned memory domain usable.
+        const MEMORY_DOMAINS = Self::HOST_VISIBLE_MEMORY.bits()
+            | Self::DEVICE_LOCAL_MEMORY.bits()
+            | Self::SHARED_MEMORY.bits();
+        /// Assigned bits whose semantics remain reserved by this version of the contract.
+        const RESERVED = Self::EXTERNAL_MEMORY.bits() | Self::SECURE_CONTEXTS.bits();
     }
 }
 
@@ -116,9 +124,21 @@ pub struct DeviceInfo {
     pub limits: DeviceLimits,
 }
 
+/// Invalid provider metadata discovered before any resource operation is invoked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceInfoError {
+    /// A capability whose semantics are still reserved was advertised.
+    ReservedCapabilities,
+    /// No provider-owned memory domain can be allocated.
+    MissingMemoryDomain,
+    /// A mandatory resource or byte limit is zero.
+    ZeroLimit,
+}
+
 bitflags! {
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct ContextFlags: u32 {
+        /// Reserved until secure-context isolation and transport semantics are specified.
         const SECURE = 1 << 0;
     }
 }
@@ -324,6 +344,43 @@ impl BufferInfo {
 }
 
 impl DeviceInfo {
+    /// Validate immutable provider metadata once, before constructing live object state.
+    ///
+    /// Unknown capability bits remain representable for forward-compatible diagnostics. Assigned
+    /// reserved bits are rejected because this version cannot enforce their ownership and
+    /// synchronization rules.
+    pub const fn validate(self) -> Result<(), DeviceInfoError> {
+        if self.capabilities.intersects(Capabilities::RESERVED) {
+            return Err(DeviceInfoError::ReservedCapabilities);
+        }
+        if !self.capabilities.intersects(Capabilities::MEMORY_DOMAINS) {
+            return Err(DeviceInfoError::MissingMemoryDomain);
+        }
+        if self.limits.max_contexts == 0
+            || self.limits.max_buffers_per_context == 0
+            || self.limits.max_programs_per_context == 0
+            || self.limits.max_queues_per_context == 0
+            || self.limits.max_events_per_context == 0
+            || self.limits.max_bindings_per_submission == 0
+            || self.limits.max_buffer_bytes == 0
+            || self.limits.max_artifact_bytes == 0
+        {
+            return Err(DeviceInfoError::ZeroLimit);
+        }
+        Ok(())
+    }
+
+    /// Validate context intent before backend invocation.
+    ///
+    /// This contract currently reserves every nonempty context flag set.
+    pub fn validate_context_desc(self, desc: ContextDesc) -> Result<(), BackendError> {
+        if desc.flags.is_empty() {
+            Ok(())
+        } else {
+            Err(BackendError::Unsupported)
+        }
+    }
+
     /// Validate allocation size and memory-domain support before backend invocation.
     pub fn validate_buffer_desc(self, desc: BufferDesc) -> Result<(), BackendError> {
         if desc.bytes() > self.limits.max_buffer_bytes {
@@ -346,6 +403,26 @@ impl DeviceInfo {
             return Err(BackendError::Incompatible);
         }
         Ok(())
+    }
+
+    /// Validate execution-queue intent before backend invocation.
+    ///
+    /// This contract currently reserves every nonempty execution-queue flag set.
+    pub fn validate_queue_desc(self, desc: QueueDesc) -> Result<(), BackendError> {
+        if desc.flags.is_empty() {
+            Ok(())
+        } else {
+            Err(BackendError::Unsupported)
+        }
+    }
+
+    /// Validate event-cancellation support before backend invocation.
+    pub fn validate_event_cancellation(self) -> Result<(), BackendError> {
+        if self.capabilities.contains(Capabilities::EVENT_CANCELLATION) {
+            Ok(())
+        } else {
+            Err(BackendError::Unsupported)
+        }
     }
 }
 
@@ -653,6 +730,7 @@ bitflags! {
     /// protocol uses the term *command virtqueue* for the transport queue carrying requests.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct QueueFlags: u32 {
+        /// Reserved until ordering behavior and capability negotiation are specified.
         const IN_ORDER = 1 << 0;
     }
 }
@@ -750,41 +828,102 @@ impl<R> ReleaseFailure<R> {
     }
 }
 
-/// Native accelerator lifecycle. Handles remain provider-owned and statically dispatched.
+/// Native accelerator lifecycle over provider-owned handle types.
 ///
-/// Destructive methods consume handles. A transport adapter must reject parent destruction while
-/// child objects or in-flight events still exist; it must not use `Drop` timing as protocol state.
+/// The reference command engine is generic over this trait, so its calls are statically dispatched
+/// and native handles need no boxing. The trait imposes no `Send` or `Sync` bounds: a provider may
+/// preserve thread-affine handles, while a provider that opts into those auto traits must make the
+/// corresponding shared calls safe. Callers must not overlap a mutable borrow, a consumed handle,
+/// or destruction with another use of the same resource.
 ///
-/// The only baseline operations that explicitly transfer buffer contents are [`Self::write_buffer`]
-/// and [`Self::read_buffer`]. Allocation, submission, polling, and release must not hide full-range
-/// staging copies. In particular, `submit` binds the provider allocation directly or rejects it as
-/// [`BackendError::Incompatible`].
+/// Borrowed arguments are valid only for the duration of a call and must not be retained as Rust
+/// references. Destructive methods consume handles. A caller must reject parent destruction while
+/// child objects or in-flight events still exist; it must not use `Drop` timing as lifecycle state.
 ///
-/// [`Self::Queue`] is an accelerator execution queue. It must not be confused with the command
-/// virtqueue used by a transport adapter to deliver protocol requests.
+/// The only operations that explicitly transfer buffer contents are [`Self::write_buffer`] and
+/// [`Self::read_buffer`]. Allocation, submission, polling, and release must not hide full-range
+/// staging copies. In particular, `submit` binds the exact provider allocation directly or rejects
+/// it as [`BackendError::Incompatible`].
+///
+/// Dynamic loading, a stable binary interface, and erased cross-boundary handle ownership are not
+/// defined here. An integration that needs dynamic dispatch must fix one concrete handle family in
+/// an adapter without weakening this trait's borrowing, acceptance, or release contracts.
 pub trait Accelerator {
+    /// Owned context handle. It may be a native value and need not be boxed, cloneable, or thread
+    /// safe.
     type Context;
+    /// Owned handle for the exact allocation described by its accompanying [`BufferInfo`].
     type Buffer;
+    /// Owned resident-program handle with no borrow of its source artifact.
     type Program;
+    /// Owned accelerator execution-queue handle.
     type Queue;
+    /// Owned submission and completion token with no borrow of the submitted binding slice.
     type Event;
 
+    /// Return immutable identity, capability, and limit metadata.
+    ///
+    /// - **Ownership/lifetime:** no ownership changes; a successful value must remain stable for
+    ///   the lifetime of this backend instance.
+    /// - **Progress/concurrency:** discovery may perform bounded synchronous provider work but must
+    ///   not wait for resource progress. Concurrent calls are permitted only when the concrete
+    ///   backend is `Sync`.
+    /// - **Failure/retry:** an error creates no resource and may be retried; callers validate and
+    ///   cache the first successful result before invoking resource methods.
+    /// - **Allocation/copies:** the call must not allocate resource backing or copy bulk content.
     fn device_info(&self) -> Result<DeviceInfo, BackendError>;
+
+    /// Create one context from prevalidated intent.
+    ///
+    /// - **Ownership/lifetime:** `desc` is consumed by value and not retained by reference; success
+    ///   returns one owned context. All current nonempty context flags are unsupported.
+    /// - **Progress/concurrency:** provider setup may synchronously block, but must not wait for
+    ///   unrelated resource progress. Independent creation may overlap only when concrete types
+    ///   permit it.
+    /// - **Failure/retry:** `Err` guarantees that no context resource was retained and the request
+    ///   may be retried.
+    /// - **Allocation/copies:** context bookkeeping may be allocated; no buffer content is copied.
     fn create_context(&self, desc: ContextDesc) -> Result<Self::Context, BackendError>;
+
+    /// Destroy an empty context.
+    ///
+    /// - **Ownership/lifetime:** the handle is consumed and must have no live child resources.
+    /// - **Progress/concurrency:** release may synchronously block, but must not wait for children
+    ///   or in-flight work; no use of this context may overlap the call.
+    /// - **Failure/retry:** [`ReleaseFailure::Rejected`] returns the live handle for retry;
+    ///   [`ReleaseFailure::Indeterminate`] invalidates it and forbids retry.
+    /// - **Allocation/copies:** the call releases provider bookkeeping and copies no content.
     fn destroy_context(&self, context: Self::Context) -> Result<(), ReleaseFailure<Self::Context>>;
 
+    /// Allocate one exact provider-owned buffer backing.
+    ///
+    /// - **Ownership/lifetime:** `context` is borrowed only for this call. Success returns an owned
+    ///   handle plus metadata for the actual backing; neither may borrow `context`.
+    /// - **Progress/concurrency:** allocation may synchronously block. Independent contexts may be
+    ///   used concurrently only when the concrete backend and handles permit it.
+    /// - **Failure/retry:** `Err` guarantees that no buffer backing was retained and may be retried.
+    /// - **Allocation/copies:** this is the buffer-allocation boundary. Program-visible requests
+    ///   allocate directly bindable backing here or fail; they must not reserve a submission-time
+    ///   bounce allocation or copy buffer content.
     fn allocate_buffer(
         &self,
         context: &Self::Context,
         desc: BufferDesc,
     ) -> Result<AllocatedBuffer<Self::Buffer>, BackendError>;
+
     /// Perform one explicit host-to-buffer transfer.
     ///
-    /// The command engine calls this only for buffers with [`BufferUsage::TRANSFER_DESTINATION`].
-    /// The provider must not retain `data`. A segmented source should be read directly into final
-    /// backing rather than coalesced. Host-visible allocations should copy directly into their
-    /// final backing; device-local allocations may use bounded temporary staging during this
-    /// explicit transfer.
+    /// - **Ownership/lifetime:** `buffer` is exclusively borrowed and `data` is borrowed only for
+    ///   this call. The provider must not retain either reference.
+    /// - **Progress/concurrency:** the call may synchronously block until the explicit transfer is
+    ///   complete. The exclusive buffer borrow prevents overlapping access without forcing
+    ///   interior synchronization; unrelated buffers may progress when concrete types permit it.
+    /// - **Failure/retry:** on `Err`, the requested range may be partially modified but the handle
+    ///   remains live. A later successful full-range write replaces it; device loss is not
+    ///   retryable on the same backend instance.
+    /// - **Allocation/copies:** this is an explicit content-copy boundary. Segmented input should
+    ///   flow into final backing without frame-sized coalescing. Device-local backing may use
+    ///   bounded temporary staging during this call.
     fn write_buffer(
         &self,
         buffer: &mut Self::Buffer,
@@ -793,32 +932,102 @@ pub trait Accelerator {
     ) -> Result<(), BackendError>;
     /// Perform one explicit buffer-to-host transfer.
     ///
-    /// The command engine calls this only for buffers with [`BufferUsage::TRANSFER_SOURCE`]. The
-    /// provider must not retain `data` and should write directly across segmented destinations.
-    /// Returning `Ok(())` guarantees that every byte in `data` was initialized; the command engine
-    /// may publish the complete destination without first clearing it.
+    /// - **Ownership/lifetime:** `buffer` is shared-borrowed and `data` is exclusively borrowed only
+    ///   for this call. The provider must not retain either reference.
+    /// - **Progress/concurrency:** the call may synchronously block until the explicit transfer is
+    ///   complete. Shared reads may overlap only when the concrete buffer is `Sync` and the
+    ///   provider supports that access.
+    /// - **Failure/retry:** `Err` leaves the destination potentially partially initialized; the
+    ///   caller must not publish it. The buffer is unchanged and a complete read may be retried
+    ///   unless the backend is lost. `Ok(())` guarantees every destination byte was initialized.
+    /// - **Allocation/copies:** this is an explicit content-copy boundary. The provider should
+    ///   write directly across segmented destinations; device-local backing may use bounded
+    ///   temporary staging during this call.
     fn read_buffer(
         &self,
         buffer: &Self::Buffer,
         offset: u64,
         data: &mut dyn ByteSink,
     ) -> Result<(), BackendError>;
+
+    /// Release an unreferenced buffer and its exact backing allocation.
+    ///
+    /// - **Ownership/lifetime:** the handle is consumed and must not be bound to an in-flight event.
+    /// - **Progress/concurrency:** release may synchronously block but must not wait for references
+    ///   to disappear; no access to this buffer may overlap the call.
+    /// - **Failure/retry:** rejected release returns the live handle for retry; indeterminate
+    ///   release invalidates it and requires recovery.
+    /// - **Allocation/copies:** backing is deallocated without copying its contents or allocating a
+    ///   replacement.
     fn free_buffer(&self, buffer: Self::Buffer) -> Result<(), ReleaseFailure<Self::Buffer>>;
 
+    /// Create a resident program from an opaque, possibly segmented artifact.
+    ///
+    /// - **Ownership/lifetime:** `context`, `artifact.payload`, and the envelope are borrowed only
+    ///   for this call. Success returns an owned program with no source borrow.
+    /// - **Progress/concurrency:** program creation may synchronously block. Independent lifecycle
+    ///   work may overlap only when the concrete backend and context permit it.
+    /// - **Failure/retry:** `Err` guarantees that no program resource was retained and may be
+    ///   retried with a still-live context and artifact.
+    /// - **Allocation/copies:** resident program storage may be allocated. Segmented bytes should
+    ///   stream into final resident storage rather than require one artifact-sized coalescing copy.
     fn load_program(
         &self,
         context: &Self::Context,
         artifact: ArtifactRef<'_>,
     ) -> Result<Self::Program, BackendError>;
+
+    /// Release an unreferenced resident program.
+    ///
+    /// - **Ownership/lifetime:** the program is consumed and must not be referenced by an event.
+    /// - **Progress/concurrency:** release may synchronously block but must not wait for in-flight
+    ///   references; no use of this program may overlap the call.
+    /// - **Failure/retry:** rejected release returns the live handle for retry; indeterminate
+    ///   release invalidates it and requires recovery.
+    /// - **Allocation/copies:** resident storage is released without copying buffer contents or
+    ///   allocating replacement state.
     fn unload_program(&self, program: Self::Program) -> Result<(), ReleaseFailure<Self::Program>>;
 
+    /// Create one accelerator execution queue.
+    ///
+    /// - **Ownership/lifetime:** `context` is borrowed only for this call and success returns an
+    ///   owned queue. All current nonempty queue flags are unsupported.
+    /// - **Progress/concurrency:** queue setup may synchronously block. Independent creation may
+    ///   overlap only when concrete types permit it.
+    /// - **Failure/retry:** `Err` guarantees that no queue resource was retained and may be retried.
+    /// - **Allocation/copies:** queue bookkeeping may be allocated; no program or buffer content is
+    ///   copied.
     fn create_queue(
         &self,
         context: &Self::Context,
         desc: QueueDesc,
     ) -> Result<Self::Queue, BackendError>;
+
+    /// Release an unreferenced execution queue.
+    ///
+    /// - **Ownership/lifetime:** the queue is consumed and must not be referenced by an event.
+    /// - **Progress/concurrency:** release may synchronously block but must not wait for submitted
+    ///   work; no use of this queue may overlap the call.
+    /// - **Failure/retry:** rejected release returns the live handle for retry; indeterminate
+    ///   release invalidates it and requires recovery.
+    /// - **Allocation/copies:** queue state is released without copying buffer content or allocating
+    ///   replacement state.
     fn destroy_queue(&self, queue: Self::Queue) -> Result<(), ReleaseFailure<Self::Queue>>;
 
+    /// Attempt to admit one program execution and return its event.
+    ///
+    /// - **Ownership/lifetime:** queue, program, buffers, and the binding slice are borrowed only
+    ///   during admission and must not be retained as Rust references. The caller keeps every
+    ///   referenced handle alive until the returned event is terminal and destroyed.
+    /// - **Progress/concurrency:** synchronous work is limited to validation and admission; the call
+    ///   must not wait for execution to finish. Concurrent submission requires concrete `Sync`
+    ///   handles and provider support; the trait requires no lock or atomic operation by itself.
+    /// - **Failure/retry:** [`SubmitFailure::Rejected`] guarantees no acceptance and permits retry.
+    ///   Success or [`SubmitFailure::Indeterminate`] transfers invocation ownership to the event and
+    ///   must not be retried as though rejected.
+    /// - **Allocation/copies:** the borrowed slice requires no per-binding box or owned mirror.
+    ///   Providers may use amortized event storage, but must directly bind each exact allocation and
+    ///   reject incompatibility instead of allocating or copying through hidden bounce buffers.
     fn submit(
         &self,
         queue: &Self::Queue,
@@ -826,18 +1035,41 @@ pub trait Accelerator {
         bindings: &[BindingRef<'_, Self::Buffer>],
         timeout: Timeout,
     ) -> Result<Self::Event, SubmitFailure<Self::Event>>;
+
     /// Observe event state without blocking or driving an executor.
     ///
-    /// Once a terminal state is observed, every later successful poll returns the same state.
+    /// - **Ownership/lifetime:** the event is borrowed only for this call and remains live.
+    /// - **Progress/concurrency:** polling is bounded, nonblocking, and safe to race with provider
+    ///   completion when the concrete event is `Sync`.
+    /// - **Failure/retry:** errors do not make an event terminal; polling may be retried unless the
+    ///   backend is lost. Once observed, a terminal state is stable across every later success.
+    /// - **Allocation/copies:** polling allocates no per-call state and copies no bulk content.
     fn poll_event(&self, event: &Self::Event) -> Result<EventState, BackendError>;
+
     /// Attempt to make a pending event terminal as [`EventState::Cancelled`].
     ///
-    /// If completion wins the race, the backend returns [`BackendError::Busy`] and polling reveals
-    /// the selected terminal result. Returning `Ok(())` means cancellation won and every later
-    /// successful poll returns `Cancelled`.
+    /// - **Ownership/lifetime:** the event is borrowed only for this call and remains live.
+    /// - **Progress/concurrency:** cancellation is bounded and nonblocking. It may race with
+    ///   completion; the provider chooses exactly one terminal result without requiring a lock in
+    ///   the handle contract.
+    /// - **Failure/retry:** `Ok(())` means cancellation won. [`BackendError::Busy`] means completion
+    ///   won and the caller should poll. The default `Unsupported` implementation is conformant only
+    ///   when [`Capabilities::EVENT_CANCELLATION`] is absent.
+    /// - **Allocation/copies:** cancellation allocates no per-call state and copies no bulk content.
     fn cancel_event(&self, _event: &Self::Event) -> Result<(), BackendError> {
         Err(BackendError::Unsupported)
     }
+
+    /// Release one terminal event and its provider invocation state.
+    ///
+    /// - **Ownership/lifetime:** the event is consumed. Every referenced queue, program, and buffer
+    ///   must remain live until this release succeeds or becomes indeterminate.
+    /// - **Progress/concurrency:** release may synchronously block but must not wait for a pending
+    ///   event to finish; no poll or cancellation may overlap this call.
+    /// - **Failure/retry:** rejected release returns the live event for retry; indeterminate release
+    ///   invalidates it and requires recovery.
+    /// - **Allocation/copies:** invocation state is released without copying buffer content or
+    ///   allocating replacement state.
     fn destroy_event(&self, event: Self::Event) -> Result<(), ReleaseFailure<Self::Event>>;
 }
 
@@ -877,6 +1109,28 @@ mod tests {
                 .ok_or(ByteAccessError::OutOfBounds)?;
             self.0[start..end].copy_from_slice(source);
             Ok(())
+        }
+    }
+
+    fn valid_device_info() -> DeviceInfo {
+        DeviceInfo {
+            identity: DeviceIdentity {
+                uuid: [0; 16],
+                class: AcceleratorClass::OTHER,
+                vendor_id: 0,
+                device_id: 0,
+            },
+            capabilities: Capabilities::HOST_VISIBLE_MEMORY,
+            limits: DeviceLimits {
+                max_contexts: 1,
+                max_buffers_per_context: 1,
+                max_programs_per_context: 1,
+                max_queues_per_context: 1,
+                max_events_per_context: 1,
+                max_bindings_per_submission: 1,
+                max_buffer_bytes: 1,
+                max_artifact_bytes: 1,
+            },
         }
     }
 
@@ -977,6 +1231,60 @@ mod tests {
         assert!(capabilities.supports_memory_domain(MemoryDomain::Host));
         assert!(capabilities.supports_memory_domain(MemoryDomain::Shared));
         assert!(!capabilities.supports_memory_domain(MemoryDomain::Device));
+    }
+
+    #[test]
+    fn device_information_rejects_unusable_provider_contracts() {
+        let valid = valid_device_info();
+        assert_eq!(valid.validate(), Ok(()));
+
+        let mut reserved = valid;
+        reserved.capabilities |= Capabilities::EXTERNAL_MEMORY;
+        assert_eq!(
+            reserved.validate(),
+            Err(DeviceInfoError::ReservedCapabilities)
+        );
+
+        let mut no_memory = valid;
+        no_memory.capabilities = Capabilities::EVENT_CANCELLATION;
+        assert_eq!(
+            no_memory.validate(),
+            Err(DeviceInfoError::MissingMemoryDomain)
+        );
+
+        let mut zero_limit = valid;
+        zero_limit.limits.max_bindings_per_submission = 0;
+        assert_eq!(zero_limit.validate(), Err(DeviceInfoError::ZeroLimit));
+
+        let mut unknown = valid;
+        unknown.capabilities |= Capabilities::from_bits_retain(1 << 63);
+        assert_eq!(unknown.validate(), Ok(()));
+    }
+
+    #[test]
+    fn reserved_operations_are_rejected_before_provider_invocation() {
+        let mut info = valid_device_info();
+        assert_eq!(info.validate_context_desc(ContextDesc::default()), Ok(()));
+        assert_eq!(info.validate_queue_desc(QueueDesc::default()), Ok(()));
+        assert_eq!(
+            info.validate_context_desc(ContextDesc {
+                flags: ContextFlags::SECURE,
+            }),
+            Err(BackendError::Unsupported)
+        );
+        assert_eq!(
+            info.validate_queue_desc(QueueDesc {
+                flags: QueueFlags::IN_ORDER,
+            }),
+            Err(BackendError::Unsupported)
+        );
+        assert_eq!(
+            info.validate_event_cancellation(),
+            Err(BackendError::Unsupported)
+        );
+
+        info.capabilities |= Capabilities::EVENT_CANCELLATION;
+        assert_eq!(info.validate_event_cancellation(), Ok(()));
     }
 
     #[test]

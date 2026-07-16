@@ -8,14 +8,14 @@ behavior is deliberately tracked by a later issue. The exact per-keyword ledger 
 
 | Normative area | Current executable evidence | Tracked completion rationale |
 |---|---|---|
-| `specification.md` sections 2-3: scope and layer boundaries | Workspace dependency direction, `no_std` target checks, the clean-room dependency guard, and the full reference guest-to-backend path | Concrete provider boundary audits continue in #21 |
-| Section 4: contexts, buffers, programs, queues, submissions, and events | `virtio-accel-core`, object-table, mock lifecycle, and full serialized split-queue lifecycle tests | Remaining backend semantics are #21 |
+| `specification.md` sections 2-3: scope and layer boundaries | Workspace dependency direction, `no_std` target checks, the clean-room dependency guard, the audited provider trait, and the full reference guest-to-backend path | Concrete platform adapters remain intentionally outside portable v1 |
+| Section 4: contexts, buffers, programs, queues, submissions, and events | `virtio-accel-core`, construction-time metadata validation, object-table and mock lifecycle tests, and full serialized split-queue scenarios | Deterministic reference execution and the reusable backend suite are #22 and #24 |
 | Section 5: mandatory baseline, reserved features, flags, and scalar namespaces | Primary ABI namespace tests plus clean-room request validation and edge vectors | Optional features remain unadvertised; their future policy is #32 |
 | Section 6: versions, exact lengths, unknown values, and extension rules | Config/version edge vectors, both codecs, immutable manifests, and layout assertions | Candidate-to-stable freeze and clean-room review are audited again in #33 |
-| Sections 7-9: ownership, time, progress, and error truth | Generational-ID, timeout, mock lifecycle, unknown-status, indeterminate-submit, end-to-end recovery, and response-atomicity tests | Remaining backend policy details are #21 |
+| Sections 7-9: ownership, time, progress, and error truth | Per-method provider contracts plus generational-ID, timeout, mock lifecycle, unknown-status, indeterminate-submit, end-to-end recovery, and response-atomicity tests | Exhaustive provider fault injection and reusable conformance are #23 and #24 |
 | Section 10: portability | Stable/MSRV, Linux/macOS/Windows, Wasm, AArch64, RISC-V, feature, dependency, and documentation CI | Concrete OS/VMM adapters remain intentionally outside portable v1 |
 | `wire-abi.md` sections 1-6: config, headers, namespaces, all payloads, statuses, limits, and reserved fields | `layout.json`, `vectors.json`, primary `zerocopy` assertions, the manual dependency-free codec, and live-object end-to-end scenarios | Adversarial limit combinations remain part of threat-model issue #25 |
-| `wire-abi.md` section 7: preflight and response atomicity | Error-shape vectors, ownership-aware core error types, and end-to-end short-completion rejection | Post-mutation provider failures remain part of the backend audit in #21 |
+| `wire-abi.md` section 7: preflight and response atomicity | Error-shape vectors, ownership-aware core error types, explicit transfer-failure contracts, and end-to-end short-completion rejection | Exhaustive post-mutation fault injection is #23 |
 | `wire-abi.md` sections 8-9: versioned artifacts and change control | Checked-in inputs, drift tests, and coordinated-change documentation | Release freeze governance is finalized by #32 and #33 |
 | `virtqueue.md` sections 1-12 | Stable executable cases and `scenarios.json` drive the full reference guest, split queue, device loop, command engine, and backend through segmented chains, out-of-order completion, notification suppression, backpressure, short responses, timeout, cancellation, reset, and device loss | Concrete VMM adapter integration remains intentionally outside portable v1 |
 
@@ -46,5 +46,5 @@ field after the other implementation decodes the bytes. No Rust wire structure c
 boundary.
 
 The clean-room binding uniqueness check is intentionally allocation-free and quadratic. This crate
-is portable conformance evidence, not the production command-engine hot path; #20 may use a bounded
-set or table consistent with its resource accounting.
+is portable conformance evidence, not the production command-engine hot path; the command processor
+uses one bounded decoded-binding allocation and sorts it in place.

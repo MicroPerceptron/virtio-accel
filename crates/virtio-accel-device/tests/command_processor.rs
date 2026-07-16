@@ -5,8 +5,8 @@ use std::vec::Vec;
 
 use virtio_accel_core::{
     Accelerator, AccessMode, AllocatedBuffer, ArtifactRef, BackendError, BindingRef, BufferDesc,
-    BufferUsage, ByteSink, ByteSource, Capabilities, ContextDesc, DeviceInfo, EventState,
-    MemoryDomain, QueueDesc, ReleaseFailure, SubmitFailure, Timeout,
+    BufferUsage, ByteSink, ByteSource, Capabilities, ContextDesc, DeviceInfo, DeviceInfoError,
+    EventState, MemoryDomain, QueueDesc, ReleaseFailure, SubmitFailure, Timeout,
 };
 use virtio_accel_device::{
     ChainRegion, CommandOutcome, CommandProcessError, CommandProcessor, CommandProcessorInitError,
@@ -552,6 +552,43 @@ fn invalid_config_is_rejected_before_backend_discovery() {
         ))
     ));
     assert_eq!(device_info_calls.get(), 0);
+}
+
+#[test]
+fn invalid_provider_metadata_is_rejected_before_object_state_exists() {
+    for (capabilities, expected) in [
+        (
+            Capabilities::HOST_VISIBLE_MEMORY | Capabilities::EXTERNAL_MEMORY,
+            DeviceInfoError::ReservedCapabilities,
+        ),
+        (
+            Capabilities::EVENT_CANCELLATION,
+            DeviceInfoError::MissingMemoryDomain,
+        ),
+    ] {
+        let backend = RecordingBackend::default();
+        let mut info = backend.device_info().unwrap();
+        backend.device_info_calls.set(0);
+        info.capabilities = capabilities;
+        backend.info_override.set(Some(info));
+        let device_info_calls = Rc::clone(&backend.device_info_calls);
+
+        assert!(matches!(
+            CommandProcessor::new(backend, &config(), ObjectNamespace::new(1).unwrap()),
+            Err(CommandProcessorInitError::DeviceInfo(error)) if error == expected
+        ));
+        assert_eq!(device_info_calls.get(), 1);
+    }
+
+    let backend = RecordingBackend::default();
+    let mut info = backend.device_info().unwrap();
+    backend.device_info_calls.set(0);
+    info.limits.max_events_per_context = 0;
+    backend.info_override.set(Some(info));
+    assert_eq!(
+        CommandProcessor::new(backend, &config(), ObjectNamespace::new(1).unwrap()).unwrap_err(),
+        CommandProcessorInitError::DeviceInfo(DeviceInfoError::ZeroLimit)
+    );
 }
 
 #[test]
