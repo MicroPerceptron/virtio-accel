@@ -7,6 +7,9 @@ This directory contains implementation-independent inputs for the portable proto
 - [`vectors.json`](vectors.json) contains canonical hexadecimal bytes for the device configuration,
   all 15 request opcodes, every success and command-specific response shape, all event states, and
   reviewed malformed/unknown boundary cases.
+- [`scenarios.json`](scenarios.json) contains deterministic end-to-end command, status, and used-
+  length traces for lifecycle, scheduling, pressure, notification, recovery, timeout, and
+  device-loss behavior.
 - [`coverage.md`](coverage.md) maps the normative document areas to executable evidence or an
   explicitly tracked implementation issue.
 - [`requirements.json`](requirements.json) catalogs every normative keyword occurrence with a

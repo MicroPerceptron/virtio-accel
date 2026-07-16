@@ -1,0 +1,97 @@
+{
+  "schema": "virtio-accel-scenarios-1",
+  "protocol": "1.0",
+  "note": "Immutable end-to-end inputs. Each trace records device processing order, wire response status, and published used length.",
+  "scenarios": [
+    {
+      "name": "complete_lifecycle",
+      "trace": [
+        { "request_id": 1, "operation": "GET_DEVICE_INFO", "opcode": 1, "status": 0, "used": 92 },
+        { "request_id": 2, "operation": "CREATE_CONTEXT", "opcode": 256, "status": 0, "used": 24 },
+        { "request_id": 3, "operation": "ALLOCATE_BUFFER", "opcode": 512, "status": 0, "used": 24 },
+        { "request_id": 4, "operation": "WRITE_BUFFER", "opcode": 514, "status": 0, "used": 16 },
+        { "request_id": 5, "operation": "READ_BUFFER", "opcode": 515, "status": 0, "used": 24 },
+        { "request_id": 6, "operation": "LOAD_PROGRAM", "opcode": 768, "status": 0, "used": 24 },
+        { "request_id": 7, "operation": "CREATE_QUEUE", "opcode": 1024, "status": 0, "used": 24 },
+        { "request_id": 8, "operation": "SUBMIT", "opcode": 1280, "status": 0, "used": 24 },
+        { "request_id": 9, "operation": "FREE_BUFFER", "opcode": 513, "status": 5, "used": 16 },
+        { "request_id": 10, "operation": "POLL_EVENT", "opcode": 1281, "status": 0, "used": 24 },
+        { "request_id": 11, "operation": "CANCEL_EVENT", "opcode": 1282, "status": 0, "used": 16 },
+        { "request_id": 12, "operation": "POLL_EVENT", "opcode": 1281, "status": 0, "used": 24 },
+        { "request_id": 13, "operation": "DESTROY_EVENT", "opcode": 1283, "status": 0, "used": 16 },
+        { "request_id": 14, "operation": "SUBMIT", "opcode": 1280, "status": 0, "used": 24 },
+        { "request_id": 15, "operation": "POLL_EVENT", "opcode": 1281, "status": 0, "used": 24 },
+        { "request_id": 16, "operation": "DESTROY_EVENT", "opcode": 1283, "status": 0, "used": 16 },
+        { "request_id": 17, "operation": "DESTROY_QUEUE", "opcode": 1025, "status": 0, "used": 16 },
+        { "request_id": 18, "operation": "UNLOAD_PROGRAM", "opcode": 769, "status": 0, "used": 16 },
+        { "request_id": 19, "operation": "FREE_BUFFER", "opcode": 513, "status": 0, "used": 16 },
+        { "request_id": 20, "operation": "DESTROY_CONTEXT", "opcode": 257, "status": 0, "used": 16 }
+      ]
+    },
+    {
+      "name": "out_of_order",
+      "trace": [
+        { "request_id": 2, "operation": "GET_DEVICE_INFO", "opcode": 1, "status": 0, "used": 92 },
+        { "request_id": 1, "operation": "GET_DEVICE_INFO", "opcode": 1, "status": 0, "used": 92 }
+      ]
+    },
+    {
+      "name": "backpressure",
+      "trace": [
+        { "request_id": 1, "operation": "GET_DEVICE_INFO", "opcode": 1, "status": 0, "used": 92 },
+        { "request_id": 2, "operation": "GET_DEVICE_INFO", "opcode": 1, "status": 0, "used": 92 }
+      ]
+    },
+    {
+      "name": "notification_suppression",
+      "trace": [
+        { "request_id": 1, "operation": "GET_DEVICE_INFO", "opcode": 1, "status": 0, "used": 92 }
+      ]
+    },
+    {
+      "name": "short_response",
+      "trace": [
+        { "request_id": 1, "operation": "GET_DEVICE_INFO", "opcode": 1, "status": 0, "used": 91 }
+      ]
+    },
+    {
+      "name": "timeout",
+      "trace": [
+        { "request_id": 1, "operation": "GET_DEVICE_INFO", "opcode": 1, "status": 0, "used": 92 },
+        { "request_id": 2, "operation": "CREATE_CONTEXT", "opcode": 256, "status": 0, "used": 24 },
+        { "request_id": 3, "operation": "ALLOCATE_BUFFER", "opcode": 512, "status": 0, "used": 24 },
+        { "request_id": 4, "operation": "LOAD_PROGRAM", "opcode": 768, "status": 0, "used": 24 },
+        { "request_id": 5, "operation": "CREATE_QUEUE", "opcode": 1024, "status": 0, "used": 24 },
+        { "request_id": 6, "operation": "SUBMIT", "opcode": 1280, "status": 8, "used": 16 },
+        { "request_id": 7, "operation": "DESTROY_QUEUE", "opcode": 1025, "status": 0, "used": 16 },
+        { "request_id": 8, "operation": "UNLOAD_PROGRAM", "opcode": 769, "status": 0, "used": 16 },
+        { "request_id": 9, "operation": "FREE_BUFFER", "opcode": 513, "status": 0, "used": 16 },
+        { "request_id": 10, "operation": "DESTROY_CONTEXT", "opcode": 257, "status": 0, "used": 16 }
+      ]
+    },
+    {
+      "name": "reset_inflight",
+      "trace": [
+        { "request_id": 1, "operation": "GET_DEVICE_INFO", "opcode": 1, "status": 0, "used": 92 },
+        { "request_id": 2, "operation": "CREATE_CONTEXT", "opcode": 256, "status": 0, "used": 24 },
+        { "request_id": 3, "operation": "ALLOCATE_BUFFER", "opcode": 512, "status": 0, "used": 24 },
+        { "request_id": 4, "operation": "LOAD_PROGRAM", "opcode": 768, "status": 0, "used": 24 },
+        { "request_id": 5, "operation": "CREATE_QUEUE", "opcode": 1024, "status": 0, "used": 24 },
+        { "request_id": 6, "operation": "SUBMIT", "opcode": 1280, "status": 0, "used": 24 },
+        { "request_id": 1, "operation": "GET_DEVICE_INFO", "opcode": 1, "status": 0, "used": 92 }
+      ]
+    },
+    {
+      "name": "device_loss",
+      "trace": [
+        { "request_id": 1, "operation": "GET_DEVICE_INFO", "opcode": 1, "status": 0, "used": 92 },
+        { "request_id": 2, "operation": "CREATE_CONTEXT", "opcode": 256, "status": 0, "used": 24 },
+        { "request_id": 3, "operation": "ALLOCATE_BUFFER", "opcode": 512, "status": 0, "used": 24 },
+        { "request_id": 4, "operation": "LOAD_PROGRAM", "opcode": 768, "status": 0, "used": 24 },
+        { "request_id": 5, "operation": "CREATE_QUEUE", "opcode": 1024, "status": 0, "used": 24 },
+        { "request_id": 6, "operation": "SUBMIT", "opcode": 1280, "status": 0, "used": 24 },
+        { "request_id": 7, "operation": "POLL_EVENT", "opcode": 1281, "status": 9, "used": 16 }
+      ]
+    }
+  ]
+}
