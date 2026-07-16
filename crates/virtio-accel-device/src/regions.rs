@@ -374,6 +374,10 @@ mod tests {
     #[test]
     fn chain_layout_rejects_direction_and_length_errors() {
         assert_eq!(
+            validate_chain_layout(&[ChainRegion::readable(16)], 8),
+            Err(ChainLayoutError::DescriptorCount)
+        );
+        assert_eq!(
             validate_chain_layout(
                 &[
                     ChainRegion::readable(16),
@@ -398,6 +402,16 @@ mod tests {
                 8,
             ),
             Err(ChainLayoutError::LengthOverflow)
+        );
+
+        let layout =
+            validate_chain_layout(&[ChainRegion::readable(16), ChainRegion::writable(16)], 8)
+                .unwrap();
+        let request = [0_u8; 15];
+        let response = [0_u8; 16];
+        assert_eq!(
+            layout.validate_ports(&request, &response),
+            Err(ChainLayoutError::PortLengthMismatch)
         );
     }
 

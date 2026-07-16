@@ -9,6 +9,7 @@
 extern crate alloc;
 
 mod decoder;
+mod frame;
 mod object_table;
 mod regions;
 mod response;
@@ -17,12 +18,13 @@ pub use decoder::{
     DecodedBinding, DecodedRequest, DecodedRequestBody, DecoderLimits, DecoderLimitsError,
     FrameDecodeError, FrameDecoder, UnrecoverableDecodeError,
 };
+pub use frame::{FramePreflight, FramePreflightError, UnusableFrame, preflight_command_frame};
 pub use object_table::{ObjectId, ObjectKind, ObjectTable, ObjectTableError};
 pub use regions::{
     ChainLayout, ChainLayoutError, ChainRegion, ReadableRegion, RegionDirection,
     SegmentedRegionError, SegmentedSink, SegmentedSource, WritableRegion, validate_chain_layout,
 };
-pub use response::{ResponseWriteError, ResponseWriter};
+pub use response::{ResponsePayload, ResponseWriteError, ResponseWriter};
 use virtio_accel_core::BackendError;
 use virtio_accel_proto::StatusCode;
 

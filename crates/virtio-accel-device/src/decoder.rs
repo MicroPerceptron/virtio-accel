@@ -4,7 +4,9 @@
 //! borrowed views over the original [`ByteSource`]. `SUBMIT` is the only allocating decode path:
 //! it retains one [`DecodedBinding`] per advertised binding and temporarily uses two `u32` arrays
 //! per binding for four-pass radix duplicate detection. All three allocations are bounded by the
-//! configured binding limit and use fallible reservation.
+//! configured binding limit and use fallible reservation. The decoder performs a constant number
+//! of fixed-prefix reads plus one 32-byte read and four fixed radix passes per binding, so its own
+//! work is linear in the validated payload size.
 
 use alloc::vec::Vec;
 use core::mem::size_of;
@@ -228,6 +230,10 @@ pub struct FrameDecoder {
 impl FrameDecoder {
     pub const fn new(limits: DecoderLimits) -> Self {
         Self { limits }
+    }
+
+    pub const fn limits(&self) -> DecoderLimits {
+        self.limits
     }
 
     pub fn decode<'a>(

@@ -5,9 +5,8 @@
 //! fixed 4 KiB stack scratch buffer and never allocates or writes beyond the preflighted frame.
 
 use virtio_accel_core::{ByteSink, ByteSource};
-use virtio_accel_proto::StatusCode;
-
-use crate::WritableRegion;
+use virtio_accel_proto::{ResponseHeader, StatusCode};
+use zerocopy::IntoBytes;
 
 const RESPONSE_HEADER_BYTES: u64 = 16;
 
@@ -47,32 +46,21 @@ impl<'a> ResponseWriter<'a> {
         self.max_response_bytes
     }
 
-    pub fn payload_region(
+    /// Borrow the exact success-payload destination.
+    ///
+    /// The returned guard commits the same payload length that was preflighted here, preventing a
+    /// caller from initializing one range and advertising another in the response header.
+    pub fn payload(
         &mut self,
         payload_bytes: u64,
-    ) -> Result<WritableRegion<'_>, ResponseWriteError> {
-        self.preflight(payload_bytes)?;
-        WritableRegion::new(self.sink, RESPONSE_HEADER_BYTES, payload_bytes)
-            .map_err(|_| ResponseWriteError::InsufficientCapacity)
-    }
-
-    /// Commit the response header after its payload has been initialized.
-    pub fn commit(
-        &mut self,
-        status: StatusCode,
-        request_id: u64,
-        payload_bytes: u32,
-    ) -> Result<u32, ResponseWriteError> {
-        let used = self.preflight(u64::from(payload_bytes))?;
-        let mut header = [0_u8; RESPONSE_HEADER_BYTES as usize];
-        header[0..2].copy_from_slice(&status.0.to_le_bytes());
-        header[2..4].copy_from_slice(&0_u16.to_le_bytes());
-        header[4..8].copy_from_slice(&payload_bytes.to_le_bytes());
-        header[8..16].copy_from_slice(&request_id.to_le_bytes());
-        self.sink
-            .write_at(0, &header)
-            .map_err(|_| ResponseWriteError::SinkAccess)?;
-        Ok(used)
+    ) -> Result<ResponsePayload<'_>, ResponseWriteError> {
+        let used = self.preflight(payload_bytes)?;
+        Ok(ResponsePayload {
+            sink: self.sink,
+            payload_bytes: u32::try_from(payload_bytes)
+                .map_err(|_| ResponseWriteError::FrameTooLarge)?,
+            used,
+        })
     }
 
     /// Write a bounded payload first, then atomically expose it by committing the header.
@@ -83,11 +71,11 @@ impl<'a> ResponseWriter<'a> {
         payload: &dyn ByteSource,
     ) -> Result<u32, ResponseWriteError> {
         let payload_bytes = payload.len();
-        self.preflight(payload_bytes)?;
+        let mut destination = self.payload(payload_bytes)?;
 
         if let Some(contiguous) = payload.as_contiguous() {
-            self.sink
-                .write_at(RESPONSE_HEADER_BYTES, contiguous)
+            destination
+                .write_at(0, contiguous)
                 .map_err(|_| ResponseWriteError::SinkAccess)?;
         } else {
             let mut scratch = [0_u8; 4096];
@@ -99,18 +87,14 @@ impl<'a> ResponseWriter<'a> {
                 payload
                     .read_at(offset, &mut scratch[..count])
                     .map_err(|_| ResponseWriteError::SourceAccess)?;
-                self.sink
-                    .write_at(RESPONSE_HEADER_BYTES + offset, &scratch[..count])
+                destination
+                    .write_at(offset, &scratch[..count])
                     .map_err(|_| ResponseWriteError::SinkAccess)?;
                 offset += count as u64;
             }
         }
 
-        self.commit(
-            status,
-            request_id,
-            u32::try_from(payload_bytes).map_err(|_| ResponseWriteError::FrameTooLarge)?,
-        )
+        destination.commit(status, request_id)
     }
 
     pub fn write_empty(
@@ -118,7 +102,9 @@ impl<'a> ResponseWriter<'a> {
         status: StatusCode,
         request_id: u64,
     ) -> Result<u32, ResponseWriteError> {
-        self.commit(status, request_id, 0)
+        let used = self.preflight(0)?;
+        write_header(self.sink, status, request_id, 0)?;
+        Ok(used)
     }
 
     fn preflight(&self, payload_bytes: u64) -> Result<u32, ResponseWriteError> {
@@ -133,6 +119,72 @@ impl<'a> ResponseWriter<'a> {
         }
         Ok(total as u32)
     }
+}
+
+/// Exact payload destination for one preflighted response.
+pub struct ResponsePayload<'a> {
+    sink: &'a mut dyn ByteSink,
+    payload_bytes: u32,
+    used: u32,
+}
+
+impl core::fmt::Debug for ResponsePayload<'_> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("ResponsePayload")
+            .field("payload_bytes", &self.payload_bytes)
+            .field("used", &self.used)
+            .finish()
+    }
+}
+
+impl ResponsePayload<'_> {
+    /// Commit the response header after the complete payload has been initialized.
+    pub fn commit(self, status: StatusCode, request_id: u64) -> Result<u32, ResponseWriteError> {
+        write_header(self.sink, status, request_id, self.payload_bytes)?;
+        Ok(self.used)
+    }
+}
+
+impl ByteSink for ResponsePayload<'_> {
+    fn len(&self) -> u64 {
+        u64::from(self.payload_bytes)
+    }
+
+    fn write_at(
+        &mut self,
+        offset: u64,
+        source: &[u8],
+    ) -> Result<(), virtio_accel_core::BackendError> {
+        let bytes = u64::try_from(source.len())
+            .map_err(|_| virtio_accel_core::BackendError::OutOfBounds)?;
+        let end = offset
+            .checked_add(bytes)
+            .ok_or(virtio_accel_core::BackendError::OutOfBounds)?;
+        if end > self.len() {
+            return Err(virtio_accel_core::BackendError::OutOfBounds);
+        }
+        self.sink.write_at(RESPONSE_HEADER_BYTES + offset, source)
+    }
+
+    fn as_contiguous_mut(&mut self) -> Option<&mut [u8]> {
+        let sink = self.sink.as_contiguous_mut()?;
+        let end = RESPONSE_HEADER_BYTES
+            .checked_add(u64::from(self.payload_bytes))
+            .and_then(|end| usize::try_from(end).ok())?;
+        sink.get_mut(RESPONSE_HEADER_BYTES as usize..end)
+    }
+}
+
+fn write_header(
+    sink: &mut dyn ByteSink,
+    status: StatusCode,
+    request_id: u64,
+    payload_bytes: u32,
+) -> Result<(), ResponseWriteError> {
+    let header = ResponseHeader::new(status, payload_bytes, request_id);
+    sink.write_at(0, header.as_bytes())
+        .map_err(|_| ResponseWriteError::SinkAccess)
 }
 
 #[cfg(test)]
@@ -170,11 +222,9 @@ mod tests {
     fn direct_payload_region_does_not_touch_excess_capacity() {
         let mut output = [0xaa_u8; 32];
         let mut writer = ResponseWriter::new(&mut output, 32);
-        {
-            let mut payload = writer.payload_region(4).unwrap();
-            payload.write_at(0, b"data").unwrap();
-        }
-        assert_eq!(writer.commit(StatusCode::OK, 7, 4), Ok(20));
+        let mut payload = writer.payload(4).unwrap();
+        payload.write_at(0, b"data").unwrap();
+        assert_eq!(payload.commit(StatusCode::OK, 7), Ok(20));
         assert_eq!(&output[16..20], b"data");
         assert_eq!(&output[20..], &[0xaa; 12]);
     }
@@ -184,9 +234,21 @@ mod tests {
         let mut output = [0xaa_u8; 16];
         let mut writer = ResponseWriter::new(&mut output, u32::MAX);
         assert_eq!(
-            writer.payload_region(u64::MAX).unwrap_err(),
+            writer.payload(u64::MAX).unwrap_err(),
             ResponseWriteError::FrameTooLarge
         );
         assert_eq!(output, [0xaa; 16]);
+    }
+
+    #[test]
+    fn payload_guard_commits_the_preflighted_length() {
+        let mut output = [0xaa_u8; 24];
+        let mut writer = ResponseWriter::new(&mut output, 24);
+        let mut payload = writer.payload(8).unwrap();
+        assert_eq!(payload.len(), 8);
+        assert!(payload.write_at(7, &[1, 2]).is_err());
+        payload.write_at(0, &[0; 8]).unwrap();
+        assert_eq!(payload.commit(StatusCode::OK, 9), Ok(24));
+        assert_eq!(&output[4..8], &8_u32.to_le_bytes());
     }
 }
