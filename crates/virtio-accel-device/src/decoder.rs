@@ -2,11 +2,9 @@
 //!
 //! Fixed wire values use an 80-byte stack scratch area. Transfer and artifact tails remain
 //! borrowed views over the original [`ByteSource`]. `SUBMIT` is the only allocating decode path:
-//! it retains one [`DecodedBinding`] per advertised binding and temporarily uses two `u32` arrays
-//! per binding for four-pass radix duplicate detection. All three allocations are bounded by the
-//! configured binding limit and use fallible reservation. The decoder performs a constant number
-//! of fixed-prefix reads plus one 32-byte read and four fixed radix passes per binding, so its own
-//! work is linear in the validated payload size.
+//! it retains one [`DecodedBinding`] per advertised binding, then sorts that allocation in place by
+//! slot to reject duplicates. The allocation is bounded by the configured binding limit and uses
+//! fallible reservation. No payload bytes are coalesced.
 
 use alloc::vec::Vec;
 use core::mem::size_of;
@@ -540,10 +538,6 @@ impl FrameDecoder {
         bindings
             .try_reserve_exact(count)
             .map_err(|_| BodyDecodeError::Protocol(StatusCode::OUT_OF_MEMORY))?;
-        let mut slots = Vec::new();
-        slots
-            .try_reserve_exact(count)
-            .map_err(|_| BodyDecodeError::Protocol(StatusCode::OUT_OF_MEMORY))?;
 
         let binding_base = REQUEST_HEADER_BYTES + size_of::<SubmitRequest>() as u64;
         for index in 0..count {
@@ -563,7 +557,6 @@ impl FrameDecoder {
             }
             let range = BufferRange::new(binding.offset.get(), bytes).map_err(|_| invalid())?;
             let access = AccessMode::try_from(binding.access).map_err(|_| invalid())?;
-            slots.push(binding.slot.get());
             bindings.push(DecodedBinding {
                 buffer_id: object_id(binding.buffer_id.get())?,
                 range,
@@ -572,7 +565,11 @@ impl FrameDecoder {
             });
         }
 
-        if has_duplicate_slots(&mut slots)? {
+        bindings.sort_unstable_by_key(|binding| binding.slot);
+        if bindings
+            .windows(2)
+            .any(|window| window[0].slot == window[1].slot)
+        {
             return Err(invalid());
         }
 
@@ -677,44 +674,6 @@ fn decode_transfer(
         object_id(value.buffer_id.get())?,
         BufferRange::new(value.offset.get(), bytes).map_err(|_| invalid())?,
     ))
-}
-
-fn has_duplicate_slots(slots: &mut [u32]) -> Result<bool, BodyDecodeError> {
-    if slots.len() < 2 {
-        return Ok(false);
-    }
-
-    let mut scratch = Vec::new();
-    scratch
-        .try_reserve_exact(slots.len())
-        .map_err(|_| BodyDecodeError::Protocol(StatusCode::OUT_OF_MEMORY))?;
-    scratch.resize(slots.len(), 0);
-
-    radix_pass(slots, &mut scratch, 0);
-    radix_pass(&scratch, slots, 8);
-    radix_pass(slots, &mut scratch, 16);
-    radix_pass(&scratch, slots, 24);
-    Ok(slots.windows(2).any(|window| window[0] == window[1]))
-}
-
-fn radix_pass(input: &[u32], output: &mut [u32], shift: u32) {
-    let mut counts = [0_usize; 256];
-    for value in input {
-        counts[((value >> shift) & 0xff) as usize] += 1;
-    }
-
-    let mut next = 0;
-    for count in &mut counts {
-        let start = next;
-        next += *count;
-        *count = start;
-    }
-
-    for value in input {
-        let bucket = ((value >> shift) & 0xff) as usize;
-        output[counts[bucket]] = *value;
-        counts[bucket] += 1;
-    }
 }
 
 #[cfg(test)]

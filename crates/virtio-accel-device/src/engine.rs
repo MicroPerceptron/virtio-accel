@@ -5,19 +5,24 @@
 //! executor. Transport integrations may schedule distinct processors or backend work concurrently,
 //! but state admission and response commitment remain explicit serialization boundaries.
 
+use alloc::vec::Vec;
+
 use virtio_accel_core::{
-    Accelerator, ArtifactRef, BackendError, BufferRange, BufferUsage, ByteSink, ByteSource,
-    DeviceInfo, ReleaseFailure,
+    Accelerator, ArtifactRef, BackendError, BindingRef, BufferRange, BufferUsage, ByteSink,
+    ByteSource, Capabilities, DeviceInfo, EventState, ReleaseFailure, SubmitFailure, Timeout,
 };
-use virtio_accel_proto::{Le16, Le32, Le64, ObjectPayload, StatusCode, WireConfig, WireDeviceInfo};
+use virtio_accel_proto::{
+    KnownEventState, Le16, Le32, Le64, ObjectPayload, StatusCode, SubmitResponse, WireConfig,
+    WireDeviceInfo, WireEventState,
+};
 use zerocopy::IntoBytes;
 
 use crate::{
-    BufferRecord, ChainRegion, CreateError, DecodedRequest, DecodedRequestBody, DecoderLimits,
-    DecoderLimitsError, DeviceState, DeviceStateConfigError, DeviceStateError, FrameDecoder,
-    FramePreflight, FramePreflightError, ObjectId, ObjectNamespace, ResponseWriteError,
-    ResponseWriter, UnusableFrame, preflight_command_frame, status_from_backend_error,
-    status_from_device_state_error,
+    BufferRecord, ChainRegion, CreateError, DecodedBinding, DecodedRequest, DecodedRequestBody,
+    DecoderLimits, DecoderLimitsError, DeviceState, DeviceStateConfigError, DeviceStateError,
+    FrameDecoder, FramePreflight, FramePreflightError, ObjectId, ObjectNamespace,
+    ResponseWriteError, ResponseWriter, UnusableFrame, preflight_command_frame,
+    status_from_backend_error, status_from_device_state_error,
 };
 
 pub type AcceleratorState<A> = DeviceState<
@@ -55,6 +60,14 @@ pub enum CommandOutcome {
         used: u32,
     },
     Unusable(UnusableFrame),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubmitCreateError {
+    State(DeviceStateError),
+    OutOfMemory,
+    Rejected(BackendError),
+    Validation(StatusCode),
 }
 
 /// One synchronization-free command engine for a backend instance.
@@ -263,11 +276,201 @@ impl<A: Accelerator> CommandProcessor<A> {
             DecodedRequestBody::DestroyQueue { queue_id } => {
                 self.destroy_queue(response, request_id, queue_id)
             }
-            DecodedRequestBody::Submit { .. }
-            | DecodedRequestBody::PollEvent { .. }
-            | DecodedRequestBody::CancelEvent { .. }
-            | DecodedRequestBody::DestroyEvent { .. } => {
-                self.respond_empty(response, StatusCode::UNSUPPORTED, request_id, false)
+            DecodedRequestBody::Submit {
+                queue_id,
+                program_id,
+                bindings,
+                timeout,
+            } => self.submit(
+                response, request_id, queue_id, program_id, bindings, timeout,
+            ),
+            DecodedRequestBody::PollEvent { event_id } => {
+                self.poll_event(response, request_id, event_id)
+            }
+            DecodedRequestBody::CancelEvent { event_id } => {
+                self.cancel_event(response, request_id, event_id)
+            }
+            DecodedRequestBody::DestroyEvent { event_id } => {
+                self.destroy_event(response, request_id, event_id)
+            }
+        }
+    }
+
+    fn submit(
+        &mut self,
+        response: &mut dyn ByteSink,
+        request_id: u64,
+        queue_id: ObjectId,
+        program_id: ObjectId,
+        bindings: Vec<DecodedBinding>,
+        timeout: Timeout,
+    ) -> Result<CommandOutcome, CommandProcessError> {
+        let mut buffer_ids = Vec::new();
+        if buffer_ids.try_reserve_exact(bindings.len()).is_err() {
+            return self.respond_empty(response, StatusCode::OUT_OF_MEMORY, request_id, false);
+        }
+        buffer_ids.extend(bindings.iter().map(|binding| binding.buffer_id));
+
+        let accelerator = &self.accelerator;
+        let mut admission_status = StatusCode::OK;
+        let result = self
+            .state
+            .create_event_with(queue_id, program_id, buffer_ids, |resources| {
+                let mut native_bindings = Vec::new();
+                native_bindings
+                    .try_reserve_exact(bindings.len())
+                    .map_err(|_| SubmitCreateError::OutOfMemory)?;
+                for binding in &bindings {
+                    let (buffer, info) = resources
+                        .buffer_with_info_by_id(binding.buffer_id)
+                        .map_err(SubmitCreateError::State)?;
+                    let desc = info.desc();
+                    if binding.range.end() > desc.bytes() {
+                        return Err(SubmitCreateError::Validation(StatusCode::OUT_OF_BOUNDS));
+                    }
+                    if !desc.allows_access(binding.access) {
+                        return Err(SubmitCreateError::Validation(StatusCode::PERMISSION_DENIED));
+                    }
+                    native_bindings.push(BindingRef {
+                        slot: binding.slot,
+                        buffer,
+                        range: binding.range,
+                        access: binding.access,
+                    });
+                }
+                match accelerator.submit(
+                    resources.queue(),
+                    resources.program(),
+                    &native_bindings,
+                    timeout,
+                ) {
+                    Ok(event) => Ok(event),
+                    Err(SubmitFailure::Rejected(error)) => Err(SubmitCreateError::Rejected(error)),
+                    Err(SubmitFailure::Indeterminate { error, event }) => {
+                        admission_status = status_from_backend_error(error);
+                        Ok(event)
+                    }
+                }
+            });
+
+        match result {
+            Ok(event_id) => {
+                self.respond_event_id(response, admission_status, request_id, event_id, true)
+            }
+            Err(CreateError::State(error)) => self.respond_state_error(response, request_id, error),
+            Err(CreateError::Provider(SubmitCreateError::Rejected(error))) => {
+                self.respond_backend_error(response, request_id, error, false)
+            }
+            Err(CreateError::Provider(SubmitCreateError::OutOfMemory)) => {
+                self.respond_empty(response, StatusCode::OUT_OF_MEMORY, request_id, false)
+            }
+            Err(CreateError::Provider(SubmitCreateError::Validation(status))) => {
+                self.respond_empty(response, status, request_id, false)
+            }
+            Err(CreateError::Provider(SubmitCreateError::State(_))) => {
+                self.recovery_response(response, request_id)
+            }
+        }
+    }
+
+    fn poll_event(
+        &mut self,
+        response: &mut dyn ByteSink,
+        request_id: u64,
+        event_id: ObjectId,
+    ) -> Result<CommandOutcome, CommandProcessError> {
+        let event = match self.state.event_record(event_id) {
+            Ok(record) => match record.resource() {
+                Ok(event) => event,
+                Err(error) => return self.respond_state_error(response, request_id, error),
+            },
+            Err(error) => return self.respond_state_error(response, request_id, error),
+        };
+        match self.accelerator.poll_event(event) {
+            Ok(state) => {
+                let payload = wire_event_state(state);
+                self.respond_bytes(
+                    response,
+                    StatusCode::OK,
+                    request_id,
+                    payload.as_bytes(),
+                    false,
+                )
+            }
+            Err(error) => self.respond_backend_error(response, request_id, error, false),
+        }
+    }
+
+    fn cancel_event(
+        &mut self,
+        response: &mut dyn ByteSink,
+        request_id: u64,
+        event_id: ObjectId,
+    ) -> Result<CommandOutcome, CommandProcessError> {
+        if !self
+            .info
+            .capabilities
+            .contains(Capabilities::EVENT_CANCELLATION)
+        {
+            return self.respond_empty(response, StatusCode::UNSUPPORTED, request_id, false);
+        }
+        let event = match self.state.event_record(event_id) {
+            Ok(record) => match record.resource() {
+                Ok(event) => event,
+                Err(error) => return self.respond_state_error(response, request_id, error),
+            },
+            Err(error) => return self.respond_state_error(response, request_id, error),
+        };
+        match self.accelerator.cancel_event(event) {
+            Ok(()) => self.respond_empty(response, StatusCode::OK, request_id, true),
+            Err(error) => self.respond_backend_error(response, request_id, error, false),
+        }
+    }
+
+    fn destroy_event(
+        &mut self,
+        response: &mut dyn ByteSink,
+        request_id: u64,
+        event_id: ObjectId,
+    ) -> Result<CommandOutcome, CommandProcessError> {
+        let state = {
+            let event = match self.state.event_record(event_id) {
+                Ok(record) => match record.resource() {
+                    Ok(event) => event,
+                    Err(error) => return self.respond_state_error(response, request_id, error),
+                },
+                Err(error) => return self.respond_state_error(response, request_id, error),
+            };
+            self.accelerator.poll_event(event)
+        };
+        match state {
+            Ok(EventState::Pending) => {
+                return self.respond_empty(response, StatusCode::BUSY, request_id, false);
+            }
+            Ok(EventState::Complete | EventState::Failed(_) | EventState::Cancelled) => {}
+            Err(error) => {
+                return self.respond_backend_error(response, request_id, error, false);
+            }
+        }
+
+        let event = match self.state.begin_event_release(event_id) {
+            Ok(event) => event,
+            Err(error) => return self.respond_state_error(response, request_id, error),
+        };
+        match self.accelerator.destroy_event(event) {
+            Ok(()) => match self.state.commit_event_release(event_id) {
+                Ok(()) => self.respond_empty(response, StatusCode::OK, request_id, true),
+                Err(_) => self.recovery_response(response, request_id),
+            },
+            Err(ReleaseFailure::Rejected { error, resource }) => {
+                match self.state.restore_event_release(event_id, resource) {
+                    Ok(()) => self.respond_backend_error(response, request_id, error, false),
+                    Err(_) => self.recovery_response(response, request_id),
+                }
+            }
+            Err(ReleaseFailure::Indeterminate { .. }) => {
+                let _ = self.state.commit_event_release(event_id);
+                self.recovery_response(response, request_id)
             }
         }
     }
@@ -536,6 +739,20 @@ impl<A: Accelerator> CommandProcessor<A> {
         )
     }
 
+    fn respond_event_id(
+        &mut self,
+        response: &mut dyn ByteSink,
+        status: StatusCode,
+        request_id: u64,
+        id: ObjectId,
+        mutated: bool,
+    ) -> Result<CommandOutcome, CommandProcessError> {
+        let payload = SubmitResponse {
+            event_id: Le64::new(id.get()),
+        };
+        self.respond_bytes(response, status, request_id, payload.as_bytes(), mutated)
+    }
+
     fn respond_bytes(
         &mut self,
         response: &mut dyn ByteSink,
@@ -627,5 +844,19 @@ fn wire_device_info(info: DeviceInfo) -> WireDeviceInfo {
         max_bindings_per_submission: Le32::new(info.limits.max_bindings_per_submission),
         max_buffer_bytes: Le64::new(info.limits.max_buffer_bytes),
         max_artifact_bytes: Le64::new(info.limits.max_artifact_bytes),
+    }
+}
+
+fn wire_event_state(state: EventState) -> WireEventState {
+    let (state, error) = match state {
+        EventState::Pending => (KnownEventState::Pending, StatusCode::OK),
+        EventState::Complete => (KnownEventState::Complete, StatusCode::OK),
+        EventState::Failed(error) => (KnownEventState::Failed, status_from_backend_error(error)),
+        EventState::Cancelled => (KnownEventState::Cancelled, StatusCode::OK),
+    };
+    WireEventState {
+        state: Le16::new(state as u16),
+        error: Le16::new(error.0),
+        reserved: Le32::new(0),
     }
 }
