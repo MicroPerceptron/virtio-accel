@@ -430,7 +430,8 @@ indeterminate.
 
 Portable crates **MUST NOT** select an operating system, VMM, kernel, vendor API, or global runtime.
 
-- `virtio-accel-proto` and `virtio-accel-core` require neither `std` nor `alloc`.
+- `virtio-accel-proto`, `virtio-accel-transport`, and `virtio-accel-core` require neither `std` nor
+  `alloc`.
 - `virtio-accel-device` and the future reference guest/queue layers may require `alloc` but not
   `std`.
 - reference host tooling and mock backends may require `std`.
@@ -507,7 +508,11 @@ model or is identified as an implementation helper.
 | `SubmitResponse` | Event ownership payload for accepted or indeterminate submission |
 | `WireEventState`, `KnownEventState`, `UnknownEventState` | Event-poll response payload and extensible raw state handling |
 | `DecodeError`, `read_exact`, `checked_array_bytes` | Protocol decoding helpers; implementation-only |
-| `ChainRegion`, `ChainLayout`, `SegmentedSource`, `SegmentedSink` | Transport-neutral flattened-chain metadata and test/reference byte ports |
+| `QueueSize`, `QueueState`, `QueueEpoch`, `QueueControl` | Validated Virtio queue configuration and reset lifecycle |
+| `ChainId`, `ChainRegion`, `ChainLayout`, `ChainIo`, `DeviceChain` | Reset-scoped descriptor-chain identity, flattened metadata, and mapped byte-port presentation |
+| `DriverQueue`, `PublishedChain`, `UsedChain`, `ReclaimedChain`, `PublishError` | Ownership-preserving driver publication, completion, reset reclamation, and retryable backpressure |
+| `DeviceQueue`, `UsedLength`, `NotificationHint`, `NotificationRecheck` | Consuming device completion, exact used length, and lost-wakeup-safe notification decisions |
+| `SegmentedSource`, `SegmentedSink` | Device test/reference byte ports over segmented storage |
 | `FrameDecoder`, `DecodedRequest`, `DecodedRequestBody`, `FramePreflight` | Complete untrusted request validation before semantic dispatch |
 | `ResponseWriter`, `ResponsePayload` | Bounded response framing and exact direct payload destination |
 | `ObjectNamespace`, `ObjectKind`, `ObjectId` | Device-private namespaced typed object identity |

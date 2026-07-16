@@ -129,6 +129,7 @@ jobs:
           cargo check
           -p virtio-accel-cleanroom
           -p virtio-accel-proto
+          -p virtio-accel-transport
           -p virtio-accel-core
           -p virtio-accel-device
           -p virtio-accel

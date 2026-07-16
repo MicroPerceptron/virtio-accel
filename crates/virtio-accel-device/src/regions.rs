@@ -1,146 +1,14 @@
-//! Transport-neutral descriptor metadata and segmented byte ports.
+//! Segmented byte ports over transport-neutral descriptor metadata.
 //!
-//! Layout validation is allocation-free and visits each descriptor once. Each segmented port
-//! access scans at most the segment list and copies only the requested range; constructors reject
-//! empty, zero-length, and overflowing segment collections.
+//! Each segmented port access scans at most the segment list and copies only the requested range;
+//! constructors reject empty, zero-length, and overflowing segment collections.
 
 use core::cmp::min;
 
 use virtio_accel_core::{BackendError, ByteSink, ByteSource};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RegionDirection {
-    DeviceReadable,
-    DeviceWritable,
-}
-
-/// Direction and length of one flattened chain region, without any transport identity or address.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ChainRegion {
-    pub direction: RegionDirection,
-    pub bytes: u64,
-}
-
-impl ChainRegion {
-    pub const fn readable(bytes: u64) -> Self {
-        Self {
-            direction: RegionDirection::DeviceReadable,
-            bytes,
-        }
-    }
-
-    pub const fn writable(bytes: u64) -> Self {
-        Self {
-            direction: RegionDirection::DeviceWritable,
-            bytes,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChainLayoutError {
-    DescriptorCount,
-    ZeroLength,
-    Direction,
-    LengthOverflow,
-    PortLengthMismatch,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ChainLayout {
-    descriptor_count: u16,
-    readable_descriptors: u16,
-    writable_descriptors: u16,
-    readable_bytes: u64,
-    writable_bytes: u64,
-}
-
-impl ChainLayout {
-    pub const fn descriptor_count(self) -> u16 {
-        self.descriptor_count
-    }
-
-    pub const fn readable_descriptors(self) -> u16 {
-        self.readable_descriptors
-    }
-
-    pub const fn writable_descriptors(self) -> u16 {
-        self.writable_descriptors
-    }
-
-    pub const fn readable_bytes(self) -> u64 {
-        self.readable_bytes
-    }
-
-    pub const fn writable_bytes(self) -> u64 {
-        self.writable_bytes
-    }
-
-    pub fn validate_ports(
-        self,
-        request: &dyn ByteSource,
-        response: &dyn ByteSink,
-    ) -> Result<(), ChainLayoutError> {
-        if request.len() != self.readable_bytes || response.len() != self.writable_bytes {
-            return Err(ChainLayoutError::PortLengthMismatch);
-        }
-        Ok(())
-    }
-}
-
-/// Validate transport-neutral descriptor metadata before any frame bytes are decoded.
-///
-/// The descriptors contain only direction and length. Guest addresses, queue indices, and mapping
-/// details remain owned by the transport adapter.
-pub fn validate_chain_layout(
-    regions: &[ChainRegion],
-    max_descriptors: u16,
-) -> Result<ChainLayout, ChainLayoutError> {
-    if regions.len() < 2 || regions.len() > usize::from(max_descriptors) {
-        return Err(ChainLayoutError::DescriptorCount);
-    }
-
-    let mut readable_descriptors = 0_u16;
-    let mut writable_descriptors = 0_u16;
-    let mut readable_bytes = 0_u64;
-    let mut writable_bytes = 0_u64;
-    let mut saw_writable = false;
-
-    for region in regions {
-        if region.bytes == 0 {
-            return Err(ChainLayoutError::ZeroLength);
-        }
-        match region.direction {
-            RegionDirection::DeviceReadable => {
-                if saw_writable {
-                    return Err(ChainLayoutError::Direction);
-                }
-                readable_descriptors += 1;
-                readable_bytes = readable_bytes
-                    .checked_add(region.bytes)
-                    .ok_or(ChainLayoutError::LengthOverflow)?;
-            }
-            RegionDirection::DeviceWritable => {
-                saw_writable = true;
-                writable_descriptors += 1;
-                writable_bytes = writable_bytes
-                    .checked_add(region.bytes)
-                    .ok_or(ChainLayoutError::LengthOverflow)?;
-            }
-        }
-    }
-
-    if readable_descriptors == 0 || writable_descriptors == 0 {
-        return Err(ChainLayoutError::Direction);
-    }
-    Ok(ChainLayout {
-        descriptor_count: regions.len() as u16,
-        readable_descriptors,
-        writable_descriptors,
-        readable_bytes,
-        writable_bytes,
-    })
-}
+pub use virtio_accel_transport::{
+    ChainLayout, ChainLayoutError, ChainRegion, RegionDirection, validate_chain_layout,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SegmentedRegionError {
@@ -370,50 +238,6 @@ fn checked_range_u64(offset: u64, bytes: u64, len: u64) -> Result<(), BackendErr
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn chain_layout_rejects_direction_and_length_errors() {
-        assert_eq!(
-            validate_chain_layout(&[ChainRegion::readable(16)], 8),
-            Err(ChainLayoutError::DescriptorCount)
-        );
-        assert_eq!(
-            validate_chain_layout(
-                &[
-                    ChainRegion::readable(16),
-                    ChainRegion::writable(16),
-                    ChainRegion::readable(1),
-                ],
-                8,
-            ),
-            Err(ChainLayoutError::Direction)
-        );
-        assert_eq!(
-            validate_chain_layout(&[ChainRegion::readable(0), ChainRegion::writable(16),], 8,),
-            Err(ChainLayoutError::ZeroLength)
-        );
-        assert_eq!(
-            validate_chain_layout(
-                &[
-                    ChainRegion::readable(u64::MAX),
-                    ChainRegion::readable(1),
-                    ChainRegion::writable(16),
-                ],
-                8,
-            ),
-            Err(ChainLayoutError::LengthOverflow)
-        );
-
-        let layout =
-            validate_chain_layout(&[ChainRegion::readable(16), ChainRegion::writable(16)], 8)
-                .unwrap();
-        let request = [0_u8; 15];
-        let response = [0_u8; 16];
-        assert_eq!(
-            layout.validate_ports(&request, &response),
-            Err(ChainLayoutError::PortLengthMismatch)
-        );
-    }
 
     #[test]
     fn segmented_ports_cross_every_boundary() {

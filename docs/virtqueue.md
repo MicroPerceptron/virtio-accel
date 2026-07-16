@@ -255,6 +255,24 @@ The portable conformance suite uses these stable case identifiers:
 
 The byte vectors under [`conformance/v1.0`](../conformance/v1.0/) cover protocol frames. Queue-model
 implementations consume the case identifiers above so the same behavioral scenarios can be reused
-by the in-memory split ring and future platform transports. Executable region/queue ports are
-tracked by issue #17, the split-ring assertions by #18, guest compatibility behavior by #19, and
-full-path assertions by #20.
+by the in-memory split ring and future platform transports. The dependency-free
+`virtio-accel-transport` crate provides the executable region, ownership, reset-epoch, backpressure,
+and notification port contracts. Split-ring assertions remain tracked by issue #18, guest
+compatibility behavior by #19, and full-path assertions by #20.
+
+## Appendix A: portable Rust queue-port mapping
+
+This appendix is non-normative. `DriverQueue::publish` consumes a complete driver chain on success
+and returns it unchanged through `PublishError` on pre-publication failure. `pop_used` or `reset`
+returns every successfully published chain, preventing safe callers from reusing descriptors while
+the device owns them.
+
+`DeviceQueue::pop_available` returns a non-`Copy` `DeviceChain`. Completion consumes that value and
+must compare its `ChainId` epoch with current `QueueState` before publishing bytes or ring state.
+`ChainIo` contains only flattened `ChainRegion` values and generic readable/writable byte ports; it
+cannot carry guest addresses or a concrete descriptor type.
+
+All steady-state queue-port methods are specified as nonblocking and allocation-free in their Rust
+documentation. Publication/completion establish release ordering, their peer-side pops establish
+acquire ordering, and notification enablement returns `WorkPending` when its mandatory recheck finds
+work that raced with suppression.

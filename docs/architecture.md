@@ -119,6 +119,23 @@ Command virtqueue zero is the baseline bidirectional transport queue. One descri
 device-readable request bytes and device-writable response bytes. Completion may be out of
 submission order, keyed by the request ID.
 
+`virtio-accel-transport` defines the queue boundary without choosing a ring implementation or guest
+memory library. Driver publication transfers ownership of a complete chain until used-ring
+consumption or reset returns it. Device pop returns a non-`Copy` chain consumed by completion. Queue
+identities include a monotonic reset epoch, so stale completion is rejected before guest bytes, a
+used element, or a notification can be published.
+
+Publication and completion are release boundaries for request and response bytes; the corresponding
+pop operations are acquire boundaries. Notification enablement includes the required atomic recheck,
+represented explicitly as `Idle` or `WorkPending`. Concrete adapters may use atomics and atomic
+pointers for shared indices and ownership transfer, but the portable traits require no lock, thread,
+executor, or global runtime.
+
+Queue configuration may reserve storage bounded by the validated queue size. Every steady-state
+operation is nonblocking and heap-allocation-free: publish, pop, complete, notification suppression,
+notification recheck, and reset. Reset may move already-owned storage into a reclamation result but
+does not allocate or wait for a peer.
+
 The baseline `SUBMIT` command returns an event object; `POLL_EVENT` provides portable progress without
 requiring unsolicited device writes. Optional multi-queue and event-queue features are reserved for
 later validation. Split and packed virtqueue mechanics belong to transport adapters, not the command
@@ -131,7 +148,9 @@ Virtio queue index.
 
 The semantic hot path uses associated handle types and borrowed binding slices, avoiding trait-object
 dispatch and per-binding boxing. Wire decoding will operate directly over validated descriptor-backed
-regions. Object lookup is constant time and bounded by advertised limits.
+regions. Object lookup is constant time and bounded by advertised limits. The queue ports add no
+allocation or copy to the steady-state path; mapping implementations can present borrowed segmented
+byte ports directly to the command processor.
 
 `WRITE_BUFFER` and `READ_BUFFER` are the baseline's explicit content-copy boundaries. Device-local
 memory may require bounded staging during those operations. Allocation, submission, polling, and
@@ -184,8 +203,8 @@ discover an undocumented copy.
 
 ## Next implementation boundary
 
-The portable command engine depends only on `virtio-accel-proto` and `virtio-accel-core`. Its
-baseline processor:
+The portable command engine depends on `virtio-accel-proto`, `virtio-accel-core`, and the
+transport-neutral region metadata re-exported by `virtio-accel-device`. Its baseline processor:
 
 1. Decodes one bounded request from abstract readable/writable byte regions.
 2. Maintains typed object records and context dependency counts.
@@ -193,6 +212,7 @@ baseline processor:
 4. Passes transfer and artifact regions directly to backend byte ports.
 5. Produces a response without knowing about rust-vmm or a host operating system.
 
-Submission/event retention and deterministic reset complete the engine. The next boundary is a thin
-rust-vmm adapter supplying `virtio-device`, `virtio-queue`, and `vm-memory` integration. Linux
-vhost-user and an in-kernel guest driver remain later platform layers.
+Submission/event retention and deterministic reset complete the engine. The next boundary is the
+in-memory split-virtqueue model implementing the portable queue ports, followed by a thin rust-vmm
+adapter supplying `virtio-device`, `virtio-queue`, and `vm-memory` integration. Linux vhost-user and
+an in-kernel guest driver remain later platform layers.

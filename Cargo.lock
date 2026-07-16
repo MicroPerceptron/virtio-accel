@@ -106,6 +106,7 @@ dependencies = [
  "virtio-accel-device",
  "virtio-accel-mock",
  "virtio-accel-proto",
+ "virtio-accel-transport",
 ]
 
 [[package]]
@@ -130,6 +131,7 @@ dependencies = [
  "virtio-accel-core",
  "virtio-accel-mock",
  "virtio-accel-proto",
+ "virtio-accel-transport",
  "zerocopy",
 ]
 
@@ -149,6 +151,10 @@ dependencies = [
  "virtio-accel-cleanroom",
  "zerocopy",
 ]
+
+[[package]]
+name = "virtio-accel-transport"
+version = "0.1.0"
 
 [[package]]
 name = "zerocopy"

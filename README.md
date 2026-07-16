@@ -11,6 +11,8 @@ claimed virtio device ID.
 ## Workspace
 
 - `virtio-accel-proto`: `no_std`, pointer-free, little-endian protocol 1.0 wire structures.
+- `virtio-accel-transport`: dependency-free `no_std` descriptor-chain, queue, reset, and
+  notification ports.
 - `virtio-accel-core`: `no_std` backend lifecycle, memory, program, queue, and event contracts.
 - `virtio-accel-device`: `no_std + alloc` device-owned state, including bounded generational IDs.
 - `virtio-accel-mock`: cross-platform in-memory backend that exercises the complete lifecycle.
@@ -21,7 +23,10 @@ claimed virtio device ID.
 The crate dependency direction is:
 
 ```text
-transport adapters (future: rust-vmm, bare metal, tests)
+transport implementations (split ring, rust-vmm, bare metal)
+                         |
+                         v
+             virtio-accel-transport
                          |
                          v
               virtio-accel-device
@@ -33,8 +38,9 @@ transport adapters (future: rust-vmm, bare metal, tests)
                     provider adapters (future)
 ```
 
-Neither the wire protocol nor the device-state layer is allowed to leak transport descriptors or
-guest addresses into a provider backend.
+The transport crate exposes reset-scoped chain identities, flattened direction/length metadata, and
+owned publication/completion tokens. Neither it nor the device-state layer leaks guest addresses,
+ring pointers, or concrete descriptor types into the command engine or provider backend.
 
 ## Protocol 1.0 candidate surface
 
