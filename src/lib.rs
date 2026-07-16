@@ -9,4 +9,5 @@
 pub use virtio_accel_core as core;
 pub use virtio_accel_device as device;
 pub use virtio_accel_proto as proto;
+pub use virtio_accel_split_queue as split_queue;
 pub use virtio_accel_transport as transport;

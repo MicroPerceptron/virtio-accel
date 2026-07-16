@@ -136,6 +136,16 @@ operation is nonblocking and heap-allocation-free: publish, pop, complete, notif
 notification recheck, and reset. Reset may move already-owned storage into a reclamation result but
 does not allocate or wait for a peer.
 
+`virtio-accel-split-queue` is the deterministic executable implementation of that boundary. It
+preallocates descriptor ownership, chain records, available entries, and used entries at
+configuration. Its split-ring counters use wrapping `u16` arithmetic, direct chains retain their
+scatter/gather buffers, and profile-invalid flags or indirect descriptors are classified before
+byte access. Driver and device operations take `&mut SplitQueue`, so ordinary ring state needs no
+atomics, atomic pointers, locks, or compare-and-swap loops. Non-atomic `Rc` ownership keeps a reset
+reclamation token and a consumed device token tied to the same buffers; one `AtomicU64` reset epoch
+is the only synchronization primitive, because it must invalidate byte ports already issued to a
+device token before driver ownership is reclaimed.
+
 The baseline `SUBMIT` command returns an event object; `POLL_EVENT` provides portable progress without
 requiring unsolicited device writes. Optional multi-queue and event-queue features are reserved for
 later validation. Split and packed virtqueue mechanics belong to transport adapters, not the command
@@ -212,7 +222,8 @@ transport-neutral region metadata re-exported by `virtio-accel-device`. Its base
 4. Passes transfer and artifact regions directly to backend byte ports.
 5. Produces a response without knowing about rust-vmm or a host operating system.
 
-Submission/event retention and deterministic reset complete the engine. The next boundary is the
-in-memory split-virtqueue model implementing the portable queue ports, followed by a thin rust-vmm
-adapter supplying `virtio-device`, `virtio-queue`, and `vm-memory` integration. Linux vhost-user and
-an in-kernel guest driver remain later platform layers.
+Submission/event retention, deterministic reset, and the bounded split-virtqueue model complete the
+portable device side. The next boundary is the no-std reference guest in issue #19, followed by the
+full guest-to-command-engine lifecycle in issue #20. A thin rust-vmm adapter supplying
+`virtio-device`, `virtio-queue`, and `vm-memory` integration remains a later platform layer, as do
+Linux vhost-user and an in-kernel guest driver.

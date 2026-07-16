@@ -9,6 +9,7 @@
 use bitflags::bitflags;
 use core::fmt;
 use core::num::{NonZeroU32, NonZeroU64};
+use virtio_accel_transport::{ByteAccessError, ReadableBytes, WritableBytes};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackendError {
@@ -450,6 +451,36 @@ pub trait ByteSource: fmt::Debug {
     }
 }
 
+/// Zero-copy core byte-source adapter over a transport-owned readable port.
+#[derive(Debug)]
+pub struct TransportByteSource<'a, T: ?Sized>(&'a T);
+
+impl<'a, T: ?Sized> TransportByteSource<'a, T> {
+    /// Borrow a transport-readable port without copying or coalescing its bytes.
+    pub const fn new(source: &'a T) -> Self {
+        Self(source)
+    }
+
+    /// Recover the wrapped transport port.
+    pub const fn into_inner(self) -> &'a T {
+        self.0
+    }
+}
+
+impl<T: ReadableBytes + ?Sized> ByteSource for TransportByteSource<'_, T> {
+    fn len(&self) -> u64 {
+        ReadableBytes::len(self.0)
+    }
+
+    fn read_at(&self, offset: u64, target: &mut [u8]) -> Result<(), BackendError> {
+        ReadableBytes::read_at(self.0, offset, target).map_err(backend_error_from_byte_access)
+    }
+
+    fn as_contiguous(&self) -> Option<&[u8]> {
+        ReadableBytes::as_contiguous(self.0)
+    }
+}
+
 impl ByteSource for [u8] {
     fn len(&self) -> u64 {
         self.len() as u64
@@ -505,6 +536,44 @@ pub trait ByteSink: fmt::Debug {
     /// A returned slice has length [`Self::len`] and represents the same bytes as `write_at`.
     fn as_contiguous_mut(&mut self) -> Option<&mut [u8]> {
         None
+    }
+}
+
+/// Zero-copy core byte-sink adapter over a transport-owned writable port.
+#[derive(Debug)]
+pub struct TransportByteSink<'a, T: ?Sized>(&'a mut T);
+
+impl<'a, T: ?Sized> TransportByteSink<'a, T> {
+    /// Borrow a transport-writable port without copying or coalescing its bytes.
+    pub const fn new(sink: &'a mut T) -> Self {
+        Self(sink)
+    }
+
+    /// Recover the wrapped transport port.
+    pub fn into_inner(self) -> &'a mut T {
+        self.0
+    }
+}
+
+impl<T: WritableBytes + ?Sized> ByteSink for TransportByteSink<'_, T> {
+    fn len(&self) -> u64 {
+        WritableBytes::len(self.0)
+    }
+
+    fn write_at(&mut self, offset: u64, source: &[u8]) -> Result<(), BackendError> {
+        WritableBytes::write_at(self.0, offset, source).map_err(backend_error_from_byte_access)
+    }
+
+    fn as_contiguous_mut(&mut self) -> Option<&mut [u8]> {
+        WritableBytes::as_contiguous_mut(self.0)
+    }
+}
+
+const fn backend_error_from_byte_access(error: ByteAccessError) -> BackendError {
+    match error {
+        ByteAccessError::OutOfBounds => BackendError::OutOfBounds,
+        ByteAccessError::Busy | ByteAccessError::Reset => BackendError::Busy,
+        ByteAccessError::Access => BackendError::DeviceLost,
     }
 }
 
@@ -775,6 +844,54 @@ pub trait Accelerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    struct TransportBytes([u8; 4]);
+
+    impl ReadableBytes for TransportBytes {
+        fn len(&self) -> u64 {
+            self.0.as_slice().len() as u64
+        }
+
+        fn read_at(&self, offset: u64, target: &mut [u8]) -> Result<(), ByteAccessError> {
+            let start = usize::try_from(offset).map_err(|_| ByteAccessError::OutOfBounds)?;
+            let end = start
+                .checked_add(target.len())
+                .filter(|end| *end <= self.0.as_slice().len())
+                .ok_or(ByteAccessError::OutOfBounds)?;
+            target.copy_from_slice(&self.0[start..end]);
+            Ok(())
+        }
+    }
+
+    impl WritableBytes for TransportBytes {
+        fn len(&self) -> u64 {
+            self.0.as_slice().len() as u64
+        }
+
+        fn write_at(&mut self, offset: u64, source: &[u8]) -> Result<(), ByteAccessError> {
+            let start = usize::try_from(offset).map_err(|_| ByteAccessError::OutOfBounds)?;
+            let end = start
+                .checked_add(source.len())
+                .filter(|end| *end <= self.0.as_slice().len())
+                .ok_or(ByteAccessError::OutOfBounds)?;
+            self.0[start..end].copy_from_slice(source);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn transport_byte_adapters_preserve_segment_ports_without_copying() {
+        let mut bytes = TransportBytes(*b"abcd");
+        let source = TransportByteSource::new(&bytes);
+        let mut read = [0; 2];
+        ByteSource::read_at(&source, 1, &mut read).unwrap();
+        assert_eq!(&read, b"bc");
+
+        let mut sink = TransportByteSink::new(&mut bytes);
+        ByteSink::write_at(&mut sink, 2, b"xy").unwrap();
+        assert_eq!(&bytes.0, b"abxy");
+    }
 
     #[test]
     fn buffer_descriptors_reject_invalid_alignment() {

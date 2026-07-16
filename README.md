@@ -13,6 +13,7 @@ claimed virtio device ID.
 - `virtio-accel-proto`: `no_std`, pointer-free, little-endian protocol 1.0 wire structures.
 - `virtio-accel-transport`: dependency-free `no_std` descriptor-chain, queue, reset, and
   notification ports.
+- `virtio-accel-split-queue`: `no_std + alloc` bounded in-memory split-ring reference model.
 - `virtio-accel-core`: `no_std` backend lifecycle, memory, program, queue, and event contracts.
 - `virtio-accel-device`: `no_std + alloc` device-owned state, including bounded generational IDs.
 - `virtio-accel-mock`: cross-platform in-memory backend that exercises the complete lifecycle.
@@ -23,24 +24,19 @@ claimed virtio device ID.
 The crate dependency direction is:
 
 ```text
-transport implementations (split ring, rust-vmm, bare metal)
-                         |
-                         v
-             virtio-accel-transport
-                         |
-                         v
-              virtio-accel-device
-                 /             \
-                v               v
-    virtio-accel-proto   virtio-accel-core
-                                  |
-                                  v
-                    provider adapters (future)
+virtio-accel-split-queue ---> virtio-accel-transport
+                                      ^
+                                      |
+virtio-accel-device ----------+-------+------> virtio-accel-core
+          |                                          |
+          +-----> virtio-accel-proto                 v
+                                             provider adapters
 ```
 
-The transport crate exposes reset-scoped chain identities, flattened direction/length metadata, and
-owned publication/completion tokens. Neither it nor the device-state layer leaks guest addresses,
-ring pointers, or concrete descriptor types into the command engine or provider backend.
+Arrows point from a crate to its dependency. The transport crate exposes reset-scoped chain
+identities, flattened direction/length metadata, and owned publication/completion tokens. Neither
+it nor the device-state layer leaks guest addresses, ring pointers, or concrete descriptor types
+into the command engine or provider backend.
 
 ## Protocol 1.0 candidate surface
 

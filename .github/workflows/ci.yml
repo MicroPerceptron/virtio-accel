@@ -132,6 +132,7 @@ jobs:
           -p virtio-accel-transport
           -p virtio-accel-core
           -p virtio-accel-device
+          -p virtio-accel-split-queue
           -p virtio-accel
           --target ${{ matrix.target }}
           --no-default-features
