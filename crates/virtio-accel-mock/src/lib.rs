@@ -5,6 +5,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod reference;
+
+use core::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::vec::Vec;
@@ -15,9 +18,14 @@ use virtio_accel_core::{
     ReleaseFailure, SubmitFailure, TargetIdentity, Timeout, validate_bindings,
 };
 
+use reference::Operation;
+
 const EVENT_PENDING: u8 = 0;
-const EVENT_COMPLETE: u8 = 1;
-const EVENT_CANCELLED: u8 = 2;
+const EVENT_EXECUTING: u8 = 1;
+const EVENT_COMPLETE: u8 = 2;
+const EVENT_CANCELLED: u8 = 3;
+const EVENT_DEVICE_LOST: u8 = 4;
+const TRANSFER_CHUNK_BYTES: usize = 256;
 
 #[derive(Clone, Debug)]
 pub struct MockContext {
@@ -28,7 +36,7 @@ pub struct MockContext {
 pub struct MockBuffer {
     context_id: u64,
     desc: BufferDesc,
-    data: Vec<u8>,
+    data: Arc<[AtomicU8]>,
 }
 
 #[derive(Clone, Debug)]
@@ -37,6 +45,7 @@ pub struct MockProgram {
     format: ArtifactFormat,
     target: TargetIdentity,
     payload_bytes: usize,
+    operation: Operation,
 }
 
 impl MockProgram {
@@ -60,7 +69,70 @@ pub struct MockQueue {
 
 #[derive(Clone, Debug)]
 pub struct MockEvent {
-    state: Arc<AtomicU8>,
+    inner: Arc<MockEventInner>,
+}
+
+#[derive(Debug)]
+struct MockEventInner {
+    state: AtomicU8,
+    invocation: MockInvocation,
+}
+
+#[derive(Clone, Debug)]
+struct BufferSlice {
+    data: Arc<[AtomicU8]>,
+    range: Range<usize>,
+}
+
+#[derive(Debug)]
+enum MockInvocation {
+    Barrier,
+    Copy {
+        source: BufferSlice,
+        target: BufferSlice,
+    },
+    Fill {
+        target: BufferSlice,
+        value: u8,
+    },
+    Xor {
+        target: BufferSlice,
+        value: u8,
+    },
+}
+
+impl MockInvocation {
+    fn execute(&self) {
+        match self {
+            Self::Barrier => {}
+            Self::Copy { source, target } => {
+                let reverse = Arc::ptr_eq(&source.data, &target.data)
+                    && target.range.start > source.range.start
+                    && target.range.start < source.range.end;
+                if reverse {
+                    for index in (0..source.range.len()).rev() {
+                        let byte = source.data[source.range.start + index].load(Ordering::Relaxed);
+                        target.data[target.range.start + index].store(byte, Ordering::Relaxed);
+                    }
+                } else {
+                    for index in 0..source.range.len() {
+                        let byte = source.data[source.range.start + index].load(Ordering::Relaxed);
+                        target.data[target.range.start + index].store(byte, Ordering::Relaxed);
+                    }
+                }
+            }
+            Self::Fill { target, value } => {
+                for byte in &target.data[target.range.clone()] {
+                    byte.store(*value, Ordering::Relaxed);
+                }
+            }
+            Self::Xor { target, value } => {
+                for byte in &target.data[target.range.clone()] {
+                    byte.fetch_xor(*value, Ordering::Relaxed);
+                }
+            }
+        }
+    }
 }
 
 pub struct MockAccelerator {
@@ -101,10 +173,28 @@ impl Default for MockAccelerator {
 impl MockAccelerator {
     pub fn complete(&self, event: &MockEvent) -> Result<(), BackendError> {
         event
+            .inner
             .state
             .compare_exchange(
                 EVENT_PENDING,
-                EVENT_COMPLETE,
+                EVENT_EXECUTING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|_| BackendError::Busy)?;
+        event.inner.invocation.execute();
+        event.inner.state.store(EVENT_COMPLETE, Ordering::Release);
+        Ok(())
+    }
+
+    /// Fail a pending event before execution, simulating harness-controlled device loss.
+    pub fn fail_device_lost(&self, event: &MockEvent) -> Result<(), BackendError> {
+        event
+            .inner
+            .state
+            .compare_exchange(
+                EVENT_PENDING,
+                EVENT_DEVICE_LOST,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
@@ -131,6 +221,82 @@ impl MockAccelerator {
             .filter(|end| *end <= total)
             .ok_or(BackendError::OutOfBounds)?;
         Ok(start..end)
+    }
+
+    fn binding_for_slot<'slice, 'buffer>(
+        bindings: &'slice [BindingRef<'buffer, MockBuffer>],
+        slot: u32,
+    ) -> Option<&'slice BindingRef<'buffer, MockBuffer>> {
+        bindings.iter().find(|binding| binding.slot == slot)
+    }
+
+    fn buffer_slice(binding: &BindingRef<'_, MockBuffer>) -> Result<BufferSlice, BackendError> {
+        let bytes =
+            usize::try_from(binding.range.bytes()).map_err(|_| BackendError::OutOfBounds)?;
+        Ok(BufferSlice {
+            data: Arc::clone(&binding.buffer.data),
+            range: Self::checked_range(binding.buffer.data.len(), binding.range.offset, bytes)?,
+        })
+    }
+
+    fn prepare_invocation(
+        operation: Operation,
+        bindings: &[BindingRef<'_, MockBuffer>],
+    ) -> Result<MockInvocation, BackendError> {
+        let incompatible = || BackendError::Incompatible;
+        match operation {
+            Operation::Barrier { slot } => {
+                if bindings.len() != 1 || Self::binding_for_slot(bindings, slot).is_none() {
+                    return Err(incompatible());
+                }
+                Ok(MockInvocation::Barrier)
+            }
+            Operation::Copy {
+                source_slot,
+                target_slot,
+            } => {
+                if bindings.len() != 2 {
+                    return Err(incompatible());
+                }
+                let source = Self::binding_for_slot(bindings, source_slot)
+                    .filter(|binding| binding.access == virtio_accel_core::AccessMode::Read)
+                    .ok_or_else(incompatible)?;
+                let target = Self::binding_for_slot(bindings, target_slot)
+                    .filter(|binding| binding.access == virtio_accel_core::AccessMode::Write)
+                    .ok_or_else(incompatible)?;
+                if source.range.bytes() != target.range.bytes() {
+                    return Err(incompatible());
+                }
+                Ok(MockInvocation::Copy {
+                    source: Self::buffer_slice(source)?,
+                    target: Self::buffer_slice(target)?,
+                })
+            }
+            Operation::Fill { target_slot, value } => {
+                if bindings.len() != 1 {
+                    return Err(incompatible());
+                }
+                let target = Self::binding_for_slot(bindings, target_slot)
+                    .filter(|binding| binding.access == virtio_accel_core::AccessMode::Write)
+                    .ok_or_else(incompatible)?;
+                Ok(MockInvocation::Fill {
+                    target: Self::buffer_slice(target)?,
+                    value,
+                })
+            }
+            Operation::Xor { target_slot, value } => {
+                if bindings.len() != 1 {
+                    return Err(incompatible());
+                }
+                let target = Self::binding_for_slot(bindings, target_slot)
+                    .filter(|binding| binding.access == virtio_accel_core::AccessMode::ReadWrite)
+                    .ok_or_else(incompatible)?;
+                Ok(MockInvocation::Xor {
+                    target: Self::buffer_slice(target)?,
+                    value,
+                })
+            }
+        }
     }
 }
 
@@ -179,12 +345,12 @@ impl Accelerator for MockAccelerator {
         let mut data = Vec::new();
         data.try_reserve_exact(bytes)
             .map_err(|_| BackendError::OutOfMemory)?;
-        data.resize(bytes, 0);
+        data.resize_with(bytes, || AtomicU8::new(0));
         Ok(AllocatedBuffer::new(
             MockBuffer {
                 context_id: context.id,
                 desc,
-                data,
+                data: Arc::from(data.into_boxed_slice()),
             },
             info,
         ))
@@ -212,9 +378,23 @@ impl Accelerator for MockAccelerator {
             if source.len() != bytes {
                 return Err(BackendError::InvalidArgument);
             }
-            buffer.data[range].copy_from_slice(source);
+            for (target, source) in buffer.data[range].iter().zip(source) {
+                target.store(*source, Ordering::Relaxed);
+            }
         } else {
-            data.read_at(0, &mut buffer.data[range])?;
+            let mut scratch = [0; TRANSFER_CHUNK_BYTES];
+            let mut copied = 0;
+            while copied < bytes {
+                let chunk_bytes = (bytes - copied).min(TRANSFER_CHUNK_BYTES);
+                data.read_at(copied as u64, &mut scratch[..chunk_bytes])?;
+                for (target, source) in buffer.data[range.start + copied..][..chunk_bytes]
+                    .iter()
+                    .zip(&scratch[..chunk_bytes])
+                {
+                    target.store(*source, Ordering::Relaxed);
+                }
+                copied += chunk_bytes;
+            }
         }
         Ok(())
     }
@@ -241,9 +421,23 @@ impl Accelerator for MockAccelerator {
             if target.len() != bytes {
                 return Err(BackendError::InvalidArgument);
             }
-            target.copy_from_slice(&buffer.data[range]);
+            for (target, source) in target.iter_mut().zip(&buffer.data[range]) {
+                *target = source.load(Ordering::Relaxed);
+            }
         } else {
-            data.write_at(0, &buffer.data[range])?;
+            let mut scratch = [0; TRANSFER_CHUNK_BYTES];
+            let mut copied = 0;
+            while copied < bytes {
+                let chunk_bytes = (bytes - copied).min(TRANSFER_CHUNK_BYTES);
+                for (target, source) in scratch[..chunk_bytes]
+                    .iter_mut()
+                    .zip(&buffer.data[range.start + copied..][..chunk_bytes])
+                {
+                    *target = source.load(Ordering::Relaxed);
+                }
+                data.write_at(copied as u64, &scratch[..chunk_bytes])?;
+                copied += chunk_bytes;
+            }
         }
         Ok(())
     }
@@ -260,6 +454,15 @@ impl Accelerator for MockAccelerator {
         if artifact.payload.len() > self.info.limits.max_artifact_bytes {
             return Err(BackendError::ResourceLimit);
         }
+        if artifact.format != reference::ARTIFACT_FORMAT {
+            return Err(BackendError::Unsupported);
+        }
+        if artifact.target != reference::TARGET_IDENTITY
+            || artifact.resident_bytes != reference::RESIDENT_BYTES
+        {
+            return Err(BackendError::Incompatible);
+        }
+        let operation = reference::decode(artifact.payload)?;
         let payload_bytes =
             usize::try_from(artifact.payload.len()).map_err(|_| BackendError::ResourceLimit)?;
         Ok(MockProgram {
@@ -267,6 +470,7 @@ impl Accelerator for MockAccelerator {
             format: artifact.format,
             target: artifact.target,
             payload_bytes,
+            operation,
         })
     }
 
@@ -313,22 +517,29 @@ impl Accelerator for MockAccelerator {
                 return Err(SubmitFailure::Rejected(BackendError::PermissionDenied));
             }
         }
+        let invocation = Self::prepare_invocation(program.operation, bindings)
+            .map_err(SubmitFailure::Rejected)?;
         Ok(MockEvent {
-            state: Arc::new(AtomicU8::new(EVENT_PENDING)),
+            inner: Arc::new(MockEventInner {
+                state: AtomicU8::new(EVENT_PENDING),
+                invocation,
+            }),
         })
     }
 
     fn poll_event(&self, event: &Self::Event) -> Result<EventState, BackendError> {
-        match event.state.load(Ordering::Acquire) {
-            EVENT_PENDING => Ok(EventState::Pending),
+        match event.inner.state.load(Ordering::Acquire) {
+            EVENT_PENDING | EVENT_EXECUTING => Ok(EventState::Pending),
             EVENT_COMPLETE => Ok(EventState::Complete),
             EVENT_CANCELLED => Ok(EventState::Cancelled),
+            EVENT_DEVICE_LOST => Ok(EventState::Failed(BackendError::DeviceLost)),
             _ => Err(BackendError::DeviceLost),
         }
     }
 
     fn cancel_event(&self, event: &Self::Event) -> Result<(), BackendError> {
         event
+            .inner
             .state
             .compare_exchange(
                 EVENT_PENDING,
@@ -360,6 +571,24 @@ mod tests {
     use virtio_accel_core::{
         AccessMode, BindingRef, BufferRange, BufferUsage, ContextFlags, QueueFlags,
     };
+
+    fn load_reference(
+        backend: &MockAccelerator,
+        context: &MockContext,
+        artifact: &reference::ReferenceArtifact,
+    ) -> MockProgram {
+        backend
+            .load_program(
+                context,
+                ArtifactRef {
+                    format: reference::ARTIFACT_FORMAT,
+                    target: reference::TARGET_IDENTITY,
+                    payload: artifact.as_bytes(),
+                    resident_bytes: reference::RESIDENT_BYTES,
+                },
+            )
+            .unwrap()
+    }
 
     #[derive(Debug)]
     struct SplitSource<'a> {
@@ -451,20 +680,11 @@ mod tests {
         backend.read_buffer(&buffer, 4, &mut output).unwrap();
         assert_eq!(output, [1, 2, 3, 4]);
 
-        let program = backend
-            .load_program(
-                &context,
-                ArtifactRef {
-                    format: ArtifactFormat::new(1).unwrap(),
-                    target: TargetIdentity([0; 12]),
-                    payload: &[0xaa],
-                    resident_bytes: 16,
-                },
-            )
-            .unwrap();
-        assert_eq!(program.format().get(), 1);
-        assert_eq!(program.target(), TargetIdentity([0; 12]));
-        assert_eq!(program.payload_bytes(), 1);
+        let artifact = reference::ReferenceArtifact::barrier(0);
+        let program = load_reference(&backend, &context, &artifact);
+        assert_eq!(program.format(), reference::ARTIFACT_FORMAT);
+        assert_eq!(program.target(), reference::TARGET_IDENTITY);
+        assert_eq!(program.payload_bytes(), reference::ARTIFACT_BYTES);
         let queue = backend
             .create_queue(&context, QueueDesc::default())
             .unwrap();
@@ -588,17 +808,8 @@ mod tests {
             )
             .unwrap();
         let (buffer, _) = allocation.into_parts();
-        let program = backend
-            .load_program(
-                &context_a,
-                ArtifactRef {
-                    format: ArtifactFormat::new(1).unwrap(),
-                    target: TargetIdentity([0; 12]),
-                    payload: &[1],
-                    resident_bytes: 1,
-                },
-            )
-            .unwrap();
+        let artifact = reference::ReferenceArtifact::barrier(0);
+        let program = load_reference(&backend, &context_a, &artifact);
         let queue = backend
             .create_queue(&context_a, QueueDesc::default())
             .unwrap();
@@ -611,6 +822,233 @@ mod tests {
         assert!(matches!(
             backend.submit(&queue, &program, &bindings, Timeout::Infinite),
             Err(SubmitFailure::Rejected(BackendError::InvalidArgument))
+        ));
+    }
+
+    #[test]
+    fn copy_produces_verifiable_output_only_after_completion() {
+        let backend = MockAccelerator::default();
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        let source = backend
+            .allocate_buffer(
+                &context,
+                BufferDesc::new(
+                    8,
+                    1,
+                    MemoryDomain::Host,
+                    BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let target = backend
+            .allocate_buffer(
+                &context,
+                BufferDesc::new(
+                    8,
+                    1,
+                    MemoryDomain::Host,
+                    BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let (mut source, _) = source.into_parts();
+        let (target, _) = target.into_parts();
+        backend.write_buffer(&mut source, 0, b"copy me").unwrap();
+
+        let artifact = reference::ReferenceArtifact::copy(3, 7).unwrap();
+        let program = load_reference(&backend, &context, &artifact);
+        let queue = backend
+            .create_queue(&context, QueueDesc::default())
+            .unwrap();
+        let bindings = [
+            BindingRef {
+                slot: 7,
+                buffer: &target,
+                range: BufferRange::new(0, 7).unwrap(),
+                access: AccessMode::Write,
+            },
+            BindingRef {
+                slot: 3,
+                buffer: &source,
+                range: BufferRange::new(0, 7).unwrap(),
+                access: AccessMode::Read,
+            },
+        ];
+        let event = backend
+            .submit(&queue, &program, &bindings, Timeout::Infinite)
+            .unwrap();
+
+        let mut output = [0; 7];
+        backend.read_buffer(&target, 0, &mut output).unwrap();
+        assert_eq!(output, [0; 7]);
+        backend.complete(&event).unwrap();
+        backend.read_buffer(&target, 0, &mut output).unwrap();
+        assert_eq!(&output, b"copy me");
+    }
+
+    #[test]
+    fn pending_operations_complete_in_harness_selected_order() {
+        let backend = MockAccelerator::default();
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        let allocation = backend
+            .allocate_buffer(
+                &context,
+                BufferDesc::new(
+                    4,
+                    1,
+                    MemoryDomain::Shared,
+                    BufferUsage::TRANSFER_SOURCE
+                        | BufferUsage::PROGRAM_OUTPUT
+                        | BufferUsage::MUTABLE_STATE,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let (buffer, _) = allocation.into_parts();
+        let fill = reference::ReferenceArtifact::fill(0, 0xa5);
+        let xor = reference::ReferenceArtifact::xor(0, 0xff);
+        let fill_program = load_reference(&backend, &context, &fill);
+        let xor_program = load_reference(&backend, &context, &xor);
+        let queue = backend
+            .create_queue(&context, QueueDesc::default())
+            .unwrap();
+        let range = BufferRange::new(0, 4).unwrap();
+        let fill_bindings = [BindingRef {
+            slot: 0,
+            buffer: &buffer,
+            range,
+            access: AccessMode::Write,
+        }];
+        let xor_bindings = [BindingRef {
+            slot: 0,
+            buffer: &buffer,
+            range,
+            access: AccessMode::ReadWrite,
+        }];
+        let fill_event = backend
+            .submit(&queue, &fill_program, &fill_bindings, Timeout::Infinite)
+            .unwrap();
+        let xor_event = backend
+            .submit(&queue, &xor_program, &xor_bindings, Timeout::Infinite)
+            .unwrap();
+
+        backend.complete(&xor_event).unwrap();
+        let mut output = [0; 4];
+        backend.read_buffer(&buffer, 0, &mut output).unwrap();
+        assert_eq!(output, [0xff; 4]);
+        assert_eq!(backend.poll_event(&fill_event), Ok(EventState::Pending));
+
+        backend.complete(&fill_event).unwrap();
+        backend.read_buffer(&buffer, 0, &mut output).unwrap();
+        assert_eq!(output, [0xa5; 4]);
+    }
+
+    #[test]
+    fn cancellation_and_device_loss_prevent_execution() {
+        let backend = MockAccelerator::default();
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        let allocation = backend
+            .allocate_buffer(
+                &context,
+                BufferDesc::new(
+                    4,
+                    1,
+                    MemoryDomain::Host,
+                    BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let (buffer, _) = allocation.into_parts();
+        let artifact = reference::ReferenceArtifact::fill(0, 0x5a);
+        let program = load_reference(&backend, &context, &artifact);
+        let queue = backend
+            .create_queue(&context, QueueDesc::default())
+            .unwrap();
+        let bindings = [BindingRef {
+            slot: 0,
+            buffer: &buffer,
+            range: BufferRange::new(0, 4).unwrap(),
+            access: AccessMode::Write,
+        }];
+
+        let cancelled = backend
+            .submit(&queue, &program, &bindings, Timeout::Infinite)
+            .unwrap();
+        backend.cancel_event(&cancelled).unwrap();
+        assert_eq!(backend.complete(&cancelled), Err(BackendError::Busy));
+
+        let lost = backend
+            .submit(&queue, &program, &bindings, Timeout::Infinite)
+            .unwrap();
+        backend.fail_device_lost(&lost).unwrap();
+        assert_eq!(
+            backend.poll_event(&lost),
+            Ok(EventState::Failed(BackendError::DeviceLost))
+        );
+        assert_eq!(backend.complete(&lost), Err(BackendError::Busy));
+
+        let mut output = [0; 4];
+        backend.read_buffer(&buffer, 0, &mut output).unwrap();
+        assert_eq!(output, [0; 4]);
+    }
+
+    #[test]
+    fn artifact_and_binding_incompatibility_fail_before_admission() {
+        let backend = MockAccelerator::default();
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        let artifact = reference::ReferenceArtifact::fill(2, 1);
+
+        assert!(matches!(
+            backend.load_program(
+                &context,
+                ArtifactRef {
+                    format: reference::ARTIFACT_FORMAT,
+                    target: TargetIdentity([0; 12]),
+                    payload: artifact.as_bytes(),
+                    resident_bytes: reference::RESIDENT_BYTES,
+                },
+            ),
+            Err(BackendError::Incompatible)
+        ));
+
+        let mut malformed = *artifact.as_bytes();
+        malformed[17] = 1;
+        assert!(matches!(
+            backend.load_program(
+                &context,
+                ArtifactRef {
+                    format: reference::ARTIFACT_FORMAT,
+                    target: reference::TARGET_IDENTITY,
+                    payload: &malformed,
+                    resident_bytes: reference::RESIDENT_BYTES,
+                },
+            ),
+            Err(BackendError::InvalidArgument)
+        ));
+        let program = load_reference(&backend, &context, &artifact);
+
+        let allocation = backend
+            .allocate_buffer(
+                &context,
+                BufferDesc::new(4, 1, MemoryDomain::Host, BufferUsage::MUTABLE_STATE).unwrap(),
+            )
+            .unwrap();
+        let (buffer, _) = allocation.into_parts();
+        let queue = backend
+            .create_queue(&context, QueueDesc::default())
+            .unwrap();
+        let bindings = [BindingRef {
+            slot: 2,
+            buffer: &buffer,
+            range: BufferRange::new(0, 4).unwrap(),
+            access: AccessMode::ReadWrite,
+        }];
+        assert!(matches!(
+            backend.submit(&queue, &program, &bindings, Timeout::Infinite),
+            Err(SubmitFailure::Rejected(BackendError::Incompatible))
         ));
     }
 }

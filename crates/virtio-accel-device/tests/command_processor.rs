@@ -15,7 +15,7 @@ use virtio_accel_device::{
     SegmentedSource, UnusableFrame,
 };
 use virtio_accel_mock::{
-    MockAccelerator, MockBuffer, MockContext, MockEvent, MockProgram, MockQueue,
+    MockAccelerator, MockBuffer, MockContext, MockEvent, MockProgram, MockQueue, reference,
 };
 use virtio_accel_proto::{
     AllocateBufferRequest, BASELINE_COMMAND_QUEUES, CreateContextRequest, CreateQueueRequest,
@@ -440,17 +440,17 @@ fn load_program(
     processor: &mut CommandProcessor<RecordingBackend>,
     context_id: ObjectId,
 ) -> ObjectId {
-    let artifact = b"program";
+    let artifact = reference::ReferenceArtifact::barrier(0);
     let load = LoadProgramRequest {
         context_id: Le64::new(context_id.get()),
-        format: Le32::new(1),
+        format: Le32::new(reference::ARTIFACT_FORMAT.get()),
         flags: Le32::new(0),
-        target: [Le32::new(0); 12],
-        payload_bytes: Le64::new(artifact.as_slice().len() as u64),
-        resident_bytes: Le64::new(artifact.as_slice().len() as u64),
+        target: reference::TARGET_IDENTITY.0.map(Le32::new),
+        payload_bytes: Le64::new(reference::ARTIFACT_BYTES as u64),
+        resident_bytes: Le64::new(reference::RESIDENT_BYTES),
     };
     let mut payload = Vec::from(load.as_bytes());
-    payload.extend_from_slice(artifact);
+    payload.extend_from_slice(artifact.as_bytes());
     let (outcome, response) = run(
         processor,
         &request(virtio_accel_proto::KnownOpcode::LoadProgram, &payload),
@@ -626,17 +626,17 @@ fn baseline_lifecycle_preserves_segmented_zero_copy_ports() {
     assert_eq!(status(outcome), StatusCode::OK);
     assert_eq!(&response[16..24], b"abcdefgh");
 
-    let artifact = b"program";
+    let artifact = reference::ReferenceArtifact::barrier(0);
     let load = LoadProgramRequest {
         context_id: Le64::new(context.get()),
-        format: Le32::new(1),
+        format: Le32::new(reference::ARTIFACT_FORMAT.get()),
         flags: Le32::new(0),
-        target: [Le32::new(0); 12],
-        payload_bytes: Le64::new(artifact.as_slice().len() as u64),
-        resident_bytes: Le64::new(artifact.as_slice().len() as u64),
+        target: reference::TARGET_IDENTITY.0.map(Le32::new),
+        payload_bytes: Le64::new(reference::ARTIFACT_BYTES as u64),
+        resident_bytes: Le64::new(reference::RESIDENT_BYTES),
     };
     let mut load_payload = Vec::from(load.as_bytes());
-    load_payload.extend_from_slice(artifact);
+    load_payload.extend_from_slice(artifact.as_bytes());
     let load = request(virtio_accel_proto::KnownOpcode::LoadProgram, &load_payload);
     let (outcome, response) = run(&mut processor, &load, 24);
     assert_eq!(status(outcome), StatusCode::OK);
@@ -683,6 +683,53 @@ fn baseline_lifecycle_preserves_segmented_zero_copy_ports() {
     assert!(processor.accelerator().segmented_read.get());
     assert!(processor.accelerator().segmented_artifact.get());
     assert_eq!(processor.state().context_count(), 0);
+}
+
+#[test]
+fn malformed_reference_artifacts_do_not_create_resident_programs() {
+    let mut processor = processor();
+    let context = create_context(&mut processor);
+    let mut artifact = *reference::ReferenceArtifact::barrier(0).as_bytes();
+    artifact[17] = 1;
+    let load = LoadProgramRequest {
+        context_id: Le64::new(context.get()),
+        format: Le32::new(reference::ARTIFACT_FORMAT.get()),
+        flags: Le32::new(0),
+        target: reference::TARGET_IDENTITY.0.map(Le32::new),
+        payload_bytes: Le64::new(reference::ARTIFACT_BYTES as u64),
+        resident_bytes: Le64::new(reference::RESIDENT_BYTES),
+    };
+    let mut payload = Vec::from(load.as_bytes());
+    payload.extend_from_slice(&artifact);
+
+    assert_eq!(
+        status(
+            run(
+                &mut processor,
+                &request(virtio_accel_proto::KnownOpcode::LoadProgram, &payload),
+                24,
+            )
+            .0,
+        ),
+        StatusCode::INVALID_ARGUMENT
+    );
+    assert_eq!(
+        processor.state().resource_counts(),
+        ResourceCounts {
+            contexts: 1,
+            ..ResourceCounts::default()
+        }
+    );
+
+    load_program(&mut processor, context);
+    assert_eq!(
+        processor.state().resource_counts(),
+        ResourceCounts {
+            contexts: 1,
+            programs: 1,
+            ..ResourceCounts::default()
+        }
+    );
 }
 
 #[test]
