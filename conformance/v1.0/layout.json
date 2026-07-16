@@ -24,6 +24,18 @@
       "SECURE_CONTEXTS": "0x0000000000000010"
     }
   },
+  "capabilities": {
+    "assigned": {
+      "HOST_VISIBLE_MEMORY": "0x0000000000000001",
+      "DEVICE_LOCAL_MEMORY": "0x0000000000000002",
+      "EVENT_CANCELLATION": "0x0000000000000004",
+      "SHARED_MEMORY": "0x0000000000000020"
+    },
+    "reserved": {
+      "EXTERNAL_MEMORY": "0x0000000000000008",
+      "SECURE_CONTEXTS": "0x0000000000000010"
+    }
+  },
   "opcodes": {
     "GET_DEVICE_INFO": "0x0001",
     "CREATE_CONTEXT": "0x0100",

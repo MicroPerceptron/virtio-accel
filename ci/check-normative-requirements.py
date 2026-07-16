@@ -66,8 +66,8 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
             "crates/virtio-accel-device/src/object_table.rs",
             "crates/virtio-accel-mock/src/lib.rs",
         ),
-        ("#20", "#21"),
-        "Core ownership types and lifecycle tests exist; the command engine and complete backend policy remain tracked.",
+        ("#20", "#21", "#25"),
+        "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked.",
     ),
     ("SPEC", 5): coverage(
         "mixed",

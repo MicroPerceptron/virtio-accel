@@ -39,4 +39,5 @@ virtio-accel-device.workspace = true
 virtio-accel-proto.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 virtio-accel-mock.workspace = true

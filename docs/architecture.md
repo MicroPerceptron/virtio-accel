@@ -64,6 +64,23 @@ shared mappings, and fences are optional features because their ownership, cache
 synchronization rules differ by transport and host OS. Adding them requires a separate invariant
 and threat-model pass.
 
+Provider-owned shared memory is distinct from external memory. `MemoryDomain::Shared` requests one
+allocation that the provider can access through a host mapping and bind directly for accelerator
+execution. It does not expose a guest address or platform handle and does not imply cross-process
+sharing or implicit cache coherence.
+
+The allocation result reports verified backing properties, actual retained bytes, and actual
+alignment separately from the provider-native handle. Logical buffer bytes may be smaller than a
+page-, section-, or device-aligned backing allocation. The command engine retains those facts in its
+buffer record for compatibility checks and resource accounting, while submission passes only
+borrowed native handles. This lets the device reject a dishonest or degraded allocation before it
+becomes guest-visible without adding metadata lookup or boxing to the execution hot path.
+
+Bulk byte payloads cross the semantic boundary through `ByteSource` and `ByteSink`. Both abstractions
+support checked random access over segmented storage and an optional contiguous view. A command
+engine can therefore expose validated descriptor-backed regions directly: a provider streams them
+into final storage, while an already contiguous payload remains one borrowed slice.
+
 ## Queue model
 
 Command virtqueue zero is the baseline bidirectional transport queue. One descriptor chain contains
@@ -84,9 +101,48 @@ The semantic hot path uses associated handle types and borrowed binding slices, 
 dispatch and per-binding boxing. Wire decoding will operate directly over validated descriptor-backed
 regions. Object lookup is constant time and bounded by advertised limits.
 
-The initial buffer transfer path permits copies because it is the compatibility baseline. Zero-copy
-imports are deliberately deferred rather than pretending that DMA-BUF, Windows shared handles, and
-other mechanisms have identical lifetime or coherency semantics.
+`WRITE_BUFFER` and `READ_BUFFER` are the baseline's explicit content-copy boundaries. Device-local
+memory may require bounded staging during those operations. Allocation, submission, polling, and
+release do not receive permission to copy a bound buffer merely because a native import or binding
+path is inconvenient.
+
+Every buffer declared for program input, output, or mutable state reports
+`BufferProperties::DIRECT_BINDING`. This means a compatible submission binds that exact allocation
+without copying the bound range to or from a different allocation. A backend that cannot honor the
+requested placement and direct-binding contract rejects allocation; a program-specific alignment or
+format mismatch rejects submission as `INCOMPATIBLE`. Neither path may silently degrade to a bounce
+buffer.
+
+The mutable side of an explicit write receives `&mut Buffer`, allowing implementations to use
+ordinary provider handles and mappings rather than forcing interior mutability or a lock into every
+buffer. Submission remains borrowed and allocation-free in the semantic API.
+
+Program artifacts use the same byte-source abstraction. Program loading is a slow lifecycle path,
+so an object-safe source is an acceptable dispatch cost; forcing a frame-sized allocation and copy
+for every segmented artifact is not. Providers can parse a contiguous borrowed artifact in place or
+read segmented bytes directly into final resident storage.
+
+Zero-copy guest-memory imports are deliberately deferred rather than pretending that DMA-BUF,
+Windows shared handles, and other mechanisms have identical lifetime or coherency semantics. When
+external memory is specified, fallback staging will require explicit negotiation and copy
+accounting; it will not weaken the provider-owned direct-binding rule.
+
+### Backend fast-path checklist
+
+A provider implementation should make the native buffer handle own or reference everything needed
+to reuse the allocation efficiently: the final backing object, device address or import, host
+mapping when present, alignment facts, and synchronization state. Native mapping or import setup
+belongs at allocation or another amortized lifecycle boundary, not in every submission.
+
+The intended steady-state submission path is a bounded walk over the borrowed binding slice,
+validation of program-specific compatibility, native handle/address binding, and queue admission. It
+does not allocate per binding, assemble a second binding array with owned payloads, or copy tensor
+contents. Small command and metadata writes are not buffer staging and remain provider-specific.
+
+Issue #29 owns quantitative evidence: explicit-transfer bytes, staged bytes and allocations,
+submission allocations, retained memory, and host preparation versus device execution time. A
+backend should be diagnosable when it misses the intended path rather than requiring a profiler to
+discover an undocumented copy.
 
 ## Next implementation boundary
 

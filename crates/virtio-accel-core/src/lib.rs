@@ -63,11 +63,28 @@ bitflags! {
     /// capability would change descriptor framing or any other device/driver protocol behavior.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct Capabilities: u64 {
+        /// Supports [`MemoryDomain::Host`] allocations.
         const HOST_VISIBLE_MEMORY = 1 << 0;
+        /// Supports [`MemoryDomain::Device`] allocations.
         const DEVICE_LOCAL_MEMORY = 1 << 1;
         const EVENT_CANCELLATION = 1 << 2;
+        /// Reserved for post-v1 external-allocation import/export semantics.
         const EXTERNAL_MEMORY = 1 << 3;
+        /// Reserved until secure-context isolation requirements are specified.
         const SECURE_CONTEXTS = 1 << 4;
+        /// Supports provider-owned [`MemoryDomain::Shared`] allocations.
+        const SHARED_MEMORY = 1 << 5;
+    }
+}
+
+impl Capabilities {
+    /// Whether the backend can allocate the requested provider-owned memory domain.
+    pub const fn supports_memory_domain(self, domain: MemoryDomain) -> bool {
+        match domain {
+            MemoryDomain::Host => self.contains(Self::HOST_VISIBLE_MEMORY),
+            MemoryDomain::Device => self.contains(Self::DEVICE_LOCAL_MEMORY),
+            MemoryDomain::Shared => self.contains(Self::SHARED_MEMORY),
+        }
     }
 }
 
@@ -113,8 +130,19 @@ pub struct ContextDesc {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum MemoryDomain {
+    /// Provider memory optimized for host transfers.
+    ///
+    /// If the usage includes program access, the returned allocation is still directly bindable;
+    /// this value never permits per-submission staging.
     Host = 1,
+    /// Provider memory optimized for accelerator access.
+    ///
+    /// Explicit read/write transfers may stage through provider-owned temporary memory.
     Device = 2,
+    /// One provider-owned allocation that is host visible and directly accelerator bindable.
+    ///
+    /// This does not imply cross-process export, guest-memory import, cache coherence, or any
+    /// platform external-memory handle.
     Shared = 3,
 }
 
@@ -134,7 +162,9 @@ impl TryFrom<u8> for MemoryDomain {
 bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct BufferUsage: u32 {
+        /// The buffer may be the source of an explicit [`Accelerator::read_buffer`] transfer.
         const TRANSFER_SOURCE = 1 << 0;
+        /// The buffer may be the destination of an explicit [`Accelerator::write_buffer`] transfer.
         const TRANSFER_DESTINATION = 1 << 1;
         const PROGRAM_INPUT = 1 << 2;
         const PROGRAM_OUTPUT = 1 << 3;
@@ -159,7 +189,10 @@ impl BufferDesc {
     ) -> Result<Self, BackendError> {
         let bytes = NonZeroU64::new(bytes).ok_or(BackendError::InvalidArgument)?;
         let alignment = NonZeroU64::new(alignment).ok_or(BackendError::InvalidArgument)?;
-        if !alignment.get().is_power_of_two() {
+        if !alignment.get().is_power_of_two()
+            || usage.is_empty()
+            || !BufferUsage::all().contains(usage)
+        {
             return Err(BackendError::InvalidArgument);
         }
         Ok(Self {
@@ -176,6 +209,161 @@ impl BufferDesc {
 
     pub const fn alignment(self) -> u64 {
         self.alignment.get()
+    }
+
+    /// Whether this allocation can appear in a program binding.
+    pub const fn is_program_visible(self) -> bool {
+        self.usage.intersects(
+            BufferUsage::PROGRAM_INPUT
+                .union(BufferUsage::PROGRAM_OUTPUT)
+                .union(BufferUsage::MUTABLE_STATE),
+        )
+    }
+}
+
+bitflags! {
+    /// Properties of the actual provider allocation returned for a [`BufferDesc`].
+    ///
+    /// These properties describe the backing allocation, not an aspirational fast path. A backend
+    /// must reject allocation rather than advertise a property that it can satisfy only by
+    /// allocating and copying a full-size bounce buffer during submission.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct BufferProperties: u32 {
+        /// The provider can access the allocation through a host mapping.
+        const HOST_VISIBLE = 1 << 0;
+        /// The allocation uses the provider's accelerator-local placement class.
+        const DEVICE_LOCAL = 1 << 1;
+        /// Compatible program submissions bind this exact allocation without copying the bound
+        /// byte range into or out of a different allocation.
+        const DIRECT_BINDING = 1 << 2;
+    }
+}
+
+/// Verified properties of one provider allocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BufferInfo {
+    desc: BufferDesc,
+    allocation_bytes: NonZeroU64,
+    alignment: NonZeroU64,
+    properties: BufferProperties,
+}
+
+impl BufferInfo {
+    /// Validate that actual allocation properties honestly satisfy the requested descriptor.
+    pub fn new(
+        desc: BufferDesc,
+        allocation_bytes: u64,
+        alignment: u64,
+        properties: BufferProperties,
+    ) -> Result<Self, BackendError> {
+        let allocation_bytes =
+            NonZeroU64::new(allocation_bytes).ok_or(BackendError::InvalidArgument)?;
+        let alignment = NonZeroU64::new(alignment).ok_or(BackendError::InvalidArgument)?;
+        if !BufferProperties::all().contains(properties) {
+            return Err(BackendError::InvalidArgument);
+        }
+        if allocation_bytes.get() < desc.bytes()
+            || !alignment.get().is_power_of_two()
+            || alignment.get() < desc.alignment()
+        {
+            return Err(BackendError::Incompatible);
+        }
+
+        let required = match desc.domain {
+            MemoryDomain::Host => BufferProperties::HOST_VISIBLE,
+            MemoryDomain::Device => BufferProperties::DEVICE_LOCAL,
+            MemoryDomain::Shared => {
+                BufferProperties::HOST_VISIBLE.union(BufferProperties::DIRECT_BINDING)
+            }
+        };
+        if !properties.contains(required)
+            || (desc.is_program_visible() && !properties.contains(BufferProperties::DIRECT_BINDING))
+        {
+            return Err(BackendError::Incompatible);
+        }
+
+        Ok(Self {
+            desc,
+            allocation_bytes,
+            alignment,
+            properties,
+        })
+    }
+
+    pub const fn desc(self) -> BufferDesc {
+        self.desc
+    }
+
+    /// Physical/provider backing bytes retained for this logical buffer.
+    pub const fn allocation_bytes(self) -> u64 {
+        self.allocation_bytes.get()
+    }
+
+    /// Alignment guaranteed by the actual provider allocation.
+    pub const fn alignment(self) -> u64 {
+        self.alignment.get()
+    }
+
+    pub const fn properties(self) -> BufferProperties {
+        self.properties
+    }
+}
+
+impl DeviceInfo {
+    /// Validate allocation size and memory-domain support before backend invocation.
+    pub fn validate_buffer_desc(self, desc: BufferDesc) -> Result<(), BackendError> {
+        if desc.bytes() > self.limits.max_buffer_bytes {
+            return Err(BackendError::ResourceLimit);
+        }
+        if !self.capabilities.supports_memory_domain(desc.domain) {
+            return Err(BackendError::Unsupported);
+        }
+        Ok(())
+    }
+
+    /// Validate that a backend allocation describes the request it was asked to satisfy.
+    pub fn validate_buffer_info(
+        self,
+        requested: BufferDesc,
+        actual: BufferInfo,
+    ) -> Result<(), BackendError> {
+        self.validate_buffer_desc(requested)?;
+        if actual.desc() != requested {
+            return Err(BackendError::Incompatible);
+        }
+        Ok(())
+    }
+}
+
+/// A newly allocated native buffer handle and its verified backing properties.
+///
+/// Device implementations should retain `info` in their object record and pass only `buffer` to
+/// backend hot paths.
+#[derive(Debug)]
+pub struct AllocatedBuffer<B> {
+    buffer: B,
+    info: BufferInfo,
+}
+
+impl<B> AllocatedBuffer<B> {
+    pub const fn new(buffer: B, info: BufferInfo) -> Self {
+        Self { buffer, info }
+    }
+
+    pub const fn buffer(&self) -> &B {
+        &self.buffer
+    }
+
+    pub fn buffer_mut(&mut self) -> &mut B {
+        &mut self.buffer
+    }
+
+    pub const fn info(&self) -> BufferInfo {
+        self.info
+    }
+
+    pub fn into_parts(self) -> (B, BufferInfo) {
+        (self.buffer, self.info)
     }
 }
 
@@ -224,6 +412,123 @@ impl TryFrom<u8> for AccessMode {
     }
 }
 
+/// A bounded byte source that may be physically segmented.
+///
+/// Transport adapters can implement this trait over validated descriptor-backed regions so
+/// providers can read directly into final program or buffer storage without first coalescing the
+/// complete payload. Every range fully contained in `0..len()` must be readable for the duration of
+/// the backend call. The optional contiguous view preserves the single-slice fast path.
+pub trait ByteSource: fmt::Debug {
+    /// Stable logical length of this source.
+    fn len(&self) -> u64;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Fill `target` from the exact logical range beginning at `offset`.
+    fn read_at(&self, offset: u64, target: &mut [u8]) -> Result<(), BackendError>;
+
+    /// Borrow the complete logical source when it is one contiguous region.
+    ///
+    /// A returned slice has length [`Self::len`] and contains the same bytes as `read_at`.
+    fn as_contiguous(&self) -> Option<&[u8]> {
+        None
+    }
+}
+
+impl ByteSource for [u8] {
+    fn len(&self) -> u64 {
+        self.len() as u64
+    }
+
+    fn read_at(&self, offset: u64, target: &mut [u8]) -> Result<(), BackendError> {
+        let start = usize::try_from(offset).map_err(|_| BackendError::OutOfBounds)?;
+        let end = start
+            .checked_add(target.len())
+            .filter(|end| *end <= self.len())
+            .ok_or(BackendError::OutOfBounds)?;
+        target.copy_from_slice(&self[start..end]);
+        Ok(())
+    }
+
+    fn as_contiguous(&self) -> Option<&[u8]> {
+        Some(self)
+    }
+}
+
+impl<const N: usize> ByteSource for [u8; N] {
+    fn len(&self) -> u64 {
+        N as u64
+    }
+
+    fn read_at(&self, offset: u64, target: &mut [u8]) -> Result<(), BackendError> {
+        self.as_slice().read_at(offset, target)
+    }
+
+    fn as_contiguous(&self) -> Option<&[u8]> {
+        Some(self)
+    }
+}
+
+/// A bounded byte destination that may be physically segmented.
+///
+/// Providers can write buffer contents directly into validated response regions. The optional
+/// contiguous view avoids callback overhead when the destination is already one slice. Every range
+/// fully contained in `0..len()` must be writable for the duration of the backend call.
+pub trait ByteSink: fmt::Debug {
+    /// Stable logical length of this destination.
+    fn len(&self) -> u64;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Write `source` to the exact logical range beginning at `offset`.
+    fn write_at(&mut self, offset: u64, source: &[u8]) -> Result<(), BackendError>;
+
+    /// Mutably borrow the complete logical destination when it is one contiguous region.
+    ///
+    /// A returned slice has length [`Self::len`] and represents the same bytes as `write_at`.
+    fn as_contiguous_mut(&mut self) -> Option<&mut [u8]> {
+        None
+    }
+}
+
+impl ByteSink for [u8] {
+    fn len(&self) -> u64 {
+        self.len() as u64
+    }
+
+    fn write_at(&mut self, offset: u64, source: &[u8]) -> Result<(), BackendError> {
+        let start = usize::try_from(offset).map_err(|_| BackendError::OutOfBounds)?;
+        let end = start
+            .checked_add(source.len())
+            .filter(|end| *end <= self.len())
+            .ok_or(BackendError::OutOfBounds)?;
+        self[start..end].copy_from_slice(source);
+        Ok(())
+    }
+
+    fn as_contiguous_mut(&mut self) -> Option<&mut [u8]> {
+        Some(self)
+    }
+}
+
+impl<const N: usize> ByteSink for [u8; N] {
+    fn len(&self) -> u64 {
+        N as u64
+    }
+
+    fn write_at(&mut self, offset: u64, source: &[u8]) -> Result<(), BackendError> {
+        self.as_mut_slice().write_at(offset, source)
+    }
+
+    fn as_contiguous_mut(&mut self) -> Option<&mut [u8]> {
+        Some(self)
+    }
+}
+
 /// Opaque, provider-owned executable format identifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
@@ -247,11 +552,15 @@ impl ArtifactFormat {
 #[repr(transparent)]
 pub struct TargetIdentity(pub [u32; 12]);
 
+/// Borrowed program artifact envelope.
+///
+/// Payload bytes may be segmented; providers should stream them into final resident storage or use
+/// [`ByteSource::as_contiguous`] when a borrowed slice is available.
 #[derive(Clone, Copy, Debug)]
 pub struct ArtifactRef<'a> {
     pub format: ArtifactFormat,
     pub target: TargetIdentity,
-    pub payload: &'a [u8],
+    pub payload: &'a dyn ByteSource,
     pub resident_bytes: u64,
 }
 
@@ -295,6 +604,10 @@ impl Timeout {
 }
 
 /// One validated binding. The referenced buffer must remain alive until its event is reclaimed.
+///
+/// Program-visible buffers carry [`BufferProperties::DIRECT_BINDING`]. A backend must reject an
+/// incompatible buffer/program combination instead of copying the range into a hidden bounce
+/// allocation.
 #[derive(Debug)]
 pub struct BindingRef<'a, B> {
     pub slot: u32,
@@ -360,6 +673,11 @@ impl<R> ReleaseFailure<R> {
 /// Destructive methods consume handles. A transport adapter must reject parent destruction while
 /// child objects or in-flight events still exist; it must not use `Drop` timing as protocol state.
 ///
+/// The only baseline operations that explicitly transfer buffer contents are [`Self::write_buffer`]
+/// and [`Self::read_buffer`]. Allocation, submission, polling, and release must not hide full-range
+/// staging copies. In particular, `submit` binds the provider allocation directly or rejects it as
+/// [`BackendError::Incompatible`].
+///
 /// [`Self::Queue`] is an accelerator execution queue. It must not be confused with the command
 /// virtqueue used by a transport adapter to deliver protocol requests.
 pub trait Accelerator {
@@ -377,18 +695,29 @@ pub trait Accelerator {
         &self,
         context: &Self::Context,
         desc: BufferDesc,
-    ) -> Result<Self::Buffer, BackendError>;
+    ) -> Result<AllocatedBuffer<Self::Buffer>, BackendError>;
+    /// Perform one explicit host-to-buffer transfer.
+    ///
+    /// The command engine calls this only for buffers with [`BufferUsage::TRANSFER_DESTINATION`].
+    /// The provider must not retain `data`. A segmented source should be read directly into final
+    /// backing rather than coalesced. Host-visible allocations should copy directly into their
+    /// final backing; device-local allocations may use bounded temporary staging during this
+    /// explicit transfer.
     fn write_buffer(
         &self,
-        buffer: &Self::Buffer,
+        buffer: &mut Self::Buffer,
         offset: u64,
-        data: &[u8],
+        data: &dyn ByteSource,
     ) -> Result<(), BackendError>;
+    /// Perform one explicit buffer-to-host transfer.
+    ///
+    /// The command engine calls this only for buffers with [`BufferUsage::TRANSFER_SOURCE`]. The
+    /// provider must not retain `data` and should write directly across segmented destinations.
     fn read_buffer(
         &self,
         buffer: &Self::Buffer,
         offset: u64,
-        data: &mut [u8],
+        data: &mut dyn ByteSink,
     ) -> Result<(), BackendError>;
     fn free_buffer(&self, buffer: Self::Buffer) -> Result<(), ReleaseFailure<Self::Buffer>>;
 
@@ -427,13 +756,66 @@ mod tests {
     #[test]
     fn buffer_descriptors_reject_invalid_alignment() {
         assert!(BufferDesc::new(1, 0, MemoryDomain::Host, BufferUsage::empty()).is_err());
-        assert!(BufferDesc::new(1, 3, MemoryDomain::Host, BufferUsage::empty()).is_err());
+        assert!(BufferDesc::new(1, 3, MemoryDomain::Host, BufferUsage::TRANSFER_SOURCE).is_err());
+        assert!(BufferDesc::new(1, 1, MemoryDomain::Host, BufferUsage::empty()).is_err());
         assert_eq!(
             BufferDesc::new(64, 16, MemoryDomain::Shared, BufferUsage::PROGRAM_INPUT)
                 .unwrap()
                 .alignment(),
             16
         );
+    }
+
+    #[test]
+    fn allocation_properties_reject_hidden_submission_staging() {
+        let host_input =
+            BufferDesc::new(64, 16, MemoryDomain::Host, BufferUsage::PROGRAM_INPUT).unwrap();
+        assert_eq!(
+            BufferInfo::new(host_input, 64, 16, BufferProperties::HOST_VISIBLE),
+            Err(BackendError::Incompatible)
+        );
+        assert!(
+            BufferInfo::new(
+                host_input,
+                64,
+                16,
+                BufferProperties::HOST_VISIBLE | BufferProperties::DIRECT_BINDING
+            )
+            .is_ok()
+        );
+
+        let shared =
+            BufferDesc::new(64, 16, MemoryDomain::Shared, BufferUsage::TRANSFER_SOURCE).unwrap();
+        assert_eq!(
+            BufferInfo::new(shared, 64, 16, BufferProperties::HOST_VISIBLE),
+            Err(BackendError::Incompatible)
+        );
+        assert_eq!(
+            BufferInfo::new(
+                shared,
+                63,
+                16,
+                BufferProperties::HOST_VISIBLE | BufferProperties::DIRECT_BINDING
+            ),
+            Err(BackendError::Incompatible)
+        );
+        assert_eq!(
+            BufferInfo::new(
+                shared,
+                64,
+                8,
+                BufferProperties::HOST_VISIBLE | BufferProperties::DIRECT_BINDING
+            ),
+            Err(BackendError::Incompatible)
+        );
+    }
+
+    #[test]
+    fn capabilities_report_memory_domains_independently() {
+        let capabilities = Capabilities::HOST_VISIBLE_MEMORY | Capabilities::SHARED_MEMORY;
+        assert!(capabilities.supports_memory_domain(MemoryDomain::Host));
+        assert!(capabilities.supports_memory_domain(MemoryDomain::Shared));
+        assert!(!capabilities.supports_memory_domain(MemoryDomain::Device));
     }
 
     #[test]
