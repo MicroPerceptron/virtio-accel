@@ -307,6 +307,9 @@ impl Accelerator for MockAccelerator {
             if binding.range.end() > binding.buffer.desc.bytes() {
                 return Err(SubmitFailure::Rejected(BackendError::OutOfBounds));
             }
+            if !binding.buffer.desc.allows_access(binding.access) {
+                return Err(SubmitFailure::Rejected(BackendError::PermissionDenied));
+            }
         }
         Ok(MockEvent {
             state: Arc::new(AtomicU8::new(EVENT_PENDING)),

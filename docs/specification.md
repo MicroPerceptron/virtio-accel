@@ -199,6 +199,10 @@ Binding slot numbers **MUST** be unique within a submission. A binding does not 
 of its buffer, but the device **MUST** retain the buffer until the resulting event is safely
 reclaimed.
 
+Read access requires a buffer declared for program input or mutable state. Write access requires a
+buffer declared for program output or mutable state. Read-write access requires mutable state.
+Binding-array order has no semantic meaning; the slot number identifies the program argument.
+
 ### 4.8 Submission
 
 A **submission** is an attempt to admit one program, execution queue, binding list, and relative
@@ -221,6 +225,10 @@ state is pending, complete, failed, or cancelled.
 
 An event **MUST** retain its execution queue, program, buffers, and per-invocation backend state until
 it is terminal and successfully destroyed. A pending event **MUST NOT** be destroyed.
+
+Terminal event states are stable. Cancellation and completion select exactly one terminal result:
+if cancellation wins, the cancellation command succeeds and polling reports cancelled; if
+completion wins, cancellation returns `BUSY` and polling reports the completed or failed result.
 
 ### 4.10 Request and response
 

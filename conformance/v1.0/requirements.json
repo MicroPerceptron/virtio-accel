@@ -580,9 +580,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-50EC74C4B4A6",
+      "id": "REQ-SPEC-33E85C6AD59D",
       "source": "docs/specification.md",
-      "line": 215,
+      "line": 219,
       "section": "4. Terminology and object model",
       "keyword": "MUST NOT",
       "statement": "The command engine **MUST NOT** convert an indeterminate submission into an ordinary error.",
@@ -602,9 +602,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-B45FEED8ABA7",
+      "id": "REQ-SPEC-E77511D6085E",
       "source": "docs/specification.md",
-      "line": 222,
+      "line": 226,
       "section": "4. Terminology and object model",
       "keyword": "MUST",
       "statement": "An event **MUST** retain its execution queue, program, buffers, and per-invocation backend state until",
@@ -624,9 +624,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-E8F4BC935D93",
+      "id": "REQ-SPEC-C7B728AD67B3",
       "source": "docs/specification.md",
-      "line": 223,
+      "line": 227,
       "section": "4. Terminology and object model",
       "keyword": "MUST NOT",
       "statement": "it is terminal and successfully destroyed. A pending event **MUST NOT** be destroyed.",
@@ -646,9 +646,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-68CFBB9C2D41",
+      "id": "REQ-SPEC-AEC4DC4C1559",
       "source": "docs/specification.md",
-      "line": 244,
+      "line": 252,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "The portable v1 baseline **MUST** provide:",
@@ -666,9 +666,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-6A5CA92B1CFE",
+      "id": "REQ-SPEC-AFBF838B4F2D",
       "source": "docs/specification.md",
-      "line": 259,
+      "line": 267,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "advertise semantic event-cancellation capability, the device **MUST** return `UNSUPPORTED` without",
@@ -686,9 +686,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-FD0B52B87A47",
+      "id": "REQ-SPEC-86C7CC9E6BDB",
       "source": "docs/specification.md",
-      "line": 268,
+      "line": 276,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
       "statement": "`TIMELINE_FENCES`, and `SECURE_CONTEXTS` reserve numeric positions only. A baseline device **MUST NOT**",
@@ -706,9 +706,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-A7094E01E82E",
+      "id": "REQ-SPEC-0206502CFC72",
       "source": "docs/specification.md",
-      "line": 269,
+      "line": 277,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
       "statement": "advertise them and a baseline driver **MUST NOT** accept them. Protocol 1.0 assigns no semantics to",
@@ -726,9 +726,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-26AB1F1F0970",
+      "id": "REQ-SPEC-7643E8E58065",
       "source": "docs/specification.md",
-      "line": 272,
+      "line": 280,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
       "statement": "Unknown device-specific feature bits **MUST NOT** be accepted by a driver. A device **MUST NOT**",
@@ -746,9 +746,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-899753DD52D4",
+      "id": "REQ-SPEC-EE0B8056BD02",
       "source": "docs/specification.md",
-      "line": 272,
+      "line": 280,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
       "statement": "Unknown device-specific feature bits **MUST NOT** be accepted by a driver. A device **MUST NOT**",
@@ -766,9 +766,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-AE542DCB3D68",
+      "id": "REQ-SPEC-F0DC58280363",
       "source": "docs/specification.md",
-      "line": 290,
+      "line": 298,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
       "statement": "ownership, synchronization, and isolation rules are specified. A protocol 1.0 device **MUST NOT**",
@@ -786,9 +786,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-7807653A3F9F",
+      "id": "REQ-SPEC-A8A5BBCC23A0",
       "source": "docs/specification.md",
-      "line": 293,
+      "line": 301,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "The device **MUST** reject an allocation for an unsupported memory domain before invoking the",
@@ -806,9 +806,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-86369B5E9589",
+      "id": "REQ-SPEC-C2EEBEA200DF",
       "source": "docs/specification.md",
-      "line": 299,
+      "line": 307,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "new synchronization, or changed lifetime rules, the device **MUST** also negotiate an appropriate",
@@ -826,9 +826,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-EADCE4F0A8A9",
+      "id": "REQ-SPEC-013430EC73B8",
       "source": "docs/specification.md",
-      "line": 304,
+      "line": 312,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
       "statement": "implementation **MUST NOT** translate an underspecified capability into additional wire behavior.",
@@ -846,9 +846,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-C4C81B1D7BB6",
+      "id": "REQ-SPEC-AEC435BFF0AF",
       "source": "docs/specification.md",
-      "line": 309,
+      "line": 317,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "reserved and **MUST** be zero.",
@@ -866,9 +866,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-C679BCADAAEA",
+      "id": "REQ-SPEC-6008D0C2488F",
       "source": "docs/specification.md",
-      "line": 312,
+      "line": 320,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "**MUST** be rejected before backend invocation. Reserved fields **MUST** be zero.",
@@ -886,9 +886,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-D861A636A153",
+      "id": "REQ-SPEC-AD1B44BE1427",
       "source": "docs/specification.md",
-      "line": 312,
+      "line": 320,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "**MUST** be rejected before backend invocation. Reserved fields **MUST** be zero.",
@@ -906,9 +906,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-BB680E1A0B79",
+      "id": "REQ-SPEC-75AB5333C8C4",
       "source": "docs/specification.md",
-      "line": 319,
+      "line": 327,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "Candidate implementations **MUST** expose major `1` and minor `0` in device-specific configuration",
@@ -927,9 +927,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-8597E84F67FD",
+      "id": "REQ-SPEC-20BBDCCEEC92",
       "source": "docs/specification.md",
-      "line": 320,
+      "line": 328,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "and **MUST NOT** claim candidate protocol 1.0 conformance unless they satisfy the normative wire,",
@@ -948,9 +948,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-CE119CF28472",
+      "id": "REQ-SPEC-5348BBC0D8FD",
       "source": "docs/specification.md",
-      "line": 324,
+      "line": 332,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "#33. Before that audit, an intentional candidate revision **MUST** follow the coordinated procedure",
@@ -969,9 +969,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-6875C63115F8",
+      "id": "REQ-SPEC-6121F6E1EB77",
       "source": "docs/specification.md",
-      "line": 325,
+      "line": 333,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "in [wire-abi.md](wire-abi.md) and **MUST NOT** be described as a frozen or stable release.",
@@ -990,9 +990,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-00BB7B9A2B4C",
+      "id": "REQ-SPEC-72DE383CDBC0",
       "source": "docs/specification.md",
-      "line": 331,
+      "line": 339,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "- a driver **MUST** reject a device with an unsupported major version;",
@@ -1011,9 +1011,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-8FCB39B7C119",
+      "id": "REQ-SPEC-3803DA96468A",
       "source": "docs/specification.md",
-      "line": 333,
+      "line": 341,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "- a driver **MUST NOT** use behavior newer than the device minor version it observed; and",
@@ -1032,9 +1032,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-FE18F408035C",
+      "id": "REQ-SPEC-6E4D852251B8",
       "source": "docs/specification.md",
-      "line": 342,
+      "line": 350,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "Therefore a minor version alone **MUST NOT** append fields to an existing response that an older",
@@ -1053,9 +1053,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-6C45506F15E8",
+      "id": "REQ-SPEC-756F68A7AAFD",
       "source": "docs/specification.md",
-      "line": 346,
+      "line": 354,
       "section": "6. Versioning and compatibility",
       "keyword": "SHOULD",
       "statement": "negotiated feature explicitly selects a different layout. Extensions **SHOULD** use a new opcode or",
@@ -1074,9 +1074,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-754533E01919",
+      "id": "REQ-SPEC-D0F8BB882F40",
       "source": "docs/specification.md",
-      "line": 349,
+      "line": 357,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "Without such a feature, a receiver **MUST** require the exact payload length for the opcode and",
@@ -1095,9 +1095,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-D1E971E43B4A",
+      "id": "REQ-SPEC-B8E6FB0D7274",
       "source": "docs/specification.md",
-      "line": 350,
+      "line": 358,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "**MUST** reject trailing bytes. It **MUST NOT** silently reinterpret or ignore an unknown tail.",
@@ -1116,9 +1116,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-E5BE5302740B",
+      "id": "REQ-SPEC-9EC4D79F120D",
       "source": "docs/specification.md",
-      "line": 350,
+      "line": 358,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "**MUST** reject trailing bytes. It **MUST NOT** silently reinterpret or ignore an unknown tail.",
@@ -1137,9 +1137,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-89F3C7144057",
+      "id": "REQ-SPEC-E44726AD481F",
       "source": "docs/specification.md",
-      "line": 357,
+      "line": 365,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "- An unknown response status is an opaque failure. A driver **MUST NOT** treat it as success or",
@@ -1158,9 +1158,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-75D40B718E67",
+      "id": "REQ-SPEC-FC0B92A06782",
       "source": "docs/specification.md",
-      "line": 364,
+      "line": 372,
       "section": "7. Ownership and destruction",
       "keyword": "MUST",
       "statement": "The device owns the mapping from opaque object IDs to backend handles. The mapping **MUST** reject:",
@@ -1179,9 +1179,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-3FCD0B88A0D2",
+      "id": "REQ-SPEC-56593F42BA6E",
       "source": "docs/specification.md",
-      "line": 372,
+      "line": 380,
       "section": "7. Ownership and destruction",
       "keyword": "MUST NOT",
       "statement": "Object-ID encoding is implementation-private. Drivers **MUST NOT** infer slot, kind, generation, or",
@@ -1200,9 +1200,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-2AA25E912F8B",
+      "id": "REQ-SPEC-231C9BFD9771",
       "source": "docs/specification.md",
-      "line": 377,
+      "line": 385,
       "section": "7. Ownership and destruction",
       "keyword": "MUST",
       "statement": "- a rejected release returns the still-live handle and the device **MUST** restore it for retry;",
@@ -1221,9 +1221,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-98C389360C1A",
+      "id": "REQ-SPEC-D59392AFA174",
       "source": "docs/specification.md",
-      "line": 379,
+      "line": 387,
       "section": "7. Ownership and destruction",
       "keyword": "MUST NOT",
       "statement": "- an indeterminate release invalidates the guest ID and requires recovery. The device **MUST NOT**",
@@ -1242,9 +1242,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-58CA48105327",
+      "id": "REQ-SPEC-0198899B57F8",
       "source": "docs/specification.md",
-      "line": 382,
+      "line": 390,
       "section": "7. Ownership and destruction",
       "keyword": "MUST NOT",
       "statement": "`Drop` may provide defensive cleanup inside an implementation but **MUST NOT** be used as",
@@ -1263,9 +1263,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-516FEBC9DC0B",
+      "id": "REQ-SPEC-B35C802C4CE1",
       "source": "docs/specification.md",
-      "line": 388,
+      "line": 396,
       "section": "8. Time and progress",
       "keyword": "MUST NOT",
       "statement": "infinite. Absolute guest timestamps **MUST NOT** be compared with a host clock because their",
@@ -1282,9 +1282,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-B3DE8C0C13C8",
+      "id": "REQ-SPEC-A3E630EEB53C",
       "source": "docs/specification.md",
-      "line": 391,
+      "line": 399,
       "section": "8. Time and progress",
       "keyword": "MUST",
       "statement": "Polling an event **MUST** be nonblocking and bounded. The portable contract creates no background",
@@ -1301,9 +1301,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-C0E2DDFC4E95",
+      "id": "REQ-SPEC-9A070026FAAE",
       "source": "docs/specification.md",
-      "line": 395,
+      "line": 403,
       "section": "8. Time and progress",
       "keyword": "MUST",
       "statement": "cannot prove rejection is indeterminate and **MUST** retain an event.",
@@ -1320,9 +1320,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-CB3886392A30",
+      "id": "REQ-SPEC-B87D11017952",
       "source": "docs/specification.md",
-      "line": 404,
+      "line": 412,
       "section": "9. Errors",
       "keyword": "MUST",
       "statement": "A device **MUST** map errors deterministically and **MUST NOT** expose uninitialized response bytes.",
@@ -1340,9 +1340,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-D2EC5C810722",
+      "id": "REQ-SPEC-9DA3CA594109",
       "source": "docs/specification.md",
-      "line": 404,
+      "line": 412,
       "section": "9. Errors",
       "keyword": "MUST NOT",
       "statement": "A device **MUST** map errors deterministically and **MUST NOT** expose uninitialized response bytes.",
@@ -1360,9 +1360,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-063210EF2C88",
+      "id": "REQ-SPEC-549D7EA018D8",
       "source": "docs/specification.md",
-      "line": 408,
+      "line": 416,
       "section": "9. Errors",
       "keyword": "MUST NOT",
       "statement": "An error response **MUST NOT** imply that a backend operation was rejected when acceptance was",
@@ -1380,9 +1380,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-48AE033662E2",
+      "id": "REQ-SPEC-C38079758E77",
       "source": "docs/specification.md",
-      "line": 413,
+      "line": 421,
       "section": "10. Portability requirements",
       "keyword": "MUST NOT",
       "statement": "Portable crates **MUST NOT** select an operating system, VMM, kernel, vendor API, or global runtime.",
@@ -1398,9 +1398,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-38AC895175F0",
+      "id": "REQ-SPEC-15A354D61BD7",
       "source": "docs/specification.md",
-      "line": 420,
+      "line": 428,
       "section": "10. Portability requirements",
       "keyword": "MUST NOT",
       "statement": "Platform adapters depend inward on the portable layers. A portable layer **MUST NOT** conditionally",
@@ -1416,9 +1416,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-E90D593ED0AD",
+      "id": "REQ-SPEC-0E2CA4544542",
       "source": "docs/specification.md",
-      "line": 436,
+      "line": 444,
       "section": "11. Tracked completion work",
       "keyword": "MAY",
       "statement": "No implementation **MAY** advertise a reserved optional feature merely because a Rust constant",
@@ -1765,9 +1765,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-521DFC5AAE65",
+      "id": "REQ-WIRE-313FCB978A7A",
       "source": "docs/wire-abi.md",
-      "line": 145,
+      "line": 149,
       "section": "4. Common value namespaces",
       "keyword": "MUST",
       "statement": "Unknown event states make the response invalid to a 1.0 driver. A driver **MUST** retain the event",
@@ -1782,9 +1782,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-64102815576B",
+      "id": "REQ-WIRE-80A0DAA86EAD",
       "source": "docs/wire-abi.md",
-      "line": 195,
+      "line": 199,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST NOT",
       "statement": "Capability bits are semantic reports, not Virtio feature bits. A capability **MUST NOT** alter wire",
@@ -1802,9 +1802,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-4B8751C702D4",
+      "id": "REQ-WIRE-8A055801233E",
       "source": "docs/wire-abi.md",
-      "line": 208,
+      "line": 212,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST NOT",
       "statement": "Bits 3 (`EXTERNAL_MEMORY`) and 4 (`SECURE_CONTEXTS`) are reserved and **MUST NOT** be advertised by a",
@@ -1822,9 +1822,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-580C3DD285D4",
+      "id": "REQ-WIRE-67C188990B79",
       "source": "docs/wire-abi.md",
-      "line": 213,
+      "line": 217,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST",
       "statement": "`CreateContextRequest` is eight bytes: `flags: u32` followed by `reserved: u32`. Both fields **MUST**",
@@ -1842,9 +1842,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-4EAD37AC39A4",
+      "id": "REQ-WIRE-42EB92A9EC01",
       "source": "docs/wire-abi.md",
-      "line": 232,
+      "line": 236,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST",
       "statement": "The device **MUST** reject a memory domain whose corresponding semantic capability is absent before",
@@ -1862,9 +1862,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-87BB31FD5813",
+      "id": "REQ-WIRE-223FBC8A60C0",
       "source": "docs/wire-abi.md",
-      "line": 238,
+      "line": 242,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST",
       "statement": "`TransferBufferRequest` is 24 bytes containing `buffer_id`, `offset`, and `bytes`. `bytes` **MUST**",
@@ -1882,9 +1882,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-E017FD0EEA20",
+      "id": "REQ-WIRE-5C3F347D6615",
       "source": "docs/wire-abi.md",
-      "line": 239,
+      "line": 243,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST NOT",
       "statement": "be nonzero. `offset + bytes` **MUST NOT** overflow and **MUST** fit in the buffer.",
@@ -1902,9 +1902,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-271DD2086E42",
+      "id": "REQ-WIRE-B27D105076D0",
       "source": "docs/wire-abi.md",
-      "line": 239,
+      "line": 243,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST",
       "statement": "be nonzero. `offset + bytes` **MUST NOT** overflow and **MUST** fit in the buffer.",
@@ -1922,9 +1922,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-8008071E0526",
+      "id": "REQ-WIRE-241B1A675E6E",
       "source": "docs/wire-abi.md",
-      "line": 241,
+      "line": 245,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST",
       "statement": "For `WRITE_BUFFER`, the request payload length **MUST** be `24 + bytes`, and bytes following the",
@@ -1942,9 +1942,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-4EF44E350137",
+      "id": "REQ-WIRE-EF36BE53AF84",
       "source": "docs/wire-abi.md",
-      "line": 263,
+      "line": 267,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST",
       "statement": "`80 + payload_bytes` **MUST** fit the request payload and configured frame limit.",
@@ -1962,9 +1962,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-9444BF78467A",
+      "id": "REQ-WIRE-ED65F48C9645",
       "source": "docs/wire-abi.md",
-      "line": 268,
+      "line": 272,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST",
       "statement": "reserved words **MUST** be zero in protocol 1.0.",
@@ -1982,9 +1982,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-F9B8603BE34B",
+      "id": "REQ-WIRE-C5375BF48766",
       "source": "docs/wire-abi.md",
-      "line": 275,
+      "line": 279,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST",
       "statement": "- `binding_count` **MUST** be 1 through both advertised `max_bindings_per_submission` and 4096.",
@@ -2002,9 +2002,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-47AC091DB502",
+      "id": "REQ-WIRE-20A4C3C896DE",
       "source": "docs/wire-abi.md",
-      "line": 276,
+      "line": 280,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST",
       "statement": "- `flags` **MUST** be zero.",
@@ -2022,9 +2022,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-219F0562BE70",
+      "id": "REQ-WIRE-FAF253929B2A",
       "source": "docs/wire-abi.md",
-      "line": 278,
+      "line": 282,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST",
       "statement": "- The payload length **MUST** be `32 + binding_count * 32`.",
@@ -2042,9 +2042,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-6E7783E86053",
+      "id": "REQ-WIRE-9994C43527C9",
       "source": "docs/wire-abi.md",
-      "line": 323,
+      "line": 328,
       "section": "7. Response atomicity",
       "keyword": "MUST",
       "statement": "Before backend invocation, the device **MUST** validate the complete readable frame and enough",
@@ -2061,9 +2061,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-464698253A6B",
+      "id": "REQ-WIRE-9C21B8D4BFC1",
       "source": "docs/wire-abi.md",
-      "line": 324,
+      "line": 329,
       "section": "7. Response atomicity",
       "keyword": "MUST",
       "statement": "writable capacity for every possible response shape of that command. It **MUST** initialize every",
@@ -2080,9 +2080,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-38CDAB01C914",
+      "id": "REQ-WIRE-E64A25494C17",
       "source": "docs/wire-abi.md",
-      "line": 328,
+      "line": 333,
       "section": "7. Response atomicity",
       "keyword": "MUST",
       "statement": "occurs after semantic mutation, or a release becomes indeterminate, the device **MUST** enter",
@@ -2099,9 +2099,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-50389481EBC0",
+      "id": "REQ-WIRE-A92557C08CB5",
       "source": "docs/wire-abi.md",
-      "line": 329,
+      "line": 334,
       "section": "7. Response atomicity",
       "keyword": "MUST NOT",
       "statement": "recovery and expose the Virtio `DEVICE_NEEDS_RESET` condition. It **MUST NOT** report an ordinary",
@@ -2118,9 +2118,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-C6BCD8DA20D3",
+      "id": "REQ-WIRE-06A28D538D92",
       "source": "docs/wire-abi.md",
-      "line": 343,
+      "line": 348,
       "section": "9. Candidate and post-freeze change procedure",
       "keyword": "MUST",
       "statement": "A proposed wire change **MUST** be classified before code is merged:",
@@ -2137,9 +2137,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-0AD257A3D59E",
+      "id": "REQ-WIRE-EA6631A95021",
       "source": "docs/wire-abi.md",
-      "line": 356,
+      "line": 361,
       "section": "9. Candidate and post-freeze change procedure",
       "keyword": "MUST",
       "statement": "The same reviewed change **MUST** update the normative documents, Rust constants/layout assertions,",

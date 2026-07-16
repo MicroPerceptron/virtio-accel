@@ -297,16 +297,24 @@ impl<'a, B, P, Q> SubmissionResources<'a, B, P, Q> {
         self.program
     }
 
+    /// Retained buffer IDs sorted by raw object ID, including duplicate bindings.
     pub fn buffer_ids(&self) -> &[ObjectId] {
         self.buffer_ids
     }
 
-    pub fn buffer(&self, index: usize) -> Result<&'a B, DeviceStateError> {
-        let id = *self
-            .buffer_ids
-            .get(index)
-            .ok_or(DeviceStateError::InvalidArgument)?;
-        self.buffers.get(id).map_err(map_table_error)?.resource()
+    pub fn buffer_by_id(&self, id: ObjectId) -> Result<&'a B, DeviceStateError> {
+        self.buffer_with_info_by_id(id).map(|(buffer, _)| buffer)
+    }
+
+    pub(crate) fn buffer_with_info_by_id(
+        &self,
+        id: ObjectId,
+    ) -> Result<(&'a B, BufferInfo), DeviceStateError> {
+        self.buffer_ids
+            .binary_search_by_key(&id.get(), |candidate| candidate.get())
+            .map_err(|_| DeviceStateError::InvalidArgument)?;
+        let record = self.buffers.get(id).map_err(map_table_error)?;
+        Ok((record.resource()?, record.info()))
     }
 }
 
@@ -535,7 +543,7 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
         &mut self,
         queue_id: ObjectId,
         program_id: ObjectId,
-        buffer_ids: &[ObjectId],
+        mut buffer_ids: Vec<ObjectId>,
         create: impl FnOnce(SubmissionResources<'_, B, P, Q>) -> Result<E, ProviderError>,
     ) -> Result<ObjectId, CreateError<ProviderError>> {
         if buffer_ids.is_empty() {
@@ -546,7 +554,7 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
         }
 
         let context_id = self
-            .validate_submission(queue_id, program_id, buffer_ids)
+            .validate_submission(queue_id, program_id, &buffer_ids)
             .map_err(CreateError::State)?;
         let context = self
             .contexts
@@ -559,15 +567,10 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
             .try_reserve_insert()
             .map_err(|error| CreateError::State(map_table_error(error)))?;
 
-        let mut retained_buffers = Vec::new();
-        retained_buffers
-            .try_reserve_exact(buffer_ids.len())
-            .map_err(|_| CreateError::State(DeviceStateError::OutOfMemory))?;
-        retained_buffers.extend_from_slice(buffer_ids);
-        retained_buffers.sort_unstable_by_key(|id| id.get());
-        self.check_reference_increments(queue_id, program_id, &retained_buffers)
+        buffer_ids.sort_unstable_by_key(|id| id.get());
+        self.check_reference_increments(queue_id, program_id, &buffer_ids)
             .map_err(CreateError::State)?;
-        self.increment_event_references(context_id, queue_id, program_id, buffer_ids)
+        self.increment_event_references(context_id, queue_id, program_id, &buffer_ids)
             .map_err(CreateError::State)?;
 
         let event_result = {
@@ -586,13 +589,13 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
                 queue,
                 program,
                 buffers: &self.buffers,
-                buffer_ids,
+                buffer_ids: &buffer_ids,
             })
         };
         let event = match event_result {
             Ok(event) => event,
             Err(error) => {
-                self.decrement_event_references(context_id, queue_id, program_id, buffer_ids)
+                self.decrement_event_references(context_id, queue_id, program_id, &buffer_ids)
                     .map_err(CreateError::State)?;
                 return Err(CreateError::Provider(error));
             }
@@ -603,7 +606,7 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
             context_id,
             queue_id,
             program_id,
-            buffer_ids: retained_buffers,
+            buffer_ids,
         });
         Ok(id)
     }
@@ -1093,12 +1096,11 @@ mod tests {
             })
             .unwrap();
         let event = state
-            .create_event_with(queue, program, &[buffer, buffer], |resources| {
+            .create_event_with(queue, program, alloc::vec![buffer, buffer], |resources| {
                 assert_eq!(resources.context_id(), context);
                 assert_eq!(*resources.queue(), 40);
                 assert_eq!(*resources.program(), 30);
-                assert_eq!(*resources.buffer(0).unwrap(), 21);
-                assert_eq!(*resources.buffer(1).unwrap(), 21);
+                assert_eq!(*resources.buffer_by_id(buffer).unwrap(), 21);
                 Ok::<_, &'static str>(50)
             })
             .unwrap();
@@ -1253,13 +1255,13 @@ mod tests {
         ));
 
         state
-            .create_event_with(queue, program, &[buffer], |_| {
+            .create_event_with(queue, program, alloc::vec![buffer], |_| {
                 calls.set(calls.get() + 1);
                 Ok::<_, &'static str>(50)
             })
             .unwrap();
         assert!(matches!(
-            state.create_event_with(queue, program, &[buffer], |_| {
+            state.create_event_with(queue, program, alloc::vec![buffer], |_| {
                 calls.set(calls.get() + 1);
                 Ok::<_, &'static str>(51)
             }),
@@ -1314,7 +1316,9 @@ mod tests {
             .create_queue_with(context, |_| Ok::<_, &'static str>(40))
             .unwrap();
         assert!(matches!(
-            state.create_event_with(queue, program, &[buffer], |_| { Err::<u32, _>("event") }),
+            state.create_event_with(queue, program, alloc::vec![buffer], |_| {
+                Err::<u32, _>("event")
+            }),
             Err(CreateError::Provider("event"))
         ));
         assert_eq!(state.event_count(), 0);
@@ -1342,7 +1346,7 @@ mod tests {
             .unwrap();
         let called = Cell::new(false);
         assert!(matches!(
-            first.create_event_with(queue, program, &[buffer], |_| {
+            first.create_event_with(queue, program, alloc::vec![buffer], |_| {
                 called.set(true);
                 Ok::<_, &'static str>(50)
             }),
