@@ -5,13 +5,14 @@
 
 #![forbid(unsafe_code)]
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::vec::Vec;
 use virtio_accel_core::{
-    Accelerator, AcceleratorClass, ArtifactFormat, ArtifactRef, BackendError, BindingRef,
-    BufferDesc, Capabilities, ContextDesc, DeviceIdentity, DeviceInfo, DeviceLimits, EventState,
-    QueueDesc, ReleaseFailure, SubmitFailure, TargetIdentity, Timeout, validate_bindings,
+    Accelerator, AcceleratorClass, AllocatedBuffer, ArtifactFormat, ArtifactRef, BackendError,
+    BindingRef, BufferDesc, BufferInfo, BufferProperties, ByteSink, ByteSource, Capabilities,
+    ContextDesc, DeviceIdentity, DeviceInfo, DeviceLimits, EventState, MemoryDomain, QueueDesc,
+    ReleaseFailure, SubmitFailure, TargetIdentity, Timeout, validate_bindings,
 };
 
 const EVENT_PENDING: u8 = 0;
@@ -23,11 +24,11 @@ pub struct MockContext {
     id: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct MockBuffer {
     context_id: u64,
     desc: BufferDesc,
-    data: Arc<Mutex<Vec<u8>>>,
+    data: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -80,6 +81,7 @@ impl Default for MockAccelerator {
                 },
                 capabilities: Capabilities::HOST_VISIBLE_MEMORY
                     | Capabilities::DEVICE_LOCAL_MEMORY
+                    | Capabilities::SHARED_MEMORY
                     | Capabilities::EVENT_CANCELLATION,
                 limits: DeviceLimits {
                     max_contexts: 64,
@@ -160,31 +162,59 @@ impl Accelerator for MockAccelerator {
         &self,
         context: &Self::Context,
         desc: BufferDesc,
-    ) -> Result<Self::Buffer, BackendError> {
-        if desc.bytes() > self.info.limits.max_buffer_bytes {
-            return Err(BackendError::ResourceLimit);
-        }
+    ) -> Result<AllocatedBuffer<Self::Buffer>, BackendError> {
+        self.info.validate_buffer_desc(desc)?;
+        let properties = match desc.domain {
+            MemoryDomain::Host => BufferProperties::HOST_VISIBLE,
+            MemoryDomain::Device => BufferProperties::DEVICE_LOCAL,
+            MemoryDomain::Shared => BufferProperties::HOST_VISIBLE,
+        } | if desc.is_program_visible() || desc.domain == MemoryDomain::Shared {
+            BufferProperties::DIRECT_BINDING
+        } else {
+            BufferProperties::empty()
+        };
+        let info = BufferInfo::new(desc, desc.bytes(), desc.alignment(), properties)?;
         let bytes = usize::try_from(desc.bytes()).map_err(|_| BackendError::OutOfMemory)?;
         let mut data = Vec::new();
         data.try_reserve_exact(bytes)
             .map_err(|_| BackendError::OutOfMemory)?;
         data.resize(bytes, 0);
-        Ok(MockBuffer {
-            context_id: context.id,
-            desc,
-            data: Arc::new(Mutex::new(data)),
-        })
+        Ok(AllocatedBuffer::new(
+            MockBuffer {
+                context_id: context.id,
+                desc,
+                data,
+            },
+            info,
+        ))
     }
 
     fn write_buffer(
         &self,
-        buffer: &Self::Buffer,
+        buffer: &mut Self::Buffer,
         offset: u64,
-        data: &[u8],
+        data: &dyn ByteSource,
     ) -> Result<(), BackendError> {
-        let mut target = buffer.data.lock().map_err(|_| BackendError::DeviceLost)?;
-        let range = Self::checked_range(target.len(), offset, data.len())?;
-        target[range].copy_from_slice(data);
+        if !buffer
+            .desc
+            .usage
+            .contains(virtio_accel_core::BufferUsage::TRANSFER_DESTINATION)
+        {
+            return Err(BackendError::PermissionDenied);
+        }
+        let bytes = usize::try_from(data.len()).map_err(|_| BackendError::OutOfBounds)?;
+        if bytes == 0 {
+            return Err(BackendError::InvalidArgument);
+        }
+        let range = Self::checked_range(buffer.data.len(), offset, bytes)?;
+        if let Some(source) = data.as_contiguous() {
+            if source.len() != bytes {
+                return Err(BackendError::InvalidArgument);
+            }
+            buffer.data[range].copy_from_slice(source);
+        } else {
+            data.read_at(0, &mut buffer.data[range])?;
+        }
         Ok(())
     }
 
@@ -192,11 +222,28 @@ impl Accelerator for MockAccelerator {
         &self,
         buffer: &Self::Buffer,
         offset: u64,
-        data: &mut [u8],
+        data: &mut dyn ByteSink,
     ) -> Result<(), BackendError> {
-        let source = buffer.data.lock().map_err(|_| BackendError::DeviceLost)?;
-        let range = Self::checked_range(source.len(), offset, data.len())?;
-        data.copy_from_slice(&source[range]);
+        if !buffer
+            .desc
+            .usage
+            .contains(virtio_accel_core::BufferUsage::TRANSFER_SOURCE)
+        {
+            return Err(BackendError::PermissionDenied);
+        }
+        let bytes = usize::try_from(data.len()).map_err(|_| BackendError::OutOfBounds)?;
+        if bytes == 0 {
+            return Err(BackendError::InvalidArgument);
+        }
+        let range = Self::checked_range(buffer.data.len(), offset, bytes)?;
+        if let Some(target) = data.as_contiguous_mut() {
+            if target.len() != bytes {
+                return Err(BackendError::InvalidArgument);
+            }
+            target.copy_from_slice(&buffer.data[range]);
+        } else {
+            data.write_at(0, &buffer.data[range])?;
+        }
         Ok(())
     }
 
@@ -209,14 +256,16 @@ impl Accelerator for MockAccelerator {
         context: &Self::Context,
         artifact: ArtifactRef<'_>,
     ) -> Result<Self::Program, BackendError> {
-        if artifact.payload.len() as u64 > self.info.limits.max_artifact_bytes {
+        if artifact.payload.len() > self.info.limits.max_artifact_bytes {
             return Err(BackendError::ResourceLimit);
         }
+        let payload_bytes =
+            usize::try_from(artifact.payload.len()).map_err(|_| BackendError::ResourceLimit)?;
         Ok(MockProgram {
             context_id: context.id,
             format: artifact.format,
             target: artifact.target,
-            payload_bytes: artifact.payload.len(),
+            payload_bytes,
         })
     }
 
@@ -303,25 +352,94 @@ impl Accelerator for MockAccelerator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use virtio_accel_core::{AccessMode, BindingRef, BufferRange, BufferUsage, MemoryDomain};
+    use virtio_accel_core::{AccessMode, BindingRef, BufferRange, BufferUsage};
+
+    #[derive(Debug)]
+    struct SplitSource<'a> {
+        first: &'a [u8],
+        second: &'a [u8],
+    }
+
+    impl ByteSource for SplitSource<'_> {
+        fn len(&self) -> u64 {
+            (self.first.len() + self.second.len()) as u64
+        }
+
+        fn read_at(&self, offset: u64, target: &mut [u8]) -> Result<(), BackendError> {
+            let start = usize::try_from(offset).map_err(|_| BackendError::OutOfBounds)?;
+            let end = start
+                .checked_add(target.len())
+                .filter(|end| *end <= self.first.len() + self.second.len())
+                .ok_or(BackendError::OutOfBounds)?;
+            for (segment_start, segment) in [(0, self.first), (self.first.len(), self.second)] {
+                let overlap_start = start.max(segment_start);
+                let overlap_end = end.min(segment_start + segment.len());
+                if overlap_start < overlap_end {
+                    target[overlap_start - start..overlap_end - start].copy_from_slice(
+                        &segment[overlap_start - segment_start..overlap_end - segment_start],
+                    );
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct SplitSink<'a> {
+        first: &'a mut [u8],
+        second: &'a mut [u8],
+    }
+
+    impl ByteSink for SplitSink<'_> {
+        fn len(&self) -> u64 {
+            (self.first.len() + self.second.len()) as u64
+        }
+
+        fn write_at(&mut self, offset: u64, source: &[u8]) -> Result<(), BackendError> {
+            let start = usize::try_from(offset).map_err(|_| BackendError::OutOfBounds)?;
+            let end = start
+                .checked_add(source.len())
+                .filter(|end| *end <= self.first.len() + self.second.len())
+                .ok_or(BackendError::OutOfBounds)?;
+            let first_len = self.first.len();
+            for (segment_start, segment) in [(0, &mut *self.first), (first_len, &mut *self.second)]
+            {
+                let overlap_start = start.max(segment_start);
+                let overlap_end = end.min(segment_start + segment.len());
+                if overlap_start < overlap_end {
+                    segment[overlap_start - segment_start..overlap_end - segment_start]
+                        .copy_from_slice(&source[overlap_start - start..overlap_end - start]);
+                }
+            }
+            Ok(())
+        }
+    }
 
     #[test]
     fn reference_backend_exercises_the_complete_lifecycle() {
         let backend = MockAccelerator::default();
         let context = backend.create_context(ContextDesc::default()).unwrap();
-        let buffer = backend
-            .allocate_buffer(
-                &context,
-                BufferDesc::new(
-                    16,
-                    8,
-                    MemoryDomain::Shared,
-                    BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_INPUT,
-                )
-                .unwrap(),
-            )
-            .unwrap();
-        backend.write_buffer(&buffer, 4, &[1, 2, 3, 4]).unwrap();
+        let desc = BufferDesc::new(
+            16,
+            8,
+            MemoryDomain::Shared,
+            BufferUsage::TRANSFER_SOURCE
+                | BufferUsage::TRANSFER_DESTINATION
+                | BufferUsage::PROGRAM_INPUT,
+        )
+        .unwrap();
+        let allocation = backend.allocate_buffer(&context, desc).unwrap();
+        assert_eq!(allocation.info().desc(), desc);
+        assert_eq!(allocation.info().allocation_bytes(), 16);
+        assert_eq!(allocation.info().alignment(), 8);
+        assert!(
+            allocation
+                .info()
+                .properties()
+                .contains(BufferProperties::DIRECT_BINDING)
+        );
+        let (mut buffer, _) = allocation.into_parts();
+        backend.write_buffer(&mut buffer, 4, &[1, 2, 3, 4]).unwrap();
         let mut output = [0; 4];
         backend.read_buffer(&buffer, 4, &mut output).unwrap();
         assert_eq!(output, [1, 2, 3, 4]);
@@ -371,16 +489,75 @@ mod tests {
     }
 
     #[test]
+    fn explicit_transfers_enforce_declared_direction() {
+        let backend = MockAccelerator::default();
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        let allocation = backend
+            .allocate_buffer(
+                &context,
+                BufferDesc::new(4, 1, MemoryDomain::Host, BufferUsage::TRANSFER_SOURCE).unwrap(),
+            )
+            .unwrap();
+        let (mut buffer, _) = allocation.into_parts();
+        assert_eq!(
+            backend.write_buffer(&mut buffer, 0, &[1]),
+            Err(BackendError::PermissionDenied)
+        );
+
+        backend.free_buffer(buffer).unwrap();
+        backend.destroy_context(context).unwrap();
+    }
+
+    #[test]
+    fn segmented_transfers_do_not_require_coalescing() {
+        let backend = MockAccelerator::default();
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        let allocation = backend
+            .allocate_buffer(
+                &context,
+                BufferDesc::new(
+                    4,
+                    1,
+                    MemoryDomain::Host,
+                    BufferUsage::TRANSFER_SOURCE | BufferUsage::TRANSFER_DESTINATION,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let (mut buffer, _) = allocation.into_parts();
+
+        let source = SplitSource {
+            first: &[1, 2],
+            second: &[3, 4],
+        };
+        backend.write_buffer(&mut buffer, 0, &source).unwrap();
+
+        let mut first = [0; 1];
+        let mut second = [0; 3];
+        let mut sink = SplitSink {
+            first: &mut first,
+            second: &mut second,
+        };
+        backend.read_buffer(&buffer, 0, &mut sink).unwrap();
+        assert_eq!(first, [1]);
+        assert_eq!(second, [2, 3, 4]);
+
+        backend.free_buffer(buffer).unwrap();
+        backend.destroy_context(context).unwrap();
+    }
+
+    #[test]
     fn cross_context_submission_is_rejected_before_acceptance() {
         let backend = MockAccelerator::default();
         let context_a = backend.create_context(ContextDesc::default()).unwrap();
         let context_b = backend.create_context(ContextDesc::default()).unwrap();
-        let buffer = backend
+        let allocation = backend
             .allocate_buffer(
                 &context_b,
                 BufferDesc::new(1, 1, MemoryDomain::Host, BufferUsage::PROGRAM_INPUT).unwrap(),
             )
             .unwrap();
+        let (buffer, _) = allocation.into_parts();
         let program = backend
             .load_program(
                 &context_a,

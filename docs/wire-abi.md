@@ -196,6 +196,18 @@ Capability bits are semantic reports, not Virtio feature bits. A capability **MU
 framing without a separately negotiated feature. Unknown capability bits are ignored for operation
 selection and preserved by diagnostic tooling.
 
+Assigned protocol 1.0 semantic capability bits are:
+
+| Bit | Name |
+|---:|---|
+| 0 | `HOST_VISIBLE_MEMORY` |
+| 1 | `DEVICE_LOCAL_MEMORY` |
+| 2 | `EVENT_CANCELLATION` |
+| 5 | `SHARED_MEMORY` |
+
+Bits 3 (`EXTERNAL_MEMORY`) and 4 (`SECURE_CONTEXTS`) are reserved and **MUST NOT** be advertised by a
+protocol 1.0 device.
+
 ### 5.2 Context
 
 `CreateContextRequest` is eight bytes: `flags: u32` followed by `reserved: u32`. Both fields **MUST**
@@ -217,6 +229,12 @@ Context destruction uses an eight-byte `ObjectPayload`.
 | `usage` | Nonempty subset of assigned usage bits |
 | `reserved1` | Zero |
 
+The device **MUST** reject a memory domain whose corresponding semantic capability is absent before
+backend invocation. `Host`, `Device`, and provider-owned `Shared` allocations use capability bits 0,
+1, and 5 respectively. Successful allocation commits the backend to the placement and direct-binding
+rules in [specification.md](specification.md); it may not silently substitute a staged submission
+path.
+
 `TransferBufferRequest` is 24 bytes containing `buffer_id`, `offset`, and `bytes`. `bytes` **MUST**
 be nonzero. `offset + bytes` **MUST NOT** overflow and **MUST** fit in the buffer.
 
@@ -224,6 +242,10 @@ For `WRITE_BUFFER`, the request payload length **MUST** be `24 + bytes`, and byt
 prefix are copied to the buffer. For `READ_BUFFER`, the request payload is exactly 24 bytes and the
 success response payload contains exactly `bytes` bytes. Transfers must also fit the configured
 request or response frame maximum.
+
+`WRITE_BUFFER` requires buffer usage `TRANSFER_DESTINATION`; `READ_BUFFER` requires
+`TRANSFER_SOURCE`. These commands are explicit copy boundaries. Their existence does not permit
+allocation or submission to copy program bindings through hidden bounce buffers.
 
 ### 5.4 Programs
 

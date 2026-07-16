@@ -1,7 +1,7 @@
 {
   "schema": "virtio-accel-normative-requirements-1",
   "generated_by": "ci/check-normative-requirements.py",
-  "requirement_count": 113,
+  "requirement_count": 126,
   "requirements": [
     {
       "id": "REQ-SPEC-A29885B44214",
@@ -243,9 +243,10 @@
         ],
         "issues": [
           "#20",
-          "#21"
+          "#21",
+          "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; the command engine and complete backend policy remain tracked."
+        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
       }
     },
     {
@@ -264,9 +265,10 @@
         ],
         "issues": [
           "#20",
-          "#21"
+          "#21",
+          "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; the command engine and complete backend policy remain tracked."
+        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
       }
     },
     {
@@ -285,15 +287,214 @@
         ],
         "issues": [
           "#20",
-          "#21"
+          "#21",
+          "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; the command engine and complete backend policy remain tracked."
+        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
       }
     },
     {
-      "id": "REQ-SPEC-56AF235C5973",
+      "id": "REQ-SPEC-2ADD413E2C54",
       "source": "docs/specification.md",
-      "line": 143,
+      "line": 149,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST",
+      "statement": "An allocation result **MUST** report the requested descriptor, actual retained allocation bytes,",
+      "coverage": {
+        "status": "mixed",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs"
+        ],
+        "issues": [
+          "#20",
+          "#21",
+          "#25"
+        ],
+        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+      }
+    },
+    {
+      "id": "REQ-SPEC-9C940B6CA84A",
+      "source": "docs/specification.md",
+      "line": 150,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST NOT",
+      "statement": "actual guaranteed alignment, and honest backing properties. Actual bytes **MUST NOT** be smaller",
+      "coverage": {
+        "status": "mixed",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs"
+        ],
+        "issues": [
+          "#20",
+          "#21",
+          "#25"
+        ],
+        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+      }
+    },
+    {
+      "id": "REQ-SPEC-6356A0CC67A3",
+      "source": "docs/specification.md",
+      "line": 151,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST NOT",
+      "statement": "than the logical buffer and actual alignment **MUST NOT** be weaker than requested. Device resource",
+      "coverage": {
+        "status": "mixed",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs"
+        ],
+        "issues": [
+          "#20",
+          "#21",
+          "#25"
+        ],
+        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+      }
+    },
+    {
+      "id": "REQ-SPEC-8F8A0C569B92",
+      "source": "docs/specification.md",
+      "line": 153,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST NOT",
+      "statement": "A provider **MUST NOT** return an allocation whose reported placement can be achieved only by",
+      "coverage": {
+        "status": "mixed",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs"
+        ],
+        "issues": [
+          "#20",
+          "#21",
+          "#25"
+        ],
+        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+      }
+    },
+    {
+      "id": "REQ-SPEC-9D56D3A7B4DB",
+      "source": "docs/specification.md",
+      "line": 156,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST",
+      "statement": "A buffer whose usage includes program input, program output, or mutable state **MUST** report direct",
+      "coverage": {
+        "status": "mixed",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs"
+        ],
+        "issues": [
+          "#20",
+          "#21",
+          "#25"
+        ],
+        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+      }
+    },
+    {
+      "id": "REQ-SPEC-6DD165FA9420",
+      "source": "docs/specification.md",
+      "line": 157,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST",
+      "statement": "binding. A compatible submission **MUST** bind the exact provider allocation without copying the",
+      "coverage": {
+        "status": "mixed",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs"
+        ],
+        "issues": [
+          "#20",
+          "#21",
+          "#25"
+        ],
+        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+      }
+    },
+    {
+      "id": "REQ-SPEC-F386A9C7B476",
+      "source": "docs/specification.md",
+      "line": 159,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST",
+      "statement": "**MUST** reject allocation. If a particular program is incompatible with an otherwise valid buffer,",
+      "coverage": {
+        "status": "mixed",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs"
+        ],
+        "issues": [
+          "#20",
+          "#21",
+          "#25"
+        ],
+        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+      }
+    },
+    {
+      "id": "REQ-SPEC-B164581301C6",
+      "source": "docs/specification.md",
+      "line": 160,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST",
+      "statement": "submission **MUST** be rejected as `INCOMPATIBLE`; the provider **MUST NOT** silently stage it.",
+      "coverage": {
+        "status": "mixed",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs"
+        ],
+        "issues": [
+          "#20",
+          "#21",
+          "#25"
+        ],
+        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+      }
+    },
+    {
+      "id": "REQ-SPEC-0178C1494E1C",
+      "source": "docs/specification.md",
+      "line": 160,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST NOT",
+      "statement": "submission **MUST** be rejected as `INCOMPATIBLE`; the provider **MUST NOT** silently stage it.",
+      "coverage": {
+        "status": "mixed",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs"
+        ],
+        "issues": [
+          "#20",
+          "#21",
+          "#25"
+        ],
+        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
+      }
+    },
+    {
+      "id": "REQ-SPEC-A7BAAE96F374",
+      "source": "docs/specification.md",
+      "line": 177,
       "section": "4. Terminology and object model",
       "keyword": "MUST NOT",
       "statement": "The transport **MUST NOT** interpret vendor artifact contents. Artifact-format adapters own their",
@@ -306,15 +507,16 @@
         ],
         "issues": [
           "#20",
-          "#21"
+          "#21",
+          "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; the command engine and complete backend policy remain tracked."
+        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
       }
     },
     {
-      "id": "REQ-SPEC-99785E39EE23",
+      "id": "REQ-SPEC-DE29CAFF6637",
       "source": "docs/specification.md",
-      "line": 152,
+      "line": 190,
       "section": "4. Terminology and object model",
       "keyword": "SHOULD",
       "statement": "It is unrelated to a Virtio queue index. Documentation and APIs **SHOULD** use \u201cexecution queue\u201d",
@@ -327,15 +529,16 @@
         ],
         "issues": [
           "#20",
-          "#21"
+          "#21",
+          "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; the command engine and complete backend policy remain tracked."
+        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
       }
     },
     {
-      "id": "REQ-SPEC-446BAC519DC5",
+      "id": "REQ-SPEC-62401FEF59A7",
       "source": "docs/specification.md",
-      "line": 160,
+      "line": 198,
       "section": "4. Terminology and object model",
       "keyword": "MUST",
       "statement": "Binding slot numbers **MUST** be unique within a submission. A binding does not transfer ownership",
@@ -348,15 +551,16 @@
         ],
         "issues": [
           "#20",
-          "#21"
+          "#21",
+          "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; the command engine and complete backend policy remain tracked."
+        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
       }
     },
     {
-      "id": "REQ-SPEC-B509E77DB3D3",
+      "id": "REQ-SPEC-616928D3ABA3",
       "source": "docs/specification.md",
-      "line": 161,
+      "line": 199,
       "section": "4. Terminology and object model",
       "keyword": "MUST",
       "statement": "of its buffer, but the device **MUST** retain the buffer until the resulting event is safely",
@@ -369,15 +573,16 @@
         ],
         "issues": [
           "#20",
-          "#21"
+          "#21",
+          "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; the command engine and complete backend policy remain tracked."
+        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
       }
     },
     {
-      "id": "REQ-SPEC-B71B5452BE12",
+      "id": "REQ-SPEC-50EC74C4B4A6",
       "source": "docs/specification.md",
-      "line": 177,
+      "line": 215,
       "section": "4. Terminology and object model",
       "keyword": "MUST NOT",
       "statement": "The command engine **MUST NOT** convert an indeterminate submission into an ordinary error.",
@@ -390,15 +595,16 @@
         ],
         "issues": [
           "#20",
-          "#21"
+          "#21",
+          "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; the command engine and complete backend policy remain tracked."
+        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
       }
     },
     {
-      "id": "REQ-SPEC-66AFC1A94561",
+      "id": "REQ-SPEC-B45FEED8ABA7",
       "source": "docs/specification.md",
-      "line": 184,
+      "line": 222,
       "section": "4. Terminology and object model",
       "keyword": "MUST",
       "statement": "An event **MUST** retain its execution queue, program, buffers, and per-invocation backend state until",
@@ -411,15 +617,16 @@
         ],
         "issues": [
           "#20",
-          "#21"
+          "#21",
+          "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; the command engine and complete backend policy remain tracked."
+        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
       }
     },
     {
-      "id": "REQ-SPEC-10FC985A68FF",
+      "id": "REQ-SPEC-E8F4BC935D93",
       "source": "docs/specification.md",
-      "line": 185,
+      "line": 223,
       "section": "4. Terminology and object model",
       "keyword": "MUST NOT",
       "statement": "it is terminal and successfully destroyed. A pending event **MUST NOT** be destroyed.",
@@ -432,15 +639,16 @@
         ],
         "issues": [
           "#20",
-          "#21"
+          "#21",
+          "#25"
         ],
-        "rationale": "Core ownership types and lifecycle tests exist; the command engine and complete backend policy remain tracked."
+        "rationale": "Core ownership types and lifecycle tests exist; command-engine enforcement, complete backend policy, and retained-byte accounting remain tracked."
       }
     },
     {
-      "id": "REQ-SPEC-5BB719500123",
+      "id": "REQ-SPEC-68CFBB9C2D41",
       "source": "docs/specification.md",
-      "line": 206,
+      "line": 244,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "The portable v1 baseline **MUST** provide:",
@@ -458,9 +666,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-47C10706DD08",
+      "id": "REQ-SPEC-6A5CA92B1CFE",
       "source": "docs/specification.md",
-      "line": 221,
+      "line": 259,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "advertise semantic event-cancellation capability, the device **MUST** return `UNSUPPORTED` without",
@@ -478,9 +686,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-6AE883563CDE",
+      "id": "REQ-SPEC-FD0B52B87A47",
       "source": "docs/specification.md",
-      "line": 230,
+      "line": 268,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
       "statement": "`TIMELINE_FENCES`, and `SECURE_CONTEXTS` reserve numeric positions only. A baseline device **MUST NOT**",
@@ -498,9 +706,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-0451EDD49C74",
+      "id": "REQ-SPEC-A7094E01E82E",
       "source": "docs/specification.md",
-      "line": 231,
+      "line": 269,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
       "statement": "advertise them and a baseline driver **MUST NOT** accept them. Protocol 1.0 assigns no semantics to",
@@ -518,9 +726,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-4790D362BFD9",
+      "id": "REQ-SPEC-26AB1F1F0970",
       "source": "docs/specification.md",
-      "line": 234,
+      "line": 272,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
       "statement": "Unknown device-specific feature bits **MUST NOT** be accepted by a driver. A device **MUST NOT**",
@@ -538,9 +746,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-4F438014BEF4",
+      "id": "REQ-SPEC-899753DD52D4",
       "source": "docs/specification.md",
-      "line": 234,
+      "line": 272,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
       "statement": "Unknown device-specific feature bits **MUST NOT** be accepted by a driver. A device **MUST NOT**",
@@ -558,9 +766,49 @@
       }
     },
     {
-      "id": "REQ-SPEC-F04C99D52AC3",
+      "id": "REQ-SPEC-AE542DCB3D68",
       "source": "docs/specification.md",
-      "line": 243,
+      "line": 290,
+      "section": "5. Baseline capabilities and feature policy",
+      "keyword": "MUST NOT",
+      "statement": "ownership, synchronization, and isolation rules are specified. A protocol 1.0 device **MUST NOT**",
+      "coverage": {
+        "status": "mixed",
+        "evidence": [
+          "conformance/rust-clean-room/tests/vectors.rs",
+          "crates/virtio-accel-proto/src/lib.rs"
+        ],
+        "issues": [
+          "#20",
+          "#32"
+        ],
+        "rationale": "Namespaces and reserved values are executable; runtime negotiation and future evolution remain tracked."
+      }
+    },
+    {
+      "id": "REQ-SPEC-7807653A3F9F",
+      "source": "docs/specification.md",
+      "line": 293,
+      "section": "5. Baseline capabilities and feature policy",
+      "keyword": "MUST",
+      "statement": "The device **MUST** reject an allocation for an unsupported memory domain before invoking the",
+      "coverage": {
+        "status": "mixed",
+        "evidence": [
+          "conformance/rust-clean-room/tests/vectors.rs",
+          "crates/virtio-accel-proto/src/lib.rs"
+        ],
+        "issues": [
+          "#20",
+          "#32"
+        ],
+        "rationale": "Namespaces and reserved values are executable; runtime negotiation and future evolution remain tracked."
+      }
+    },
+    {
+      "id": "REQ-SPEC-86369B5E9589",
+      "source": "docs/specification.md",
+      "line": 299,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "new synchronization, or changed lifetime rules, the device **MUST** also negotiate an appropriate",
@@ -578,12 +826,12 @@
       }
     },
     {
-      "id": "REQ-SPEC-8B2416B7246F",
+      "id": "REQ-SPEC-EADCE4F0A8A9",
       "source": "docs/specification.md",
-      "line": 248,
+      "line": 304,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
-      "statement": "listed in [wire-abi.md](wire-abi.md); the reference implementation **MUST NOT** translate an",
+      "statement": "implementation **MUST NOT** translate an underspecified capability into additional wire behavior.",
       "coverage": {
         "status": "mixed",
         "evidence": [
@@ -598,9 +846,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-13AAF8D4B1EE",
+      "id": "REQ-SPEC-C4C81B1D7BB6",
       "source": "docs/specification.md",
-      "line": 254,
+      "line": 309,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "reserved and **MUST** be zero.",
@@ -618,9 +866,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-7A71D9423437",
+      "id": "REQ-SPEC-C679BCADAAEA",
       "source": "docs/specification.md",
-      "line": 257,
+      "line": 312,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "**MUST** be rejected before backend invocation. Reserved fields **MUST** be zero.",
@@ -638,9 +886,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-7FAC1C244457",
+      "id": "REQ-SPEC-D861A636A153",
       "source": "docs/specification.md",
-      "line": 257,
+      "line": 312,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "**MUST** be rejected before backend invocation. Reserved fields **MUST** be zero.",
@@ -658,9 +906,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-30B9B112E166",
+      "id": "REQ-SPEC-BB680E1A0B79",
       "source": "docs/specification.md",
-      "line": 264,
+      "line": 319,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "Candidate implementations **MUST** expose major `1` and minor `0` in device-specific configuration",
@@ -679,9 +927,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-2BF6F42BB323",
+      "id": "REQ-SPEC-8597E84F67FD",
       "source": "docs/specification.md",
-      "line": 265,
+      "line": 320,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "and **MUST NOT** claim candidate protocol 1.0 conformance unless they satisfy the normative wire,",
@@ -700,9 +948,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-ED6E6EBD406D",
+      "id": "REQ-SPEC-CE119CF28472",
       "source": "docs/specification.md",
-      "line": 269,
+      "line": 324,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "#33. Before that audit, an intentional candidate revision **MUST** follow the coordinated procedure",
@@ -721,9 +969,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-5687B484D7C0",
+      "id": "REQ-SPEC-6875C63115F8",
       "source": "docs/specification.md",
-      "line": 270,
+      "line": 325,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "in [wire-abi.md](wire-abi.md) and **MUST NOT** be described as a frozen or stable release.",
@@ -742,9 +990,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-C559442F7881",
+      "id": "REQ-SPEC-00BB7B9A2B4C",
       "source": "docs/specification.md",
-      "line": 276,
+      "line": 331,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "- a driver **MUST** reject a device with an unsupported major version;",
@@ -763,9 +1011,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-97B5F1905B00",
+      "id": "REQ-SPEC-8FCB39B7C119",
       "source": "docs/specification.md",
-      "line": 278,
+      "line": 333,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "- a driver **MUST NOT** use behavior newer than the device minor version it observed; and",
@@ -784,9 +1032,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-3C80B5950333",
+      "id": "REQ-SPEC-FE18F408035C",
       "source": "docs/specification.md",
-      "line": 287,
+      "line": 342,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "Therefore a minor version alone **MUST NOT** append fields to an existing response that an older",
@@ -805,9 +1053,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-C606EBB6B424",
+      "id": "REQ-SPEC-6C45506F15E8",
       "source": "docs/specification.md",
-      "line": 291,
+      "line": 346,
       "section": "6. Versioning and compatibility",
       "keyword": "SHOULD",
       "statement": "negotiated feature explicitly selects a different layout. Extensions **SHOULD** use a new opcode or",
@@ -826,9 +1074,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-5D0FF22C6F7F",
+      "id": "REQ-SPEC-754533E01919",
       "source": "docs/specification.md",
-      "line": 294,
+      "line": 349,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "Without such a feature, a receiver **MUST** require the exact payload length for the opcode and",
@@ -847,9 +1095,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-9EE8CA6EE4D0",
+      "id": "REQ-SPEC-D1E971E43B4A",
       "source": "docs/specification.md",
-      "line": 295,
+      "line": 350,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "**MUST** reject trailing bytes. It **MUST NOT** silently reinterpret or ignore an unknown tail.",
@@ -868,9 +1116,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-1E2D21965135",
+      "id": "REQ-SPEC-E5BE5302740B",
       "source": "docs/specification.md",
-      "line": 295,
+      "line": 350,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "**MUST** reject trailing bytes. It **MUST NOT** silently reinterpret or ignore an unknown tail.",
@@ -889,9 +1137,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-5E601687AFF4",
+      "id": "REQ-SPEC-89F3C7144057",
       "source": "docs/specification.md",
-      "line": 302,
+      "line": 357,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "- An unknown response status is an opaque failure. A driver **MUST NOT** treat it as success or",
@@ -910,9 +1158,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-348C878520B7",
+      "id": "REQ-SPEC-75D40B718E67",
       "source": "docs/specification.md",
-      "line": 309,
+      "line": 364,
       "section": "7. Ownership and destruction",
       "keyword": "MUST",
       "statement": "The device owns the mapping from opaque object IDs to backend handles. The mapping **MUST** reject:",
@@ -931,9 +1179,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-DF46FBE73D09",
+      "id": "REQ-SPEC-3FCD0B88A0D2",
       "source": "docs/specification.md",
-      "line": 317,
+      "line": 372,
       "section": "7. Ownership and destruction",
       "keyword": "MUST NOT",
       "statement": "Object-ID encoding is implementation-private. Drivers **MUST NOT** infer slot, kind, generation, or",
@@ -952,9 +1200,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-43660E08DAB5",
+      "id": "REQ-SPEC-2AA25E912F8B",
       "source": "docs/specification.md",
-      "line": 322,
+      "line": 377,
       "section": "7. Ownership and destruction",
       "keyword": "MUST",
       "statement": "- a rejected release returns the still-live handle and the device **MUST** restore it for retry;",
@@ -973,9 +1221,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-12D875ED1FD1",
+      "id": "REQ-SPEC-98C389360C1A",
       "source": "docs/specification.md",
-      "line": 324,
+      "line": 379,
       "section": "7. Ownership and destruction",
       "keyword": "MUST NOT",
       "statement": "- an indeterminate release invalidates the guest ID and requires recovery. The device **MUST NOT**",
@@ -994,9 +1242,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-80762635C08B",
+      "id": "REQ-SPEC-58CA48105327",
       "source": "docs/specification.md",
-      "line": 327,
+      "line": 382,
       "section": "7. Ownership and destruction",
       "keyword": "MUST NOT",
       "statement": "`Drop` may provide defensive cleanup inside an implementation but **MUST NOT** be used as",
@@ -1015,9 +1263,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-133784109D00",
+      "id": "REQ-SPEC-516FEBC9DC0B",
       "source": "docs/specification.md",
-      "line": 333,
+      "line": 388,
       "section": "8. Time and progress",
       "keyword": "MUST NOT",
       "statement": "infinite. Absolute guest timestamps **MUST NOT** be compared with a host clock because their",
@@ -1034,9 +1282,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-1631781F77C9",
+      "id": "REQ-SPEC-B3DE8C0C13C8",
       "source": "docs/specification.md",
-      "line": 336,
+      "line": 391,
       "section": "8. Time and progress",
       "keyword": "MUST",
       "statement": "Polling an event **MUST** be nonblocking and bounded. The portable contract creates no background",
@@ -1053,9 +1301,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-8CD9DDF8269D",
+      "id": "REQ-SPEC-C0E2DDFC4E95",
       "source": "docs/specification.md",
-      "line": 340,
+      "line": 395,
       "section": "8. Time and progress",
       "keyword": "MUST",
       "statement": "cannot prove rejection is indeterminate and **MUST** retain an event.",
@@ -1072,9 +1320,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-8857EBAFBF73",
+      "id": "REQ-SPEC-CB3886392A30",
       "source": "docs/specification.md",
-      "line": 349,
+      "line": 404,
       "section": "9. Errors",
       "keyword": "MUST",
       "statement": "A device **MUST** map errors deterministically and **MUST NOT** expose uninitialized response bytes.",
@@ -1092,9 +1340,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-584B530155E9",
+      "id": "REQ-SPEC-D2EC5C810722",
       "source": "docs/specification.md",
-      "line": 349,
+      "line": 404,
       "section": "9. Errors",
       "keyword": "MUST NOT",
       "statement": "A device **MUST** map errors deterministically and **MUST NOT** expose uninitialized response bytes.",
@@ -1112,9 +1360,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-8DCDDFCFBAD6",
+      "id": "REQ-SPEC-063210EF2C88",
       "source": "docs/specification.md",
-      "line": 353,
+      "line": 408,
       "section": "9. Errors",
       "keyword": "MUST NOT",
       "statement": "An error response **MUST NOT** imply that a backend operation was rejected when acceptance was",
@@ -1132,9 +1380,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-400D30242C2D",
+      "id": "REQ-SPEC-48AE033662E2",
       "source": "docs/specification.md",
-      "line": 358,
+      "line": 413,
       "section": "10. Portability requirements",
       "keyword": "MUST NOT",
       "statement": "Portable crates **MUST NOT** select an operating system, VMM, kernel, vendor API, or global runtime.",
@@ -1150,9 +1398,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-A74AA2573F34",
+      "id": "REQ-SPEC-38AC895175F0",
       "source": "docs/specification.md",
-      "line": 365,
+      "line": 420,
       "section": "10. Portability requirements",
       "keyword": "MUST NOT",
       "statement": "Platform adapters depend inward on the portable layers. A portable layer **MUST NOT** conditionally",
@@ -1168,9 +1416,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-7224582FFB9A",
+      "id": "REQ-SPEC-E90D593ED0AD",
       "source": "docs/specification.md",
-      "line": 381,
+      "line": 436,
       "section": "11. Tracked completion work",
       "keyword": "MAY",
       "statement": "No implementation **MAY** advertise a reserved optional feature merely because a Rust constant",
@@ -1554,9 +1802,29 @@
       }
     },
     {
-      "id": "REQ-WIRE-0824A8EE98CA",
+      "id": "REQ-WIRE-4B8751C702D4",
       "source": "docs/wire-abi.md",
-      "line": 201,
+      "line": 208,
+      "section": "5. Opcodes and payloads",
+      "keyword": "MUST NOT",
+      "statement": "Bits 3 (`EXTERNAL_MEMORY`) and 4 (`SECURE_CONTEXTS`) are reserved and **MUST NOT** be advertised by a",
+      "coverage": {
+        "status": "mixed",
+        "evidence": [
+          "conformance/rust-clean-room/tests/vectors.rs",
+          "crates/virtio-accel-proto/tests/semantic_interop.rs"
+        ],
+        "issues": [
+          "#20",
+          "#25"
+        ],
+        "rationale": "Every payload layout and scalar invariant is cross-decoded; live-object and advertised-quota checks are tracked."
+      }
+    },
+    {
+      "id": "REQ-WIRE-580C3DD285D4",
+      "source": "docs/wire-abi.md",
+      "line": 213,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST",
       "statement": "`CreateContextRequest` is eight bytes: `flags: u32` followed by `reserved: u32`. Both fields **MUST**",
@@ -1574,9 +1842,29 @@
       }
     },
     {
-      "id": "REQ-WIRE-83B1B42B6991",
+      "id": "REQ-WIRE-4EAD37AC39A4",
       "source": "docs/wire-abi.md",
-      "line": 220,
+      "line": 232,
+      "section": "5. Opcodes and payloads",
+      "keyword": "MUST",
+      "statement": "The device **MUST** reject a memory domain whose corresponding semantic capability is absent before",
+      "coverage": {
+        "status": "mixed",
+        "evidence": [
+          "conformance/rust-clean-room/tests/vectors.rs",
+          "crates/virtio-accel-proto/tests/semantic_interop.rs"
+        ],
+        "issues": [
+          "#20",
+          "#25"
+        ],
+        "rationale": "Every payload layout and scalar invariant is cross-decoded; live-object and advertised-quota checks are tracked."
+      }
+    },
+    {
+      "id": "REQ-WIRE-87BB31FD5813",
+      "source": "docs/wire-abi.md",
+      "line": 238,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST",
       "statement": "`TransferBufferRequest` is 24 bytes containing `buffer_id`, `offset`, and `bytes`. `bytes` **MUST**",
@@ -1594,9 +1882,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-AB348136DD8D",
+      "id": "REQ-WIRE-E017FD0EEA20",
       "source": "docs/wire-abi.md",
-      "line": 221,
+      "line": 239,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST NOT",
       "statement": "be nonzero. `offset + bytes` **MUST NOT** overflow and **MUST** fit in the buffer.",
@@ -1614,9 +1902,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-49564F60EF8C",
+      "id": "REQ-WIRE-271DD2086E42",
       "source": "docs/wire-abi.md",
-      "line": 221,
+      "line": 239,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST",
       "statement": "be nonzero. `offset + bytes` **MUST NOT** overflow and **MUST** fit in the buffer.",
@@ -1634,9 +1922,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-AC75C61B84D8",
+      "id": "REQ-WIRE-8008071E0526",
       "source": "docs/wire-abi.md",
-      "line": 223,
+      "line": 241,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST",
       "statement": "For `WRITE_BUFFER`, the request payload length **MUST** be `24 + bytes`, and bytes following the",
@@ -1654,9 +1942,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-A70C3D08E0BB",
+      "id": "REQ-WIRE-4EF44E350137",
       "source": "docs/wire-abi.md",
-      "line": 241,
+      "line": 263,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST",
       "statement": "`80 + payload_bytes` **MUST** fit the request payload and configured frame limit.",
@@ -1674,9 +1962,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-43560D158BB8",
+      "id": "REQ-WIRE-9444BF78467A",
       "source": "docs/wire-abi.md",
-      "line": 246,
+      "line": 268,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST",
       "statement": "reserved words **MUST** be zero in protocol 1.0.",
@@ -1694,9 +1982,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-5E3A3B34D5A7",
+      "id": "REQ-WIRE-F9B8603BE34B",
       "source": "docs/wire-abi.md",
-      "line": 253,
+      "line": 275,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST",
       "statement": "- `binding_count` **MUST** be 1 through both advertised `max_bindings_per_submission` and 4096.",
@@ -1714,9 +2002,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-3DB7CD56ECB9",
+      "id": "REQ-WIRE-47AC091DB502",
       "source": "docs/wire-abi.md",
-      "line": 254,
+      "line": 276,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST",
       "statement": "- `flags` **MUST** be zero.",
@@ -1734,9 +2022,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-372ACF609966",
+      "id": "REQ-WIRE-219F0562BE70",
       "source": "docs/wire-abi.md",
-      "line": 256,
+      "line": 278,
       "section": "5. Opcodes and payloads",
       "keyword": "MUST",
       "statement": "- The payload length **MUST** be `32 + binding_count * 32`.",
@@ -1754,9 +2042,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-2A6C55913B50",
+      "id": "REQ-WIRE-6E7783E86053",
       "source": "docs/wire-abi.md",
-      "line": 301,
+      "line": 323,
       "section": "7. Response atomicity",
       "keyword": "MUST",
       "statement": "Before backend invocation, the device **MUST** validate the complete readable frame and enough",
@@ -1773,9 +2061,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-9A07069A80BA",
+      "id": "REQ-WIRE-464698253A6B",
       "source": "docs/wire-abi.md",
-      "line": 302,
+      "line": 324,
       "section": "7. Response atomicity",
       "keyword": "MUST",
       "statement": "writable capacity for every possible response shape of that command. It **MUST** initialize every",
@@ -1792,9 +2080,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-F97FF8EB6E93",
+      "id": "REQ-WIRE-38CDAB01C914",
       "source": "docs/wire-abi.md",
-      "line": 306,
+      "line": 328,
       "section": "7. Response atomicity",
       "keyword": "MUST",
       "statement": "occurs after semantic mutation, or a release becomes indeterminate, the device **MUST** enter",
@@ -1811,9 +2099,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-236296B59AB4",
+      "id": "REQ-WIRE-50389481EBC0",
       "source": "docs/wire-abi.md",
-      "line": 307,
+      "line": 329,
       "section": "7. Response atomicity",
       "keyword": "MUST NOT",
       "statement": "recovery and expose the Virtio `DEVICE_NEEDS_RESET` condition. It **MUST NOT** report an ordinary",
@@ -1830,9 +2118,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-CEF7A35F46A4",
+      "id": "REQ-WIRE-C6BCD8DA20D3",
       "source": "docs/wire-abi.md",
-      "line": 321,
+      "line": 343,
       "section": "9. Candidate and post-freeze change procedure",
       "keyword": "MUST",
       "statement": "A proposed wire change **MUST** be classified before code is merged:",
@@ -1849,9 +2137,9 @@
       }
     },
     {
-      "id": "REQ-WIRE-A595D1D65047",
+      "id": "REQ-WIRE-0AD257A3D59E",
       "source": "docs/wire-abi.md",
-      "line": 334,
+      "line": 356,
       "section": "9. Candidate and post-freeze change procedure",
       "keyword": "MUST",
       "statement": "The same reviewed change **MUST** update the normative documents, Rust constants/layout assertions,",

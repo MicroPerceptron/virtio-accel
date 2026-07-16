@@ -135,6 +135,40 @@ A **buffer** is a bounded backend allocation with:
 The buffer’s guest-visible object ID is not an address. Every transfer and binding range **MUST** fit
 within the buffer without integer overflow.
 
+Memory domains are strict allocation requirements:
+
+- `Host` requests provider memory optimized for host transfers;
+- `Device` requests the provider's accelerator-local placement class; and
+- `Shared` requests one provider-owned allocation that is both host visible and directly bindable
+  by the accelerator.
+
+`Shared` does not mean guest-memory import, cross-process export, a platform shared handle, or
+implicit cache coherence. Those operations require the reserved external-memory feature and have no
+protocol 1.0 semantics.
+
+An allocation result **MUST** report the requested descriptor, actual retained allocation bytes,
+actual guaranteed alignment, and honest backing properties. Actual bytes **MUST NOT** be smaller
+than the logical buffer and actual alignment **MUST NOT** be weaker than requested. Device resource
+accounting uses actual retained bytes rather than assuming logical bytes include provider padding.
+A provider **MUST NOT** return an allocation whose reported placement can be achieved only by
+copying through another full-size allocation during submission.
+
+A buffer whose usage includes program input, program output, or mutable state **MUST** report direct
+binding. A compatible submission **MUST** bind the exact provider allocation without copying the
+bound range into or out of another allocation. If the provider cannot satisfy that invariant, it
+**MUST** reject allocation. If a particular program is incompatible with an otherwise valid buffer,
+submission **MUST** be rejected as `INCOMPATIBLE`; the provider **MUST NOT** silently stage it.
+
+`WRITE_BUFFER` and `READ_BUFFER` are the only baseline operations that explicitly transfer buffer
+contents. A write requires `TRANSFER_DESTINATION`; a read requires `TRANSFER_SOURCE`. Device-local
+memory may use bounded provider staging during these explicit transfers, but no transfer may retain
+the request or response byte region after the backend call returns.
+
+The semantic transfer API accepts bounded byte sources and sinks that may be segmented. This avoids
+requiring the command engine to allocate a contiguous copy of a valid transfer payload or response
+before calling the backend. A contiguous region remains available to providers as an optional fast
+path.
+
 ### 4.5 Program
 
 A **program** is a resident backend object created from an opaque artifact format, opaque target
@@ -142,6 +176,10 @@ identity, payload, and declared resident-byte requirement.
 
 The transport **MUST NOT** interpret vendor artifact contents. Artifact-format adapters own their
 validation beyond the portable envelope fields.
+
+The semantic artifact payload is a bounded byte source rather than a required contiguous slice.
+Providers may inspect an available contiguous view or read segmented payload bytes directly into
+final resident storage.
 
 ### 4.6 Accelerator execution queue
 
@@ -239,14 +277,31 @@ offer a feature it cannot honor if accepted.
 Backend `Capabilities` report whether a semantic operation or resource class is supported. They do
 not independently change wire framing.
 
+Protocol 1.0 assigns these semantic capability bits:
+
+| Bit | Name | Meaning |
+|---:|---|---|
+| 0 | `HOST_VISIBLE_MEMORY` | `MemoryDomain::Host` allocation is supported |
+| 1 | `DEVICE_LOCAL_MEMORY` | `MemoryDomain::Device` allocation is supported |
+| 2 | `EVENT_CANCELLATION` | Pending events may support `CANCEL_EVENT` |
+| 5 | `SHARED_MEMORY` | Provider-owned `MemoryDomain::Shared` allocation is supported |
+
+Semantic bits 3 (`EXTERNAL_MEMORY`) and 4 (`SECURE_CONTEXTS`) are reserved until their transport,
+ownership, synchronization, and isolation rules are specified. A protocol 1.0 device **MUST NOT**
+advertise either bit.
+
+The device **MUST** reject an allocation for an unsupported memory domain before invoking the
+backend. Advertising a memory-domain capability commits the backend to the corresponding allocation
+properties and direct-binding rules from section 4.4; capability reporting is not permission to
+substitute a staged implementation.
+
 If enabling a backend capability would require different descriptor direction, additional queues,
 new synchronization, or changed lifetime rules, the device **MUST** also negotiate an appropriate
 transport feature.
 
-The exact backend meanings of host-visible memory, device-local memory, secure contexts, and
-execution-queue flags are tracked by issue #21. Protocol 1.0 accepts only the wire values explicitly
-listed in [wire-abi.md](wire-abi.md); the reference implementation **MUST NOT** translate an
-underspecified capability into additional wire behavior.
+The exact secure-context and execution-queue-flag semantics remain tracked by issue #21. Protocol
+1.0 accepts only the wire values explicitly listed in [wire-abi.md](wire-abi.md); the reference
+implementation **MUST NOT** translate an underspecified capability into additional wire behavior.
 
 ### 5.4 Request and object flags
 
@@ -395,10 +450,12 @@ model or is identified as an implementation helper.
 | `DeviceLimits` | Context, buffer, program, execution-queue, event, binding, and byte limits enforced before backend invocation |
 | `DeviceInfo` | Device identity, semantic capabilities, and limits |
 | `ContextFlags`, `ContextDesc` | Context creation intent; protocol 1.0 accepts only empty context flags |
-| `MemoryDomain` | Requested buffer placement class |
+| `MemoryDomain` | Strict provider-owned buffer placement requirement |
 | `BufferUsage`, `BufferDesc`, `BufferRange` | Buffer allocation intent and checked byte range |
+| `BufferProperties`, `BufferInfo`, `AllocatedBuffer` | Verified backing properties kept out of the backend hot path |
 | `AccessMode` | Binding read/write intent |
-| `ArtifactFormat`, `TargetIdentity`, `ArtifactRef` | Opaque program artifact description |
+| `ByteSource`, `ByteSink` | Bounded contiguous-or-segmented bulk byte ports |
+| `ArtifactFormat`, `TargetIdentity`, `ArtifactRef` | Opaque program artifact description over a byte source |
 | `QueueFlags`, `QueueDesc` | Accelerator execution-queue creation intent, not a Virtio queue |
 | `Timeout` | Relative admission timeout; zero on wire means infinite |
 | `BindingRef`, `validate_bindings` | Validated semantic binding and implementation helper |
