@@ -13,3 +13,4 @@ zerocopy.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+virtio-accel-cleanroom.workspace = true

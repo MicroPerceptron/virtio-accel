@@ -38,6 +38,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Check normative requirement ledger
+        run: python3 ci/check-normative-requirements.py --check
+
       - name: Lint all targets
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
@@ -124,6 +127,7 @@ jobs:
       - name: Check no_std and alloc portable crates
         run: >-
           cargo check
+          -p virtio-accel-cleanroom
           -p virtio-accel-proto
           -p virtio-accel-core
           -p virtio-accel-device

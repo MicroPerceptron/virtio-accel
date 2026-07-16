@@ -9,6 +9,7 @@ publish = false
 
 [workspace]
 members = [
+    "conformance/rust-clean-room",
     "crates/virtio-accel-core",
     "crates/virtio-accel-device",
     "crates/virtio-accel-mock",
@@ -27,6 +28,7 @@ bitflags = { version = "2.13.1", default-features = false }
 serde_json = "1.0.149"
 zerocopy = { version = "0.8.54", default-features = false, features = ["derive"] }
 virtio-accel-core = { path = "crates/virtio-accel-core" }
+virtio-accel-cleanroom = { path = "conformance/rust-clean-room" }
 virtio-accel-device = { path = "crates/virtio-accel-device" }
 virtio-accel-mock = { path = "crates/virtio-accel-mock" }
 virtio-accel-proto = { path = "crates/virtio-accel-proto" }
