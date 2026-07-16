@@ -1,0 +1,227 @@
+name: CI
+
+"on":
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  style-and-api:
+    name: style-and-api
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: stable
+          components: clippy,rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint all targets
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Check public documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --all-features --no-deps
+
+  native-test:
+    name: native-test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: stable
+
+      - name: Run workspace tests
+        run: cargo test --workspace --all-targets --all-features
+
+      - name: Run documentation tests
+        run: cargo test --workspace --doc --all-features
+
+      - name: Check release profile
+        run: cargo check --workspace --release --all-features
+
+  msrv:
+    name: msrv (1.85.0)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install minimum supported Rust
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: 1.85.0
+
+      - name: Check every workspace target on MSRV
+        run: cargo check --workspace --all-targets --all-features
+
+      - name: Run tests on MSRV
+        run: cargo test --workspace --all-features
+
+  portable-target:
+    name: portable-target (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-unknown-none
+          - riscv64gc-unknown-none-elf
+          - wasm32-unknown-unknown
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust and target
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Check no_std and alloc portable crates
+        run: >-
+          cargo check
+          -p virtio-accel-proto
+          -p virtio-accel-core
+          -p virtio-accel-device
+          -p virtio-accel
+          --target ${{ matrix.target }}
+          --no-default-features
+
+      - name: Check std reference code on Wasm
+        if: matrix.target == 'wasm32-unknown-unknown'
+        run: cargo check --workspace --target wasm32-unknown-unknown --all-features
+
+  feature-sets:
+    name: feature-sets-and-dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: stable
+
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        with:
+          tool: cargo-hack@0.6.45
+          fallback: none
+
+      - name: Check feature powerset
+        run: cargo hack check --workspace --feature-powerset --no-dev-deps
+
+      - name: Check portable dependency features
+        run: bash ci/check-portable-dependencies.sh
+
+  dependency-policy:
+    name: dependency-policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check advisories, licenses, bans, and sources
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          rust-version: "1.85.0"
+          command: check
+          arguments: --all-features
+
+  fuzz-smoke:
+    name: fuzz-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Detect fuzz workspace
+        id: fuzz
+        shell: bash
+        run: |
+          if [[ -f fuzz/Cargo.toml ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No fuzz workspace yet; issue #26 will add the first targets."
+          fi
+
+      - name: Install nightly Rust
+        if: steps.fuzz.outputs.present == 'true'
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: nightly-2026-07-13
+
+      - name: Install cargo-fuzz
+        if: steps.fuzz.outputs.present == 'true'
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        with:
+          tool: cargo-fuzz@0.13.2
+          fallback: none
+
+      - name: Run bounded smoke iterations
+        if: steps.fuzz.outputs.present == 'true'
+        shell: bash
+        run: |
+          mapfile -t targets < <(cargo fuzz list)
+          if (( ${#targets[@]} == 0 )); then
+            echo "fuzz/Cargo.toml exists but defines no fuzz targets" >&2
+            exit 1
+          fi
+          for target in "${targets[@]}"; do
+            cargo fuzz run "$target" -- -runs=256 -max_total_time=20
+          done

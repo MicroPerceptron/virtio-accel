@@ -45,15 +45,17 @@ while an indeterminate failure must also return an event that retains the operat
 Guest-visible object IDs are opaque, kind-tagged, generational, and never reused after generation
 exhaustion.
 
-See [docs/architecture.md](docs/architecture.md) for the invariants and the next implementation
-boundary.
+The [portable protocol foundations](docs/specification.md) define the normative v1 terminology,
+object model, compatibility rules, and mandatory baseline. See
+[docs/architecture.md](docs/architecture.md) for the implementation invariants and
+[docs/portability.md](docs/portability.md) for the enforced target matrix.
 
 ## Development
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-targets --all-features
 ```
 
 The protocol is pre-standardization work. Numeric opcodes, feature bits, and payload layouts may

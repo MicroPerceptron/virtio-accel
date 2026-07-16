@@ -15,6 +15,10 @@ pub type Le64 = U64<LE>;
 
 pub const PROTOCOL_MAJOR: u16 = 0;
 pub const PROTOCOL_MINOR: u16 = 1;
+/// Index of the baseline command virtqueue.
+///
+/// This transport queue carries protocol requests and responses. It is distinct from an
+/// accelerator execution queue created with [`KnownOpcode::CreateQueue`].
 pub const COMMAND_QUEUE: u16 = 0;
 
 bitflags! {
@@ -29,7 +33,32 @@ bitflags! {
     }
 }
 
+/// Feature set required by every implementation of the current portable baseline.
+///
+/// The draft baseline deliberately requires no device-specific feature bits. The commands and
+/// object lifecycle described by the specification remain available; feature bits are reserved
+/// for behavior that changes transport framing or synchronization.
+pub const BASELINE_FEATURES: FeatureBits = FeatureBits::empty();
+
+/// Draft feature bits that a baseline implementation must leave unadvertised.
+///
+/// Defining their numeric positions reserves the namespace without claiming that their semantics
+/// are stable. Advertising any of these bits before its specification and conformance work is
+/// complete is a protocol error.
+pub const UNADVERTISED_DRAFT_FEATURES: FeatureBits = FeatureBits::from_bits_retain(
+    FeatureBits::MULTI_QUEUE.bits()
+        | FeatureBits::EVENT_QUEUE.bits()
+        | FeatureBits::EXTERNAL_MEMORY.bits()
+        | FeatureBits::TIMELINE_FENCES.bits()
+        | FeatureBits::SECURE_CONTEXTS.bits(),
+);
+
 bitflags! {
+    /// Per-request flags.
+    ///
+    /// No request flag is part of the mandatory draft baseline. `NO_WAIT` retains its draft
+    /// numeric assignment but must not be sent until issue #9 defines its command-specific
+    /// semantics.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct RequestFlags: u16 {
         const NO_WAIT = 1 << 0;
@@ -313,5 +342,12 @@ mod tests {
         bytes[..2].copy_from_slice(&0xdead_u16.to_le_bytes());
         let decoded = read_exact::<RequestHeader>(&bytes).unwrap();
         assert_eq!(decoded.known_opcode(), Err(UnknownOpcode(0xdead)));
+    }
+
+    #[test]
+    fn draft_features_are_reserved_but_not_baseline_requirements() {
+        assert!(BASELINE_FEATURES.is_empty());
+        assert!(!UNADVERTISED_DRAFT_FEATURES.is_empty());
+        assert!(!BASELINE_FEATURES.intersects(UNADVERTISED_DRAFT_FEATURES));
     }
 }

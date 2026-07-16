@@ -3,6 +3,7 @@ name = "virtio-accel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 description = "Portable Rust foundations for a virtio accelerator device"
 publish = false
 
