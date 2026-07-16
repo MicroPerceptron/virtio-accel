@@ -10,7 +10,7 @@ Rust 2024 edition selected by the workspace. Every package inherits the same `ru
 
 | Job | Toolchain and targets | Contract enforced |
 |---|---|---|
-| `style-and-api` | Current stable on Ubuntu | Formatting, Clippy with warnings denied, and warning-free public docs |
+| `style-and-api` | Current stable on Ubuntu | Formatting, complete normative-requirement ledger, Clippy with warnings denied, and warning-free public docs |
 | `native-test` | Current stable on Ubuntu, macOS, and Windows | All workspace unit, integration, target, feature, and documentation tests plus release-profile checking |
 | `msrv` | Rust 1.85.0 on Ubuntu | Every workspace target and test continues to compile at the declared MSRV |
 | `portable-target` | Stable `aarch64-unknown-none`, `riscv64gc-unknown-none-elf`, and `wasm32-unknown-unknown` | `cleanroom`, `proto`, and `core` remain `no_std`; device/facade layers require at most `alloc`; Wasm also checks the std reference crates |
@@ -68,6 +68,7 @@ The host-independent checks can be reproduced with:
 
 ```sh
 cargo fmt --all -- --check
+python3 ci/check-normative-requirements.py --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 cargo test --workspace --all-targets --all-features

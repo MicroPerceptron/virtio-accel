@@ -9,6 +9,8 @@ This directory contains implementation-independent inputs for the portable proto
   reviewed malformed/unknown boundary cases.
 - [`coverage.md`](coverage.md) maps the normative document areas to executable evidence or an
   explicitly tracked implementation issue.
+- [`requirements.json`](requirements.json) catalogs every normative keyword occurrence with a
+  content-derived ID, source line, executable evidence, tracked issues, and rationale.
 - [`../rust-clean-room`](../rust-clean-room) contains a dependency-free `no_std` Rust codec that
   implements the byte contract manually without importing `virtio-accel-proto` or its wire types.
 
@@ -22,4 +24,11 @@ versioned directory.
 
 The primary ABI and clean-room codec independently decode and encode every canonical frame. The
 primary crate's bridge test runs both implementations over the same bytes and compares their raw
-headers and exact output. CI also enforces that the clean-room codec remains dependency-free.
+headers and exact output. A separate semantic interoperability test constructs every distinct
+request and response layout in each implementation, crosses only bytes, and checks every decoded
+field in the other implementation. CI also enforces that the clean-room codec remains
+dependency-free.
+
+`ci/check-normative-requirements.py --check` reconstructs the requirement ledger from the normative
+Markdown. CI fails if a requirement is added, removed, moved, or reworded without regenerating and
+reviewing its exact evidence/rationale entry.

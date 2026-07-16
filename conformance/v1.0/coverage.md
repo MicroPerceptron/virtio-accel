@@ -1,8 +1,10 @@
 # Protocol 1.0 candidate conformance coverage
 
-This matrix records where each normative area is executable today and where implementation-level
-behavior is deliberately tracked by a later issue. A tracked issue is the explicit rationale
-required by epic #2; it is not an assertion that unimplemented behavior already conforms.
+This matrix summarizes where each normative area is executable today and where implementation-level
+behavior is deliberately tracked by a later issue. The exact per-keyword ledger is
+[`requirements.json`](requirements.json), mechanically checked by
+`ci/check-normative-requirements.py`. A tracked issue is the explicit rationale required by epic
+#2; it is not an assertion that unimplemented behavior already conforms.
 
 | Normative area | Current executable evidence | Tracked completion rationale |
 |---|---|---|
@@ -38,7 +40,10 @@ The clean-room suite:
 
 The bridge test in `virtio-accel-proto` decodes each frame with both implementations, compares the
 independently derived header semantics, and requires the manual encoder to reproduce the exact
-canonical bytes. No Rust wire structure crosses that boundary.
+canonical bytes. `crates/virtio-accel-proto/tests/semantic_interop.rs` additionally constructs every
+distinct config, request, and response layout in each implementation and checks every semantic
+field after the other implementation decodes the bytes. No Rust wire structure crosses either
+boundary.
 
 The clean-room binding uniqueness check is intentionally allocation-free and quadratic. This crate
 is portable conformance evidence, not the production command-engine hot path; #20 may use a bounded
