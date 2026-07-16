@@ -10,3 +10,7 @@ publish = false
 [dependencies]
 virtio-accel-core.workspace = true
 virtio-accel-proto.workspace = true
+zerocopy.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
