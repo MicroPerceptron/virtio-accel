@@ -5,14 +5,14 @@ use std::vec::Vec;
 
 use virtio_accel_core::{
     Accelerator, AccessMode, AllocatedBuffer, ArtifactRef, BackendError, BindingRef, BufferDesc,
-    BufferUsage, ByteSink, ByteSource, Capabilities, ContextDesc, DeviceInfo, DeviceInfoError,
-    EventState, MemoryDomain, QueueDesc, ReleaseFailure, SubmitFailure, Timeout,
+    BufferInfo, BufferUsage, ByteSink, ByteSource, Capabilities, ContextDesc, DeviceInfo,
+    DeviceInfoError, EventState, MemoryDomain, QueueDesc, ReleaseFailure, SubmitFailure, Timeout,
 };
 use virtio_accel_device::{
     ChainRegion, CommandOutcome, CommandProcessError, CommandProcessor, CommandProcessorInitError,
     DecoderLimitsError, DeviceHealth, DeviceStateError, ObjectId, ObjectNamespace,
-    ResetDisposition, ResetError, ResourceCounts, ResponseWriteError, SegmentedSink,
-    SegmentedSource, UnusableFrame,
+    ResetDisposition, ResetError, ResourceCounts, ResourcePolicy, ResponseWriteError,
+    RetainedBytes, SegmentedSink, SegmentedSource, UnusableFrame,
 };
 use virtio_accel_mock::fault::{
     FaultAccelerator, FaultAction, FaultPoint, FaultScript, FaultStep, ResourceState,
@@ -54,6 +54,8 @@ struct RecordingBackend {
     context_release_mode: Cell<ReleaseMode>,
     free_mode: Cell<ReleaseMode>,
     free_calls: Cell<u32>,
+    allocate_buffer_calls: Cell<u32>,
+    allocation_bytes_override: Cell<Option<u64>>,
     program_release_mode: Cell<ReleaseMode>,
     queue_release_mode: Cell<ReleaseMode>,
     release_log: RefCell<Vec<&'static str>>,
@@ -62,6 +64,7 @@ struct RecordingBackend {
     segmented_write: Cell<bool>,
     segmented_read: Cell<bool>,
     segmented_artifact: Cell<bool>,
+    load_program_calls: Cell<u32>,
     submit_mode: Cell<SubmitMode>,
     submit_calls: Cell<u32>,
     last_timeout: Cell<Option<Timeout>>,
@@ -84,6 +87,8 @@ impl Default for RecordingBackend {
             context_release_mode: Cell::new(ReleaseMode::Pass),
             free_mode: Cell::new(ReleaseMode::Pass),
             free_calls: Cell::new(0),
+            allocate_buffer_calls: Cell::new(0),
+            allocation_bytes_override: Cell::new(None),
             program_release_mode: Cell::new(ReleaseMode::Pass),
             queue_release_mode: Cell::new(ReleaseMode::Pass),
             release_log: RefCell::new(Vec::new()),
@@ -92,6 +97,7 @@ impl Default for RecordingBackend {
             segmented_write: Cell::new(false),
             segmented_read: Cell::new(false),
             segmented_artifact: Cell::new(false),
+            load_program_calls: Cell::new(0),
             submit_mode: Cell::new(SubmitMode::Accept),
             submit_calls: Cell::new(0),
             last_timeout: Cell::new(None),
@@ -148,7 +154,20 @@ impl Accelerator for RecordingBackend {
         context: &Self::Context,
         desc: BufferDesc,
     ) -> Result<AllocatedBuffer<Self::Buffer>, BackendError> {
-        self.inner.allocate_buffer(context, desc)
+        self.allocate_buffer_calls
+            .set(self.allocate_buffer_calls.get() + 1);
+        let allocated = self.inner.allocate_buffer(context, desc)?;
+        let Some(allocation_bytes) = self.allocation_bytes_override.get() else {
+            return Ok(allocated);
+        };
+        let (buffer, info) = allocated.into_parts();
+        let info = BufferInfo::new(
+            info.desc(),
+            allocation_bytes,
+            info.alignment(),
+            info.properties(),
+        )?;
+        Ok(AllocatedBuffer::new(buffer, info))
     }
 
     fn write_buffer(
@@ -193,6 +212,8 @@ impl Accelerator for RecordingBackend {
         context: &Self::Context,
         artifact: ArtifactRef<'_>,
     ) -> Result<Self::Program, BackendError> {
+        self.load_program_calls
+            .set(self.load_program_calls.get() + 1);
         self.segmented_artifact
             .set(artifact.payload.as_contiguous().is_none());
         self.inner.load_program(context, artifact)
@@ -323,11 +344,16 @@ fn config() -> WireConfig {
     }
 }
 
+fn resource_policy() -> ResourcePolicy {
+    ResourcePolicy::new(1 << 30, 1 << 30).unwrap()
+}
+
 fn processor() -> CommandProcessor<RecordingBackend> {
     CommandProcessor::new(
         RecordingBackend::default(),
         &config(),
         ObjectNamespace::new(1).unwrap(),
+        resource_policy(),
     )
     .unwrap()
 }
@@ -549,7 +575,12 @@ fn invalid_config_is_rejected_before_backend_discovery() {
     invalid.protocol_major = Le16::new(PROTOCOL_MAJOR + 1);
 
     assert!(matches!(
-        CommandProcessor::new(backend, &invalid, ObjectNamespace::new(1).unwrap(),),
+        CommandProcessor::new(
+            backend,
+            &invalid,
+            ObjectNamespace::new(1).unwrap(),
+            resource_policy(),
+        ),
         Err(CommandProcessorInitError::Decoder(
             DecoderLimitsError::Config(virtio_accel_proto::ConfigError::Version)
         ))
@@ -568,7 +599,13 @@ fn deterministic_fault_script_preserves_command_engine_ownership() {
     let backend = FaultAccelerator::new(MockAccelerator::default(), discovery_script);
     let discovery_control = backend.control();
     assert_eq!(
-        CommandProcessor::new(backend, &config(), ObjectNamespace::new(1).unwrap()).unwrap_err(),
+        CommandProcessor::new(
+            backend,
+            &config(),
+            ObjectNamespace::new(1).unwrap(),
+            resource_policy(),
+        )
+        .unwrap_err(),
         CommandProcessorInitError::Backend(BackendError::Busy)
     );
     assert!(discovery_control.snapshot().is_clean());
@@ -648,8 +685,13 @@ fn deterministic_fault_script_preserves_command_engine_ownership() {
     .unwrap();
     let backend = FaultAccelerator::new(MockAccelerator::default(), script);
     let control = backend.control();
-    let mut processor =
-        CommandProcessor::new(backend, &config(), ObjectNamespace::new(1).unwrap()).unwrap();
+    let mut processor = CommandProcessor::new(
+        backend,
+        &config(),
+        ObjectNamespace::new(1).unwrap(),
+        resource_policy(),
+    )
+    .unwrap();
 
     let create = request(
         virtio_accel_proto::KnownOpcode::CreateContext,
@@ -850,7 +892,12 @@ fn invalid_provider_metadata_is_rejected_before_object_state_exists() {
         let device_info_calls = Rc::clone(&backend.device_info_calls);
 
         assert!(matches!(
-            CommandProcessor::new(backend, &config(), ObjectNamespace::new(1).unwrap()),
+            CommandProcessor::new(
+                backend,
+                &config(),
+                ObjectNamespace::new(1).unwrap(),
+                resource_policy(),
+            ),
             Err(CommandProcessorInitError::DeviceInfo(error)) if error == expected
         ));
         assert_eq!(device_info_calls.get(), 1);
@@ -862,7 +909,13 @@ fn invalid_provider_metadata_is_rejected_before_object_state_exists() {
     info.limits.max_events_per_context = 0;
     backend.info_override.set(Some(info));
     assert_eq!(
-        CommandProcessor::new(backend, &config(), ObjectNamespace::new(1).unwrap()).unwrap_err(),
+        CommandProcessor::new(
+            backend,
+            &config(),
+            ObjectNamespace::new(1).unwrap(),
+            resource_policy(),
+        )
+        .unwrap_err(),
         CommandProcessorInitError::DeviceInfo(DeviceInfoError::ZeroLimit)
     );
 }
@@ -1015,8 +1068,13 @@ fn semantic_validation_prevents_backend_calls() {
     backend.device_info_calls.set(0);
     info.limits.max_contexts = 1;
     backend.info_override.set(Some(info));
-    let mut processor =
-        CommandProcessor::new(backend, &config(), ObjectNamespace::new(1).unwrap()).unwrap();
+    let mut processor = CommandProcessor::new(
+        backend,
+        &config(),
+        ObjectNamespace::new(1).unwrap(),
+        resource_policy(),
+    )
+    .unwrap();
 
     let context = create_context(&mut processor);
     let create = request(
@@ -1099,6 +1157,225 @@ fn semantic_validation_prevents_backend_calls() {
         StatusCode::STALE_OBJECT
     );
     assert_eq!(processor.accelerator().read_calls.get(), 0);
+}
+
+#[test]
+fn unsupported_memory_domain_is_rejected_before_backend_allocation() {
+    let backend = RecordingBackend::default();
+    let mut info = backend.device_info().unwrap();
+    info.capabilities.remove(Capabilities::DEVICE_LOCAL_MEMORY);
+    backend.info_override.set(Some(info));
+    let mut processor = CommandProcessor::new(
+        backend,
+        &config(),
+        ObjectNamespace::new(1).unwrap(),
+        resource_policy(),
+    )
+    .unwrap();
+    let context = create_context(&mut processor);
+    let allocate = request(
+        virtio_accel_proto::KnownOpcode::AllocateBuffer,
+        AllocateBufferRequest {
+            context_id: Le64::new(context.get()),
+            bytes: Le64::new(8),
+            alignment: Le64::new(1),
+            memory_domain: MemoryDomain::Device as u8,
+            reserved0: [0; 7],
+            usage: Le32::new(BufferUsage::TRANSFER_SOURCE.bits()),
+            reserved1: Le32::new(0),
+        }
+        .as_bytes(),
+    );
+
+    assert_eq!(
+        status(run(&mut processor, &allocate, 24).0),
+        StatusCode::UNSUPPORTED
+    );
+    assert_eq!(processor.accelerator().allocate_buffer_calls.get(), 0);
+    assert!(processor.retained_bytes().is_empty());
+}
+
+#[test]
+fn aggregate_retained_byte_policy_cleans_up_before_exposing_an_id() {
+    let backend = RecordingBackend::default();
+    backend.allocation_bytes_override.set(Some(16));
+    let mut processor = CommandProcessor::new(
+        backend,
+        &config(),
+        ObjectNamespace::new(1).unwrap(),
+        ResourcePolicy::new(8, 1 << 20).unwrap(),
+    )
+    .unwrap();
+    let context = create_context(&mut processor);
+    let allocate = request(
+        virtio_accel_proto::KnownOpcode::AllocateBuffer,
+        AllocateBufferRequest {
+            context_id: Le64::new(context.get()),
+            bytes: Le64::new(8),
+            alignment: Le64::new(1),
+            memory_domain: MemoryDomain::Host as u8,
+            reserved0: [0; 7],
+            usage: Le32::new(BufferUsage::TRANSFER_SOURCE.bits()),
+            reserved1: Le32::new(0),
+        }
+        .as_bytes(),
+    );
+
+    assert_eq!(
+        status(run(&mut processor, &allocate, 24).0),
+        StatusCode::RESOURCE_LIMIT
+    );
+    assert_eq!(processor.accelerator().free_calls.get(), 1);
+    assert_eq!(
+        processor.state().resource_counts(),
+        ResourceCounts {
+            contexts: 1,
+            ..ResourceCounts::default()
+        }
+    );
+    assert!(processor.retained_bytes().is_empty());
+    assert_eq!(processor.health(), DeviceHealth::Running);
+}
+
+#[test]
+fn rejected_cleanup_of_an_unpublished_allocation_requires_backend_discard() {
+    let backend = RecordingBackend::default();
+    backend.allocation_bytes_override.set(Some(16));
+    backend
+        .free_mode
+        .set(ReleaseMode::Reject(BackendError::Busy));
+    let mut processor = CommandProcessor::new(
+        backend,
+        &config(),
+        ObjectNamespace::new(1).unwrap(),
+        ResourcePolicy::new(8, 1 << 20).unwrap(),
+    )
+    .unwrap();
+    let context = create_context(&mut processor);
+    let allocate = request(
+        virtio_accel_proto::KnownOpcode::AllocateBuffer,
+        AllocateBufferRequest {
+            context_id: Le64::new(context.get()),
+            bytes: Le64::new(8),
+            alignment: Le64::new(1),
+            memory_domain: MemoryDomain::Host as u8,
+            reserved0: [0; 7],
+            usage: Le32::new(BufferUsage::TRANSFER_SOURCE.bits()),
+            reserved1: Le32::new(0),
+        }
+        .as_bytes(),
+    );
+
+    assert_eq!(
+        status(run(&mut processor, &allocate, 24).0),
+        StatusCode::DEVICE_LOST
+    );
+    assert_eq!(processor.health(), DeviceHealth::BackendDiscardRequired);
+    assert_eq!(
+        processor.retained_bytes(),
+        RetainedBytes {
+            buffer_backing: 16,
+            program_resident: 0,
+        }
+    );
+    let report = processor.reset(ObjectNamespace::new(2).unwrap()).unwrap();
+    assert_eq!(report.disposition, ResetDisposition::BackendDiscardRequired);
+    assert_eq!(report.quarantined.contexts, 1);
+    assert_eq!(report.quarantined.buffers, 1);
+    assert_eq!(report.quarantined_bytes.buffer_backing, 16);
+    assert!(report.released_bytes.is_empty());
+}
+
+#[test]
+fn indeterminate_cleanup_of_an_unpublished_allocation_quarantines_actual_backing() {
+    let backend = RecordingBackend::default();
+    backend.allocation_bytes_override.set(Some(16));
+    backend.free_mode.set(ReleaseMode::Indeterminate);
+    let mut processor = CommandProcessor::new(
+        backend,
+        &config(),
+        ObjectNamespace::new(1).unwrap(),
+        ResourcePolicy::new(8, 1 << 20).unwrap(),
+    )
+    .unwrap();
+    let context = create_context(&mut processor);
+    let allocate = request(
+        virtio_accel_proto::KnownOpcode::AllocateBuffer,
+        AllocateBufferRequest {
+            context_id: Le64::new(context.get()),
+            bytes: Le64::new(8),
+            alignment: Le64::new(1),
+            memory_domain: MemoryDomain::Host as u8,
+            reserved0: [0; 7],
+            usage: Le32::new(BufferUsage::TRANSFER_SOURCE.bits()),
+            reserved1: Le32::new(0),
+        }
+        .as_bytes(),
+    );
+
+    assert_eq!(
+        status(run(&mut processor, &allocate, 24).0),
+        StatusCode::DEVICE_LOST
+    );
+    assert_eq!(processor.health(), DeviceHealth::BackendDiscardRequired);
+    assert_eq!(
+        processor.state().resource_counts(),
+        ResourceCounts {
+            contexts: 1,
+            ..ResourceCounts::default()
+        }
+    );
+    assert_eq!(
+        processor.retained_bytes(),
+        RetainedBytes {
+            buffer_backing: 16,
+            program_resident: 0,
+        }
+    );
+    let report = processor.reset(ObjectNamespace::new(2).unwrap()).unwrap();
+    assert_eq!(report.disposition, ResetDisposition::BackendDiscardRequired);
+    assert_eq!(report.quarantined.contexts, 1);
+    assert_eq!(report.quarantined.buffers, 1);
+    assert_eq!(report.quarantined_bytes.buffer_backing, 16);
+    assert!(report.released_bytes.is_empty());
+}
+
+#[test]
+fn program_resident_policy_rejects_before_provider_invocation() {
+    let backend = RecordingBackend::default();
+    let mut processor = CommandProcessor::new(
+        backend,
+        &config(),
+        ObjectNamespace::new(1).unwrap(),
+        ResourcePolicy::new(1 << 20, reference::RESIDENT_BYTES - 1).unwrap(),
+    )
+    .unwrap();
+    let context = create_context(&mut processor);
+    let artifact = reference::ReferenceArtifact::barrier(0);
+    let load = LoadProgramRequest {
+        context_id: Le64::new(context.get()),
+        format: Le32::new(reference::ARTIFACT_FORMAT.get()),
+        flags: Le32::new(0),
+        target: reference::TARGET_IDENTITY.0.map(Le32::new),
+        payload_bytes: Le64::new(reference::ARTIFACT_BYTES as u64),
+        resident_bytes: Le64::new(reference::RESIDENT_BYTES),
+    };
+    let mut payload = Vec::from(load.as_bytes());
+    payload.extend_from_slice(artifact.as_bytes());
+
+    assert_eq!(
+        status(
+            run(
+                &mut processor,
+                &request(virtio_accel_proto::KnownOpcode::LoadProgram, &payload),
+                24,
+            )
+            .0
+        ),
+        StatusCode::RESOURCE_LIMIT
+    );
+    assert_eq!(processor.accelerator().load_program_calls.get(), 0);
+    assert!(processor.retained_bytes().is_empty());
 }
 
 #[test]
@@ -1254,6 +1531,8 @@ fn response_failure_after_creation_requires_reset() {
         }
     );
     assert!(report.quarantined.is_empty());
+    assert!(report.released_bytes.is_empty());
+    assert!(report.quarantined_bytes.is_empty());
     assert_eq!(processor.health(), DeviceHealth::Running);
     assert!(processor.state().is_empty());
 }
@@ -1757,8 +2036,13 @@ fn cancellation_is_not_forwarded_without_the_capability() {
     backend.device_info_calls.set(0);
     info.capabilities.remove(Capabilities::EVENT_CANCELLATION);
     backend.info_override.set(Some(info));
-    let mut processor =
-        CommandProcessor::new(backend, &config(), ObjectNamespace::new(1).unwrap()).unwrap();
+    let mut processor = CommandProcessor::new(
+        backend,
+        &config(),
+        ObjectNamespace::new(1).unwrap(),
+        resource_policy(),
+    )
+    .unwrap();
     let (_context, buffer, program, queue) =
         submission_objects(&mut processor, BufferUsage::PROGRAM_INPUT);
     let submit = submit_request(queue, program, buffer, 0, 8, AccessMode::Read);
@@ -1853,6 +2137,14 @@ fn reset_cancels_pending_events_then_tears_down_child_before_parent() {
     );
     assert!(report.quarantined.is_empty());
     assert_eq!(
+        report.released_bytes,
+        RetainedBytes {
+            buffer_backing: 8,
+            program_resident: u128::from(reference::RESIDENT_BYTES),
+        }
+    );
+    assert!(report.quarantined_bytes.is_empty());
+    assert_eq!(
         processor.accelerator().release_log.borrow().as_slice(),
         [
             "cancel_event",
@@ -1944,6 +2236,20 @@ fn rejected_reset_release_is_quarantined_and_reset_is_idempotent() {
         }
     );
     assert_eq!(
+        first.released_bytes,
+        RetainedBytes {
+            buffer_backing: 0,
+            program_resident: u128::from(reference::RESIDENT_BYTES),
+        }
+    );
+    assert_eq!(
+        first.quarantined_bytes,
+        RetainedBytes {
+            buffer_backing: 8,
+            program_resident: 0,
+        }
+    );
+    assert_eq!(
         processor.accelerator().release_log.borrow().as_slice(),
         ["queue", "program", "buffer"]
     );
@@ -2022,6 +2328,14 @@ fn indeterminate_event_release_quarantines_the_complete_object_graph() {
             events: 1,
         }
     );
+    assert!(first.released_bytes.is_empty());
+    assert_eq!(
+        first.quarantined_bytes,
+        RetainedBytes {
+            buffer_backing: 8,
+            program_resident: u128::from(reference::RESIDENT_BYTES),
+        }
+    );
     assert_eq!(
         processor.accelerator().release_log.borrow().as_slice(),
         ["event"]
@@ -2042,8 +2356,13 @@ fn pending_event_without_cancellation_requires_backend_discard() {
     backend.device_info_calls.set(0);
     info.capabilities.remove(Capabilities::EVENT_CANCELLATION);
     backend.info_override.set(Some(info));
-    let mut processor =
-        CommandProcessor::new(backend, &config(), ObjectNamespace::new(1).unwrap()).unwrap();
+    let mut processor = CommandProcessor::new(
+        backend,
+        &config(),
+        ObjectNamespace::new(1).unwrap(),
+        resource_policy(),
+    )
+    .unwrap();
     let (_context, buffer, program, queue) =
         submission_objects(&mut processor, BufferUsage::PROGRAM_INPUT);
     let submit = submit_request(queue, program, buffer, 0, 8, AccessMode::Read);

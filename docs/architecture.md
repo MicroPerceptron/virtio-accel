@@ -12,7 +12,8 @@ formats: artifact format identifiers and target words remain opaque to the trans
 The normative terminology, object model, and compatibility rules live in
 [specification.md](specification.md), with exact layouts in [wire-abi.md](wire-abi.md) and command
 queue rules in [virtqueue.md](virtqueue.md). This document explains the implementation boundaries
-that preserve those rules.
+that preserve those rules. The portable trust assumptions and denial-of-service bounds are mapped
+in [threat-model.md](threat-model.md).
 
 ## Load-bearing invariants
 
@@ -107,6 +108,13 @@ page-, section-, or device-aligned backing allocation. The command engine retain
 buffer record for compatibility checks and resource accounting, while submission passes only
 borrowed native handles. This lets the device reject a dishonest or degraded allocation before it
 becomes guest-visible without adding metadata lookup or boxing to the execution hot path.
+
+`ResourcePolicy` supplies mandatory host-private aggregate limits without duplicating the wire or
+provider capability limits. The command engine prechecks logical buffer bytes, reconciles the
+provider's actual backing charge before publishing an ID, and charges program resident storage
+before provider invocation. Charges remain represented across rejected releases; indeterminate
+ownership transfers them to quarantine and makes the entire backend discard-only. `ResetReport`
+therefore reports both object counts and exact released or quarantined retained bytes.
 
 Bulk byte payloads cross the semantic boundary through `ByteSource` and `ByteSink`. Both abstractions
 support checked random access over segmented storage and an optional contiguous view. A command
@@ -317,6 +325,7 @@ transport-neutral region metadata re-exported by `virtio-accel-device`. Its base
 Submission/event retention, deterministic reset, the bounded split-virtqueue model, the no-std
 reference guest, deterministic reference execution, scripted ownership-boundary faults, and the
 reusable backend conformance suite now complete both portable queue endpoints and the provider
-contract evidence. The next v1 boundary is issue #25's threat model and enforceable resource policy.
-A thin rust-vmm adapter supplying `virtio-device`, `virtio-queue`, and `vm-memory` integration
-remains a later platform layer, as do Linux vhost-user and an in-kernel guest driver.
+contract evidence. The threat model and enforceable aggregate resource policy close the security
+model; issues #26 and #27 extend its malformed-input and stateful-sequence verification. A thin
+rust-vmm adapter supplying `virtio-device`, `virtio-queue`, and `vm-memory` integration remains a
+later platform layer, as do Linux vhost-user and an in-kernel guest driver.

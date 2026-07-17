@@ -172,7 +172,7 @@ path.
 ### 4.5 Program
 
 A **program** is a resident backend object created from an opaque artifact format, opaque target
-identity, payload, and declared resident-byte requirement.
+identity, payload, and caller-authorized upper bound on retained resident bytes.
 
 The transport **MUST NOT** interpret vendor artifact contents. Artifact-format adapters own their
 validation beyond the portable envelope fields.
@@ -254,6 +254,40 @@ instance. Once discard is required, repeated reset attempts **MUST NOT** invoke 
 
 Successful reinitialization **MUST** use a fresh nonzero object namespace. No object ID created
 before reset may resolve after reset.
+
+### 4.12 Host resource policy and hostile input
+
+Every guest-controlled byte length, object count, array count, descriptor count, queue occupancy,
+and in-flight reference count **MUST** be checked against an authoritative nonzero bound before it
+can drive allocation, iteration, or provider invocation. Checked arithmetic **MUST** reject a value
+whose derived size is not representable. Wire framing bounds belong to `WireConfig`, provider
+capability and per-object bounds belong to `DeviceLimits`, and aggregate provider-retained storage
+bounds belong to a host-supplied `ResourcePolicy`; an implementation **MUST NOT** use conflicting
+duplicate limits for the same boundary.
+
+A device integration **MUST** provide nonzero aggregate limits for actual buffer backing bytes and
+declared program resident bytes. The command engine **MUST** charge the actual
+`BufferInfo::allocation_bytes` returned by the provider and the `ArtifactRef::resident_bytes`
+authorized before program loading. A provider **MUST NOT** retain program storage attributable to a
+returned program handle beyond that program's resident-byte charge.
+
+A retained-byte charge begins before the associated object ID is published and **MUST** remain
+accounted while the provider handle is live or releasing. Rejected release **MUST** restore the
+charge with the same live object. Indeterminate release **MUST** transfer the charge to quarantine
+and require discard of the complete backend instance.
+
+If actual buffer backing would exceed aggregate policy, the device **MUST NOT** expose the new
+object ID. It **MUST** attempt release through the provider ownership boundary; unless successful
+release is proven, the device **MUST** stop admission and require backend discard rather than report
+ordinary resource exhaustion.
+
+Portable parsing, lookup, queue, polling, cancellation, and reset work **MUST** terminate after a
+validated finite amount of local work and **MUST NOT** busy-wait for guest or provider progress.
+Malformed guest input and configured resource exhaustion **MUST NOT** cause a panic or expose
+uninitialized response bytes.
+Repeated-command rate limits, guest-memory pinning budgets, and provider-hang watchdogs belong to
+the transport or host integration because the portable layer has no clock, scheduler, tenant, or
+safe way to preempt arbitrary provider code.
 
 ## 5. Baseline capabilities and feature policy
 
@@ -469,10 +503,12 @@ This document, [wire-abi.md](wire-abi.md), and [virtqueue.md](virtqueue.md) defi
 driver/device protocol candidate. The following implementation, provider, and verification details
 remain explicitly tracked rather than silently decided here:
 
-- issue #25 turns the trust assumptions into enforceable resource and threat-model limits;
 - issue #32 defines post-1.0 semver and wire-evolution policy; and
 - issue #33 performs the final protocol and API audit, including independent clean-room review,
   before freezing protocol 1.0.
+
+The portable security assumptions, finite attacker-controlled dimensions, resource-policy owners,
+and explicit exclusions are documented in [threat-model.md](threat-model.md).
 
 No implementation **MAY** advertise a reserved optional feature merely because a Rust constant
 records its numeric position.
@@ -506,7 +542,9 @@ model or is identified as an implementation helper.
 | `ReleaseFailure` | Rejected versus indeterminate resource-release boundary |
 | `Accelerator` | Accelerator backend contract |
 | `DeviceHealth` | Running, known-state reset required, or backend-discard-required processor state |
-| `ResourceCounts`, `ResetDisposition`, `ResetReport`, `ResetError` | Reset accounting, reuse decision, and namespace validation |
+| `ResourcePolicy` | Mandatory host-private aggregate limits for provider-retained buffer and program storage |
+| `RetainedBytes` | Exact live and quarantined provider-retained bulk-storage charges |
+| `ResourceCounts`, `ResetDisposition`, `ResetReport`, `ResetError` | Reset object and retained-byte accounting, reuse decision, and namespace validation |
 | `Le16`, `Le32`, `Le64` | Wire implementation aliases; not semantic API |
 | `PROTOCOL_MAJOR`, `PROTOCOL_MINOR` | Candidate protocol version 1.0 |
 | `COMMAND_QUEUE` | Baseline command virtqueue index |

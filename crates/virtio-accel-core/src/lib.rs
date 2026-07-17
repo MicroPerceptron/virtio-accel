@@ -714,7 +714,9 @@ pub struct TargetIdentity(pub [u32; 12]);
 /// Borrowed program artifact envelope.
 ///
 /// Payload bytes may be segmented; providers should stream them into final resident storage or use
-/// [`ByteSource::as_contiguous`] when a borrowed slice is available.
+/// [`ByteSource::as_contiguous`] when a borrowed slice is available. `resident_bytes` is the
+/// caller-authorized upper bound for all provider storage retained by the returned program; a
+/// provider must reject the artifact if it cannot stay within that charge.
 #[derive(Clone, Copy, Debug)]
 pub struct ArtifactRef<'a> {
     pub format: ArtifactFormat,
@@ -969,8 +971,9 @@ pub trait Accelerator {
     ///   work may overlap only when the concrete backend and context permit it.
     /// - **Failure/retry:** `Err` guarantees that no program resource was retained and may be
     ///   retried with a still-live context and artifact.
-    /// - **Allocation/copies:** resident program storage may be allocated. Segmented bytes should
-    ///   stream into final resident storage rather than require one artifact-sized coalescing copy.
+    /// - **Allocation/copies:** resident program storage may be allocated but all storage retained
+    ///   by the returned handle must fit `artifact.resident_bytes`. Segmented bytes should stream
+    ///   into final resident storage rather than require one artifact-sized coalescing copy.
     fn load_program(
         &self,
         context: &Self::Context,

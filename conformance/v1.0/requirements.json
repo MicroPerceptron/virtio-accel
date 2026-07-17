@@ -1,7 +1,7 @@
 {
   "schema": "virtio-accel-normative-requirements-1",
   "generated_by": "ci/check-normative-requirements.py",
-  "requirement_count": 141,
+  "requirement_count": 156,
   "requirements": [
     {
       "id": "REQ-SPEC-A29885B44214",
@@ -223,18 +223,19 @@
       "keyword": "MUST",
       "statement": "A device **MUST** reject an operation that combines objects from different contexts before invoking",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
           "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
       }
     },
     {
@@ -245,18 +246,19 @@
       "keyword": "MUST NOT",
       "statement": "the backend. A context **MUST NOT** be destroyed while any child object or in-flight reference",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
           "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
       }
     },
     {
@@ -267,18 +269,19 @@
       "keyword": "MUST",
       "statement": "The buffer\u2019s guest-visible object ID is not an address. Every transfer and binding range **MUST** fit",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
           "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
       }
     },
     {
@@ -289,18 +292,19 @@
       "keyword": "MUST",
       "statement": "An allocation result **MUST** report the requested descriptor, actual retained allocation bytes,",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
           "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
       }
     },
     {
@@ -311,18 +315,19 @@
       "keyword": "MUST NOT",
       "statement": "actual guaranteed alignment, and honest backing properties. Actual bytes **MUST NOT** be smaller",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
           "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
       }
     },
     {
@@ -333,18 +338,19 @@
       "keyword": "MUST NOT",
       "statement": "than the logical buffer and actual alignment **MUST NOT** be weaker than requested. Device resource",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
           "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
       }
     },
     {
@@ -355,18 +361,19 @@
       "keyword": "MUST NOT",
       "statement": "A provider **MUST NOT** return an allocation whose reported placement can be achieved only by",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
           "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
       }
     },
     {
@@ -377,18 +384,19 @@
       "keyword": "MUST",
       "statement": "A buffer whose usage includes program input, program output, or mutable state **MUST** report direct",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
           "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
       }
     },
     {
@@ -399,18 +407,19 @@
       "keyword": "MUST",
       "statement": "binding. A compatible submission **MUST** bind the exact provider allocation without copying the",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
           "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
       }
     },
     {
@@ -421,18 +430,19 @@
       "keyword": "MUST",
       "statement": "**MUST** reject allocation. If a particular program is incompatible with an otherwise valid buffer,",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
           "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
       }
     },
     {
@@ -443,18 +453,19 @@
       "keyword": "MUST",
       "statement": "submission **MUST** be rejected as `INCOMPATIBLE`; the provider **MUST NOT** silently stage it.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
           "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
       }
     },
     {
@@ -465,18 +476,19 @@
       "keyword": "MUST NOT",
       "statement": "submission **MUST** be rejected as `INCOMPATIBLE`; the provider **MUST NOT** silently stage it.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
           "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
       }
     },
     {
@@ -487,18 +499,19 @@
       "keyword": "MUST NOT",
       "statement": "The transport **MUST NOT** interpret vendor artifact contents. Artifact-format adapters own their",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
           "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
       }
     },
     {
@@ -509,18 +522,19 @@
       "keyword": "SHOULD",
       "statement": "It is unrelated to a Virtio queue index. Documentation and APIs **SHOULD** use \u201cexecution queue\u201d",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
           "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
       }
     },
     {
@@ -531,18 +545,19 @@
       "keyword": "MUST",
       "statement": "Binding slot numbers **MUST** be unique within a submission. A binding does not transfer ownership",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
           "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
       }
     },
     {
@@ -553,18 +568,19 @@
       "keyword": "MUST",
       "statement": "of its buffer, but the device **MUST** retain the buffer until the resulting event is safely",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
           "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
       }
     },
     {
@@ -575,18 +591,19 @@
       "keyword": "MUST NOT",
       "statement": "The command engine **MUST NOT** convert an indeterminate submission into an ordinary error.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
           "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
       }
     },
     {
@@ -597,18 +614,19 @@
       "keyword": "MUST",
       "statement": "An event **MUST** retain its execution queue, program, buffers, and per-invocation backend state until",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
           "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
       }
     },
     {
@@ -619,18 +637,19 @@
       "keyword": "MUST NOT",
       "statement": "it is terminal and successfully destroyed. A pending event **MUST NOT** be destroyed.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
           "crates/virtio-accel-device/src/object_table.rs",
           "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked."
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
       }
     },
     {
@@ -727,9 +746,354 @@
       }
     },
     {
-      "id": "REQ-SPEC-6D83CC8BDB22",
+      "id": "REQ-SPEC-8691D06F0D68",
+      "source": "docs/specification.md",
+      "line": 261,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST",
+      "statement": "and in-flight reference count **MUST** be checked against an authoritative nonzero bound before it",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
+          "tests/portable_end_to_end.rs"
+        ],
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
+      }
+    },
+    {
+      "id": "REQ-SPEC-D22562859299",
       "source": "docs/specification.md",
       "line": 262,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST",
+      "statement": "can drive allocation, iteration, or provider invocation. Checked arithmetic **MUST** reject a value",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
+          "tests/portable_end_to_end.rs"
+        ],
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
+      }
+    },
+    {
+      "id": "REQ-SPEC-226FE069EA68",
+      "source": "docs/specification.md",
+      "line": 265,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST NOT",
+      "statement": "bounds belong to a host-supplied `ResourcePolicy`; an implementation **MUST NOT** use conflicting",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
+          "tests/portable_end_to_end.rs"
+        ],
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
+      }
+    },
+    {
+      "id": "REQ-SPEC-8ABF9B78E345",
+      "source": "docs/specification.md",
+      "line": 268,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST",
+      "statement": "A device integration **MUST** provide nonzero aggregate limits for actual buffer backing bytes and",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
+          "tests/portable_end_to_end.rs"
+        ],
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
+      }
+    },
+    {
+      "id": "REQ-SPEC-E1432CAA0DD9",
+      "source": "docs/specification.md",
+      "line": 269,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST",
+      "statement": "declared program resident bytes. The command engine **MUST** charge the actual",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
+          "tests/portable_end_to_end.rs"
+        ],
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
+      }
+    },
+    {
+      "id": "REQ-SPEC-0CAA1153DEEC",
+      "source": "docs/specification.md",
+      "line": 271,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST NOT",
+      "statement": "authorized before program loading. A provider **MUST NOT** retain program storage attributable to a",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
+          "tests/portable_end_to_end.rs"
+        ],
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
+      }
+    },
+    {
+      "id": "REQ-SPEC-E161D2E5A4D8",
+      "source": "docs/specification.md",
+      "line": 274,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST",
+      "statement": "A retained-byte charge begins before the associated object ID is published and **MUST** remain",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
+          "tests/portable_end_to_end.rs"
+        ],
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
+      }
+    },
+    {
+      "id": "REQ-SPEC-02A6E8638F5F",
+      "source": "docs/specification.md",
+      "line": 275,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST",
+      "statement": "accounted while the provider handle is live or releasing. Rejected release **MUST** restore the",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
+          "tests/portable_end_to_end.rs"
+        ],
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
+      }
+    },
+    {
+      "id": "REQ-SPEC-3E532E8A4FE3",
+      "source": "docs/specification.md",
+      "line": 276,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST",
+      "statement": "charge with the same live object. Indeterminate release **MUST** transfer the charge to quarantine",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
+          "tests/portable_end_to_end.rs"
+        ],
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
+      }
+    },
+    {
+      "id": "REQ-SPEC-F9EF18252F7A",
+      "source": "docs/specification.md",
+      "line": 279,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST NOT",
+      "statement": "If actual buffer backing would exceed aggregate policy, the device **MUST NOT** expose the new",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
+          "tests/portable_end_to_end.rs"
+        ],
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
+      }
+    },
+    {
+      "id": "REQ-SPEC-7817A66E2590",
+      "source": "docs/specification.md",
+      "line": 280,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST",
+      "statement": "object ID. It **MUST** attempt release through the provider ownership boundary; unless successful",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
+          "tests/portable_end_to_end.rs"
+        ],
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
+      }
+    },
+    {
+      "id": "REQ-SPEC-7C16F062051A",
+      "source": "docs/specification.md",
+      "line": 281,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST",
+      "statement": "release is proven, the device **MUST** stop admission and require backend discard rather than report",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
+          "tests/portable_end_to_end.rs"
+        ],
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
+      }
+    },
+    {
+      "id": "REQ-SPEC-0BD87CC8F0FC",
+      "source": "docs/specification.md",
+      "line": 284,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST",
+      "statement": "Portable parsing, lookup, queue, polling, cancellation, and reset work **MUST** terminate after a",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
+          "tests/portable_end_to_end.rs"
+        ],
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
+      }
+    },
+    {
+      "id": "REQ-SPEC-0D832E9EBD91",
+      "source": "docs/specification.md",
+      "line": 285,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST NOT",
+      "statement": "validated finite amount of local work and **MUST NOT** busy-wait for guest or provider progress.",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
+          "tests/portable_end_to_end.rs"
+        ],
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
+      }
+    },
+    {
+      "id": "REQ-SPEC-516B6F73E7E2",
+      "source": "docs/specification.md",
+      "line": 286,
+      "section": "4. Terminology and object model",
+      "keyword": "MUST NOT",
+      "statement": "Malformed guest input and configured resource exhaustion **MUST NOT** cause a panic or expose",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "crates/virtio-accel-core/src/lib.rs",
+          "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "crates/virtio-accel-device/src/object_table.rs",
+          "crates/virtio-accel-mock/src/lib.rs",
+          "docs/threat-model.md",
+          "tests/portable_end_to_end.rs"
+        ],
+        "issues": [],
+        "rationale": "Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable."
+      }
+    },
+    {
+      "id": "REQ-SPEC-8C0B6AB3EA1F",
+      "source": "docs/specification.md",
+      "line": 296,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "The portable v1 baseline **MUST** provide:",
@@ -746,9 +1110,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-E4E71AC72ACA",
+      "id": "REQ-SPEC-540EC7D8DB7A",
       "source": "docs/specification.md",
-      "line": 277,
+      "line": 311,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "advertise semantic event-cancellation capability, the device **MUST** return `UNSUPPORTED` without",
@@ -765,9 +1129,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-D50B70E6702F",
+      "id": "REQ-SPEC-C3BE550753FA",
       "source": "docs/specification.md",
-      "line": 286,
+      "line": 320,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
       "statement": "`TIMELINE_FENCES`, and `SECURE_CONTEXTS` reserve numeric positions only. A baseline device **MUST NOT**",
@@ -784,9 +1148,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-4EB42592CD49",
+      "id": "REQ-SPEC-6B6DAEA5865A",
       "source": "docs/specification.md",
-      "line": 287,
+      "line": 321,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
       "statement": "advertise them and a baseline driver **MUST NOT** accept them. Protocol 1.0 assigns no semantics to",
@@ -803,9 +1167,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-295FDC8F1AFE",
+      "id": "REQ-SPEC-F59975FEF95A",
       "source": "docs/specification.md",
-      "line": 290,
+      "line": 324,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
       "statement": "Unknown device-specific feature bits **MUST NOT** be accepted by a driver. A device **MUST NOT**",
@@ -822,9 +1186,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-D360B56C13CD",
+      "id": "REQ-SPEC-C6BBE1C138BB",
       "source": "docs/specification.md",
-      "line": 290,
+      "line": 324,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
       "statement": "Unknown device-specific feature bits **MUST NOT** be accepted by a driver. A device **MUST NOT**",
@@ -841,9 +1205,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-BCB2C7BE23D5",
+      "id": "REQ-SPEC-8FFBA66FC554",
       "source": "docs/specification.md",
-      "line": 308,
+      "line": 342,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
       "statement": "ownership, synchronization, and isolation rules are specified. A protocol 1.0 device **MUST NOT**",
@@ -860,9 +1224,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-C384FB585A75",
+      "id": "REQ-SPEC-5F1F6C563B25",
       "source": "docs/specification.md",
-      "line": 311,
+      "line": 345,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "The device **MUST** reject an allocation for an unsupported memory domain before invoking the",
@@ -881,9 +1245,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-BC626A25687E",
+      "id": "REQ-SPEC-ADFF726273BB",
       "source": "docs/specification.md",
-      "line": 316,
+      "line": 350,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "A baseline backend **MUST** advertise at least one assigned memory-domain capability. Every",
@@ -902,9 +1266,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-293DC68B231B",
+      "id": "REQ-SPEC-3DCF19C8EFC5",
       "source": "docs/specification.md",
-      "line": 317,
+      "line": 351,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "resource-count, binding-count, and byte limit in `DeviceInfo` **MUST** be nonzero. Identity,",
@@ -923,9 +1287,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-58C9CD029E4E",
+      "id": "REQ-SPEC-38713CCE2DB9",
       "source": "docs/specification.md",
-      "line": 318,
+      "line": 352,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "capabilities, and limits **MUST** remain stable for the lifetime of one backend instance so the",
@@ -944,9 +1308,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-ABEC6507C56E",
+      "id": "REQ-SPEC-E610CFF902E6",
       "source": "docs/specification.md",
-      "line": 321,
+      "line": 355,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "If `EVENT_CANCELLATION` is absent, the command engine **MUST** reject cancellation before backend",
@@ -965,9 +1329,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-3BDDC7B37721",
+      "id": "REQ-SPEC-5F5909C0C12C",
       "source": "docs/specification.md",
-      "line": 322,
+      "line": 356,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "invocation. If it is present, the backend **MUST** implement cancellation and **MUST NOT** return",
@@ -986,9 +1350,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-B9DC00E86791",
+      "id": "REQ-SPEC-FCE298FA20F4",
       "source": "docs/specification.md",
-      "line": 322,
+      "line": 356,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST NOT",
       "statement": "invocation. If it is present, the backend **MUST** implement cancellation and **MUST NOT** return",
@@ -1007,9 +1371,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-E6868E4CF5B2",
+      "id": "REQ-SPEC-5F7AC2E205DB",
       "source": "docs/specification.md",
-      "line": 326,
+      "line": 360,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "new synchronization, or changed lifetime rules, the device **MUST** also negotiate an appropriate",
@@ -1026,9 +1390,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-1192C3C18A01",
+      "id": "REQ-SPEC-2CD227378C63",
       "source": "docs/specification.md",
-      "line": 331,
+      "line": 365,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "**MUST** reject nonempty values before backend invocation; a direct caller of the backend trait",
@@ -1047,9 +1411,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-C438C1EA95F3",
+      "id": "REQ-SPEC-0B3C066D2AD7",
       "source": "docs/specification.md",
-      "line": 338,
+      "line": 372,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "reserved and **MUST** be zero.",
@@ -1066,9 +1430,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-034AAAED8CCB",
+      "id": "REQ-SPEC-D4447A5EA4F4",
       "source": "docs/specification.md",
-      "line": 341,
+      "line": 375,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "**MUST** be rejected before backend invocation. Reserved fields **MUST** be zero.",
@@ -1085,9 +1449,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-002AEF3E3100",
+      "id": "REQ-SPEC-DD9286027856",
       "source": "docs/specification.md",
-      "line": 341,
+      "line": 375,
       "section": "5. Baseline capabilities and feature policy",
       "keyword": "MUST",
       "statement": "**MUST** be rejected before backend invocation. Reserved fields **MUST** be zero.",
@@ -1104,9 +1468,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-C4038EE45051",
+      "id": "REQ-SPEC-4BCF13514668",
       "source": "docs/specification.md",
-      "line": 348,
+      "line": 382,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "Candidate implementations **MUST** expose major `1` and minor `0` in device-specific configuration",
@@ -1125,9 +1489,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-6B4375F7AFED",
+      "id": "REQ-SPEC-CF48CEC0E0CA",
       "source": "docs/specification.md",
-      "line": 349,
+      "line": 383,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "and **MUST NOT** claim candidate protocol 1.0 conformance unless they satisfy the normative wire,",
@@ -1146,9 +1510,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-CE15155BCD7C",
+      "id": "REQ-SPEC-EAC5AF832FBA",
       "source": "docs/specification.md",
-      "line": 353,
+      "line": 387,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "#33. Before that audit, an intentional candidate revision **MUST** follow the coordinated procedure",
@@ -1167,9 +1531,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-7E361A949E8A",
+      "id": "REQ-SPEC-7AF046B3C78A",
       "source": "docs/specification.md",
-      "line": 354,
+      "line": 388,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "in [wire-abi.md](wire-abi.md) and **MUST NOT** be described as a frozen or stable release.",
@@ -1188,9 +1552,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-7959D696D2AB",
+      "id": "REQ-SPEC-1D9FCF2259A4",
       "source": "docs/specification.md",
-      "line": 360,
+      "line": 394,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "- a driver **MUST** reject a device with an unsupported major version;",
@@ -1209,9 +1573,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-8417B9694757",
+      "id": "REQ-SPEC-D4178D3A6E1F",
       "source": "docs/specification.md",
-      "line": 362,
+      "line": 396,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "- a driver **MUST NOT** use behavior newer than the device minor version it observed; and",
@@ -1230,9 +1594,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-A47B979280E4",
+      "id": "REQ-SPEC-13D42A17F277",
       "source": "docs/specification.md",
-      "line": 371,
+      "line": 405,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "Therefore a minor version alone **MUST NOT** append fields to an existing response that an older",
@@ -1251,9 +1615,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-F2E9A4914D27",
+      "id": "REQ-SPEC-D748B1B0AD5F",
       "source": "docs/specification.md",
-      "line": 375,
+      "line": 409,
       "section": "6. Versioning and compatibility",
       "keyword": "SHOULD",
       "statement": "negotiated feature explicitly selects a different layout. Extensions **SHOULD** use a new opcode or",
@@ -1272,9 +1636,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-B102AEC467EA",
+      "id": "REQ-SPEC-DA2DB8DEEF2F",
       "source": "docs/specification.md",
-      "line": 378,
+      "line": 412,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "Without such a feature, a receiver **MUST** require the exact payload length for the opcode and",
@@ -1293,9 +1657,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-3F6D3B977243",
+      "id": "REQ-SPEC-CE932B2B539C",
       "source": "docs/specification.md",
-      "line": 379,
+      "line": 413,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "**MUST** reject trailing bytes. It **MUST NOT** silently reinterpret or ignore an unknown tail.",
@@ -1314,9 +1678,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-130EBE2E9C2E",
+      "id": "REQ-SPEC-E2B4F0AD193A",
       "source": "docs/specification.md",
-      "line": 379,
+      "line": 413,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "**MUST** reject trailing bytes. It **MUST NOT** silently reinterpret or ignore an unknown tail.",
@@ -1335,9 +1699,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-5F6759A95E05",
+      "id": "REQ-SPEC-3ADE1DDDE8DE",
       "source": "docs/specification.md",
-      "line": 386,
+      "line": 420,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "- An unknown response status is an opaque failure. A driver **MUST NOT** treat it as success or",
@@ -1356,9 +1720,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-8EAED13479BA",
+      "id": "REQ-SPEC-6C9AE2757BEE",
       "source": "docs/specification.md",
-      "line": 393,
+      "line": 427,
       "section": "7. Ownership and destruction",
       "keyword": "MUST",
       "statement": "The device owns the mapping from opaque object IDs to backend handles. The mapping **MUST** reject:",
@@ -1375,9 +1739,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-E8CBB7086059",
+      "id": "REQ-SPEC-F6B9C3ABC725",
       "source": "docs/specification.md",
-      "line": 401,
+      "line": 435,
       "section": "7. Ownership and destruction",
       "keyword": "MUST NOT",
       "statement": "Object-ID encoding is implementation-private. Drivers **MUST NOT** infer slot, kind, generation, or",
@@ -1394,9 +1758,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-11FB6A43D16D",
+      "id": "REQ-SPEC-1DBA670D2836",
       "source": "docs/specification.md",
-      "line": 406,
+      "line": 440,
       "section": "7. Ownership and destruction",
       "keyword": "MUST",
       "statement": "- a rejected release returns the still-live handle and the device **MUST** restore it for retry;",
@@ -1413,9 +1777,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-C5511AD39A09",
+      "id": "REQ-SPEC-01F6CADDDDBA",
       "source": "docs/specification.md",
-      "line": 408,
+      "line": 442,
       "section": "7. Ownership and destruction",
       "keyword": "MUST NOT",
       "statement": "- an indeterminate release invalidates the guest ID and requires recovery. The device **MUST NOT**",
@@ -1432,9 +1796,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-2C20B9BB974C",
+      "id": "REQ-SPEC-A5D2E57D1BE1",
       "source": "docs/specification.md",
-      "line": 411,
+      "line": 445,
       "section": "7. Ownership and destruction",
       "keyword": "MUST NOT",
       "statement": "`Drop` may provide defensive cleanup inside an implementation but **MUST NOT** be used as",
@@ -1451,9 +1815,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-E520D676CE05",
+      "id": "REQ-SPEC-7F15EA64E3A0",
       "source": "docs/specification.md",
-      "line": 414,
+      "line": 448,
       "section": "7. Ownership and destruction",
       "keyword": "MUST NOT",
       "statement": "A creation method that returns an ordinary error **MUST NOT** retain a newly created resource. A",
@@ -1470,9 +1834,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-2AE3767049C0",
+      "id": "REQ-SPEC-00C6D5A7BA7D",
       "source": "docs/specification.md",
-      "line": 418,
+      "line": 452,
       "section": "7. Ownership and destruction",
       "keyword": "MUST NOT",
       "statement": "the buffer; the command engine **MUST NOT** publish that destination as a successful payload.",
@@ -1489,9 +1853,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-83A7B584B764",
+      "id": "REQ-SPEC-9375E50C0DC9",
       "source": "docs/specification.md",
-      "line": 423,
+      "line": 457,
       "section": "8. Time and progress",
       "keyword": "MUST NOT",
       "statement": "infinite. Absolute guest timestamps **MUST NOT** be compared with a host clock because their",
@@ -1507,9 +1871,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-E8A31804CE1C",
+      "id": "REQ-SPEC-CBCBB8EF9B78",
       "source": "docs/specification.md",
-      "line": 426,
+      "line": 460,
       "section": "8. Time and progress",
       "keyword": "MUST",
       "statement": "Polling an event **MUST** be nonblocking and bounded. The portable contract creates no background",
@@ -1525,9 +1889,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-FBC2CA09456D",
+      "id": "REQ-SPEC-CEA953F3122D",
       "source": "docs/specification.md",
-      "line": 430,
+      "line": 464,
       "section": "8. Time and progress",
       "keyword": "MUST NOT",
       "statement": "synchronous provider work. Submission performs validation and admission only and **MUST NOT** wait",
@@ -1543,9 +1907,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-728D2CC1555F",
+      "id": "REQ-SPEC-FFC2A66ED400",
       "source": "docs/specification.md",
-      "line": 431,
+      "line": 465,
       "section": "8. Time and progress",
       "keyword": "MUST",
       "statement": "for execution to become terminal. Cancellation **MUST** also be nonblocking and bounded. No portable",
@@ -1561,9 +1925,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-056523814181",
+      "id": "REQ-SPEC-C6F3D02E11D8",
       "source": "docs/specification.md",
-      "line": 437,
+      "line": 471,
       "section": "8. Time and progress",
       "keyword": "MUST",
       "statement": "cannot prove rejection is indeterminate and **MUST** retain an event.",
@@ -1579,9 +1943,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-96510D494634",
+      "id": "REQ-SPEC-1078981F681B",
       "source": "docs/specification.md",
-      "line": 446,
+      "line": 480,
       "section": "9. Errors",
       "keyword": "MUST",
       "statement": "A device **MUST** map errors deterministically and **MUST NOT** expose uninitialized response bytes.",
@@ -1598,9 +1962,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-0C9E311E20CF",
+      "id": "REQ-SPEC-98980F97C5DD",
       "source": "docs/specification.md",
-      "line": 446,
+      "line": 480,
       "section": "9. Errors",
       "keyword": "MUST NOT",
       "statement": "A device **MUST** map errors deterministically and **MUST NOT** expose uninitialized response bytes.",
@@ -1617,9 +1981,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-234F92227481",
+      "id": "REQ-SPEC-81C049F03B4B",
       "source": "docs/specification.md",
-      "line": 450,
+      "line": 484,
       "section": "9. Errors",
       "keyword": "MUST NOT",
       "statement": "An error response **MUST NOT** imply that a backend operation was rejected when acceptance was",
@@ -1636,9 +2000,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-0CE0B3A3324E",
+      "id": "REQ-SPEC-A2BC3F34E0B5",
       "source": "docs/specification.md",
-      "line": 455,
+      "line": 489,
       "section": "10. Portability requirements",
       "keyword": "MUST NOT",
       "statement": "Portable crates **MUST NOT** select an operating system, VMM, kernel, vendor API, or global runtime.",
@@ -1654,9 +2018,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-E51EF4A89805",
+      "id": "REQ-SPEC-0E7C001BDD64",
       "source": "docs/specification.md",
-      "line": 463,
+      "line": 497,
       "section": "10. Portability requirements",
       "keyword": "MUST NOT",
       "statement": "Platform adapters depend inward on the portable layers. A portable layer **MUST NOT** conditionally",
@@ -1672,19 +2036,19 @@
       }
     },
     {
-      "id": "REQ-SPEC-4A9C77D20762",
+      "id": "REQ-SPEC-A4FB0EBF5085",
       "source": "docs/specification.md",
-      "line": 477,
+      "line": 513,
       "section": "11. Tracked completion work",
       "keyword": "MAY",
       "statement": "No implementation **MAY** advertise a reserved optional feature merely because a Rust constant",
       "coverage": {
         "status": "mixed",
         "evidence": [
-          "ci/check-normative-requirements.py"
+          "ci/check-normative-requirements.py",
+          "docs/threat-model.md"
         ],
         "issues": [
-          "#25",
           "#32",
           "#33"
         ],
@@ -2044,17 +2408,17 @@
       "keyword": "MUST NOT",
       "statement": "Capability bits are semantic reports, not Virtio feature bits. A capability **MUST NOT** alter wire",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
+        "issues": [],
+        "rationale": "Every payload invariant is cross-decoded, and live-object, advertised-quota, and aggregate retained-byte bounds are executable."
       }
     },
     {
@@ -2065,17 +2429,17 @@
       "keyword": "MUST NOT",
       "statement": "Bits 3 (`EXTERNAL_MEMORY`) and 4 (`SECURE_CONTEXTS`) are reserved and **MUST NOT** be advertised by a",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
+        "issues": [],
+        "rationale": "Every payload invariant is cross-decoded, and live-object, advertised-quota, and aggregate retained-byte bounds are executable."
       }
     },
     {
@@ -2086,17 +2450,17 @@
       "keyword": "MUST",
       "statement": "`CreateContextRequest` is eight bytes: `flags: u32` followed by `reserved: u32`. Both fields **MUST**",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
+        "issues": [],
+        "rationale": "Every payload invariant is cross-decoded, and live-object, advertised-quota, and aggregate retained-byte bounds are executable."
       }
     },
     {
@@ -2107,17 +2471,17 @@
       "keyword": "MUST",
       "statement": "The device **MUST** reject a memory domain whose corresponding semantic capability is absent before",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
+        "issues": [],
+        "rationale": "Every payload invariant is cross-decoded, and live-object, advertised-quota, and aggregate retained-byte bounds are executable."
       }
     },
     {
@@ -2128,17 +2492,17 @@
       "keyword": "MUST",
       "statement": "`TransferBufferRequest` is 24 bytes containing `buffer_id`, `offset`, and `bytes`. `bytes` **MUST**",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
+        "issues": [],
+        "rationale": "Every payload invariant is cross-decoded, and live-object, advertised-quota, and aggregate retained-byte bounds are executable."
       }
     },
     {
@@ -2149,17 +2513,17 @@
       "keyword": "MUST NOT",
       "statement": "be nonzero. `offset + bytes` **MUST NOT** overflow and **MUST** fit in the buffer.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
+        "issues": [],
+        "rationale": "Every payload invariant is cross-decoded, and live-object, advertised-quota, and aggregate retained-byte bounds are executable."
       }
     },
     {
@@ -2170,17 +2534,17 @@
       "keyword": "MUST",
       "statement": "be nonzero. `offset + bytes` **MUST NOT** overflow and **MUST** fit in the buffer.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
+        "issues": [],
+        "rationale": "Every payload invariant is cross-decoded, and live-object, advertised-quota, and aggregate retained-byte bounds are executable."
       }
     },
     {
@@ -2191,17 +2555,17 @@
       "keyword": "MUST",
       "statement": "For `WRITE_BUFFER`, the request payload length **MUST** be `24 + bytes`, and bytes following the",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
+        "issues": [],
+        "rationale": "Every payload invariant is cross-decoded, and live-object, advertised-quota, and aggregate retained-byte bounds are executable."
       }
     },
     {
@@ -2212,17 +2576,17 @@
       "keyword": "MUST",
       "statement": "`80 + payload_bytes` **MUST** fit the request payload and configured frame limit.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
+        "issues": [],
+        "rationale": "Every payload invariant is cross-decoded, and live-object, advertised-quota, and aggregate retained-byte bounds are executable."
       }
     },
     {
@@ -2233,17 +2597,17 @@
       "keyword": "MUST",
       "statement": "reserved words **MUST** be zero in protocol 1.0.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
+        "issues": [],
+        "rationale": "Every payload invariant is cross-decoded, and live-object, advertised-quota, and aggregate retained-byte bounds are executable."
       }
     },
     {
@@ -2254,17 +2618,17 @@
       "keyword": "MUST",
       "statement": "- `binding_count` **MUST** be 1 through both advertised `max_bindings_per_submission` and 4096.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
+        "issues": [],
+        "rationale": "Every payload invariant is cross-decoded, and live-object, advertised-quota, and aggregate retained-byte bounds are executable."
       }
     },
     {
@@ -2275,17 +2639,17 @@
       "keyword": "MUST",
       "statement": "- `flags` **MUST** be zero.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
+        "issues": [],
+        "rationale": "Every payload invariant is cross-decoded, and live-object, advertised-quota, and aggregate retained-byte bounds are executable."
       }
     },
     {
@@ -2296,17 +2660,17 @@
       "keyword": "MUST",
       "statement": "- The payload length **MUST** be `32 + binding_count * 32`.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "crates/virtio-accel-proto/tests/semantic_interop.rs",
+          "crates/virtio-accel-device/src/state.rs",
           "crates/virtio-accel-device/tests/command_processor.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked."
+        "issues": [],
+        "rationale": "Every payload invariant is cross-decoded, and live-object, advertised-quota, and aggregate retained-byte bounds are executable."
       }
     },
     {
@@ -2702,16 +3066,17 @@
       "keyword": "SHOULD",
       "statement": "After observing `DEVICE_NEEDS_RESET`, the driver **SHOULD** stop submitting commands and perform",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
           "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Ownership-aware failures and DEVICE_NEEDS_RESET transitions are executable; the adversarial resource policy remains tracked."
+        "issues": [],
+        "rationale": "Ownership-aware failures, DEVICE_NEEDS_RESET transitions, quarantine accounting, and adversarial resource policy are executable."
       }
     },
     {
@@ -2722,16 +3087,17 @@
       "keyword": "MUST NOT",
       "statement": "but it **MUST NOT** accept new semantic work.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "crates/virtio-accel-core/src/lib.rs",
           "crates/virtio-accel-device/src/engine.rs",
+          "crates/virtio-accel-device/src/state.rs",
+          "crates/virtio-accel-device/tests/command_processor.rs",
+          "docs/threat-model.md",
           "tests/portable_end_to_end.rs"
         ],
-        "issues": [
-          "#25"
-        ],
-        "rationale": "Ownership-aware failures and DEVICE_NEEDS_RESET transitions are executable; the adversarial resource policy remains tracked."
+        "issues": [],
+        "rationale": "Ownership-aware failures, DEVICE_NEEDS_RESET transitions, quarantine accounting, and adversarial resource policy are executable."
       }
     }
   ]

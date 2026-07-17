@@ -12,6 +12,7 @@ use virtio_accel::core::{
 };
 use virtio_accel::device::{
     CommandOutcome, CommandProcessor, ObjectNamespace, ResetDisposition, ResetReport,
+    ResourcePolicy,
 };
 use virtio_accel::guest::{
     AccessMode, Binding, Buffer, BufferDesc, BufferRange, BufferUsage, ClientHealth, Completion,
@@ -485,8 +486,13 @@ fn stack_with_faults(
     let backend_control = Rc::new(BackendControl::default());
     let backend = ScenarioBackend::new(Rc::clone(&backend_control), script);
     let fault_control = backend.inner.control();
-    let processor =
-        CommandProcessor::new(backend, &config, ObjectNamespace::new(1).unwrap()).unwrap();
+    let processor = CommandProcessor::new(
+        backend,
+        &config,
+        ObjectNamespace::new(1).unwrap(),
+        ResourcePolicy::new(1 << 30, 1 << 30).unwrap(),
+    )
+    .unwrap();
     let harness_control = Rc::new(HarnessControl::default());
     let queue = EndToEndQueue {
         queue,

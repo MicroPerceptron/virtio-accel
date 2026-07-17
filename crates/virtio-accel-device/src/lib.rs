@@ -32,9 +32,9 @@ pub use regions::{
 };
 pub use response::{ResponsePayload, ResponseWriteError, ResponseWriter};
 pub use state::{
-    BufferRecord, ChildCounts, ContextRecord, CreateError, DeviceState, DeviceStateConfigError,
-    DeviceStateError, EventRecord, ProgramRecord, QueueRecord, ReleaseState, ResourceCounts,
-    RestoreError, SubmissionResources,
+    BufferCreateOutcome, BufferRecord, ChildCounts, ContextRecord, CreateError, DeviceState,
+    DeviceStateConfigError, DeviceStateError, EventRecord, ProgramRecord, QueueRecord,
+    ReleaseState, ResourceCounts, ResourcePolicy, RestoreError, RetainedBytes, SubmissionResources,
 };
 use virtio_accel_core::BackendError;
 use virtio_accel_proto::StatusCode;

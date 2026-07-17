@@ -19,11 +19,12 @@ use virtio_accel_proto::{
 use zerocopy::IntoBytes;
 
 use crate::{
-    BufferRecord, ChainRegion, CreateError, DecodedBinding, DecodedRequest, DecodedRequestBody,
-    DecoderLimits, DecoderLimitsError, DeviceState, DeviceStateConfigError, DeviceStateError,
-    FrameDecoder, FramePreflight, FramePreflightError, ObjectId, ObjectNamespace, ResourceCounts,
-    ResponseWriteError, ResponseWriter, UnusableFrame, preflight_command_frame,
-    status_from_backend_error, status_from_device_state_error,
+    BufferCreateOutcome, BufferRecord, ChainRegion, CreateError, DecodedBinding, DecodedRequest,
+    DecodedRequestBody, DecoderLimits, DecoderLimitsError, DeviceState, DeviceStateConfigError,
+    DeviceStateError, FrameDecoder, FramePreflight, FramePreflightError, ObjectId, ObjectNamespace,
+    ResourceCounts, ResourcePolicy, ResponseWriteError, ResponseWriter, RetainedBytes,
+    UnusableFrame, preflight_command_frame, status_from_backend_error,
+    status_from_device_state_error,
 };
 
 pub type AcceleratorState<A> = DeviceState<
@@ -52,6 +53,8 @@ pub struct ResetReport {
     pub disposition: ResetDisposition,
     pub released: ResourceCounts,
     pub quarantined: ResourceCounts,
+    pub released_bytes: RetainedBytes,
+    pub quarantined_bytes: RetainedBytes,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,9 +104,11 @@ pub struct CommandProcessor<A: Accelerator> {
     state: AcceleratorState<A>,
     accelerator: A,
     info: DeviceInfo,
+    policy: ResourcePolicy,
     decoder: FrameDecoder,
     health: DeviceHealth,
     quarantined: ResourceCounts,
+    quarantined_bytes: RetainedBytes,
     last_reset: Option<ResetReport>,
 }
 
@@ -112,6 +117,7 @@ impl<A: Accelerator> core::fmt::Debug for CommandProcessor<A> {
         formatter
             .debug_struct("CommandProcessor")
             .field("info", &self.info)
+            .field("policy", &self.policy)
             .field("decoder", &self.decoder)
             .field("health", &self.health)
             .finish_non_exhaustive()
@@ -123,6 +129,7 @@ impl<A: Accelerator> CommandProcessor<A> {
         accelerator: A,
         config: &WireConfig,
         namespace: ObjectNamespace,
+        policy: ResourcePolicy,
     ) -> Result<Self, CommandProcessorInitError> {
         config.validate().map_err(|error| {
             CommandProcessorInitError::Decoder(DecoderLimitsError::Config(error))
@@ -134,15 +141,17 @@ impl<A: Accelerator> CommandProcessor<A> {
             .map_err(CommandProcessorInitError::DeviceInfo)?;
         let limits =
             DecoderLimits::new(config, info).map_err(CommandProcessorInitError::Decoder)?;
-        let state =
-            DeviceState::new(namespace, info.limits).map_err(CommandProcessorInitError::State)?;
+        let state = DeviceState::new(namespace, info.limits, policy)
+            .map_err(CommandProcessorInitError::State)?;
         Ok(Self {
             state,
             accelerator,
             info,
+            policy,
             decoder: FrameDecoder::new(limits),
             health: DeviceHealth::Running,
             quarantined: ResourceCounts::default(),
+            quarantined_bytes: RetainedBytes::default(),
             last_reset: None,
         })
     }
@@ -153,6 +162,17 @@ impl<A: Accelerator> CommandProcessor<A> {
 
     pub const fn health(&self) -> DeviceHealth {
         self.health
+    }
+
+    pub const fn resource_policy(&self) -> ResourcePolicy {
+        self.policy
+    }
+
+    /// Provider-retained bulk bytes still live or quarantined in this backend instance.
+    pub const fn retained_bytes(&self) -> RetainedBytes {
+        self.state
+            .retained_bytes()
+            .saturating_add(self.quarantined_bytes)
     }
 
     pub const fn decoder(&self) -> &FrameDecoder {
@@ -178,7 +198,8 @@ impl<A: Accelerator> CommandProcessor<A> {
             let report = match self.last_reset {
                 Some(report) => report,
                 None => {
-                    let report = self.discard_report(ResourceCounts::default());
+                    let report =
+                        self.discard_report(ResourceCounts::default(), RetainedBytes::default());
                     self.last_reset = Some(report);
                     report
                 }
@@ -192,6 +213,7 @@ impl<A: Accelerator> CommandProcessor<A> {
         self.health = DeviceHealth::NeedsReset;
         self.last_reset = None;
         let mut released = ResourceCounts::default();
+        let mut released_bytes = RetainedBytes::default();
         let mut progress = ResetProgress::default();
 
         self.reset_events(&mut released, &mut progress);
@@ -199,10 +221,10 @@ impl<A: Accelerator> CommandProcessor<A> {
             self.reset_queues(&mut released, &mut progress);
         }
         if progress.backend_callable {
-            self.reset_programs(&mut released, &mut progress);
+            self.reset_programs(&mut released, &mut released_bytes, &mut progress);
         }
         if progress.backend_callable {
-            self.reset_buffers(&mut released, &mut progress);
+            self.reset_buffers(&mut released, &mut released_bytes, &mut progress);
         }
         if progress.backend_callable {
             self.reset_contexts(&mut released, &mut progress);
@@ -210,14 +232,23 @@ impl<A: Accelerator> CommandProcessor<A> {
 
         let remaining = self.state.resource_counts();
         let quarantined = self.quarantined.saturating_add(remaining);
-        if progress.backend_reusable && self.state.is_empty() && quarantined.is_empty() {
-            self.state =
-                DeviceState::new(namespace, self.info.limits).map_err(ResetError::State)?;
+        let quarantined_bytes = self
+            .quarantined_bytes
+            .saturating_add(self.state.retained_bytes());
+        if progress.backend_reusable
+            && self.state.is_empty()
+            && quarantined.is_empty()
+            && quarantined_bytes.is_empty()
+        {
+            self.state = DeviceState::new(namespace, self.info.limits, self.policy)
+                .map_err(ResetError::State)?;
             self.health = DeviceHealth::Running;
             let report = ResetReport {
                 disposition: ResetDisposition::BackendReusable,
                 released,
                 quarantined,
+                released_bytes,
+                quarantined_bytes,
             };
             self.last_reset = None;
             return Ok(report);
@@ -228,6 +259,8 @@ impl<A: Accelerator> CommandProcessor<A> {
             disposition: ResetDisposition::BackendDiscardRequired,
             released,
             quarantined,
+            released_bytes,
+            quarantined_bytes,
         };
         self.last_reset = Some(report);
         Ok(report)
@@ -306,16 +339,22 @@ impl<A: Accelerator> CommandProcessor<A> {
                 self.destroy_context(response, request_id, context_id)
             }
             DecodedRequestBody::AllocateBuffer { context_id, desc } => {
+                if let Err(error) = self.info.validate_buffer_desc(desc) {
+                    return self.respond_backend_error(response, request_id, error, false);
+                }
                 let accelerator = &self.accelerator;
-                let info = self.info;
                 match self
                     .state
                     .create_buffer_with(context_id, desc, |context, requested| {
                         let allocated = accelerator.allocate_buffer(context, requested)?;
-                        info.validate_buffer_info(requested, allocated.info())?;
                         Ok(allocated.into_parts())
                     }) {
-                    Ok(id) => self.respond_object(response, request_id, id, true),
+                    Ok(BufferCreateOutcome::Admitted(id)) => {
+                        self.respond_object(response, request_id, id, true)
+                    }
+                    Ok(BufferCreateOutcome::CleanupRequired { id, error }) => {
+                        self.release_unpublished_buffer(response, request_id, id, error)
+                    }
                     Err(error) => self.respond_create_error(response, request_id, error),
                 }
             }
@@ -661,10 +700,22 @@ impl<A: Accelerator> CommandProcessor<A> {
         }
     }
 
-    fn reset_programs(&mut self, released: &mut ResourceCounts, progress: &mut ResetProgress) {
+    fn reset_programs(
+        &mut self,
+        released: &mut ResourceCounts,
+        released_bytes: &mut RetainedBytes,
+        progress: &mut ResetProgress,
+    ) {
         let mut cursor = 0;
         while let Some((next, id)) = self.state.next_program_id(cursor) {
             cursor = next;
+            let resident_bytes = match self.state.program_record(id) {
+                Ok(record) => record.resident_bytes(),
+                Err(_) => {
+                    progress.backend_reusable = false;
+                    continue;
+                }
+            };
             let program = match self.state.begin_program_release(id) {
                 Ok(program) => program,
                 Err(_) => {
@@ -674,7 +725,10 @@ impl<A: Accelerator> CommandProcessor<A> {
             };
             match self.accelerator.unload_program(program) {
                 Ok(()) => match self.state.commit_program_release(id) {
-                    Ok(()) => released.programs += 1,
+                    Ok(()) => {
+                        released.programs += 1;
+                        released_bytes.program_resident += u128::from(resident_bytes);
+                    }
                     Err(_) => {
                         progress.backend_reusable = false;
                         progress.backend_callable = false;
@@ -700,10 +754,22 @@ impl<A: Accelerator> CommandProcessor<A> {
         }
     }
 
-    fn reset_buffers(&mut self, released: &mut ResourceCounts, progress: &mut ResetProgress) {
+    fn reset_buffers(
+        &mut self,
+        released: &mut ResourceCounts,
+        released_bytes: &mut RetainedBytes,
+        progress: &mut ResetProgress,
+    ) {
         let mut cursor = 0;
         while let Some((next, id)) = self.state.next_buffer_id(cursor) {
             cursor = next;
+            let allocation_bytes = match self.state.buffer_record(id) {
+                Ok(record) => record.info().allocation_bytes(),
+                Err(_) => {
+                    progress.backend_reusable = false;
+                    continue;
+                }
+            };
             let buffer = match self.state.begin_buffer_release(id) {
                 Ok(buffer) => buffer,
                 Err(_) => {
@@ -713,7 +779,10 @@ impl<A: Accelerator> CommandProcessor<A> {
             };
             match self.accelerator.free_buffer(buffer) {
                 Ok(()) => match self.state.commit_buffer_release(id) {
-                    Ok(()) => released.buffers += 1,
+                    Ok(()) => {
+                        released.buffers += 1;
+                        released_bytes.buffer_backing += u128::from(allocation_bytes);
+                    }
                     Err(_) => {
                         progress.backend_reusable = false;
                         progress.backend_callable = false;
@@ -885,6 +954,40 @@ impl<A: Accelerator> CommandProcessor<A> {
         }
     }
 
+    fn release_unpublished_buffer(
+        &mut self,
+        response: &mut dyn ByteSink,
+        request_id: u64,
+        buffer_id: ObjectId,
+        admission_error: BackendError,
+    ) -> Result<CommandOutcome, CommandProcessError> {
+        let allocation_bytes = match self.state.buffer_record(buffer_id) {
+            Ok(record) => record.info().allocation_bytes(),
+            Err(_) => return self.discard_response(response, request_id),
+        };
+        let buffer = match self.state.begin_buffer_release(buffer_id) {
+            Ok(buffer) => buffer,
+            Err(_) => return self.discard_response(response, request_id),
+        };
+        match self.accelerator.free_buffer(buffer) {
+            Ok(()) => match self.state.commit_buffer_release(buffer_id) {
+                Ok(()) => self.respond_backend_error(response, request_id, admission_error, false),
+                Err(_) => self.discard_response(response, request_id),
+            },
+            Err(ReleaseFailure::Rejected { resource, .. }) => {
+                let _ = self.state.restore_buffer_release(buffer_id, resource);
+                self.discard_response(response, request_id)
+            }
+            Err(ReleaseFailure::Indeterminate { .. }) => {
+                if self.state.commit_buffer_release(buffer_id).is_ok() {
+                    self.quarantined.buffers += 1;
+                    self.quarantined_bytes.buffer_backing += u128::from(allocation_bytes);
+                }
+                self.discard_response(response, request_id)
+            }
+        }
+    }
+
     fn write_buffer(
         &mut self,
         response: &mut dyn ByteSink,
@@ -999,6 +1102,10 @@ impl<A: Accelerator> CommandProcessor<A> {
         request_id: u64,
         id: ObjectId,
     ) -> Result<CommandOutcome, CommandProcessError> {
+        let allocation_bytes = match self.state.buffer_record(id) {
+            Ok(record) => record.info().allocation_bytes(),
+            Err(error) => return self.respond_state_error(response, request_id, error),
+        };
         let resource = match self.state.begin_buffer_release(id) {
             Ok(resource) => resource,
             Err(error) => return self.respond_state_error(response, request_id, error),
@@ -1017,6 +1124,7 @@ impl<A: Accelerator> CommandProcessor<A> {
             Err(ReleaseFailure::Indeterminate { .. }) => {
                 if self.state.commit_buffer_release(id).is_ok() {
                     self.quarantined.buffers += 1;
+                    self.quarantined_bytes.buffer_backing += u128::from(allocation_bytes);
                 }
                 self.discard_response(response, request_id)
             }
@@ -1029,6 +1137,10 @@ impl<A: Accelerator> CommandProcessor<A> {
         request_id: u64,
         id: ObjectId,
     ) -> Result<CommandOutcome, CommandProcessError> {
+        let resident_bytes = match self.state.program_record(id) {
+            Ok(record) => record.resident_bytes(),
+            Err(error) => return self.respond_state_error(response, request_id, error),
+        };
         let resource = match self.state.begin_program_release(id) {
             Ok(resource) => resource,
             Err(error) => return self.respond_state_error(response, request_id, error),
@@ -1047,6 +1159,7 @@ impl<A: Accelerator> CommandProcessor<A> {
             Err(ReleaseFailure::Indeterminate { .. }) => {
                 if self.state.commit_program_release(id).is_ok() {
                     self.quarantined.programs += 1;
+                    self.quarantined_bytes.program_resident += u128::from(resident_bytes);
                 }
                 self.discard_response(response, request_id)
             }
@@ -1143,13 +1256,21 @@ impl<A: Accelerator> CommandProcessor<A> {
         self.respond_empty(response, StatusCode::DEVICE_LOST, request_id, true)
     }
 
-    fn discard_report(&self, released: ResourceCounts) -> ResetReport {
+    fn discard_report(
+        &self,
+        released: ResourceCounts,
+        released_bytes: RetainedBytes,
+    ) -> ResetReport {
         ResetReport {
             disposition: ResetDisposition::BackendDiscardRequired,
             released,
             quarantined: self
                 .quarantined
                 .saturating_add(self.state.resource_counts()),
+            released_bytes,
+            quarantined_bytes: self
+                .quarantined_bytes
+                .saturating_add(self.state.retained_bytes()),
         }
     }
 

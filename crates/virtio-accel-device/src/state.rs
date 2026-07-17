@@ -7,8 +7,9 @@
 //! state so rejected provider releases can restore ownership without reviving a stale ID.
 
 use alloc::vec::Vec;
+use core::num::NonZeroU64;
 
-use virtio_accel_core::{BufferDesc, BufferInfo, DeviceLimits};
+use virtio_accel_core::{BackendError, BufferDesc, BufferInfo, DeviceLimits};
 use virtio_accel_proto::HARD_MAX_BINDINGS;
 
 use crate::{ObjectId, ObjectKind, ObjectNamespace, ObjectTable, ObjectTableError};
@@ -45,6 +46,16 @@ impl<E> From<DeviceStateError> for CreateError<E> {
     fn from(error: DeviceStateError) -> Self {
         Self::State(error)
     }
+}
+
+/// Result of allocating provider backing before its guest-visible ID is published.
+///
+/// `CleanupRequired` retains the object in the state graph so the command engine can release it
+/// through the provider's ownership boundary. The ID must never be exposed to the guest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BufferCreateOutcome {
+    Admitted(ObjectId),
+    CleanupRequired { id: ObjectId, error: BackendError },
 }
 
 #[derive(Debug)]
@@ -150,6 +161,67 @@ impl ResourceCounts {
             programs: self.programs.saturating_add(other.programs),
             queues: self.queues.saturating_add(other.queues),
             events: self.events.saturating_add(other.events),
+        }
+    }
+}
+
+/// Device-private aggregate limits for provider-retained bulk storage.
+///
+/// Per-object and object-count limits remain in [`DeviceLimits`]. These limits let one device
+/// integration constrain the aggregate host/provider memory exposed to an untrusted guest without
+/// adding host policy to the wire ABI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResourcePolicy {
+    max_buffer_backing_bytes: NonZeroU64,
+    max_program_resident_bytes: NonZeroU64,
+}
+
+impl ResourcePolicy {
+    pub const fn new(
+        max_buffer_backing_bytes: u64,
+        max_program_resident_bytes: u64,
+    ) -> Option<Self> {
+        match (
+            NonZeroU64::new(max_buffer_backing_bytes),
+            NonZeroU64::new(max_program_resident_bytes),
+        ) {
+            (Some(max_buffer_backing_bytes), Some(max_program_resident_bytes)) => Some(Self {
+                max_buffer_backing_bytes,
+                max_program_resident_bytes,
+            }),
+            _ => None,
+        }
+    }
+
+    pub const fn max_buffer_backing_bytes(self) -> u64 {
+        self.max_buffer_backing_bytes.get()
+    }
+
+    pub const fn max_program_resident_bytes(self) -> u64 {
+        self.max_program_resident_bytes.get()
+    }
+}
+
+/// Exact retained bulk-storage charges represented by a device state graph.
+///
+/// The totals use `u128` because a valid graph may contain up to `u32::MAX` objects, each carrying
+/// a `u64` charge. This keeps accounting exact even when the sum is intentionally rejected by a
+/// `u64` policy limit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RetainedBytes {
+    pub buffer_backing: u128,
+    pub program_resident: u128,
+}
+
+impl RetainedBytes {
+    pub const fn is_empty(self) -> bool {
+        self.buffer_backing == 0 && self.program_resident == 0
+    }
+
+    pub(crate) const fn saturating_add(self, other: Self) -> Self {
+        Self {
+            buffer_backing: self.buffer_backing.saturating_add(other.buffer_backing),
+            program_resident: self.program_resident.saturating_add(other.program_resident),
         }
     }
 }
@@ -359,6 +431,8 @@ impl<'a, B, P, Q> SubmissionResources<'a, B, P, Q> {
 pub struct DeviceState<C, B, P, Q, E> {
     namespace: ObjectNamespace,
     limits: DeviceLimits,
+    policy: ResourcePolicy,
+    retained: RetainedBytes,
     contexts: ObjectTable<ContextRecord<C>>,
     buffers: ObjectTable<BufferRecord<B>>,
     programs: ObjectTable<ProgramRecord<P>>,
@@ -370,6 +444,7 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
     pub fn new(
         namespace: ObjectNamespace,
         limits: DeviceLimits,
+        policy: ResourcePolicy,
     ) -> Result<Self, DeviceStateConfigError> {
         if limits.max_contexts == 0
             || limits.max_buffers_per_context == 0
@@ -397,6 +472,8 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
         Ok(Self {
             namespace,
             limits,
+            policy,
+            retained: RetainedBytes::default(),
             contexts: ObjectTable::with_namespace(
                 ObjectKind::Context,
                 limits.max_contexts,
@@ -411,6 +488,15 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
 
     pub const fn limits(&self) -> DeviceLimits {
         self.limits
+    }
+
+    pub const fn resource_policy(&self) -> ResourcePolicy {
+        self.policy
+    }
+
+    /// Bulk bytes still represented by live or releasing provider handles.
+    pub const fn retained_bytes(&self) -> RetainedBytes {
+        self.retained
     }
 
     pub const fn namespace(&self) -> ObjectNamespace {
@@ -524,8 +610,15 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
         context_id: ObjectId,
         desc: BufferDesc,
         create: impl FnOnce(&C, BufferDesc) -> Result<(B, BufferInfo), ProviderError>,
-    ) -> Result<ObjectId, CreateError<ProviderError>> {
+    ) -> Result<BufferCreateOutcome, CreateError<ProviderError>> {
         if desc.bytes() > self.limits.max_buffer_bytes {
+            return Err(CreateError::State(DeviceStateError::ResourceLimit));
+        }
+        let minimum_retained = self
+            .retained
+            .buffer_backing
+            .saturating_add(u128::from(desc.bytes()));
+        if minimum_retained > u128::from(self.policy.max_buffer_backing_bytes()) {
             return Err(CreateError::State(DeviceStateError::ResourceLimit));
         }
         self.check_child_admission(
@@ -543,14 +636,29 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
             .get_mut(context_id)
             .map_err(|error| CreateError::State(map_table_error(error)))?;
         let (resource, info) = create(context.resource()?, desc).map_err(CreateError::Provider)?;
+        let retained = self
+            .retained
+            .buffer_backing
+            .saturating_add(u128::from(info.allocation_bytes()));
+        let cleanup_error = if info.desc() != desc {
+            Some(BackendError::Incompatible)
+        } else if retained > u128::from(self.policy.max_buffer_backing_bytes()) {
+            Some(BackendError::ResourceLimit)
+        } else {
+            None
+        };
         let id = self.buffers.insert_prepared(BufferRecord {
             resource: ResourceSlot::new(resource),
             context_id,
             info,
             in_flight: 0,
         });
+        self.retained.buffer_backing = retained;
         context.children.buffers += 1;
-        Ok(id)
+        Ok(match cleanup_error {
+            Some(error) => BufferCreateOutcome::CleanupRequired { id, error },
+            None => BufferCreateOutcome::Admitted(id),
+        })
     }
 
     pub fn create_program_with<ProviderError>(
@@ -564,6 +672,13 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
             return Err(CreateError::State(DeviceStateError::InvalidArgument));
         }
         if artifact_bytes > self.limits.max_artifact_bytes {
+            return Err(CreateError::State(DeviceStateError::ResourceLimit));
+        }
+        let retained = self
+            .retained
+            .program_resident
+            .saturating_add(u128::from(resident_bytes));
+        if retained > u128::from(self.policy.max_program_resident_bytes()) {
             return Err(CreateError::State(DeviceStateError::ResourceLimit));
         }
         self.check_child_admission(
@@ -587,6 +702,7 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
             resident_bytes,
             in_flight: 0,
         });
+        self.retained.program_resident = retained;
         context.children.programs += 1;
         Ok(id)
     }
@@ -731,12 +847,13 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
     }
 
     pub fn commit_buffer_release(&mut self, id: ObjectId) -> Result<(), DeviceStateError> {
-        let context_id = {
+        let (context_id, allocation_bytes) = {
             let record = self.buffers.get(id).map_err(map_table_error)?;
             ensure_releasing(record)?;
-            record.context_id
+            (record.context_id, record.info.allocation_bytes())
         };
         self.buffers.remove(id).map_err(map_table_error)?;
+        self.retained.buffer_backing -= u128::from(allocation_bytes);
         self.contexts
             .get_mut(context_id)
             .map_err(map_table_error)?
@@ -762,12 +879,13 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
     }
 
     pub fn commit_program_release(&mut self, id: ObjectId) -> Result<(), DeviceStateError> {
-        let context_id = {
+        let (context_id, resident_bytes) = {
             let record = self.programs.get(id).map_err(map_table_error)?;
             ensure_releasing(record)?;
-            record.context_id
+            (record.context_id, record.resident_bytes)
         };
         self.programs.remove(id).map_err(map_table_error)?;
+        self.retained.program_resident -= u128::from(resident_bytes);
         self.contexts
             .get_mut(context_id)
             .map_err(map_table_error)?
@@ -1117,8 +1235,22 @@ mod tests {
         DeviceState::new(
             ObjectNamespace::new(namespace).unwrap(),
             limits(max_contexts),
+            resource_policy(),
         )
         .unwrap()
+    }
+
+    fn resource_policy() -> ResourcePolicy {
+        ResourcePolicy::new(1 << 30, 1 << 30).unwrap()
+    }
+
+    fn admitted(outcome: BufferCreateOutcome) -> ObjectId {
+        match outcome {
+            BufferCreateOutcome::Admitted(id) => id,
+            BufferCreateOutcome::CleanupRequired { .. } => {
+                panic!("test allocation unexpectedly required cleanup")
+            }
+        }
     }
 
     fn buffer_desc() -> BufferDesc {
@@ -1153,12 +1285,14 @@ mod tests {
     fn complete_lifecycle_tracks_children_references_and_release_rollback() {
         let mut state = state(1, 1);
         let context = create_context(&mut state, 10);
-        let buffer = state
-            .create_buffer_with(context, buffer_desc(), |context, desc| {
-                assert_eq!(*context, 10);
-                Ok::<_, &'static str>((20, buffer_info(desc)))
-            })
-            .unwrap();
+        let buffer = admitted(
+            state
+                .create_buffer_with(context, buffer_desc(), |context, desc| {
+                    assert_eq!(*context, 10);
+                    Ok::<_, &'static str>((20, buffer_info(desc)))
+                })
+                .unwrap(),
+        );
         *state
             .buffer_record_mut(buffer)
             .unwrap()
@@ -1293,12 +1427,14 @@ mod tests {
             Err(CreateError::State(DeviceStateError::ResourceLimit))
         ));
 
-        let buffer = state
-            .create_buffer_with(context, buffer_desc(), |_, desc| {
-                calls.set(calls.get() + 1);
-                Ok::<_, &'static str>((20, buffer_info(desc)))
-            })
-            .unwrap();
+        let buffer = admitted(
+            state
+                .create_buffer_with(context, buffer_desc(), |_, desc| {
+                    calls.set(calls.get() + 1);
+                    Ok::<_, &'static str>((20, buffer_info(desc)))
+                })
+                .unwrap(),
+        );
         assert!(matches!(
             state.create_buffer_with(context, buffer_desc(), |_, desc| {
                 calls.set(calls.get() + 1);
@@ -1385,11 +1521,13 @@ mod tests {
             ChildCounts::default()
         );
 
-        let buffer = state
-            .create_buffer_with(context, buffer_desc(), |_, desc| {
-                Ok::<_, &'static str>((20, buffer_info(desc)))
-            })
-            .unwrap();
+        let buffer = admitted(
+            state
+                .create_buffer_with(context, buffer_desc(), |_, desc| {
+                    Ok::<_, &'static str>((20, buffer_info(desc)))
+                })
+                .unwrap(),
+        );
         let program = state
             .create_program_with(context, 1, 1, |_| Ok::<_, &'static str>(30))
             .unwrap();
@@ -1414,11 +1552,13 @@ mod tests {
         let mut first = state(1, 2);
         let first_context = create_context(&mut first, 10);
         let second_context = create_context(&mut first, 11);
-        let buffer = first
-            .create_buffer_with(first_context, buffer_desc(), |_, desc| {
-                Ok::<_, &'static str>((20, buffer_info(desc)))
-            })
-            .unwrap();
+        let buffer = admitted(
+            first
+                .create_buffer_with(first_context, buffer_desc(), |_, desc| {
+                    Ok::<_, &'static str>((20, buffer_info(desc)))
+                })
+                .unwrap(),
+        );
         let program = first
             .create_program_with(second_context, 1, 1, |_| Ok::<_, &'static str>(30))
             .unwrap();
@@ -1452,14 +1592,14 @@ mod tests {
         let mut invalid = limits(1);
         invalid.max_bindings_per_submission = 0;
         assert!(matches!(
-            TestState::new(namespace, invalid),
+            TestState::new(namespace, invalid, resource_policy()),
             Err(DeviceStateConfigError::BindingLimit)
         ));
 
         let mut invalid = limits(u32::MAX);
         invalid.max_buffers_per_context = 2;
         assert!(matches!(
-            TestState::new(namespace, invalid),
+            TestState::new(namespace, invalid, resource_policy()),
             Err(DeviceStateConfigError::CountOverflow)
         ));
 
@@ -1467,7 +1607,7 @@ mod tests {
         invalid.max_events_per_context = u32::MAX;
         invalid.max_bindings_per_submission = HARD_MAX_BINDINGS;
         assert!(matches!(
-            TestState::new(namespace, invalid),
+            TestState::new(namespace, invalid, resource_policy()),
             Err(DeviceStateConfigError::ReferenceCountOverflow)
         ));
     }
@@ -1520,5 +1660,80 @@ mod tests {
                 ..ChildCounts::default()
             }
         );
+        assert_eq!(
+            state.retained_bytes(),
+            RetainedBytes {
+                buffer_backing: 0,
+                program_resident: u128::from(resident_bytes),
+            }
+        );
+    }
+
+    #[test]
+    fn aggregate_policy_uses_actual_backing_and_charges_until_release_commits() {
+        assert!(ResourcePolicy::new(0, 1).is_none());
+        assert!(ResourcePolicy::new(1, 0).is_none());
+
+        let mut state = TestState::new(
+            ObjectNamespace::new(1).unwrap(),
+            limits(1),
+            ResourcePolicy::new(4096, 4096).unwrap(),
+        )
+        .unwrap();
+        let context = create_context(&mut state, 10);
+        let desc = buffer_desc();
+        let padded = BufferInfo::new(
+            desc,
+            8192,
+            64,
+            BufferProperties::HOST_VISIBLE | BufferProperties::DIRECT_BINDING,
+        )
+        .unwrap();
+        let outcome = state
+            .create_buffer_with(context, desc, |_, _| Ok::<_, &'static str>((20, padded)))
+            .unwrap();
+        let BufferCreateOutcome::CleanupRequired {
+            id,
+            error: BackendError::ResourceLimit,
+        } = outcome
+        else {
+            panic!("padded allocation did not require cleanup");
+        };
+        assert_eq!(
+            state.retained_bytes(),
+            RetainedBytes {
+                buffer_backing: 8192,
+                program_resident: 0,
+            }
+        );
+
+        let resource = state.begin_buffer_release(id).unwrap();
+        assert_eq!(state.retained_bytes().buffer_backing, 8192);
+        state.restore_buffer_release(id, resource).unwrap();
+        let resource = state.begin_buffer_release(id).unwrap();
+        assert_eq!(resource, 20);
+        state.commit_buffer_release(id).unwrap();
+        assert!(state.retained_bytes().is_empty());
+    }
+
+    #[test]
+    fn program_policy_rejects_before_provider_invocation() {
+        let mut state = TestState::new(
+            ObjectNamespace::new(1).unwrap(),
+            limits(1),
+            ResourcePolicy::new(4096, 8).unwrap(),
+        )
+        .unwrap();
+        let context = create_context(&mut state, 10);
+        let called = Cell::new(false);
+        assert!(matches!(
+            state.create_program_with(context, 1, 9, |_| {
+                called.set(true);
+                Ok::<_, &'static str>(30)
+            }),
+            Err(CreateError::State(DeviceStateError::ResourceLimit))
+        ));
+        assert!(!called.get());
+        assert!(state.retained_bytes().is_empty());
     }
 }
