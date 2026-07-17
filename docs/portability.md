@@ -72,11 +72,18 @@ python3 ci/check-normative-requirements.py --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 cargo test --workspace --all-targets --all-features
+cargo test -p virtio-accel-device --test state_model
 cargo test --workspace --doc --all-features
 cargo +1.85.0 check --workspace --all-targets --all-features
 cargo hack check --workspace --feature-powerset --no-dev-deps
 bash ci/check-portable-dependencies.sh
 cargo deny --all-features check
+```
+
+Deeper deterministic state-model exploration can be run manually with:
+
+```sh
+VIRTIO_ACCEL_STATE_MODEL_SEED=9e3779b97f4a7c15 cargo test -p virtio-accel-device --test state_model deep_generated_object_graphs_match_the_reference_model -- --ignored
 ```
 
 Fuzz smoke coverage can be reproduced with:
