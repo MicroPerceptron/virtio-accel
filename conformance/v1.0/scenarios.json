@@ -1,96 +1,139 @@
 {
-  "schema": "virtio-accel-scenarios-1",
+  "schema": "virtio-accel-traces-1",
   "protocol": "1.0",
-  "note": "Immutable end-to-end inputs. Each trace records device processing order, wire response status, and published used length.",
+  "vectors": "vectors.json",
+  "format": {
+    "trace": "ordered command completions at the transport-neutral command boundary",
+    "regions": "ordered flattened descriptor regions; directions are readable or writable from the device perspective",
+    "request": "exact device-readable command bytes in hexadecimal",
+    "response": "exact device-written bytes published by used length in hexadecimal",
+    "controls": "scenario actions outside command bytes, such as backend faults, scheduler choices, notification mode, short used lengths, and resets"
+  },
+  "comparison": {
+    "deterministic": ["operation", "opcode", "request_id", "status", "used", "regions", "request", "response"],
+    "completion_order": "trace order is normative except where a scenario control explicitly creates an alternative schedule before recording",
+    "canonical_vectors": "Canonical standalone wire vectors are referenced from vectors.json and are not duplicated here"
+  },
+  "note": "Immutable replayable traces. Ordinary tests must not regenerate this file.",
   "scenarios": [
     {
       "name": "complete_lifecycle",
+      "class": ["happy_path","boundary","cancellation"],
+      "controls": [{"at":"before_request_id:14","kind":"backend","action":"complete_submissions_immediately"}],
       "trace": [
-        { "request_id": 1, "operation": "GET_DEVICE_INFO", "opcode": 1, "status": 0, "used": 92 },
-        { "request_id": 2, "operation": "CREATE_CONTEXT", "opcode": 256, "status": 0, "used": 24 },
-        { "request_id": 3, "operation": "ALLOCATE_BUFFER", "opcode": 512, "status": 0, "used": 24 },
-        { "request_id": 4, "operation": "WRITE_BUFFER", "opcode": 514, "status": 0, "used": 16 },
-        { "request_id": 5, "operation": "READ_BUFFER", "opcode": 515, "status": 0, "used": 24 },
-        { "request_id": 6, "operation": "LOAD_PROGRAM", "opcode": 768, "status": 0, "used": 24 },
-        { "request_id": 7, "operation": "CREATE_QUEUE", "opcode": 1024, "status": 0, "used": 24 },
-        { "request_id": 8, "operation": "SUBMIT", "opcode": 1280, "status": 0, "used": 24 },
-        { "request_id": 9, "operation": "FREE_BUFFER", "opcode": 513, "status": 5, "used": 16 },
-        { "request_id": 10, "operation": "POLL_EVENT", "opcode": 1281, "status": 0, "used": 24 },
-        { "request_id": 11, "operation": "CANCEL_EVENT", "opcode": 1282, "status": 0, "used": 16 },
-        { "request_id": 12, "operation": "POLL_EVENT", "opcode": 1281, "status": 0, "used": 24 },
-        { "request_id": 13, "operation": "DESTROY_EVENT", "opcode": 1283, "status": 0, "used": 16 },
-        { "request_id": 14, "operation": "SUBMIT", "opcode": 1280, "status": 0, "used": 24 },
-        { "request_id": 15, "operation": "POLL_EVENT", "opcode": 1281, "status": 0, "used": 24 },
-        { "request_id": 16, "operation": "DESTROY_EVENT", "opcode": 1283, "status": 0, "used": 16 },
-        { "request_id": 17, "operation": "DESTROY_QUEUE", "opcode": 1025, "status": 0, "used": 16 },
-        { "request_id": 18, "operation": "UNLOAD_PROGRAM", "opcode": 769, "status": 0, "used": 16 },
-        { "request_id": 19, "operation": "FREE_BUFFER", "opcode": 513, "status": 0, "used": 16 },
-        { "request_id": 20, "operation": "DESTROY_CONTEXT", "opcode": 257, "status": 0, "used": 16 }
+        {"request_id":1,"operation":"GET_DEVICE_INFO","opcode":1,"status":0,"used":92,"regions":[{"bytes":3,"direction":"readable"},{"bytes":13,"direction":"readable"},{"bytes":5,"direction":"writable"},{"bytes":87,"direction":"writable"}],"request":"01000000000000000100000000000000","response":"000000004c000000010000000000000076697274696f2d616363656c6d6f636b01000000000000000000000027000000000000004000000000040000000100001000000000100000000100000010000000000000a00f000000000000"},
+        {"request_id":2,"operation":"CREATE_CONTEXT","opcode":256,"status":0,"used":24,"regions":[{"bytes":3,"direction":"readable"},{"bytes":21,"direction":"readable"},{"bytes":5,"direction":"writable"},{"bytes":19,"direction":"writable"}],"request":"000100000800000002000000000000000000000000000000","response":"000000000800000002000000000000000100000001000100"},
+        {"request_id":3,"operation":"ALLOCATE_BUFFER","opcode":512,"status":0,"used":24,"regions":[{"bytes":3,"direction":"readable"},{"bytes":53,"direction":"readable"},{"bytes":5,"direction":"writable"},{"bytes":19,"direction":"writable"}],"request":"0002000028000000030000000000000001000000010001004000000000000000100000000000000003000000000000001f00000000000000","response":"000000000800000003000000000000000100000002000100"},
+        {"request_id":4,"operation":"WRITE_BUFFER","opcode":514,"status":0,"used":16,"regions":[{"bytes":7,"direction":"readable"},{"bytes":33,"direction":"readable"},{"bytes":8,"direction":"readable"},{"bytes":5,"direction":"writable"},{"bytes":11,"direction":"writable"}],"request":"02020000200000000400000000000000010000000200010008000000000000000800000000000000706f727461626c65","response":"00000000000000000400000000000000"},
+        {"request_id":5,"operation":"READ_BUFFER","opcode":515,"status":0,"used":24,"regions":[{"bytes":3,"direction":"readable"},{"bytes":37,"direction":"readable"},{"bytes":5,"direction":"writable"},{"bytes":19,"direction":"writable"}],"request":"03020000180000000500000000000000010000000200010008000000000000000800000000000000","response":"00000000080000000500000000000000706f727461626c65"},
+        {"request_id":6,"operation":"LOAD_PROGRAM","opcode":768,"status":0,"used":24,"regions":[{"bytes":7,"direction":"readable"},{"bytes":89,"direction":"readable"},{"bytes":24,"direction":"readable"},{"bytes":5,"direction":"writable"},{"bytes":19,"direction":"writable"}],"request":"0003000068000000060000000000000001000000010001004b4d4156000000004b4d41560000010054534554594c4e4f00000000000000000000000000000000000000000000000000000000000000001800000000000000400000000000000056414d4b0100030100000000ffffffff5a00000000000000","response":"000000000800000006000000000000000100000003000100"},
+        {"request_id":7,"operation":"CREATE_QUEUE","opcode":1024,"status":0,"used":24,"regions":[{"bytes":3,"direction":"readable"},{"bytes":29,"direction":"readable"},{"bytes":5,"direction":"writable"},{"bytes":19,"direction":"writable"}],"request":"0004000010000000070000000000000001000000010001000000000000000000","response":"000000000800000007000000000000000100000004000100"},
+        {"request_id":8,"operation":"SUBMIT","opcode":1280,"status":0,"used":24,"regions":[{"bytes":80,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"0005000040000000080000000000000001000000040001000100000003000100010000000000000000000000000000000100000002000100000000000000000010000000000000000000000003000000","response":"000000000800000008000000000000000100000005000100"},
+        {"request_id":9,"operation":"FREE_BUFFER","opcode":513,"status":5,"used":16,"regions":[{"bytes":3,"direction":"readable"},{"bytes":21,"direction":"readable"},{"bytes":5,"direction":"writable"},{"bytes":11,"direction":"writable"}],"request":"010200000800000009000000000000000100000002000100","response":"05000000000000000900000000000000"},
+        {"request_id":10,"operation":"POLL_EVENT","opcode":1281,"status":0,"used":24,"regions":[{"bytes":3,"direction":"readable"},{"bytes":21,"direction":"readable"},{"bytes":5,"direction":"writable"},{"bytes":19,"direction":"writable"}],"request":"01050000080000000a000000000000000100000005000100","response":"00000000080000000a000000000000000000000000000000"},
+        {"request_id":11,"operation":"CANCEL_EVENT","opcode":1282,"status":0,"used":16,"regions":[{"bytes":3,"direction":"readable"},{"bytes":21,"direction":"readable"},{"bytes":5,"direction":"writable"},{"bytes":11,"direction":"writable"}],"request":"02050000080000000b000000000000000100000005000100","response":"00000000000000000b00000000000000"},
+        {"request_id":12,"operation":"POLL_EVENT","opcode":1281,"status":0,"used":24,"regions":[{"bytes":3,"direction":"readable"},{"bytes":21,"direction":"readable"},{"bytes":5,"direction":"writable"},{"bytes":19,"direction":"writable"}],"request":"01050000080000000c000000000000000100000005000100","response":"00000000080000000c000000000000000300000000000000"},
+        {"request_id":13,"operation":"DESTROY_EVENT","opcode":1283,"status":0,"used":16,"regions":[{"bytes":3,"direction":"readable"},{"bytes":21,"direction":"readable"},{"bytes":5,"direction":"writable"},{"bytes":11,"direction":"writable"}],"request":"03050000080000000d000000000000000100000005000100","response":"00000000000000000d00000000000000"},
+        {"request_id":14,"operation":"SUBMIT","opcode":1280,"status":0,"used":24,"regions":[{"bytes":80,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"00050000400000000e0000000000000001000000040001000100000003000100010000000000000000000000000000000100000002000100000000000000000010000000000000000000000003000000","response":"00000000080000000e00000000000000010000000d000100"},
+        {"request_id":15,"operation":"POLL_EVENT","opcode":1281,"status":0,"used":24,"regions":[{"bytes":24,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"01050000080000000f00000000000000010000000d000100","response":"00000000080000000f000000000000000100000000000000"},
+        {"request_id":16,"operation":"DESTROY_EVENT","opcode":1283,"status":0,"used":16,"regions":[{"bytes":24,"direction":"readable"},{"bytes":16,"direction":"writable"}],"request":"03050000080000001000000000000000010000000d000100","response":"00000000000000001000000000000000"},
+        {"request_id":17,"operation":"DESTROY_QUEUE","opcode":1025,"status":0,"used":16,"regions":[{"bytes":24,"direction":"readable"},{"bytes":16,"direction":"writable"}],"request":"010400000800000011000000000000000100000004000100","response":"00000000000000001100000000000000"},
+        {"request_id":18,"operation":"UNLOAD_PROGRAM","opcode":769,"status":0,"used":16,"regions":[{"bytes":24,"direction":"readable"},{"bytes":16,"direction":"writable"}],"request":"010300000800000012000000000000000100000003000100","response":"00000000000000001200000000000000"},
+        {"request_id":19,"operation":"FREE_BUFFER","opcode":513,"status":0,"used":16,"regions":[{"bytes":24,"direction":"readable"},{"bytes":16,"direction":"writable"}],"request":"010200000800000013000000000000000100000002000100","response":"00000000000000001300000000000000"},
+        {"request_id":20,"operation":"DESTROY_CONTEXT","opcode":257,"status":0,"used":16,"regions":[{"bytes":24,"direction":"readable"},{"bytes":16,"direction":"writable"}],"request":"010100000800000014000000000000000100000001000100","response":"00000000000000001400000000000000"}
       ]
     },
     {
       "name": "out_of_order",
+      "class": ["scheduling","nondeterministic_completion_order_specified_by_trace"],
+      "controls": [{"at":"scenario_start","kind":"scheduler","action":"complete_next_pair_in_reverse_order"}],
       "trace": [
-        { "request_id": 2, "operation": "GET_DEVICE_INFO", "opcode": 1, "status": 0, "used": 92 },
-        { "request_id": 1, "operation": "GET_DEVICE_INFO", "opcode": 1, "status": 0, "used": 92 }
+        {"request_id":2,"operation":"GET_DEVICE_INFO","opcode":1,"status":0,"used":92,"regions":[{"bytes":16,"direction":"readable"},{"bytes":92,"direction":"writable"}],"request":"01000000000000000200000000000000","response":"000000004c000000020000000000000076697274696f2d616363656c6d6f636b01000000000000000000000027000000000000004000000000040000000100001000000000100000000100000010000000000000a00f000000000000"},
+        {"request_id":1,"operation":"GET_DEVICE_INFO","opcode":1,"status":0,"used":92,"regions":[{"bytes":16,"direction":"readable"},{"bytes":92,"direction":"writable"}],"request":"01000000000000000100000000000000","response":"000000004c000000010000000000000076697274696f2d616363656c6d6f636b01000000000000000000000027000000000000004000000000040000000100001000000000100000000100000010000000000000a00f000000000000"}
       ]
     },
     {
       "name": "backpressure",
+      "class": ["exhaustion","queue_pressure"],
+      "controls": [{"at":"scenario_start","kind":"queue","action":"defer_device_service_until_pressure_observed"}],
       "trace": [
-        { "request_id": 1, "operation": "GET_DEVICE_INFO", "opcode": 1, "status": 0, "used": 92 },
-        { "request_id": 2, "operation": "GET_DEVICE_INFO", "opcode": 1, "status": 0, "used": 92 }
+        {"request_id":1,"operation":"GET_DEVICE_INFO","opcode":1,"status":0,"used":92,"regions":[{"bytes":16,"direction":"readable"},{"bytes":92,"direction":"writable"}],"request":"01000000000000000100000000000000","response":"000000004c000000010000000000000076697274696f2d616363656c6d6f636b01000000000000000000000027000000000000004000000000040000000100001000000000100000000100000010000000000000a00f000000000000"},
+        {"request_id":2,"operation":"GET_DEVICE_INFO","opcode":1,"status":0,"used":92,"regions":[{"bytes":16,"direction":"readable"},{"bytes":92,"direction":"writable"}],"request":"01000000000000000200000000000000","response":"000000004c000000020000000000000076697274696f2d616363656c6d6f636b01000000000000000000000027000000000000004000000000040000000100001000000000100000000100000010000000000000a00f000000000000"}
       ]
     },
     {
       "name": "notification_suppression",
+      "class": ["notification"],
+      "controls": [{"at":"scenario_start","kind":"queue","action":"suppress_available_notifications"},{"at":"before_disable_used_notifications","kind":"queue","action":"service_one_chain"}],
       "trace": [
-        { "request_id": 1, "operation": "GET_DEVICE_INFO", "opcode": 1, "status": 0, "used": 92 }
+        {"request_id":1,"operation":"GET_DEVICE_INFO","opcode":1,"status":0,"used":92,"regions":[{"bytes":3,"direction":"readable"},{"bytes":13,"direction":"readable"},{"bytes":5,"direction":"writable"},{"bytes":87,"direction":"writable"}],"request":"01000000000000000100000000000000","response":"000000004c000000010000000000000076697274696f2d616363656c6d6f636b01000000000000000000000027000000000000004000000000040000000100001000000000100000000100000010000000000000a00f000000000000"}
       ]
     },
     {
       "name": "short_response",
+      "class": ["malformed","recovery"],
+      "controls": [{"at":"before_request_id:1","kind":"transport","action":"publish_used_length_minus_one"}],
       "trace": [
-        { "request_id": 1, "operation": "GET_DEVICE_INFO", "opcode": 1, "status": 0, "used": 91 }
+        {"request_id":1,"operation":"GET_DEVICE_INFO","opcode":1,"status":0,"used":91,"regions":[{"bytes":16,"direction":"readable"},{"bytes":92,"direction":"writable"}],"request":"01000000000000000100000000000000","response":"000000004c000000010000000000000076697274696f2d616363656c6d6f636b01000000000000000000000027000000000000004000000000040000000100001000000000100000000100000010000000000000a00f0000000000"}
       ]
     },
     {
       "name": "timeout",
+      "class": ["boundary","timeout_rejection"],
+      "controls": [{"at":"before_request_id:6","kind":"backend","action":"reject_finite_timeouts_with_deadline_expired"}],
       "trace": [
-        { "request_id": 1, "operation": "GET_DEVICE_INFO", "opcode": 1, "status": 0, "used": 92 },
-        { "request_id": 2, "operation": "CREATE_CONTEXT", "opcode": 256, "status": 0, "used": 24 },
-        { "request_id": 3, "operation": "ALLOCATE_BUFFER", "opcode": 512, "status": 0, "used": 24 },
-        { "request_id": 4, "operation": "LOAD_PROGRAM", "opcode": 768, "status": 0, "used": 24 },
-        { "request_id": 5, "operation": "CREATE_QUEUE", "opcode": 1024, "status": 0, "used": 24 },
-        { "request_id": 6, "operation": "SUBMIT", "opcode": 1280, "status": 8, "used": 16 },
-        { "request_id": 7, "operation": "DESTROY_QUEUE", "opcode": 1025, "status": 0, "used": 16 },
-        { "request_id": 8, "operation": "UNLOAD_PROGRAM", "opcode": 769, "status": 0, "used": 16 },
-        { "request_id": 9, "operation": "FREE_BUFFER", "opcode": 513, "status": 0, "used": 16 },
-        { "request_id": 10, "operation": "DESTROY_CONTEXT", "opcode": 257, "status": 0, "used": 16 }
+        {"request_id":1,"operation":"GET_DEVICE_INFO","opcode":1,"status":0,"used":92,"regions":[{"bytes":3,"direction":"readable"},{"bytes":13,"direction":"readable"},{"bytes":5,"direction":"writable"},{"bytes":87,"direction":"writable"}],"request":"01000000000000000100000000000000","response":"000000004c000000010000000000000076697274696f2d616363656c6d6f636b01000000000000000000000027000000000000004000000000040000000100001000000000100000000100000010000000000000a00f000000000000"},
+        {"request_id":2,"operation":"CREATE_CONTEXT","opcode":256,"status":0,"used":24,"regions":[{"bytes":24,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"000100000800000002000000000000000000000000000000","response":"000000000800000002000000000000000100000001000100"},
+        {"request_id":3,"operation":"ALLOCATE_BUFFER","opcode":512,"status":0,"used":24,"regions":[{"bytes":56,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"0002000028000000030000000000000001000000010001004000000000000000100000000000000003000000000000001f00000000000000","response":"000000000800000003000000000000000100000002000100"},
+        {"request_id":4,"operation":"LOAD_PROGRAM","opcode":768,"status":0,"used":24,"regions":[{"bytes":120,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"0003000068000000040000000000000001000000010001004b4d4156000000004b4d41560000010054534554594c4e4f00000000000000000000000000000000000000000000000000000000000000001800000000000000400000000000000056414d4b0100030100000000ffffffff5a00000000000000","response":"000000000800000004000000000000000100000003000100"},
+        {"request_id":5,"operation":"CREATE_QUEUE","opcode":1024,"status":0,"used":24,"regions":[{"bytes":32,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"0004000010000000050000000000000001000000010001000000000000000000","response":"000000000800000005000000000000000100000004000100"},
+        {"request_id":6,"operation":"SUBMIT","opcode":1280,"status":8,"used":16,"regions":[{"bytes":80,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"0005000040000000060000000000000001000000040001000100000003000100010000000000000040420f00000000000100000002000100000000000000000010000000000000000000000003000000","response":"08000000000000000600000000000000"},
+        {"request_id":7,"operation":"DESTROY_QUEUE","opcode":1025,"status":0,"used":16,"regions":[{"bytes":24,"direction":"readable"},{"bytes":16,"direction":"writable"}],"request":"010400000800000007000000000000000100000004000100","response":"00000000000000000700000000000000"},
+        {"request_id":8,"operation":"UNLOAD_PROGRAM","opcode":769,"status":0,"used":16,"regions":[{"bytes":24,"direction":"readable"},{"bytes":16,"direction":"writable"}],"request":"010300000800000008000000000000000100000003000100","response":"00000000000000000800000000000000"},
+        {"request_id":9,"operation":"FREE_BUFFER","opcode":513,"status":0,"used":16,"regions":[{"bytes":24,"direction":"readable"},{"bytes":16,"direction":"writable"}],"request":"010200000800000009000000000000000100000002000100","response":"00000000000000000900000000000000"},
+        {"request_id":10,"operation":"DESTROY_CONTEXT","opcode":257,"status":0,"used":16,"regions":[{"bytes":24,"direction":"readable"},{"bytes":16,"direction":"writable"}],"request":"01010000080000000a000000000000000100000001000100","response":"00000000000000000a00000000000000"}
+      ]
+    },
+    {
+      "name": "indeterminate_recovery",
+      "class": ["indeterminate","recovery"],
+      "controls": [{"at":"before_request_id:3","kind":"backend_fault","action":"allocate_buffer_error_after_out_of_memory"},{"at":"before_request_id:7","kind":"backend_fault","action":"submit_indeterminate_deadline_expired"},{"at":"after_trace","kind":"reset","action":"backend_discard_required","released":{"contexts":0,"buffers":0,"programs":0,"queues":0,"events":0},"quarantined":{"contexts":1,"buffers":1,"programs":1,"queues":1,"events":1}}],
+      "trace": [
+        {"request_id":1,"operation":"GET_DEVICE_INFO","opcode":1,"status":0,"used":92,"regions":[{"bytes":3,"direction":"readable"},{"bytes":13,"direction":"readable"},{"bytes":5,"direction":"writable"},{"bytes":87,"direction":"writable"}],"request":"01000000000000000100000000000000","response":"000000004c000000010000000000000076697274696f2d616363656c6d6f636b01000000000000000000000027000000000000004000000000040000000100001000000000100000000100000010000000000000a00f000000000000"},
+        {"request_id":2,"operation":"CREATE_CONTEXT","opcode":256,"status":0,"used":24,"regions":[{"bytes":24,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"000100000800000002000000000000000000000000000000","response":"000000000800000002000000000000000100000001000100"},
+        {"request_id":3,"operation":"ALLOCATE_BUFFER","opcode":512,"status":6,"used":16,"regions":[{"bytes":56,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"0002000028000000030000000000000001000000010001004000000000000000100000000000000003000000000000001f00000000000000","response":"06000000000000000300000000000000"},
+        {"request_id":4,"operation":"ALLOCATE_BUFFER","opcode":512,"status":0,"used":24,"regions":[{"bytes":56,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"0002000028000000040000000000000001000000010001004000000000000000100000000000000003000000000000001f00000000000000","response":"000000000800000004000000000000000100000002000100"},
+        {"request_id":5,"operation":"LOAD_PROGRAM","opcode":768,"status":0,"used":24,"regions":[{"bytes":120,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"0003000068000000050000000000000001000000010001004b4d4156000000004b4d41560000010054534554594c4e4f00000000000000000000000000000000000000000000000000000000000000001800000000000000400000000000000056414d4b0100030100000000ffffffff5a00000000000000","response":"000000000800000005000000000000000100000003000100"},
+        {"request_id":6,"operation":"CREATE_QUEUE","opcode":1024,"status":0,"used":24,"regions":[{"bytes":32,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"0004000010000000060000000000000001000000010001000000000000000000","response":"000000000800000006000000000000000100000004000100"},
+        {"request_id":7,"operation":"SUBMIT","opcode":1280,"status":8,"used":24,"regions":[{"bytes":80,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"0005000040000000070000000000000001000000040001000100000003000100010000000000000000000000000000000100000002000100000000000000000010000000000000000000000003000000","response":"080000000800000007000000000000000100000005000100"}
       ]
     },
     {
       "name": "reset_inflight",
+      "class": ["reset","recovery"],
+      "controls": [{"at":"after_request_id:6","kind":"queue","action":"defer_poll_event_then_reset"},{"at":"before_reconfigured_request_id:1","kind":"reset","action":"backend_reusable","released":{"contexts":1,"buffers":1,"programs":1,"queues":1,"events":1},"quarantined":{"contexts":0,"buffers":0,"programs":0,"queues":0,"events":0}}],
       "trace": [
-        { "request_id": 1, "operation": "GET_DEVICE_INFO", "opcode": 1, "status": 0, "used": 92 },
-        { "request_id": 2, "operation": "CREATE_CONTEXT", "opcode": 256, "status": 0, "used": 24 },
-        { "request_id": 3, "operation": "ALLOCATE_BUFFER", "opcode": 512, "status": 0, "used": 24 },
-        { "request_id": 4, "operation": "LOAD_PROGRAM", "opcode": 768, "status": 0, "used": 24 },
-        { "request_id": 5, "operation": "CREATE_QUEUE", "opcode": 1024, "status": 0, "used": 24 },
-        { "request_id": 6, "operation": "SUBMIT", "opcode": 1280, "status": 0, "used": 24 },
-        { "request_id": 1, "operation": "GET_DEVICE_INFO", "opcode": 1, "status": 0, "used": 92 }
+        {"request_id":1,"operation":"GET_DEVICE_INFO","opcode":1,"status":0,"used":92,"regions":[{"bytes":3,"direction":"readable"},{"bytes":13,"direction":"readable"},{"bytes":5,"direction":"writable"},{"bytes":87,"direction":"writable"}],"request":"01000000000000000100000000000000","response":"000000004c000000010000000000000076697274696f2d616363656c6d6f636b01000000000000000000000027000000000000004000000000040000000100001000000000100000000100000010000000000000a00f000000000000"},
+        {"request_id":2,"operation":"CREATE_CONTEXT","opcode":256,"status":0,"used":24,"regions":[{"bytes":24,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"000100000800000002000000000000000000000000000000","response":"000000000800000002000000000000000100000001000100"},
+        {"request_id":3,"operation":"ALLOCATE_BUFFER","opcode":512,"status":0,"used":24,"regions":[{"bytes":56,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"0002000028000000030000000000000001000000010001004000000000000000100000000000000003000000000000001f00000000000000","response":"000000000800000003000000000000000100000002000100"},
+        {"request_id":4,"operation":"LOAD_PROGRAM","opcode":768,"status":0,"used":24,"regions":[{"bytes":120,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"0003000068000000040000000000000001000000010001004b4d4156000000004b4d41560000010054534554594c4e4f00000000000000000000000000000000000000000000000000000000000000001800000000000000400000000000000056414d4b0100030100000000ffffffff5a00000000000000","response":"000000000800000004000000000000000100000003000100"},
+        {"request_id":5,"operation":"CREATE_QUEUE","opcode":1024,"status":0,"used":24,"regions":[{"bytes":32,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"0004000010000000050000000000000001000000010001000000000000000000","response":"000000000800000005000000000000000100000004000100"},
+        {"request_id":6,"operation":"SUBMIT","opcode":1280,"status":0,"used":24,"regions":[{"bytes":80,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"0005000040000000060000000000000001000000040001000100000003000100010000000000000000000000000000000100000002000100000000000000000010000000000000000000000003000000","response":"000000000800000006000000000000000100000005000100"},
+        {"request_id":1,"operation":"GET_DEVICE_INFO","opcode":1,"status":0,"used":92,"regions":[{"bytes":3,"direction":"readable"},{"bytes":13,"direction":"readable"},{"bytes":5,"direction":"writable"},{"bytes":87,"direction":"writable"}],"request":"01000000000000000100000000000000","response":"000000004c000000010000000000000076697274696f2d616363656c6d6f636b01000000000000000000000027000000000000004000000000040000000100001000000000100000000100000010000000000000a00f000000000000"}
       ]
     },
     {
       "name": "device_loss",
+      "class": ["device_loss","recovery"],
+      "controls": [{"at":"before_request_id:7","kind":"backend","action":"poll_event_returns_device_lost"}],
       "trace": [
-        { "request_id": 1, "operation": "GET_DEVICE_INFO", "opcode": 1, "status": 0, "used": 92 },
-        { "request_id": 2, "operation": "CREATE_CONTEXT", "opcode": 256, "status": 0, "used": 24 },
-        { "request_id": 3, "operation": "ALLOCATE_BUFFER", "opcode": 512, "status": 0, "used": 24 },
-        { "request_id": 4, "operation": "LOAD_PROGRAM", "opcode": 768, "status": 0, "used": 24 },
-        { "request_id": 5, "operation": "CREATE_QUEUE", "opcode": 1024, "status": 0, "used": 24 },
-        { "request_id": 6, "operation": "SUBMIT", "opcode": 1280, "status": 0, "used": 24 },
-        { "request_id": 7, "operation": "POLL_EVENT", "opcode": 1281, "status": 9, "used": 16 }
+        {"request_id":1,"operation":"GET_DEVICE_INFO","opcode":1,"status":0,"used":92,"regions":[{"bytes":3,"direction":"readable"},{"bytes":13,"direction":"readable"},{"bytes":5,"direction":"writable"},{"bytes":87,"direction":"writable"}],"request":"01000000000000000100000000000000","response":"000000004c000000010000000000000076697274696f2d616363656c6d6f636b01000000000000000000000027000000000000004000000000040000000100001000000000100000000100000010000000000000a00f000000000000"},
+        {"request_id":2,"operation":"CREATE_CONTEXT","opcode":256,"status":0,"used":24,"regions":[{"bytes":24,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"000100000800000002000000000000000000000000000000","response":"000000000800000002000000000000000100000001000100"},
+        {"request_id":3,"operation":"ALLOCATE_BUFFER","opcode":512,"status":0,"used":24,"regions":[{"bytes":56,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"0002000028000000030000000000000001000000010001004000000000000000100000000000000003000000000000001f00000000000000","response":"000000000800000003000000000000000100000002000100"},
+        {"request_id":4,"operation":"LOAD_PROGRAM","opcode":768,"status":0,"used":24,"regions":[{"bytes":120,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"0003000068000000040000000000000001000000010001004b4d4156000000004b4d41560000010054534554594c4e4f00000000000000000000000000000000000000000000000000000000000000001800000000000000400000000000000056414d4b0100030100000000ffffffff5a00000000000000","response":"000000000800000004000000000000000100000003000100"},
+        {"request_id":5,"operation":"CREATE_QUEUE","opcode":1024,"status":0,"used":24,"regions":[{"bytes":32,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"0004000010000000050000000000000001000000010001000000000000000000","response":"000000000800000005000000000000000100000004000100"},
+        {"request_id":6,"operation":"SUBMIT","opcode":1280,"status":0,"used":24,"regions":[{"bytes":80,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"0005000040000000060000000000000001000000040001000100000003000100010000000000000000000000000000000100000002000100000000000000000010000000000000000000000003000000","response":"000000000800000006000000000000000100000005000100"},
+        {"request_id":7,"operation":"POLL_EVENT","opcode":1281,"status":9,"used":16,"regions":[{"bytes":24,"direction":"readable"},{"bytes":24,"direction":"writable"}],"request":"010500000800000007000000000000000100000005000100","response":"09000000000000000700000000000000"}
       ]
     }
   ]

@@ -7,9 +7,10 @@ This directory contains implementation-independent inputs for the portable proto
 - [`vectors.json`](vectors.json) contains canonical hexadecimal bytes for the device configuration,
   all 15 request opcodes, every success and command-specific response shape, all event states, and
   reviewed malformed/unknown boundary cases.
-- [`scenarios.json`](scenarios.json) contains deterministic end-to-end command, status, and used-
-  length traces for lifecycle, scheduling, pressure, notification, recovery, timeout, and
-  device-loss behavior.
+- [`scenarios.json`](scenarios.json) contains replayable end-to-end traces with exact request bytes,
+  published response bytes, used lengths, flattened descriptor-region layouts, and portable replay
+  controls for lifecycle, scheduling, pressure, notification, malformed completion, recovery,
+  timeout, reset, and device-loss behavior.
 - [`coverage.md`](coverage.md) maps the normative document areas to executable evidence or an
   explicitly tracked implementation issue.
 - [`requirements.json`](requirements.json) catalogs every normative keyword occurrence with a
@@ -20,8 +21,8 @@ This directory contains implementation-independent inputs for the portable proto
   backend contract without importing wire, virtqueue, OS, or vendor types; its provider adapter is
   documented in the [backend implementer guide](../../docs/backend-implementer-guide.md).
 
-The files are deliberately plain JSON with hexadecimal byte strings so implementations do not need
-Rust tooling to consume them.
+The files are deliberately plain JSON with hexadecimal byte strings and explicit control metadata
+so implementations do not need Rust tooling or test-internal harness types to consume them.
 
 Ordinary tests parse these checked-in files as inputs. They do not regenerate them. An intentional
 candidate revision must update the normative specification, Rust layout assertions, manifest, and
@@ -32,7 +33,10 @@ The primary ABI and clean-room codec independently decode and encode every canon
 primary crate's bridge test runs both implementations over the same bytes and compares their raw
 headers and exact output. A separate semantic interoperability test constructs every distinct
 request and response layout in each implementation, crosses only bytes, and checks every decoded
-field in the other implementation. CI also enforces that the clean-room codec remains
+field in the other implementation. The portable end-to-end suite also records the full guest/device
+trace and compares it with the checked-in scenario corpus, including negative differential checks
+that reject intentionally corrupted status, used length, descriptor-region, request-byte,
+response-byte, and completion-order observations. CI also enforces that the clean-room codec remains
 dependency-free.
 
 `ci/check-normative-requirements.py --check` reconstructs the requirement ledger from the normative
