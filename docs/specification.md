@@ -1,7 +1,7 @@
 # virtio-accel portable protocol foundations
 
-Status: portable protocol 1.0 candidate. Implementation conformance and the final freeze audit
-remain in progress.
+Status: frozen portable protocol 1.0 candidate. The final freeze audit is recorded in
+[`conformance/v1.0/freeze-audit.md`](../conformance/v1.0/freeze-audit.md).
 
 This document defines the portable semantic foundation for `virtio-accel`. It does not assign a
 Virtio device ID and is not an OASIS Virtio specification. The transport model is intended to remain
@@ -383,9 +383,10 @@ Candidate implementations **MUST** expose major `1` and minor `0` in device-spec
 and **MUST NOT** claim candidate protocol 1.0 conformance unless they satisfy the normative wire,
 queue, lifecycle, and compatibility requirements.
 
-Protocol 1.0 does not become a stable compatibility promise until the final audit tracked by issue
-#33. Before that audit, an intentional candidate revision **MUST** follow the coordinated procedure
-in [wire-abi.md](wire-abi.md) and **MUST NOT** be described as a frozen or stable release.
+Protocol 1.0 compatibility is frozen by the final audit recorded in
+[`conformance/v1.0/freeze-audit.md`](../conformance/v1.0/freeze-audit.md). A future erratum,
+extension, or incompatible change **MUST** follow the coordinated procedure in
+[wire-abi.md](wire-abi.md) and the classification rules in [release-policy.md](release-policy.md).
 
 ### 6.2 Stable major versions
 
@@ -497,15 +498,17 @@ Portable crates **MUST NOT** select an operating system, VMM, kernel, vendor API
 Platform adapters depend inward on the portable layers. A portable layer **MUST NOT** conditionally
 expose different semantics by host OS.
 
-## 11. Tracked completion work
+## 11. Release governance and audit trail
 
-This document, [wire-abi.md](wire-abi.md), and [virtqueue.md](virtqueue.md) define the current
-driver/device protocol candidate. The following implementation, provider, and verification details
-remain explicitly tracked rather than silently decided here:
+This document, [wire-abi.md](wire-abi.md), and [virtqueue.md](virtqueue.md) define the frozen
+portable driver/device protocol 1.0 baseline. Post-freeze change classification, Cargo semver,
+feature, MSRV, target, unsafe-code, dependency, license, and publish-metadata policy are documented
+in [release-policy.md](release-policy.md).
 
-- issue #32 defines post-1.0 semver and wire-evolution policy; and
-- issue #33 performs the final protocol and API audit, including independent clean-room review,
-  before freezing protocol 1.0.
+The versioned audit result is [conformance/v1.0/freeze-audit.md](../conformance/v1.0/freeze-audit.md)
+and the release note is [docs/releases/v1.0.md](releases/v1.0.md). Future releases **MUST** preserve
+that audit trail by linking the versioned checklist, release note, and conformance directory for the
+protocol version they claim.
 
 The portable security assumptions, finite attacker-controlled dimensions, resource-policy owners,
 and explicit exclusions are documented in [threat-model.md](threat-model.md).
