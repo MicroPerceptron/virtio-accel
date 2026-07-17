@@ -18,6 +18,8 @@ This directory contains implementation-independent inputs for the portable proto
   allocation, copy-boundary, diagnostic, and baseline evidence.
 - [`requirements.json`](requirements.json) catalogs every normative keyword occurrence with a
   content-derived ID, source line, executable evidence, tracked issues, and rationale.
+- [`freeze-audit.md`](freeze-audit.md) records the protocol 1.0 freeze checklist and final audit
+  result linked from the release notes.
 - [`../rust-clean-room`](../rust-clean-room) contains a dependency-free `no_std` Rust codec that
   implements the byte contract manually without importing `virtio-accel-proto` or its wire types.
 - [`../../crates/virtio-accel-conformance`](../../crates/virtio-accel-conformance) runs the semantic
@@ -28,9 +30,9 @@ The files are deliberately plain JSON with hexadecimal byte strings and explicit
 so implementations do not need Rust tooling or test-internal harness types to consume them.
 
 Ordinary tests parse these checked-in files as inputs. They do not regenerate them. An intentional
-candidate revision must update the normative specification, Rust layout assertions, manifest, and
+candidate revision had to update the normative specification, Rust layout assertions, manifest, and
 vectors in one reviewed change. After the final freeze audit, incompatible changes require a new
-versioned directory.
+versioned directory under the policy in [`../../docs/release-policy.md`](../../docs/release-policy.md).
 
 The primary ABI and clean-room codec independently decode and encode every canonical frame. The
 primary crate's bridge test runs both implementations over the same bytes and compares their raw

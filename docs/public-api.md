@@ -47,3 +47,8 @@ normative documents. Reserved feature bits, opcodes, flags, and fields are not o
 they are invalid until a later policy assigns semantics. Platform integrations such as KVM,
 vhost-user, VFIO, Windows, macOS, or vendor SDK adapters are post-v1 work and must not leak into
 portable default dependencies.
+
+The compatibility and release classification rules are in
+[`release-policy.md`](release-policy.md). The protocol 1.0 frozen surface is summarized in
+[`releases/v1.0.md`](releases/v1.0.md) and audited in
+[`../conformance/v1.0/freeze-audit.md`](../conformance/v1.0/freeze-audit.md).

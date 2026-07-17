@@ -82,23 +82,25 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
         rationale="Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable.",
     ),
     ("SPEC", 5): coverage(
-        "mixed",
+        "executable",
         (
             "conformance/rust-clean-room/tests/vectors.rs",
             "crates/virtio-accel-proto/src/lib.rs",
+            "ci/check-release-policy.py",
+            "docs/release-policy.md",
         ),
-        ("#32",),
-        "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked.",
+        rationale="Namespaces, reserved values, runtime capability selection, negotiation, and release-policy guardrails are executable or policy-checked.",
     ),
     ("SPEC", 6): coverage(
-        "mixed",
+        "executable",
         (
             "conformance/rust-clean-room/tests/vectors.rs",
             "conformance/v1.0/layout.json",
             "conformance/v1.0/vectors.json",
+            "conformance/v1.0/freeze-audit.md",
+            "docs/release-policy.md",
         ),
-        ("#32", "#33"),
-        "Version and exact-length behavior is executable; release governance and the final freeze remain tracked.",
+        rationale="Version, exact-length behavior, release governance, and the final freeze audit are checked into the v1.0 evidence set.",
     ),
     ("SPEC", 7): coverage(
         "executable",
@@ -139,10 +141,16 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
         rationale="The target matrix and dependency guards directly enforce the portable-layer restrictions.",
     ),
     ("SPEC", 11): coverage(
-        "mixed",
-        ("ci/check-normative-requirements.py", "docs/threat-model.md"),
-        ("#32", "#33"),
-        "The ledger prevents silent requirements; the section's named completion work remains explicitly tracked.",
+        "executable",
+        (
+            "ci/check-normative-requirements.py",
+            "ci/check-release-policy.py",
+            "conformance/v1.0/freeze-audit.md",
+            "docs/releases/v1.0.md",
+            "docs/release-policy.md",
+            "docs/threat-model.md",
+        ),
+        rationale="The ledger, release-policy check, release note, and freeze audit preserve the post-freeze audit trail.",
     ),
     ("WIRE", 1): coverage(
         "executable",
@@ -219,10 +227,13 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
         rationale="Checked-in artifacts are immutable test inputs and drift is detected by both codec suites.",
     ),
     ("WIRE", 9): coverage(
-        "mixed",
-        ("ci/check-normative-requirements.py",),
-        ("#32", "#33"),
-        "Coordinated documentation and evidence are machine-checked; final release policy and freeze remain tracked.",
+        "executable",
+        (
+            "ci/check-normative-requirements.py",
+            "conformance/v1.0/freeze-audit.md",
+            "docs/release-policy.md",
+        ),
+        rationale="Coordinated documentation, evidence, release classification, and freeze status are checked into versioned artifacts.",
     ),
     ("VIRTQ", 1): coverage(
         "executable",

@@ -338,23 +338,20 @@ rejected response that would let the driver free resources whose ownership is un
 
 Protocol constants, layouts, and canonical bytes are checked in under
 [`conformance/v1.0`](../conformance/v1.0/). They are review inputs, not test-generated output.
-Before the final freeze audit, changing any assigned value, field, size, or vector requires one
-coordinated candidate revision under section 9. After the freeze, such a change requires a
-protocol-major change unless it uses a previously reserved value under the compatibility rules in
-[specification.md](specification.md).
+The final freeze audit in
+[`../conformance/v1.0/freeze-audit.md`](../conformance/v1.0/freeze-audit.md) makes these files the
+frozen 1.0 inputs. Post-freeze changes are classified by section 9 and
+[`release-policy.md`](release-policy.md).
 
 ## 9. Candidate and post-freeze change procedure
 
 A proposed wire change **MUST** be classified before code is merged:
 
-1. Before the final freeze audit, a candidate revision may change assigned bytes only when the same
-   reviewed change updates the normative documents, Rust layout assertions, manifest, vectors, and
-   compatibility tests and records the rationale for independent reviewers.
-2. After the freeze, an erratum that changes no accepted or emitted bytes may clarify the 1.0
+1. An erratum that changes no accepted or emitted bytes may clarify the 1.0
    documents and tests.
-3. A compatible extension uses a previously reserved number plus explicit feature or new-opcode
+2. A compatible extension uses a previously reserved number plus explicit feature or new-opcode
    negotiation, preserves every 1.0 frame, and receives a new minor-version conformance directory.
-4. After the freeze, any changed assigned number, existing payload length, field meaning, required
+3. Any changed assigned number, existing payload length, field meaning, required
    response, or ownership interpretation requires a new protocol major version and a new
    conformance directory.
 

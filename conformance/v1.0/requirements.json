@@ -1098,15 +1098,15 @@
       "keyword": "MUST",
       "statement": "The portable v1 baseline **MUST** provide:",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/src/lib.rs"
+          "crates/virtio-accel-proto/src/lib.rs",
+          "ci/check-release-policy.py",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32"
-        ],
-        "rationale": "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked."
+        "issues": [],
+        "rationale": "Namespaces, reserved values, runtime capability selection, negotiation, and release-policy guardrails are executable or policy-checked."
       }
     },
     {
@@ -1117,15 +1117,15 @@
       "keyword": "MUST",
       "statement": "advertise semantic event-cancellation capability, the device **MUST** return `UNSUPPORTED` without",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/src/lib.rs"
+          "crates/virtio-accel-proto/src/lib.rs",
+          "ci/check-release-policy.py",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32"
-        ],
-        "rationale": "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked."
+        "issues": [],
+        "rationale": "Namespaces, reserved values, runtime capability selection, negotiation, and release-policy guardrails are executable or policy-checked."
       }
     },
     {
@@ -1136,15 +1136,15 @@
       "keyword": "MUST NOT",
       "statement": "`TIMELINE_FENCES`, and `SECURE_CONTEXTS` reserve numeric positions only. A baseline device **MUST NOT**",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/src/lib.rs"
+          "crates/virtio-accel-proto/src/lib.rs",
+          "ci/check-release-policy.py",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32"
-        ],
-        "rationale": "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked."
+        "issues": [],
+        "rationale": "Namespaces, reserved values, runtime capability selection, negotiation, and release-policy guardrails are executable or policy-checked."
       }
     },
     {
@@ -1155,15 +1155,15 @@
       "keyword": "MUST NOT",
       "statement": "advertise them and a baseline driver **MUST NOT** accept them. Protocol 1.0 assigns no semantics to",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/src/lib.rs"
+          "crates/virtio-accel-proto/src/lib.rs",
+          "ci/check-release-policy.py",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32"
-        ],
-        "rationale": "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked."
+        "issues": [],
+        "rationale": "Namespaces, reserved values, runtime capability selection, negotiation, and release-policy guardrails are executable or policy-checked."
       }
     },
     {
@@ -1174,15 +1174,15 @@
       "keyword": "MUST NOT",
       "statement": "Unknown device-specific feature bits **MUST NOT** be accepted by a driver. A device **MUST NOT**",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/src/lib.rs"
+          "crates/virtio-accel-proto/src/lib.rs",
+          "ci/check-release-policy.py",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32"
-        ],
-        "rationale": "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked."
+        "issues": [],
+        "rationale": "Namespaces, reserved values, runtime capability selection, negotiation, and release-policy guardrails are executable or policy-checked."
       }
     },
     {
@@ -1193,15 +1193,15 @@
       "keyword": "MUST NOT",
       "statement": "Unknown device-specific feature bits **MUST NOT** be accepted by a driver. A device **MUST NOT**",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/src/lib.rs"
+          "crates/virtio-accel-proto/src/lib.rs",
+          "ci/check-release-policy.py",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32"
-        ],
-        "rationale": "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked."
+        "issues": [],
+        "rationale": "Namespaces, reserved values, runtime capability selection, negotiation, and release-policy guardrails are executable or policy-checked."
       }
     },
     {
@@ -1212,15 +1212,15 @@
       "keyword": "MUST NOT",
       "statement": "ownership, synchronization, and isolation rules are specified. A protocol 1.0 device **MUST NOT**",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/src/lib.rs"
+          "crates/virtio-accel-proto/src/lib.rs",
+          "ci/check-release-policy.py",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32"
-        ],
-        "rationale": "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked."
+        "issues": [],
+        "rationale": "Namespaces, reserved values, runtime capability selection, negotiation, and release-policy guardrails are executable or policy-checked."
       }
     },
     {
@@ -1378,15 +1378,15 @@
       "keyword": "MUST",
       "statement": "new synchronization, or changed lifetime rules, the device **MUST** also negotiate an appropriate",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/src/lib.rs"
+          "crates/virtio-accel-proto/src/lib.rs",
+          "ci/check-release-policy.py",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32"
-        ],
-        "rationale": "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked."
+        "issues": [],
+        "rationale": "Namespaces, reserved values, runtime capability selection, negotiation, and release-policy guardrails are executable or policy-checked."
       }
     },
     {
@@ -1418,15 +1418,15 @@
       "keyword": "MUST",
       "statement": "reserved and **MUST** be zero.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/src/lib.rs"
+          "crates/virtio-accel-proto/src/lib.rs",
+          "ci/check-release-policy.py",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32"
-        ],
-        "rationale": "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked."
+        "issues": [],
+        "rationale": "Namespaces, reserved values, runtime capability selection, negotiation, and release-policy guardrails are executable or policy-checked."
       }
     },
     {
@@ -1437,15 +1437,15 @@
       "keyword": "MUST",
       "statement": "**MUST** be rejected before backend invocation. Reserved fields **MUST** be zero.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/src/lib.rs"
+          "crates/virtio-accel-proto/src/lib.rs",
+          "ci/check-release-policy.py",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32"
-        ],
-        "rationale": "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked."
+        "issues": [],
+        "rationale": "Namespaces, reserved values, runtime capability selection, negotiation, and release-policy guardrails are executable or policy-checked."
       }
     },
     {
@@ -1456,15 +1456,15 @@
       "keyword": "MUST",
       "statement": "**MUST** be rejected before backend invocation. Reserved fields **MUST** be zero.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
-          "crates/virtio-accel-proto/src/lib.rs"
+          "crates/virtio-accel-proto/src/lib.rs",
+          "ci/check-release-policy.py",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32"
-        ],
-        "rationale": "Namespaces, reserved values, runtime capability selection, and negotiation are executable; future evolution remains tracked."
+        "issues": [],
+        "rationale": "Namespaces, reserved values, runtime capability selection, negotiation, and release-policy guardrails are executable or policy-checked."
       }
     },
     {
@@ -1475,17 +1475,16 @@
       "keyword": "MUST",
       "statement": "Candidate implementations **MUST** expose major `1` and minor `0` in device-specific configuration",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "conformance/v1.0/layout.json",
-          "conformance/v1.0/vectors.json"
+          "conformance/v1.0/vectors.json",
+          "conformance/v1.0/freeze-audit.md",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32",
-          "#33"
-        ],
-        "rationale": "Version and exact-length behavior is executable; release governance and the final freeze remain tracked."
+        "issues": [],
+        "rationale": "Version, exact-length behavior, release governance, and the final freeze audit are checked into the v1.0 evidence set."
       }
     },
     {
@@ -1496,233 +1495,202 @@
       "keyword": "MUST NOT",
       "statement": "and **MUST NOT** claim candidate protocol 1.0 conformance unless they satisfy the normative wire,",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "conformance/v1.0/layout.json",
-          "conformance/v1.0/vectors.json"
+          "conformance/v1.0/vectors.json",
+          "conformance/v1.0/freeze-audit.md",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32",
-          "#33"
-        ],
-        "rationale": "Version and exact-length behavior is executable; release governance and the final freeze remain tracked."
+        "issues": [],
+        "rationale": "Version, exact-length behavior, release governance, and the final freeze audit are checked into the v1.0 evidence set."
       }
     },
     {
-      "id": "REQ-SPEC-EAC5AF832FBA",
-      "source": "docs/specification.md",
-      "line": 387,
-      "section": "6. Versioning and compatibility",
-      "keyword": "MUST",
-      "statement": "#33. Before that audit, an intentional candidate revision **MUST** follow the coordinated procedure",
-      "coverage": {
-        "status": "mixed",
-        "evidence": [
-          "conformance/rust-clean-room/tests/vectors.rs",
-          "conformance/v1.0/layout.json",
-          "conformance/v1.0/vectors.json"
-        ],
-        "issues": [
-          "#32",
-          "#33"
-        ],
-        "rationale": "Version and exact-length behavior is executable; release governance and the final freeze remain tracked."
-      }
-    },
-    {
-      "id": "REQ-SPEC-7AF046B3C78A",
+      "id": "REQ-SPEC-C80FBFEE4D8D",
       "source": "docs/specification.md",
       "line": 388,
       "section": "6. Versioning and compatibility",
-      "keyword": "MUST NOT",
-      "statement": "in [wire-abi.md](wire-abi.md) and **MUST NOT** be described as a frozen or stable release.",
+      "keyword": "MUST",
+      "statement": "extension, or incompatible change **MUST** follow the coordinated procedure in",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "conformance/v1.0/layout.json",
-          "conformance/v1.0/vectors.json"
+          "conformance/v1.0/vectors.json",
+          "conformance/v1.0/freeze-audit.md",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32",
-          "#33"
-        ],
-        "rationale": "Version and exact-length behavior is executable; release governance and the final freeze remain tracked."
+        "issues": [],
+        "rationale": "Version, exact-length behavior, release governance, and the final freeze audit are checked into the v1.0 evidence set."
       }
     },
     {
-      "id": "REQ-SPEC-1D9FCF2259A4",
+      "id": "REQ-SPEC-A9B6EC1F52D7",
       "source": "docs/specification.md",
-      "line": 394,
+      "line": 395,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "- a driver **MUST** reject a device with an unsupported major version;",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "conformance/v1.0/layout.json",
-          "conformance/v1.0/vectors.json"
+          "conformance/v1.0/vectors.json",
+          "conformance/v1.0/freeze-audit.md",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32",
-          "#33"
-        ],
-        "rationale": "Version and exact-length behavior is executable; release governance and the final freeze remain tracked."
+        "issues": [],
+        "rationale": "Version, exact-length behavior, release governance, and the final freeze audit are checked into the v1.0 evidence set."
       }
     },
     {
-      "id": "REQ-SPEC-D4178D3A6E1F",
+      "id": "REQ-SPEC-B572A6ECB452",
       "source": "docs/specification.md",
-      "line": 396,
+      "line": 397,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "- a driver **MUST NOT** use behavior newer than the device minor version it observed; and",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "conformance/v1.0/layout.json",
-          "conformance/v1.0/vectors.json"
+          "conformance/v1.0/vectors.json",
+          "conformance/v1.0/freeze-audit.md",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32",
-          "#33"
-        ],
-        "rationale": "Version and exact-length behavior is executable; release governance and the final freeze remain tracked."
+        "issues": [],
+        "rationale": "Version, exact-length behavior, release governance, and the final freeze audit are checked into the v1.0 evidence set."
       }
     },
     {
-      "id": "REQ-SPEC-13D42A17F277",
+      "id": "REQ-SPEC-92C1CB28FF96",
       "source": "docs/specification.md",
-      "line": 405,
+      "line": 406,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "Therefore a minor version alone **MUST NOT** append fields to an existing response that an older",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "conformance/v1.0/layout.json",
-          "conformance/v1.0/vectors.json"
+          "conformance/v1.0/vectors.json",
+          "conformance/v1.0/freeze-audit.md",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32",
-          "#33"
-        ],
-        "rationale": "Version and exact-length behavior is executable; release governance and the final freeze remain tracked."
+        "issues": [],
+        "rationale": "Version, exact-length behavior, release governance, and the final freeze audit are checked into the v1.0 evidence set."
       }
     },
     {
-      "id": "REQ-SPEC-D748B1B0AD5F",
+      "id": "REQ-SPEC-39A38B2BB189",
       "source": "docs/specification.md",
-      "line": 409,
+      "line": 410,
       "section": "6. Versioning and compatibility",
       "keyword": "SHOULD",
       "statement": "negotiated feature explicitly selects a different layout. Extensions **SHOULD** use a new opcode or",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "conformance/v1.0/layout.json",
-          "conformance/v1.0/vectors.json"
+          "conformance/v1.0/vectors.json",
+          "conformance/v1.0/freeze-audit.md",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32",
-          "#33"
-        ],
-        "rationale": "Version and exact-length behavior is executable; release governance and the final freeze remain tracked."
+        "issues": [],
+        "rationale": "Version, exact-length behavior, release governance, and the final freeze audit are checked into the v1.0 evidence set."
       }
     },
     {
-      "id": "REQ-SPEC-DA2DB8DEEF2F",
+      "id": "REQ-SPEC-80DCBC922868",
       "source": "docs/specification.md",
-      "line": 412,
+      "line": 413,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "Without such a feature, a receiver **MUST** require the exact payload length for the opcode and",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "conformance/v1.0/layout.json",
-          "conformance/v1.0/vectors.json"
+          "conformance/v1.0/vectors.json",
+          "conformance/v1.0/freeze-audit.md",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32",
-          "#33"
-        ],
-        "rationale": "Version and exact-length behavior is executable; release governance and the final freeze remain tracked."
+        "issues": [],
+        "rationale": "Version, exact-length behavior, release governance, and the final freeze audit are checked into the v1.0 evidence set."
       }
     },
     {
-      "id": "REQ-SPEC-CE932B2B539C",
+      "id": "REQ-SPEC-F3C37C9F58F6",
       "source": "docs/specification.md",
-      "line": 413,
+      "line": 414,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST",
       "statement": "**MUST** reject trailing bytes. It **MUST NOT** silently reinterpret or ignore an unknown tail.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "conformance/v1.0/layout.json",
-          "conformance/v1.0/vectors.json"
+          "conformance/v1.0/vectors.json",
+          "conformance/v1.0/freeze-audit.md",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32",
-          "#33"
-        ],
-        "rationale": "Version and exact-length behavior is executable; release governance and the final freeze remain tracked."
+        "issues": [],
+        "rationale": "Version, exact-length behavior, release governance, and the final freeze audit are checked into the v1.0 evidence set."
       }
     },
     {
-      "id": "REQ-SPEC-E2B4F0AD193A",
+      "id": "REQ-SPEC-6CBDC3B3F1BD",
       "source": "docs/specification.md",
-      "line": 413,
+      "line": 414,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "**MUST** reject trailing bytes. It **MUST NOT** silently reinterpret or ignore an unknown tail.",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "conformance/v1.0/layout.json",
-          "conformance/v1.0/vectors.json"
+          "conformance/v1.0/vectors.json",
+          "conformance/v1.0/freeze-audit.md",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32",
-          "#33"
-        ],
-        "rationale": "Version and exact-length behavior is executable; release governance and the final freeze remain tracked."
+        "issues": [],
+        "rationale": "Version, exact-length behavior, release governance, and the final freeze audit are checked into the v1.0 evidence set."
       }
     },
     {
-      "id": "REQ-SPEC-3ADE1DDDE8DE",
+      "id": "REQ-SPEC-0F76AC0C98B1",
       "source": "docs/specification.md",
-      "line": 420,
+      "line": 421,
       "section": "6. Versioning and compatibility",
       "keyword": "MUST NOT",
       "statement": "- An unknown response status is an opaque failure. A driver **MUST NOT** treat it as success or",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "conformance/rust-clean-room/tests/vectors.rs",
           "conformance/v1.0/layout.json",
-          "conformance/v1.0/vectors.json"
+          "conformance/v1.0/vectors.json",
+          "conformance/v1.0/freeze-audit.md",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32",
-          "#33"
-        ],
-        "rationale": "Version and exact-length behavior is executable; release governance and the final freeze remain tracked."
+        "issues": [],
+        "rationale": "Version, exact-length behavior, release governance, and the final freeze audit are checked into the v1.0 evidence set."
       }
     },
     {
-      "id": "REQ-SPEC-6C9AE2757BEE",
+      "id": "REQ-SPEC-F5E2BA862DED",
       "source": "docs/specification.md",
-      "line": 427,
+      "line": 428,
       "section": "7. Ownership and destruction",
       "keyword": "MUST",
       "statement": "The device owns the mapping from opaque object IDs to backend handles. The mapping **MUST** reject:",
@@ -1739,9 +1707,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-F6B9C3ABC725",
+      "id": "REQ-SPEC-DABD7DB050FE",
       "source": "docs/specification.md",
-      "line": 435,
+      "line": 436,
       "section": "7. Ownership and destruction",
       "keyword": "MUST NOT",
       "statement": "Object-ID encoding is implementation-private. Drivers **MUST NOT** infer slot, kind, generation, or",
@@ -1758,9 +1726,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-1DBA670D2836",
+      "id": "REQ-SPEC-29C8E5C023DF",
       "source": "docs/specification.md",
-      "line": 440,
+      "line": 441,
       "section": "7. Ownership and destruction",
       "keyword": "MUST",
       "statement": "- a rejected release returns the still-live handle and the device **MUST** restore it for retry;",
@@ -1777,9 +1745,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-01F6CADDDDBA",
+      "id": "REQ-SPEC-8EC21ACC8198",
       "source": "docs/specification.md",
-      "line": 442,
+      "line": 443,
       "section": "7. Ownership and destruction",
       "keyword": "MUST NOT",
       "statement": "- an indeterminate release invalidates the guest ID and requires recovery. The device **MUST NOT**",
@@ -1796,9 +1764,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-A5D2E57D1BE1",
+      "id": "REQ-SPEC-620EEA2EF4DE",
       "source": "docs/specification.md",
-      "line": 445,
+      "line": 446,
       "section": "7. Ownership and destruction",
       "keyword": "MUST NOT",
       "statement": "`Drop` may provide defensive cleanup inside an implementation but **MUST NOT** be used as",
@@ -1815,9 +1783,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-7F15EA64E3A0",
+      "id": "REQ-SPEC-2CE67B32AAA6",
       "source": "docs/specification.md",
-      "line": 448,
+      "line": 449,
       "section": "7. Ownership and destruction",
       "keyword": "MUST NOT",
       "statement": "A creation method that returns an ordinary error **MUST NOT** retain a newly created resource. A",
@@ -1834,9 +1802,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-00C6D5A7BA7D",
+      "id": "REQ-SPEC-2E9AFAABDF5E",
       "source": "docs/specification.md",
-      "line": 452,
+      "line": 453,
       "section": "7. Ownership and destruction",
       "keyword": "MUST NOT",
       "statement": "the buffer; the command engine **MUST NOT** publish that destination as a successful payload.",
@@ -1853,9 +1821,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-9375E50C0DC9",
+      "id": "REQ-SPEC-3B0947692D50",
       "source": "docs/specification.md",
-      "line": 457,
+      "line": 458,
       "section": "8. Time and progress",
       "keyword": "MUST NOT",
       "statement": "infinite. Absolute guest timestamps **MUST NOT** be compared with a host clock because their",
@@ -1871,9 +1839,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-CBCBB8EF9B78",
+      "id": "REQ-SPEC-8033B38B5529",
       "source": "docs/specification.md",
-      "line": 460,
+      "line": 461,
       "section": "8. Time and progress",
       "keyword": "MUST",
       "statement": "Polling an event **MUST** be nonblocking and bounded. The portable contract creates no background",
@@ -1889,9 +1857,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-CEA953F3122D",
+      "id": "REQ-SPEC-2DB7B07C0577",
       "source": "docs/specification.md",
-      "line": 464,
+      "line": 465,
       "section": "8. Time and progress",
       "keyword": "MUST NOT",
       "statement": "synchronous provider work. Submission performs validation and admission only and **MUST NOT** wait",
@@ -1907,9 +1875,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-FFC2A66ED400",
+      "id": "REQ-SPEC-13B381BAAE29",
       "source": "docs/specification.md",
-      "line": 465,
+      "line": 466,
       "section": "8. Time and progress",
       "keyword": "MUST",
       "statement": "for execution to become terminal. Cancellation **MUST** also be nonblocking and bounded. No portable",
@@ -1925,9 +1893,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-C6F3D02E11D8",
+      "id": "REQ-SPEC-5B08B8EDE1A7",
       "source": "docs/specification.md",
-      "line": 471,
+      "line": 472,
       "section": "8. Time and progress",
       "keyword": "MUST",
       "statement": "cannot prove rejection is indeterminate and **MUST** retain an event.",
@@ -1943,9 +1911,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-1078981F681B",
+      "id": "REQ-SPEC-339D482BF8AD",
       "source": "docs/specification.md",
-      "line": 480,
+      "line": 481,
       "section": "9. Errors",
       "keyword": "MUST",
       "statement": "A device **MUST** map errors deterministically and **MUST NOT** expose uninitialized response bytes.",
@@ -1962,9 +1930,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-98980F97C5DD",
+      "id": "REQ-SPEC-C9EE63C70C3E",
       "source": "docs/specification.md",
-      "line": 480,
+      "line": 481,
       "section": "9. Errors",
       "keyword": "MUST NOT",
       "statement": "A device **MUST** map errors deterministically and **MUST NOT** expose uninitialized response bytes.",
@@ -1981,9 +1949,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-81C049F03B4B",
+      "id": "REQ-SPEC-6FACD8AFE8C3",
       "source": "docs/specification.md",
-      "line": 484,
+      "line": 485,
       "section": "9. Errors",
       "keyword": "MUST NOT",
       "statement": "An error response **MUST NOT** imply that a backend operation was rejected when acceptance was",
@@ -2000,9 +1968,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-A2BC3F34E0B5",
+      "id": "REQ-SPEC-EEC927FE2C15",
       "source": "docs/specification.md",
-      "line": 489,
+      "line": 490,
       "section": "10. Portability requirements",
       "keyword": "MUST NOT",
       "statement": "Portable crates **MUST NOT** select an operating system, VMM, kernel, vendor API, or global runtime.",
@@ -2018,9 +1986,9 @@
       }
     },
     {
-      "id": "REQ-SPEC-0E7C001BDD64",
+      "id": "REQ-SPEC-814337FBAF48",
       "source": "docs/specification.md",
-      "line": 497,
+      "line": 498,
       "section": "10. Portability requirements",
       "keyword": "MUST NOT",
       "statement": "Platform adapters depend inward on the portable layers. A portable layer **MUST NOT** conditionally",
@@ -2036,23 +2004,45 @@
       }
     },
     {
-      "id": "REQ-SPEC-A4FB0EBF5085",
+      "id": "REQ-SPEC-8A29275EC1CB",
       "source": "docs/specification.md",
-      "line": 513,
-      "section": "11. Tracked completion work",
+      "line": 509,
+      "section": "11. Release governance and audit trail",
+      "keyword": "MUST",
+      "statement": "and the release note is [docs/releases/v1.0.md](releases/v1.0.md). Future releases **MUST** preserve",
+      "coverage": {
+        "status": "executable",
+        "evidence": [
+          "ci/check-normative-requirements.py",
+          "ci/check-release-policy.py",
+          "conformance/v1.0/freeze-audit.md",
+          "docs/releases/v1.0.md",
+          "docs/release-policy.md",
+          "docs/threat-model.md"
+        ],
+        "issues": [],
+        "rationale": "The ledger, release-policy check, release note, and freeze audit preserve the post-freeze audit trail."
+      }
+    },
+    {
+      "id": "REQ-SPEC-6E0FC44425DB",
+      "source": "docs/specification.md",
+      "line": 516,
+      "section": "11. Release governance and audit trail",
       "keyword": "MAY",
       "statement": "No implementation **MAY** advertise a reserved optional feature merely because a Rust constant",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
           "ci/check-normative-requirements.py",
+          "ci/check-release-policy.py",
+          "conformance/v1.0/freeze-audit.md",
+          "docs/releases/v1.0.md",
+          "docs/release-policy.md",
           "docs/threat-model.md"
         ],
-        "issues": [
-          "#32",
-          "#33"
-        ],
-        "rationale": "The ledger prevents silent requirements; the section's named completion work remains explicitly tracked."
+        "issues": [],
+        "rationale": "The ledger, release-policy check, release note, and freeze audit preserve the post-freeze audit trail."
       }
     },
     {
@@ -2761,34 +2751,32 @@
       "keyword": "MUST",
       "statement": "A proposed wire change **MUST** be classified before code is merged:",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
-          "ci/check-normative-requirements.py"
+          "ci/check-normative-requirements.py",
+          "conformance/v1.0/freeze-audit.md",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32",
-          "#33"
-        ],
-        "rationale": "Coordinated documentation and evidence are machine-checked; final release policy and freeze remain tracked."
+        "issues": [],
+        "rationale": "Coordinated documentation, evidence, release classification, and freeze status are checked into versioned artifacts."
       }
     },
     {
-      "id": "REQ-WIRE-EA6631A95021",
+      "id": "REQ-WIRE-AB99734C575E",
       "source": "docs/wire-abi.md",
-      "line": 361,
+      "line": 358,
       "section": "9. Candidate and post-freeze change procedure",
       "keyword": "MUST",
       "statement": "The same reviewed change **MUST** update the normative documents, Rust constants/layout assertions,",
       "coverage": {
-        "status": "mixed",
+        "status": "executable",
         "evidence": [
-          "ci/check-normative-requirements.py"
+          "ci/check-normative-requirements.py",
+          "conformance/v1.0/freeze-audit.md",
+          "docs/release-policy.md"
         ],
-        "issues": [
-          "#32",
-          "#33"
-        ],
-        "rationale": "Coordinated documentation and evidence are machine-checked; final release policy and freeze remain tracked."
+        "issues": [],
+        "rationale": "Coordinated documentation, evidence, release classification, and freeze status are checked into versioned artifacts."
       }
     },
     {

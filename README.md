@@ -69,8 +69,11 @@ model, compatibility rules, and mandatory baseline. The exact byte layouts live 
 [docs/threat-model.md](docs/threat-model.md) for trust boundaries and finite resource policy, and
 [docs/portability.md](docs/portability.md) for the enforced target matrix. The v1 performance and
 copy budgets are tracked in [docs/performance.md](docs/performance.md), and the public rustdoc
-policy is in [docs/public-api.md](docs/public-api.md). Backend authors can run the standard
-semantic suite using the
+policy is in [docs/public-api.md](docs/public-api.md). Release governance lives in
+[docs/release-policy.md](docs/release-policy.md), the protocol 1.0 release note is
+[docs/releases/v1.0.md](docs/releases/v1.0.md), and the final freeze audit is
+[conformance/v1.0/freeze-audit.md](conformance/v1.0/freeze-audit.md). Backend authors can run the
+standard semantic suite using the
 [accelerator backend implementer guide](docs/backend-implementer-guide.md).
 
 The primary `zerocopy` ABI and the manual clean-room codec both decode and re-encode every canonical
@@ -81,6 +84,7 @@ without making the conformance codec a production dependency.
 
 ```sh
 cargo fmt --all -- --check
+python3 ci/check-release-policy.py
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
 cargo run --example backend_conformance
@@ -89,10 +93,11 @@ cargo run --example reference_execution
 
 The project remains pre-standardization work and claims no Virtio device ID. Protocol 1.0 numeric
 opcodes, statuses, and payload layouts are versioned review inputs for independent implementation.
-They remain pre-release candidates until the final freeze audit in
-[issue #33](https://github.com/MicroPerceptron/virtio-accel/issues/33). Candidate changes must follow
-the coordinated change procedure in [docs/wire-abi.md](docs/wire-abi.md); after the freeze,
-incompatible changes require a new protocol major version.
+They are frozen for the portable v1.0 baseline by the
+[final freeze audit](conformance/v1.0/freeze-audit.md). Future changes must follow the coordinated
+change procedure in [docs/wire-abi.md](docs/wire-abi.md) and the broader
+[release and evolution policy](docs/release-policy.md); incompatible changes require a new protocol
+major version.
 
 ## License
 
