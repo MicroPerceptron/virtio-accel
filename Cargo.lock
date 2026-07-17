@@ -119,6 +119,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "virtio-accel-conformance"
+version = "0.1.0"
+dependencies = [
+ "virtio-accel-core",
+ "virtio-accel-mock",
+]
+
+[[package]]
 name = "virtio-accel-core"
 version = "0.1.0"
 dependencies = [

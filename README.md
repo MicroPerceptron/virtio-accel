@@ -19,6 +19,8 @@ claimed virtio device ID.
 - `virtio-accel-device`: `no_std + alloc` device-owned state, including bounded generational IDs.
 - `virtio-accel-mock`: cross-platform in-memory backend with deterministic test-only artifacts,
   harness-controlled execution, and scripted ownership-boundary faults.
+- `virtio-accel-conformance`: transport-free semantic backend suite with provider target, progress,
+  and optional resource-accounting adapters.
 - `virtio-accel-cleanroom`: dependency-free `no_std` conformance codec implemented without shared
   protocol types.
 - `virtio-accel`: small `no_std` facade re-exporting the portable layers.
@@ -30,13 +32,15 @@ virtio-accel-split-queue ---> virtio-accel-transport
                                       ^
                                       |
 virtio-accel-device ----------+-------+------> virtio-accel-core
-          |                                          |
-          +-----> virtio-accel-proto                 v
-                                             provider adapters
+          |
+          +-----> virtio-accel-proto
 
 virtio-accel-guest -----------> virtio-accel-transport
           |
           +--------------------> virtio-accel-proto
+
+virtio-accel-conformance --------------------> virtio-accel-core
+provider adapters --------------------------> virtio-accel-core
 ```
 
 Arrows point from a crate to its dependency. The transport crate exposes reset-scoped chain
@@ -62,7 +66,8 @@ model, compatibility rules, and mandatory baseline. The exact byte layouts live 
 [docs/virtqueue.md](docs/virtqueue.md), and independent golden artifacts under
 [conformance/v1.0](conformance/v1.0/README.md). See
 [docs/architecture.md](docs/architecture.md) for implementation invariants and
-[docs/portability.md](docs/portability.md) for the enforced target matrix.
+[docs/portability.md](docs/portability.md) for the enforced target matrix. Backend authors can run
+the standard semantic suite using the [accelerator backend implementer guide](docs/backend-implementer-guide.md).
 
 The primary `zerocopy` ABI and the manual clean-room codec both decode and re-encode every canonical
 frame. Their bridge test exchanges bytes only, providing an independent implementation check

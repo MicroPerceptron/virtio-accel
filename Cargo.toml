@@ -10,6 +10,7 @@ publish = false
 [workspace]
 members = [
     "conformance/rust-clean-room",
+    "crates/virtio-accel-conformance",
     "crates/virtio-accel-core",
     "crates/virtio-accel-device",
     "crates/virtio-accel-guest",

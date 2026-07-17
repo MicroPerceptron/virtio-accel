@@ -544,3 +544,4 @@ model or is identified as an implementation helper.
 | `ReleaseState`, `CreateError`, `RestoreError` | Device-state admission and release rollback helpers |
 | `status_from_backend_error`, `status_from_object_table_error`, `status_from_device_state_error` | Device implementation mapping helpers |
 | `MockAccelerator`, `FaultAccelerator`, and their handle types | Reference/test implementation, not normative protocol |
+| `virtio-accel-conformance` cases, target fixtures, hooks, and reports | Reusable provider-test implementation, not normative protocol |
