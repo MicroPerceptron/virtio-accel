@@ -72,12 +72,14 @@ wire structures nor guest memory and must not retain borrowed byte ports after a
 
 All named tests are located in the corresponding crate's `src` unit tests,
 [`crates/virtio-accel-device/tests/command_processor.rs`](../crates/virtio-accel-device/tests/command_processor.rs),
+[`crates/virtio-accel-device/tests/state_model.rs`](../crates/virtio-accel-device/tests/state_model.rs),
 or [`tests/portable_end_to_end.rs`](../tests/portable_end_to_end.rs). Coverage-guided malformed
 input checks live under [`fuzz/`](../fuzz/): protocol decode is compared with the clean-room codec,
 descriptor segmentation is driven through the split-queue model, and bounded stateful sequences
-check resource accounting after every action. Issue
-[#27](https://github.com/MicroPerceptron/virtio-accel/issues/27) can broaden the state model, but
-the portable v1 policy does not depend on that future expansion.
+check resource accounting after every action. The deterministic state-model suite runs a bounded
+seed set in normal CI, asserts stale-ID retirement, context isolation, reference release, quota, and
+retained-byte invariants after every action, and prints minimized replayable schedules for failures.
+An ignored deep test provides manual or nightly-style exploration with `VIRTIO_ACCEL_STATE_MODEL_SEED`.
 
 ## Resource-accounting rules
 
