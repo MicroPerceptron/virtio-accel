@@ -1,0 +1,14 @@
+[package]
+name = "virtio-accel-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Reusable semantic conformance suite for virtio-accel backends"
+publish = false
+
+[dependencies]
+virtio-accel-core.workspace = true
+
+[dev-dependencies]
+virtio-accel-mock.workspace = true

@@ -28,7 +28,7 @@ the concrete runner versions used for the release.
 |---|---|---|
 | `core-only` | `virtio-accel-cleanroom`, `virtio-accel-proto`, `virtio-accel-transport`, `virtio-accel-core` | `core`; the clean-room codec and transport ports have no normal/build dependencies, while proc-macros used by other crates may execute with `std` on the build host |
 | `alloc-portable` | `virtio-accel-guest`, `virtio-accel-split-queue`, `virtio-accel-device`, `virtio-accel` | `core + alloc`; no OS, filesystem, sockets, threads, or host synchronization |
-| `std-reference` | `virtio-accel-mock` | Portable `std`; no host-OS or vendor-specific API |
+| `std-reference` | `virtio-accel-mock`, `virtio-accel-conformance` | Portable `std`; no host-OS or vendor-specific API |
 
 Concrete VMM, kernel, OS, and vendor adapters are outside the portable-v1 milestone and must not
 become default dependencies of a portable crate.

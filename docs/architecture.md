@@ -282,6 +282,27 @@ binding vector to interpose on submission and is intentionally outside productio
 claims; the wrapped backend and ordinary command path retain their synchronization and copy
 contracts.
 
+## Reusable backend conformance
+
+`virtio-accel-conformance` depends only on `virtio-accel-core` and runs each semantic case against a
+fresh backend instance. A provider supplies one executable target fixture plus test-only progress
+and optional resource-accounting hooks. Stable case IDs cover metadata, reserved intent, every
+advertised memory domain, segmented transfers and artifacts, bounds, permissions, bindings,
+context isolation, admission, pending-event release, terminal stability, finite timeout, and both
+cancellation race outcomes.
+
+Mandatory cases cannot skip. Memory-domain and cancellation cases skip only when the corresponding
+semantic capability is absent, and reports preserve the explicit reason. Accounting, when exposed,
+is sampled before and after every case and counts both live and indeterminate native resources.
+The reference backend passes the suite directly and through `FaultAccelerator`; intentionally
+broken adapters prove that each major contract area produces a named failure.
+
+The suite is portable `std` test tooling rather than a production dependency. It preserves static
+backend and handle dispatch and introduces no wire types, virtqueues, host APIs, threads, or global
+synchronization. The [backend implementer guide](backend-implementer-guide.md) maps each case to
+trait obligations and separates semantic evidence from issue #29's quantitative allocation and
+copy budgets.
+
 ## Next implementation boundary
 
 The portable command engine depends on `virtio-accel-proto`, `virtio-accel-core`, and the
@@ -294,8 +315,8 @@ transport-neutral region metadata re-exported by `virtio-accel-device`. Its base
 5. Produces a response without knowing about rust-vmm or a host operating system.
 
 Submission/event retention, deterministic reset, the bounded split-virtqueue model, the no-std
-reference guest, deterministic reference execution, and scripted ownership-boundary faults now
-complete both portable queue endpoints and exercise verifiable buffer output and recovery. The next
-backend boundary is issue #24's reusable conformance suite and implementer guide. A thin rust-vmm
-adapter supplying `virtio-device`, `virtio-queue`, and `vm-memory` integration remains a later
-platform layer, as do Linux vhost-user and an in-kernel guest driver.
+reference guest, deterministic reference execution, scripted ownership-boundary faults, and the
+reusable backend conformance suite now complete both portable queue endpoints and the provider
+contract evidence. The next v1 boundary is issue #25's threat model and enforceable resource policy.
+A thin rust-vmm adapter supplying `virtio-device`, `virtio-queue`, and `vm-memory` integration
+remains a later platform layer, as do Linux vhost-user and an in-kernel guest driver.

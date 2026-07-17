@@ -16,6 +16,9 @@ This directory contains implementation-independent inputs for the portable proto
   content-derived ID, source line, executable evidence, tracked issues, and rationale.
 - [`../rust-clean-room`](../rust-clean-room) contains a dependency-free `no_std` Rust codec that
   implements the byte contract manually without importing `virtio-accel-proto` or its wire types.
+- [`../../crates/virtio-accel-conformance`](../../crates/virtio-accel-conformance) runs the semantic
+  backend contract without importing wire, virtqueue, OS, or vendor types; its provider adapter is
+  documented in the [backend implementer guide](../../docs/backend-implementer-guide.md).
 
 The files are deliberately plain JSON with hexadecimal byte strings so implementations do not need
 Rust tooling to consume them.
