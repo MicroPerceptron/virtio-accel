@@ -68,16 +68,18 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
         rationale="Layer direction, queue ownership, provider ownership, and the complete portable lifecycle are executable.",
     ),
     ("SPEC", 4): coverage(
-        "mixed",
+        "executable",
         (
             "crates/virtio-accel-core/src/lib.rs",
+            "crates/virtio-accel-device/src/engine.rs",
+            "crates/virtio-accel-device/src/state.rs",
             "crates/virtio-accel-device/tests/command_processor.rs",
             "crates/virtio-accel-device/src/object_table.rs",
             "crates/virtio-accel-mock/src/lib.rs",
+            "docs/threat-model.md",
             "tests/portable_end_to_end.rs",
         ),
-        ("#25",),
-        "Provider and command-engine lifecycle semantics are executable; the threat model and aggregate retained-byte policy remain tracked.",
+        rationale="Provider and command-engine lifecycle, finite attacker dimensions, and aggregate retained-byte policy are specified and executable.",
     ),
     ("SPEC", 5): coverage(
         "mixed",
@@ -138,8 +140,8 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
     ),
     ("SPEC", 11): coverage(
         "mixed",
-        ("ci/check-normative-requirements.py",),
-        ("#25", "#32", "#33"),
+        ("ci/check-normative-requirements.py", "docs/threat-model.md"),
+        ("#32", "#33"),
         "The ledger prevents silent requirements; the section's named completion work remains explicitly tracked.",
     ),
     ("WIRE", 1): coverage(
@@ -176,15 +178,16 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
         rationale="The independent semantic codec validates object IDs, domains, usage, access, and event states.",
     ),
     ("WIRE", 5): coverage(
-        "mixed",
+        "executable",
         (
             "conformance/rust-clean-room/tests/vectors.rs",
             "crates/virtio-accel-proto/tests/semantic_interop.rs",
+            "crates/virtio-accel-device/src/state.rs",
             "crates/virtio-accel-device/tests/command_processor.rs",
+            "docs/threat-model.md",
             "tests/portable_end_to_end.rs",
         ),
-        ("#25",),
-        "Every payload layout and scalar invariant is cross-decoded, and live-object and advertised-quota checks are executable; adversarial aggregate limits remain tracked.",
+        rationale="Every payload invariant is cross-decoded, and live-object, advertised-quota, and aggregate retained-byte bounds are executable.",
     ),
     ("WIRE", 6): coverage(
         "executable",
@@ -335,14 +338,16 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
         rationale="Split-ring invalidation, guest reclamation, engine teardown, and full-path reset are executable.",
     ),
     ("VIRTQ", 12): coverage(
-        "mixed",
+        "executable",
         (
             "crates/virtio-accel-core/src/lib.rs",
             "crates/virtio-accel-device/src/engine.rs",
+            "crates/virtio-accel-device/src/state.rs",
+            "crates/virtio-accel-device/tests/command_processor.rs",
+            "docs/threat-model.md",
             "tests/portable_end_to_end.rs",
         ),
-        ("#25",),
-        "Ownership-aware failures and DEVICE_NEEDS_RESET transitions are executable; the adversarial resource policy remains tracked.",
+        rationale="Ownership-aware failures, DEVICE_NEEDS_RESET transitions, quarantine accounting, and adversarial resource policy are executable.",
     ),
 }
 

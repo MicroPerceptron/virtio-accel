@@ -262,7 +262,7 @@ allocation or submission to copy program bindings through hidden bounce buffers.
 | `flags` | Zero |
 | `target[12]` | Opaque format-owned target words |
 | `payload_bytes` | Nonzero, equals the exact artifact tail length |
-| `resident_bytes` | Nonzero declared resident-memory charge |
+| `resident_bytes` | Nonzero upper bound on provider storage retained for the returned program |
 
 `80 + payload_bytes` **MUST** fit the request payload and configured frame limit.
 

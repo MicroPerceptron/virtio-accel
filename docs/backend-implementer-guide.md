@@ -139,7 +139,9 @@ observable output; issue #29 owns quantitative allocation and copy counters and 
 
 Artifacts are opaque to transports but not to the provider. Read segmented bytes without requiring
 one artifact-sized coalescing allocation, validate the format/target envelope, and retain no borrow
-of the source.
+of the source. `ArtifactRef::resident_bytes` is the caller-authorized upper bound for all storage
+retained by the returned program handle, including compiled code and provider metadata attributable
+to that program. Reject the load when that bound cannot be honored; do not treat it as an estimate.
 
 Submission validates nonempty bounded bindings, unique slots, nonempty in-range regions, declared
 buffer usage, program-specific slot/access compatibility, and one context across queue, program,
