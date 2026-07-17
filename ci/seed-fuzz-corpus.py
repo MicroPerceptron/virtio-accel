@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""Generate deterministic fuzz seed corpora from reviewed conformance vectors."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+VECTORS = ROOT / "conformance" / "v1.0" / "vectors.json"
+CORPUS = ROOT / "fuzz" / "corpus"
+
+PROTOCOL_CONTROLS = bytes([0x00, 0x40, 1, 2, 4, 8, 16, 32])
+DESCRIPTOR_MARKER = 0xA5
+DESCRIPTOR_RESPONSE_BYTES_MINUS_ONE = 127
+
+
+def main() -> None:
+    corpus = json.loads(VECTORS.read_text())
+    reset_target("protocol_decode")
+    reset_target("descriptor_end_to_end")
+    reset_target("stateful_commands")
+
+    write_seed("protocol_decode", "empty", b"")
+    write_seed("protocol_decode", "short_header", PROTOCOL_CONTROLS + b"\x00\x01\x02")
+
+    for frame in corpus["frames"]:
+        frame_bytes = bytes.fromhex(frame["hex"])
+        if frame["kind"] == "request":
+            write_seed("protocol_decode", frame["name"], PROTOCOL_CONTROLS + frame_bytes)
+            write_seed("descriptor_end_to_end", frame["name"], descriptor_seed(frame_bytes))
+        else:
+            write_seed("protocol_decode", frame["name"], PROTOCOL_CONTROLS + frame_bytes)
+
+    write_seed("descriptor_end_to_end", "raw_loop", raw_loop_seed())
+    write_seed("descriptor_end_to_end", "raw_truncated", raw_truncated_seed())
+    write_seed("descriptor_end_to_end", "raw_used_length_exceeded", raw_used_length_exceeded_seed())
+
+    write_seed("stateful_commands", "lifecycle", stateful_lifecycle_seed())
+    write_seed("stateful_commands", "stale_after_reset", stateful_stale_after_reset_seed())
+
+
+def reset_target(target: str) -> None:
+    directory = CORPUS / target
+    directory.mkdir(parents=True, exist_ok=True)
+    for entry in directory.iterdir():
+        if entry.is_file():
+            entry.unlink()
+
+
+def write_seed(target: str, name: str, data: bytes) -> None:
+    path = CORPUS / target / f"{name}.seed"
+    path.write_bytes(data)
+
+
+def descriptor_seed(frame: bytes) -> bytes:
+    return bytes(
+        [
+            DESCRIPTOR_MARKER,
+            DESCRIPTOR_RESPONSE_BYTES_MINUS_ONE,
+            0,
+            1,
+            3,
+            7,
+            2,
+            5,
+            11,
+        ]
+    ) + frame
+
+
+def raw_loop_seed() -> bytes:
+    return bytes([1, 0, 0, 1, 1, 0, 0, 0, 0])
+
+
+def raw_truncated_seed() -> bytes:
+    return bytes([3, 19, 0, 64, 1])
+
+
+def raw_used_length_exceeded_seed() -> bytes:
+    return bytes(
+        [
+            0,
+            0,
+            0,
+            16,
+            2,
+            0,
+            0,
+            0,
+            0,
+        ]
+    ) + bytes(16) + bytes([1])
+
+
+def action(opcode: int, selector: int = 0, argument: int = 0, entropy: int = 0) -> bytes:
+    return bytes([opcode & 0xFF, selector & 0xFF]) + argument.to_bytes(2, "little") + entropy.to_bytes(
+        4, "little"
+    )
+
+
+def stateful_lifecycle_seed() -> bytes:
+    return b"".join(
+        [
+            action(0),
+            action(1),
+            action(2),
+            action(3),
+            action(4),
+            action(7),
+            action(5),
+            action(8),
+            action(9),
+            action(10),
+            action(11),
+            action(12),
+            action(13),
+            action(14),
+            action(15),
+        ]
+    )
+
+
+def stateful_stale_after_reset_seed() -> bytes:
+    return b"".join(
+        [
+            action(0),
+            action(1),
+            action(15),
+            action(17, selector=0x80),
+            action(16),
+        ]
+    )
+
+
+if __name__ == "__main__":
+    main()
