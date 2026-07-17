@@ -205,10 +205,7 @@ jobs:
           toolchain: nightly-2026-07-13
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
-        with:
-          tool: cargo-fuzz@0.13.2
-          fallback: none
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
 
       - name: Test shared fuzz harness
         run: cargo test --manifest-path fuzz/Cargo.toml --lib --no-default-features
