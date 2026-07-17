@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod fault;
 pub mod reference;
 
 use core::ops::Range;

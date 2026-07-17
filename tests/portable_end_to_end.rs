@@ -33,6 +33,10 @@ use virtio_accel::transport::{
     NotificationRecheck, PublishError, PublishedChain, QueueControl, QueueEpoch, QueueError,
     QueuePort, QueueSize, QueueState, RegionDirection, UsedChain, UsedLength,
 };
+use virtio_accel_mock::fault::{
+    FaultAccelerator, FaultAction, FaultBuffer, FaultContext, FaultControl, FaultEvent, FaultPoint,
+    FaultProgram, FaultQueue, FaultScript, FaultStep, ResourceState, ResourceTally,
+};
 use virtio_accel_mock::{
     MockAccelerator, MockBuffer, MockContext, MockEvent, MockProgram, MockQueue, reference,
 };
@@ -71,25 +75,25 @@ impl BackendControl {
 }
 
 struct ScenarioBackend {
-    inner: MockAccelerator,
+    inner: FaultAccelerator<MockAccelerator>,
     control: Rc<BackendControl>,
 }
 
 impl ScenarioBackend {
-    fn new(control: Rc<BackendControl>) -> Self {
+    fn new(control: Rc<BackendControl>, script: FaultScript) -> Self {
         Self {
-            inner: MockAccelerator::default(),
+            inner: FaultAccelerator::new(MockAccelerator::default(), script),
             control,
         }
     }
 }
 
 impl Accelerator for ScenarioBackend {
-    type Context = MockContext;
-    type Buffer = MockBuffer;
-    type Program = MockProgram;
-    type Queue = MockQueue;
-    type Event = MockEvent;
+    type Context = FaultContext<MockContext>;
+    type Buffer = FaultBuffer<MockBuffer>;
+    type Program = FaultProgram<MockProgram>;
+    type Queue = FaultQueue<MockQueue>;
+    type Event = FaultEvent<MockEvent>;
 
     fn device_info(&self) -> Result<BackendDeviceInfo, BackendError> {
         let mut info = self.inner.device_info()?;
@@ -174,7 +178,8 @@ impl Accelerator for ScenarioBackend {
         let event = self.inner.submit(queue, program, bindings, timeout)?;
         if mode == SUBMIT_AUTO_COMPLETE {
             self.inner
-                .complete(&event)
+                .inner()
+                .complete(event.inner())
                 .expect("fresh mock event completes exactly once");
         }
         Ok(event)
@@ -451,6 +456,26 @@ fn stack(
     max_inflight: u16,
     max_descriptors: u16,
 ) -> (TestClient, Rc<HarnessControl>, Rc<BackendControl>) {
+    let (client, harness, backend, _) = stack_with_faults(
+        queue_size,
+        max_inflight,
+        max_descriptors,
+        FaultScript::default(),
+    );
+    (client, harness, backend)
+}
+
+fn stack_with_faults(
+    queue_size: u16,
+    max_inflight: u16,
+    max_descriptors: u16,
+    script: FaultScript,
+) -> (
+    TestClient,
+    Rc<HarnessControl>,
+    Rc<BackendControl>,
+    FaultControl,
+) {
     let size = QueueSize::new(queue_size).unwrap();
     let mut queue = SplitQueue::new(size, max_descriptors).unwrap();
     QueueControl::configure(&mut queue, size).unwrap();
@@ -458,7 +483,8 @@ fn stack(
 
     let config = wire_config(max_descriptors);
     let backend_control = Rc::new(BackendControl::default());
-    let backend = ScenarioBackend::new(Rc::clone(&backend_control));
+    let backend = ScenarioBackend::new(Rc::clone(&backend_control), script);
+    let fault_control = backend.inner.control();
     let processor =
         CommandProcessor::new(backend, &config, ObjectNamespace::new(1).unwrap()).unwrap();
     let harness_control = Rc::new(HarnessControl::default());
@@ -474,6 +500,7 @@ fn stack(
         GuestClient::new(queue, guest_config).unwrap(),
         harness_control,
         backend_control,
+        fault_control,
     )
 }
 
@@ -482,6 +509,22 @@ fn standard_stack() -> (TestClient, Rc<HarnessControl>, Rc<BackendControl>) {
         STANDARD_QUEUE_SIZE,
         STANDARD_MAX_INFLIGHT,
         STANDARD_MAX_DESCRIPTORS,
+    )
+}
+
+fn fault_stack(
+    script: FaultScript,
+) -> (
+    TestClient,
+    Rc<HarnessControl>,
+    Rc<BackendControl>,
+    FaultControl,
+) {
+    stack_with_faults(
+        STANDARD_QUEUE_SIZE,
+        STANDARD_MAX_INFLIGHT,
+        STANDARD_MAX_DESCRIPTORS,
+        script,
     )
 }
 
@@ -1032,6 +1075,163 @@ fn reference_execution_is_observable_through_the_portable_stack() {
         .read_device_writable(RESPONSE_HEADER_BYTES, &mut output)
         .unwrap();
     assert_eq!(output, input.map(|byte| byte ^ 0x5a));
+}
+
+#[test]
+fn scripted_faults_preserve_ownership_through_guest_and_reset() {
+    let script = FaultScript::new([
+        FaultStep::new(
+            FaultPoint::AllocateBuffer,
+            1,
+            FaultAction::ErrorAfter(BackendError::OutOfMemory),
+        ),
+        FaultStep::new(
+            FaultPoint::Submit,
+            1,
+            FaultAction::Indeterminate(BackendError::DeadlineExpired),
+        ),
+        FaultStep::new(
+            FaultPoint::DestroyEvent,
+            1,
+            FaultAction::Indeterminate(BackendError::DeviceLost),
+        ),
+    ])
+    .unwrap();
+    let (mut client, control, _, faults) = fault_stack(script);
+    discover(&mut client);
+
+    let pending = client
+        .create_context(chain(
+            size_of::<RequestHeader>() + size_of::<CreateContextRequest>(),
+            size_of::<ResponseHeader>() + size_of::<ObjectPayload>(),
+        ))
+        .unwrap();
+    let (context, _) = success(&mut client, pending);
+    let desc = BufferDesc::new(
+        64,
+        16,
+        MemoryDomain::Shared,
+        BufferUsage::TRANSFER_SOURCE
+            | BufferUsage::TRANSFER_DESTINATION
+            | BufferUsage::PROGRAM_INPUT
+            | BufferUsage::PROGRAM_OUTPUT
+            | BufferUsage::MUTABLE_STATE,
+    )
+    .unwrap();
+    let pending = client
+        .allocate_buffer(
+            chain(
+                size_of::<RequestHeader>() + size_of::<AllocateBufferRequest>(),
+                size_of::<ResponseHeader>() + size_of::<ObjectPayload>(),
+            ),
+            &context,
+            desc,
+        )
+        .unwrap();
+    let _operation = device_error(&mut client, pending, StatusCode::OUT_OF_MEMORY);
+
+    let pending = client
+        .allocate_buffer(
+            chain(
+                size_of::<RequestHeader>() + size_of::<AllocateBufferRequest>(),
+                size_of::<ResponseHeader>() + size_of::<ObjectPayload>(),
+            ),
+            &context,
+            desc,
+        )
+        .unwrap();
+    let (buffer, _) = success(&mut client, pending);
+    let program_desc = ProgramDesc::new(
+        NonZeroU32::new(reference::ARTIFACT_FORMAT.get()).unwrap(),
+        reference::TARGET_IDENTITY.0,
+        NonZeroU64::new(reference::RESIDENT_BYTES).unwrap(),
+    );
+    let artifact = reference::ReferenceArtifact::xor(0, 0x5a);
+    let pending = client
+        .load_program(
+            chain(
+                size_of::<RequestHeader>()
+                    + size_of::<LoadProgramRequest>()
+                    + reference::ARTIFACT_BYTES,
+                size_of::<ResponseHeader>() + size_of::<ObjectPayload>(),
+            ),
+            &context,
+            program_desc,
+            artifact.as_bytes().as_slice(),
+        )
+        .unwrap();
+    let (program, _) = success(&mut client, pending);
+    let pending = client
+        .create_execution_queue(
+            chain(
+                size_of::<RequestHeader>() + size_of::<CreateQueueRequest>(),
+                size_of::<ResponseHeader>() + size_of::<ObjectPayload>(),
+            ),
+            &context,
+        )
+        .unwrap();
+    let (queue, _) = success(&mut client, pending);
+    let resources = Resources {
+        context,
+        buffer,
+        program,
+        queue,
+    };
+
+    let pending = submit(&mut client, &resources, 0);
+    let (outcome, _) = success(&mut client, pending);
+    let SubmissionOutcome::Indeterminate {
+        status,
+        event: _event,
+    } = outcome
+    else {
+        panic!("scripted submit did not preserve its accepted event")
+    };
+    assert_eq!(status, StatusCode::DEADLINE_EXPIRED);
+
+    let next_epoch = client.queue_state().epoch().checked_next().unwrap();
+    assert_eq!(client.reset(next_epoch).unwrap().count(), 0);
+    let report = control.last_reset.get().unwrap();
+    assert_eq!(report.disposition, ResetDisposition::BackendDiscardRequired);
+    assert_eq!(
+        report.quarantined,
+        virtio_accel::device::ResourceCounts {
+            contexts: 1,
+            buffers: 1,
+            programs: 1,
+            queues: 1,
+            events: 1,
+        }
+    );
+    let snapshot = faults.snapshot();
+    assert!(snapshot.pending_faults.is_empty());
+    assert_eq!(
+        snapshot.resources_in(ResourceState::Live),
+        ResourceTally {
+            contexts: 1,
+            buffers: 1,
+            programs: 1,
+            queues: 1,
+            events: 0,
+        }
+    );
+    assert_eq!(
+        snapshot.resources_in(ResourceState::Indeterminate),
+        ResourceTally {
+            events: 1,
+            ..ResourceTally::default()
+        }
+    );
+    assert!(snapshot.releases.iter().any(|record| record.rollback));
+    assert!(snapshot.releases.iter().any(|record| {
+        record.kind == virtio_accel_mock::fault::ResourceKind::Event
+            && matches!(
+                record.outcome,
+                virtio_accel_mock::fault::ReleaseOutcome::Indeterminate(BackendError::DeviceLost)
+            )
+    }));
+    faults.discard_all();
+    assert!(faults.snapshot().is_clean());
 }
 
 #[test]
