@@ -113,10 +113,9 @@ internal allocation, so a backend or isolated provider worker must enforce its o
 memory and work budget when hostile artifacts can expand beyond their bounded input.
 
 Object-table capacity and per-event binding vectors are bounded by count limits rather than byte
-estimates because their Rust layout is implementation-specific. Quantitative retained metadata and
-allocation budgets are measured by issue
-[#29](https://github.com/MicroPerceptron/virtio-accel/issues/29); changing their representation does
-not change the security bounds above.
+estimates because their Rust layout is implementation-specific. Quantitative retained metadata,
+allocation, and copy-path budgets are tracked in [performance.md](performance.md); changing their
+representation does not change the security bounds above.
 
 ## Progress and denial of service
 

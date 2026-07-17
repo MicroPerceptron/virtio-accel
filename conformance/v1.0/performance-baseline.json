@@ -1,0 +1,49 @@
+{
+  "schema": "virtio-accel-performance-baseline-1",
+  "protocol": "1.0",
+  "budgets": "performance-budgets.json",
+  "captured_at": "2026-07-17",
+  "toolchain": {
+    "rustc": "rustc 1.98.0-nightly (c397dae80 2026-07-02)",
+    "cargo": "cargo 1.98.0-nightly (a335d47ff 2026-06-26)",
+    "msrv": "1.85.0"
+  },
+  "host": {
+    "kind": "developer-baseline",
+    "os": "macOS",
+    "arch": "aarch64",
+    "hardware_acceleration": "none"
+  },
+  "ci_hosts": [
+    "ubuntu-latest",
+    "macos-latest",
+    "windows-latest"
+  ],
+  "deterministic_results": [
+    {
+      "operation": "wire.request_decode_non_submit",
+      "metric": "load_program_bulk_tail_read_bytes",
+      "value": 0,
+      "threshold": 0
+    },
+    {
+      "operation": "wire.submit_decode",
+      "metric": "unvalidated_binding_tail_read_bytes",
+      "value": 0,
+      "threshold": 0
+    },
+    {
+      "operation": "device.submission_admission",
+      "metric": "hidden_direct_binding_staged_bytes",
+      "value": 0,
+      "threshold": 0
+    },
+    {
+      "operation": "provider.copy_path_diagnostics",
+      "metric": "hidden_direct_binding_staged_bindings",
+      "value": 0,
+      "threshold": 0
+    }
+  ],
+  "timing_results": []
+}

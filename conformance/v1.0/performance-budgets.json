@@ -1,0 +1,131 @@
+{
+  "schema": "virtio-accel-performance-budgets-1",
+  "protocol": "1.0",
+  "methodology": {
+    "timing": "CI enforces deterministic allocation, copy, and complexity budgets; wall-clock timings are release evidence and are compared only with noise-tolerant policy.",
+    "host_model": "Portable hosts without hardware acceleration exercise the wire, queue, command-engine, and reference-backend layers. Provider hooks add hardware evidence later without changing this artifact.",
+    "guest_counts": "All allocation sizes derived from guest-controlled counts are bounded by validated device limits before reservation."
+  },
+  "regression_policy": {
+    "ci": [
+      "python3 ci/check-performance-budgets.py --check",
+      "cargo test --test performance_budgets --all-features",
+      "cargo test -p virtio-accel-conformance --all-features"
+    ],
+    "timing_threshold": "A release job may compare median native-host timings against the checked-in baseline using a 15% warning threshold and a 30% failure threshold after five warmup iterations.",
+    "copy_threshold": "Hidden direct-binding submission staging is always a failure; explicit transfer bytes are reported separately from accelerator execution."
+  },
+  "operations": [
+    {
+      "id": "wire.config_decode",
+      "path": "hot",
+      "complexity": "O(1)",
+      "allocation_profile": "zero allocations",
+      "copy_profile": "fixed-size scalar copy only",
+      "permitted_copy_boundary": "none",
+      "allocates_from_unvalidated_guest_count": false,
+      "thresholds": { "max_allocations_per_call": 0, "max_hidden_staged_bytes": 0 }
+    },
+    {
+      "id": "wire.request_decode_non_submit",
+      "path": "hot",
+      "complexity": "O(1) for scalar requests; O(d) descriptor validation before decode",
+      "allocation_profile": "zero allocations",
+      "copy_profile": "fixed prefix copies only; transfer and artifact tails remain borrowed byte regions",
+      "permitted_copy_boundary": "none",
+      "allocates_from_unvalidated_guest_count": false,
+      "thresholds": { "max_allocations_per_call": 0, "max_hidden_staged_bytes": 0 }
+    },
+    {
+      "id": "wire.submit_decode",
+      "path": "hot",
+      "complexity": "O(b log b), where b is validated binding_count",
+      "allocation_profile": "one bounded decoded-binding vector after binding_count <= max_bindings_per_submission <= HARD_MAX_BINDINGS",
+      "copy_profile": "binding metadata only; no buffer range bytes are read or copied",
+      "permitted_copy_boundary": "none",
+      "allocates_from_unvalidated_guest_count": false,
+      "budget_exception": "The portable decoder owns one bounded metadata vector for duplicate-slot validation; this is not provider staging and does not contain buffer contents.",
+      "thresholds": { "max_hidden_staged_bytes": 0 }
+    },
+    {
+      "id": "transport.segmented_region_access",
+      "path": "hot",
+      "complexity": "O(s + n), where s is segment count and n is requested bytes",
+      "allocation_profile": "zero allocations",
+      "copy_profile": "exact requested byte range only",
+      "permitted_copy_boundary": "explicit ByteSource::read_at or ByteSink::write_at caller request",
+      "allocates_from_unvalidated_guest_count": false,
+      "thresholds": { "max_allocations_per_call": 0 }
+    },
+    {
+      "id": "state.object_lookup",
+      "path": "hot",
+      "complexity": "O(1) slot lookup plus generation/kind validation",
+      "allocation_profile": "zero allocations",
+      "copy_profile": "no content copies",
+      "permitted_copy_boundary": "none",
+      "allocates_from_unvalidated_guest_count": false,
+      "thresholds": { "max_allocations_per_call": 0, "max_hidden_staged_bytes": 0 }
+    },
+    {
+      "id": "device.command_dispatch",
+      "path": "hot",
+      "complexity": "O(d + request-specific validation)",
+      "allocation_profile": "inherits request decoder budget; creation paths reserve one bounded object-table slot before backend mutation",
+      "copy_profile": "response header/object payload copies only unless the opcode is an explicit transfer",
+      "permitted_copy_boundary": "response publication",
+      "allocates_from_unvalidated_guest_count": false,
+      "thresholds": { "max_hidden_staged_bytes": 0 }
+    },
+    {
+      "id": "device.submission_admission",
+      "path": "hot",
+      "complexity": "O(b log b + object lookups)",
+      "allocation_profile": "bounded event dependency storage and native binding metadata after decode validation; providers must not allocate hidden direct-binding bounce buffers",
+      "copy_profile": "metadata only; no full-range program-buffer copy",
+      "permitted_copy_boundary": "none",
+      "allocates_from_unvalidated_guest_count": false,
+      "thresholds": { "max_hidden_direct_binding_staged_bytes": 0, "max_hidden_direct_binding_staged_bindings": 0 }
+    },
+    {
+      "id": "device.polling",
+      "path": "hot",
+      "complexity": "O(1)",
+      "allocation_profile": "zero allocations",
+      "copy_profile": "event-state scalar response only",
+      "permitted_copy_boundary": "response publication",
+      "allocates_from_unvalidated_guest_count": false,
+      "thresholds": { "max_allocations_per_call": 0, "max_hidden_staged_bytes": 0 }
+    },
+    {
+      "id": "device.reset",
+      "path": "recovery",
+      "complexity": "O(contexts + buffers + programs + queues + events + retained event bindings)",
+      "allocation_profile": "zero new guest-count-derived allocations; releases existing owned state",
+      "copy_profile": "no buffer-content copies",
+      "permitted_copy_boundary": "none",
+      "allocates_from_unvalidated_guest_count": false,
+      "thresholds": { "max_hidden_staged_bytes": 0 }
+    },
+    {
+      "id": "provider.explicit_transfer",
+      "path": "explicit_copy",
+      "complexity": "O(n + s), where n is explicit transfer bytes and s is segment count",
+      "allocation_profile": "bounded provider staging is allowed only inside read_buffer/write_buffer for device-local transfers",
+      "copy_profile": "explicit transfer bytes are counted separately from staged bytes and accelerator execution time",
+      "permitted_copy_boundary": "Accelerator::write_buffer and Accelerator::read_buffer",
+      "allocates_from_unvalidated_guest_count": false,
+      "thresholds": { "report_explicit_transfer_bytes": true }
+    },
+    {
+      "id": "provider.copy_path_diagnostics",
+      "path": "provider_hook",
+      "complexity": "O(1) sampling of cumulative counters",
+      "allocation_profile": "zero allocations",
+      "copy_profile": "distinguishes direct, shared/imported, staged-direct, staged bytes, and explicit transfer bytes",
+      "permitted_copy_boundary": "diagnostic reporting only",
+      "allocates_from_unvalidated_guest_count": false,
+      "thresholds": { "max_hidden_direct_binding_staged_bytes": 0, "max_hidden_direct_binding_staged_bindings": 0 }
+    }
+  ]
+}

@@ -239,10 +239,10 @@ allocation in place; event state takes ownership of the retained-ID allocation. 
 buffer contents, boxes individual bindings, or survives event reclamation except the retained ID
 list required for exactly-once reference release.
 
-Issue #29 owns quantitative evidence: explicit-transfer bytes, staged bytes and allocations,
-submission allocations, retained memory, and host preparation versus device execution time. A
-backend should be diagnosable when it misses the intended path rather than requiring a profiler to
-discover an undocumented copy.
+[performance.md](performance.md) owns quantitative evidence: explicit-transfer bytes, staged bytes
+and allocations, submission allocations, retained memory, and host preparation versus device
+execution time. A backend should be diagnosable when it misses the intended path rather than
+requiring a profiler to discover an undocumented copy.
 
 ## Deterministic reference execution
 
@@ -308,8 +308,8 @@ broken adapters prove that each major contract area produces a named failure.
 The suite is portable `std` test tooling rather than a production dependency. It preserves static
 backend and handle dispatch and introduces no wire types, virtqueues, host APIs, threads, or global
 synchronization. The [backend implementer guide](backend-implementer-guide.md) maps each case to
-trait obligations and separates semantic evidence from issue #29's quantitative allocation and
-copy budgets.
+trait obligations and separates semantic evidence from the quantitative allocation and copy budgets
+in [performance.md](performance.md).
 
 ## Next implementation boundary
 

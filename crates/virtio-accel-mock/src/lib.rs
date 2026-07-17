@@ -138,6 +138,7 @@ impl MockInvocation {
 
 pub struct MockAccelerator {
     next_id: AtomicU64,
+    direct_binding_admissions: AtomicU64,
     info: DeviceInfo,
 }
 
@@ -145,6 +146,7 @@ impl Default for MockAccelerator {
     fn default() -> Self {
         Self {
             next_id: AtomicU64::new(1),
+            direct_binding_admissions: AtomicU64::new(0),
             info: DeviceInfo {
                 identity: DeviceIdentity {
                     uuid: *b"virtio-accelmock",
@@ -172,6 +174,11 @@ impl Default for MockAccelerator {
 }
 
 impl MockAccelerator {
+    /// Cumulative provider-owned bindings admitted without hidden submission staging.
+    pub fn direct_binding_admissions(&self) -> u64 {
+        self.direct_binding_admissions.load(Ordering::Relaxed)
+    }
+
     pub fn complete(&self, event: &MockEvent) -> Result<(), BackendError> {
         event
             .inner
@@ -520,6 +527,8 @@ impl Accelerator for MockAccelerator {
         }
         let invocation = Self::prepare_invocation(program.operation, bindings)
             .map_err(SubmitFailure::Rejected)?;
+        self.direct_binding_admissions
+            .fetch_add(bindings.len() as u64, Ordering::Relaxed);
         Ok(MockEvent {
             inner: Arc::new(MockEventInner {
                 state: AtomicU8::new(EVENT_PENDING),
