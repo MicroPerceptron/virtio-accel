@@ -68,8 +68,9 @@ model, compatibility rules, and mandatory baseline. The exact byte layouts live 
 [docs/architecture.md](docs/architecture.md) for implementation invariants and
 [docs/threat-model.md](docs/threat-model.md) for trust boundaries and finite resource policy, and
 [docs/portability.md](docs/portability.md) for the enforced target matrix. The v1 performance and
-copy budgets are tracked in [docs/performance.md](docs/performance.md). Backend authors can run the
-standard semantic suite using the
+copy budgets are tracked in [docs/performance.md](docs/performance.md), and the public rustdoc
+policy is in [docs/public-api.md](docs/public-api.md). Backend authors can run the standard
+semantic suite using the
 [accelerator backend implementer guide](docs/backend-implementer-guide.md).
 
 The primary `zerocopy` ABI and the manual clean-room codec both decode and re-encode every canonical
@@ -82,6 +83,8 @@ without making the conformance codec a production dependency.
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
+cargo run --example backend_conformance
+cargo run --example reference_execution
 ```
 
 The project remains pre-standardization work and claims no Virtio device ID. Protocol 1.0 numeric

@@ -83,6 +83,12 @@ jobs:
       - name: Run documentation tests
         run: cargo test --workspace --doc --all-features
 
+      - name: Run backend conformance example
+        run: cargo run --example backend_conformance
+
+      - name: Run reference execution example
+        run: cargo run --example reference_execution
+
       - name: Check release profile
         run: cargo check --workspace --release --all-features
 

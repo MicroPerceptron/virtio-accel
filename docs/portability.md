@@ -11,7 +11,7 @@ Rust 2024 edition selected by the workspace. Every package inherits the same `ru
 | Job | Toolchain and targets | Contract enforced |
 |---|---|---|
 | `style-and-api` | Current stable on Ubuntu | Formatting, complete normative-requirement ledger, Clippy with warnings denied, and warning-free public docs |
-| `native-test` | Current stable on Ubuntu, macOS, and Windows | All workspace unit, integration, target, feature, and documentation tests plus release-profile checking |
+| `native-test` | Current stable on Ubuntu, macOS, and Windows | All workspace unit, integration, target, feature, and documentation tests, runnable examples, and release-profile checking |
 | `msrv` | Rust 1.85.0 on Ubuntu | Every workspace target and test continues to compile at the declared MSRV |
 | `portable-target` | Stable `aarch64-unknown-none`, `riscv64gc-unknown-none-elf`, and `wasm32-unknown-unknown` | `cleanroom`, `proto`, `transport`, and `core` remain `no_std`; guest, split-queue, device, and facade layers require at most `alloc`; Wasm also checks the std reference crates |
 | `feature-sets-and-dependencies` | Stable on Ubuntu | Every Cargo feature combination plus dependency and `std`/`alloc` leakage guards for the portable codecs, queue ports, and core |
@@ -74,6 +74,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 cargo test --workspace --all-targets --all-features
 cargo test -p virtio-accel-device --test state_model
 cargo test --workspace --doc --all-features
+cargo run --example backend_conformance
+cargo run --example reference_execution
 cargo +1.85.0 check --workspace --all-targets --all-features
 cargo hack check --workspace --feature-powerset --no-dev-deps
 bash ci/check-portable-dependencies.sh

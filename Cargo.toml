@@ -33,6 +33,7 @@ serde_json = "1.0.149"
 zerocopy = { version = "0.8.54", default-features = false, features = ["derive"] }
 virtio-accel-core = { path = "crates/virtio-accel-core" }
 virtio-accel-cleanroom = { path = "conformance/rust-clean-room" }
+virtio-accel-conformance = { path = "crates/virtio-accel-conformance" }
 virtio-accel-device = { path = "crates/virtio-accel-device" }
 virtio-accel-guest = { path = "crates/virtio-accel-guest" }
 virtio-accel-mock = { path = "crates/virtio-accel-mock" }
@@ -50,4 +51,5 @@ virtio-accel-transport.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+virtio-accel-conformance.workspace = true
 virtio-accel-mock.workspace = true

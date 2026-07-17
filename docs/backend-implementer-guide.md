@@ -11,6 +11,9 @@ provider-owned inputs:
 2. One executable `TargetDescription` containing an artifact and one observable binding.
 3. A `ConformanceHooks` implementation that advances a pending event to successful completion.
 
+The same flow is available as a runnable crate-level example:
+`cargo run --example backend_conformance`.
+
 The completion hook is test control, not a new production requirement. A backend with an external
 scheduler can signal that scheduler; a deterministic backend can execute the retained invocation
 directly. The target operation must remain pending until the hook runs, transform the fixture's
@@ -174,6 +177,10 @@ Use `virtio_accel_mock::fault::FaultAccelerator` or an equivalent provider-local
 rejected and indeterminate outcomes at each native API boundary. The standard suite remains usable
 without a vendor fault API, while the command-engine and full-stack fault tests prove the portable
 recovery policy.
+
+For a complete successful lifecycle without the conformance harness, run
+`cargo run --example reference_execution`. It demonstrates the portable context, buffer, program,
+queue, submit, poll, transfer, and teardown sequence against the mock backend.
 
 ## Common traps
 

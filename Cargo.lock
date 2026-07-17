@@ -102,6 +102,7 @@ name = "virtio-accel"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "virtio-accel-conformance",
  "virtio-accel-core",
  "virtio-accel-device",
  "virtio-accel-guest",
