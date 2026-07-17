@@ -543,4 +543,4 @@ model or is identified as an implementation helper.
 | `DeviceState`, typed record types, `ChildCounts` | Context-scoped ownership graph, quotas, and in-flight reference accounting |
 | `ReleaseState`, `CreateError`, `RestoreError` | Device-state admission and release rollback helpers |
 | `status_from_backend_error`, `status_from_object_table_error`, `status_from_device_state_error` | Device implementation mapping helpers |
-| `MockAccelerator` and mock handle types | Reference/test implementation, not normative protocol |
+| `MockAccelerator`, `FaultAccelerator`, and their handle types | Reference/test implementation, not normative protocol |

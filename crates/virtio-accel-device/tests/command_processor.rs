@@ -14,6 +14,9 @@ use virtio_accel_device::{
     ResetDisposition, ResetError, ResourceCounts, ResponseWriteError, SegmentedSink,
     SegmentedSource, UnusableFrame,
 };
+use virtio_accel_mock::fault::{
+    FaultAccelerator, FaultAction, FaultPoint, FaultScript, FaultStep, ResourceState,
+};
 use virtio_accel_mock::{
     MockAccelerator, MockBuffer, MockContext, MockEvent, MockProgram, MockQueue, reference,
 };
@@ -351,8 +354,8 @@ fn object_request(opcode: virtio_accel_proto::KnownOpcode, id: ObjectId) -> Vec<
     )
 }
 
-fn run(
-    processor: &mut CommandProcessor<RecordingBackend>,
+fn run<A: Accelerator>(
+    processor: &mut CommandProcessor<A>,
     request: &[u8],
     response_capacity: usize,
 ) -> (CommandOutcome, Vec<u8>) {
@@ -388,7 +391,7 @@ fn object_id(response: &[u8]) -> ObjectId {
     ObjectId::from_raw(payload.object_id.get()).unwrap()
 }
 
-fn create_context(processor: &mut CommandProcessor<RecordingBackend>) -> ObjectId {
+fn create_context<A: Accelerator>(processor: &mut CommandProcessor<A>) -> ObjectId {
     let frame = request(
         virtio_accel_proto::KnownOpcode::CreateContext,
         CreateContextRequest {
@@ -402,8 +405,8 @@ fn create_context(processor: &mut CommandProcessor<RecordingBackend>) -> ObjectI
     object_id(&response)
 }
 
-fn allocate_buffer(
-    processor: &mut CommandProcessor<RecordingBackend>,
+fn allocate_buffer<A: Accelerator>(
+    processor: &mut CommandProcessor<A>,
     context_id: ObjectId,
 ) -> ObjectId {
     allocate_buffer_with_usage(
@@ -413,8 +416,8 @@ fn allocate_buffer(
     )
 }
 
-fn allocate_buffer_with_usage(
-    processor: &mut CommandProcessor<RecordingBackend>,
+fn allocate_buffer_with_usage<A: Accelerator>(
+    processor: &mut CommandProcessor<A>,
     context_id: ObjectId,
     usage: BufferUsage,
 ) -> ObjectId {
@@ -436,8 +439,8 @@ fn allocate_buffer_with_usage(
     object_id(&response)
 }
 
-fn load_program(
-    processor: &mut CommandProcessor<RecordingBackend>,
+fn load_program<A: Accelerator>(
+    processor: &mut CommandProcessor<A>,
     context_id: ObjectId,
 ) -> ObjectId {
     let artifact = reference::ReferenceArtifact::barrier(0);
@@ -460,8 +463,8 @@ fn load_program(
     object_id(&response)
 }
 
-fn create_queue(
-    processor: &mut CommandProcessor<RecordingBackend>,
+fn create_queue<A: Accelerator>(
+    processor: &mut CommandProcessor<A>,
     context_id: ObjectId,
 ) -> ObjectId {
     let frame = request(
@@ -478,8 +481,8 @@ fn create_queue(
     object_id(&response)
 }
 
-fn submission_objects(
-    processor: &mut CommandProcessor<RecordingBackend>,
+fn submission_objects<A: Accelerator>(
+    processor: &mut CommandProcessor<A>,
     usage: BufferUsage,
 ) -> (ObjectId, ObjectId, ObjectId, ObjectId) {
     let context = create_context(processor);
@@ -552,6 +555,279 @@ fn invalid_config_is_rejected_before_backend_discovery() {
         ))
     ));
     assert_eq!(device_info_calls.get(), 0);
+}
+
+#[test]
+fn deterministic_fault_script_preserves_command_engine_ownership() {
+    let discovery_script = FaultScript::new([FaultStep::new(
+        FaultPoint::DeviceInfo,
+        1,
+        FaultAction::ErrorBefore(BackendError::Busy),
+    )])
+    .unwrap();
+    let backend = FaultAccelerator::new(MockAccelerator::default(), discovery_script);
+    let discovery_control = backend.control();
+    assert_eq!(
+        CommandProcessor::new(backend, &config(), ObjectNamespace::new(1).unwrap()).unwrap_err(),
+        CommandProcessorInitError::Backend(BackendError::Busy)
+    );
+    assert!(discovery_control.snapshot().is_clean());
+
+    let script = FaultScript::new([
+        FaultStep::new(
+            FaultPoint::CreateContext,
+            1,
+            FaultAction::ErrorBefore(BackendError::OutOfMemory),
+        ),
+        FaultStep::new(
+            FaultPoint::AllocateBuffer,
+            1,
+            FaultAction::ErrorAfter(BackendError::OutOfMemory),
+        ),
+        FaultStep::new(
+            FaultPoint::WriteBuffer,
+            1,
+            FaultAction::ErrorAfter(BackendError::Busy),
+        ),
+        FaultStep::new(
+            FaultPoint::ReadBuffer,
+            1,
+            FaultAction::ErrorAfter(BackendError::Busy),
+        ),
+        FaultStep::new(
+            FaultPoint::LoadProgram,
+            1,
+            FaultAction::ErrorAfter(BackendError::OutOfMemory),
+        ),
+        FaultStep::new(
+            FaultPoint::CreateQueue,
+            1,
+            FaultAction::ErrorAfter(BackendError::ResourceLimit),
+        ),
+        FaultStep::new(
+            FaultPoint::Submit,
+            1,
+            FaultAction::Rejected(BackendError::Busy),
+        ),
+        FaultStep::new(
+            FaultPoint::PollEvent,
+            1,
+            FaultAction::ErrorBefore(BackendError::Busy),
+        ),
+        FaultStep::new(
+            FaultPoint::CancelEvent,
+            1,
+            FaultAction::ErrorBefore(BackendError::Busy),
+        ),
+        FaultStep::new(
+            FaultPoint::DestroyEvent,
+            1,
+            FaultAction::Rejected(BackendError::Busy),
+        ),
+        FaultStep::new(
+            FaultPoint::DestroyQueue,
+            1,
+            FaultAction::Rejected(BackendError::Busy),
+        ),
+        FaultStep::new(
+            FaultPoint::UnloadProgram,
+            1,
+            FaultAction::Rejected(BackendError::Busy),
+        ),
+        FaultStep::new(
+            FaultPoint::FreeBuffer,
+            1,
+            FaultAction::Rejected(BackendError::Busy),
+        ),
+        FaultStep::new(
+            FaultPoint::DestroyContext,
+            1,
+            FaultAction::Indeterminate(BackendError::DeviceLost),
+        ),
+    ])
+    .unwrap();
+    let backend = FaultAccelerator::new(MockAccelerator::default(), script);
+    let control = backend.control();
+    let mut processor =
+        CommandProcessor::new(backend, &config(), ObjectNamespace::new(1).unwrap()).unwrap();
+
+    let create = request(
+        virtio_accel_proto::KnownOpcode::CreateContext,
+        CreateContextRequest {
+            flags: Le32::new(0),
+            reserved: Le32::new(0),
+        }
+        .as_bytes(),
+    );
+    assert_eq!(
+        status(run(&mut processor, &create, 24).0),
+        StatusCode::OUT_OF_MEMORY
+    );
+    assert_eq!(
+        processor.state().resource_counts(),
+        ResourceCounts::default()
+    );
+    let context = create_context(&mut processor);
+
+    let usage = BufferUsage::TRANSFER_SOURCE
+        | BufferUsage::TRANSFER_DESTINATION
+        | BufferUsage::PROGRAM_INPUT;
+    let allocate = request(
+        virtio_accel_proto::KnownOpcode::AllocateBuffer,
+        AllocateBufferRequest {
+            context_id: Le64::new(context.get()),
+            bytes: Le64::new(8),
+            alignment: Le64::new(1),
+            memory_domain: MemoryDomain::Host as u8,
+            reserved0: [0; 7],
+            usage: Le32::new(usage.bits()),
+            reserved1: Le32::new(0),
+        }
+        .as_bytes(),
+    );
+    assert_eq!(
+        status(run(&mut processor, &allocate, 24).0),
+        StatusCode::OUT_OF_MEMORY
+    );
+    assert_eq!(
+        processor.state().resource_counts(),
+        ResourceCounts {
+            contexts: 1,
+            ..ResourceCounts::default()
+        }
+    );
+    let buffer = allocate_buffer_with_usage(&mut processor, context, usage);
+
+    let transfer = TransferBufferRequest {
+        buffer_id: Le64::new(buffer.get()),
+        offset: Le64::new(0),
+        bytes: Le64::new(8),
+    };
+    let mut write_payload = Vec::from(transfer.as_bytes());
+    write_payload.extend_from_slice(b"scripted");
+    let write = request(virtio_accel_proto::KnownOpcode::WriteBuffer, &write_payload);
+    assert_eq!(status(run(&mut processor, &write, 16).0), StatusCode::BUSY);
+    assert_eq!(status(run(&mut processor, &write, 16).0), StatusCode::OK);
+
+    let read = request(
+        virtio_accel_proto::KnownOpcode::ReadBuffer,
+        transfer.as_bytes(),
+    );
+    let (outcome, _) = run(&mut processor, &read, 24);
+    assert!(matches!(
+        outcome,
+        CommandOutcome::Response {
+            status: StatusCode::BUSY,
+            used: 16,
+            ..
+        }
+    ));
+    let (outcome, response) = run(&mut processor, &read, 24);
+    assert_eq!(status(outcome), StatusCode::OK);
+    assert_eq!(&response[16..24], b"scripted");
+
+    let artifact = reference::ReferenceArtifact::barrier(0);
+    let load = LoadProgramRequest {
+        context_id: Le64::new(context.get()),
+        format: Le32::new(reference::ARTIFACT_FORMAT.get()),
+        flags: Le32::new(0),
+        target: reference::TARGET_IDENTITY.0.map(Le32::new),
+        payload_bytes: Le64::new(reference::ARTIFACT_BYTES as u64),
+        resident_bytes: Le64::new(reference::RESIDENT_BYTES),
+    };
+    let mut load_payload = Vec::from(load.as_bytes());
+    load_payload.extend_from_slice(artifact.as_bytes());
+    let load = request(virtio_accel_proto::KnownOpcode::LoadProgram, &load_payload);
+    assert_eq!(
+        status(run(&mut processor, &load, 24).0),
+        StatusCode::OUT_OF_MEMORY
+    );
+    assert_eq!(processor.state().resource_counts().programs, 0);
+    let program = load_program(&mut processor, context);
+
+    let create_queue_frame = request(
+        virtio_accel_proto::KnownOpcode::CreateQueue,
+        CreateQueueRequest {
+            context_id: Le64::new(context.get()),
+            flags: Le32::new(0),
+            reserved: Le32::new(0),
+        }
+        .as_bytes(),
+    );
+    assert_eq!(
+        status(run(&mut processor, &create_queue_frame, 24).0),
+        StatusCode::RESOURCE_LIMIT
+    );
+    assert_eq!(processor.state().resource_counts().queues, 0);
+    let queue = create_queue(&mut processor, context);
+
+    let submit = submit_request(queue, program, buffer, 0, 8, AccessMode::Read);
+    assert_eq!(status(run(&mut processor, &submit, 24).0), StatusCode::BUSY);
+    assert_eq!(processor.state().event_count(), 0);
+    assert_eq!(
+        processor.state().buffer_record(buffer).unwrap().in_flight(),
+        0
+    );
+    let (outcome, response) = run(&mut processor, &submit, 24);
+    assert_eq!(status(outcome), StatusCode::OK);
+    let event = event_id(&response);
+
+    let poll = object_request(virtio_accel_proto::KnownOpcode::PollEvent, event);
+    assert_eq!(status(run(&mut processor, &poll, 24).0), StatusCode::BUSY);
+    assert_eq!(processor.state().event_count(), 1);
+    let cancel = object_request(virtio_accel_proto::KnownOpcode::CancelEvent, event);
+    assert_eq!(status(run(&mut processor, &cancel, 16).0), StatusCode::BUSY);
+    assert_eq!(status(run(&mut processor, &cancel, 16).0), StatusCode::OK);
+
+    let destroy_event = object_request(virtio_accel_proto::KnownOpcode::DestroyEvent, event);
+    assert_eq!(
+        status(run(&mut processor, &destroy_event, 16).0),
+        StatusCode::BUSY
+    );
+    assert_eq!(processor.state().event_count(), 1);
+    assert_eq!(
+        status(run(&mut processor, &destroy_event, 16).0),
+        StatusCode::OK
+    );
+    assert_eq!(processor.state().event_count(), 0);
+
+    for (opcode, id) in [
+        (virtio_accel_proto::KnownOpcode::DestroyQueue, queue),
+        (virtio_accel_proto::KnownOpcode::UnloadProgram, program),
+        (virtio_accel_proto::KnownOpcode::FreeBuffer, buffer),
+    ] {
+        let frame = object_request(opcode, id);
+        assert_eq!(status(run(&mut processor, &frame, 16).0), StatusCode::BUSY);
+        assert_eq!(status(run(&mut processor, &frame, 16).0), StatusCode::OK);
+    }
+    assert_eq!(
+        processor.state().resource_counts(),
+        ResourceCounts {
+            contexts: 1,
+            ..ResourceCounts::default()
+        }
+    );
+
+    let destroy_context = object_request(virtio_accel_proto::KnownOpcode::DestroyContext, context);
+    assert_eq!(
+        status(run(&mut processor, &destroy_context, 16).0),
+        StatusCode::DEVICE_LOST
+    );
+    assert_eq!(
+        processor.state().resource_counts(),
+        ResourceCounts::default()
+    );
+    assert_eq!(processor.health(), DeviceHealth::BackendDiscardRequired);
+
+    let snapshot = control.snapshot();
+    assert!(snapshot.pending_faults.is_empty());
+    assert!(snapshot.violations.is_empty());
+    assert_eq!(
+        snapshot.resources_in(ResourceState::Indeterminate).contexts,
+        1
+    );
+    control.discard_all();
+    assert!(control.snapshot().is_clean());
 }
 
 #[test]

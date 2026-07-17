@@ -259,6 +259,29 @@ loss report `Busy`. Completion publishes buffer mutations before the terminal ev
 the harness controls latency and completion order by deciding when and in which order to complete
 accepted events.
 
+## Deterministic fault injection
+
+`virtio-accel-mock::fault::FaultAccelerator<A>` wraps any backend with a validated explicit fault
+script. Each step selects one `Accelerator` method, its one-based call occurrence, and a compatible
+action: error before invocation, error after successful invocation, rejected ownership transfer,
+indeterminate ownership transfer, or a persistent terminal event completion. Post-create errors
+synchronously release the newly created provider resource before returning the injected error.
+Post-admission submission errors always return an event as indeterminate rather than misreporting
+accepted work as rejected.
+
+The wrapper assigns harness-local IDs to contexts, buffers, programs, queues, and events. Its audit
+snapshot records every method call, injected action, release attempt, rollback, remaining script
+step, and last known provider ownership state. It also tracks context children and the resources
+retained by each event, rejecting double release, use after release, parent release with live
+children, and release of an event-retained resource before the wrapped provider sees the invalid
+call. Live or indeterminate resources become clean only after successful release or an explicit
+backend-discard acknowledgement.
+
+Fault scripting is single-threaded test control built on `Rc<RefCell<_>>`. It may allocate a mapped
+binding vector to interpose on submission and is intentionally outside production performance
+claims; the wrapped backend and ordinary command path retain their synchronization and copy
+contracts.
+
 ## Next implementation boundary
 
 The portable command engine depends on `virtio-accel-proto`, `virtio-accel-core`, and the
@@ -271,8 +294,8 @@ transport-neutral region metadata re-exported by `virtio-accel-device`. Its base
 5. Produces a response without knowing about rust-vmm or a host operating system.
 
 Submission/event retention, deterministic reset, the bounded split-virtqueue model, the no-std
-reference guest, and deterministic reference execution now complete both portable queue endpoints
-and exercise verifiable buffer output. The next backend boundary is issue #23's deterministic fault
-injection at every ownership boundary. A thin rust-vmm adapter supplying `virtio-device`,
-`virtio-queue`, and `vm-memory` integration remains a later platform layer, as do Linux vhost-user
-and an in-kernel guest driver.
+reference guest, deterministic reference execution, and scripted ownership-boundary faults now
+complete both portable queue endpoints and exercise verifiable buffer output and recovery. The next
+backend boundary is issue #24's reusable conformance suite and implementer guide. A thin rust-vmm
+adapter supplying `virtio-device`, `virtio-queue`, and `vm-memory` integration remains a later
+platform layer, as do Linux vhost-user and an in-kernel guest driver.
