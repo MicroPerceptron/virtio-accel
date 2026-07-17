@@ -203,13 +203,20 @@ impl Accelerator for ScenarioBackend {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TraceRegion {
+    direction: &'static str,
+    bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct TraceEntry {
     request_id: u64,
     opcode: u16,
     status: u16,
     used: u32,
-    readable_segments: u16,
-    writable_segments: u16,
+    regions: Vec<TraceRegion>,
+    request_hex: String,
+    response_hex: String,
 }
 
 struct HarnessControl {
@@ -274,17 +281,21 @@ impl EndToEndQueue {
             let (regions, request, response) = chain.io().unwrap().into_parts();
             let source = TransportByteSource::new(request);
             let mut sink = TransportByteSink::new(response);
+            let mut request_bytes = vec![0_u8; usize::try_from(source.len()).unwrap()];
+            ByteSource::read_at(&source, 0, &mut request_bytes).unwrap();
             let mut header_bytes = [0_u8; size_of::<RequestHeader>()];
             ByteSource::read_at(&source, 0, &mut header_bytes).unwrap();
             let header = read_exact::<RequestHeader>(&header_bytes).unwrap();
-            let readable_segments = regions
+            let trace_regions = regions
                 .iter()
-                .filter(|region| region.direction == RegionDirection::DeviceReadable)
-                .count();
-            let writable_segments = regions
-                .iter()
-                .filter(|region| region.direction == RegionDirection::DeviceWritable)
-                .count();
+                .map(|region| TraceRegion {
+                    direction: match region.direction {
+                        RegionDirection::DeviceReadable => "readable",
+                        RegionDirection::DeviceWritable => "writable",
+                    },
+                    bytes: region.bytes,
+                })
+                .collect();
             let outcome = self
                 .processor
                 .process(regions, &source, &mut sink)
@@ -298,8 +309,9 @@ impl EndToEndQueue {
                     opcode: header.opcode.get(),
                     status: status.0,
                     used,
-                    readable_segments: u16::try_from(readable_segments).unwrap(),
-                    writable_segments: u16::try_from(writable_segments).unwrap(),
+                    regions: trace_regions,
+                    request_hex: encode_hex(&request_bytes),
+                    response_hex: String::new(),
                 },
                 used,
             )
@@ -401,7 +413,20 @@ impl DriverQueue for EndToEndQueue {
 
     fn pop_used(&mut self) -> Result<Option<UsedChain<Self::Chain>>, QueueError<Self::Error>> {
         self.service_for_poll();
-        DriverQueue::pop_used(&mut self.queue)
+        let used = DriverQueue::pop_used(&mut self.queue)?;
+        if let Some(used) = &used {
+            let used_len = usize::try_from(used.used().get()).unwrap();
+            let mut response = vec![0_u8; used_len];
+            used.chain().read_device_writable(0, &mut response).unwrap();
+            let mut trace = self.control.trace.borrow_mut();
+            let entry = trace
+                .iter_mut()
+                .find(|entry| entry.response_hex.is_empty())
+                .expect("every used chain has a pending trace entry");
+            assert_eq!(entry.used, used.used().get());
+            entry.response_hex = encode_hex(&response);
+        }
+        Ok(used)
     }
 
     fn disable_used_notifications(&mut self) -> Result<(), QueueError<Self::Error>> {
@@ -744,15 +769,65 @@ fn operation_name(opcode: KnownOpcode) -> &'static str {
     }
 }
 
-fn expected_trace(name: &str) -> Vec<(u64, u16, u16, u32)> {
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn trace_corpus() -> serde_json::Value {
     let corpus: serde_json::Value =
         serde_json::from_str(include_str!("../conformance/v1.0/scenarios.json")).unwrap();
-    let scenario = corpus["scenarios"]
+    assert_eq!(corpus["schema"], "virtio-accel-traces-1");
+    assert_eq!(corpus["protocol"], "1.0");
+    assert_eq!(corpus["vectors"], "vectors.json");
+
+    let deterministic = corpus["comparison"]["deterministic"].as_array().unwrap();
+    for field in [
+        "operation",
+        "opcode",
+        "request_id",
+        "status",
+        "used",
+        "regions",
+        "request",
+        "response",
+    ] {
+        assert!(
+            deterministic
+                .iter()
+                .any(|candidate| candidate.as_str() == Some(field)),
+            "trace comparison omits deterministic field {field}"
+        );
+    }
+    corpus
+}
+
+fn scenario_by_name<'a>(corpus: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    corpus["scenarios"]
         .as_array()
         .unwrap()
         .iter()
         .find(|scenario| scenario["name"] == name)
-        .unwrap_or_else(|| panic!("missing scenario {name}"));
+        .unwrap_or_else(|| panic!("missing scenario {name}"))
+}
+
+fn assert_hex_bytes(label: &str, hex: &str) {
+    assert_eq!(hex.len() % 2, 0, "{label} is not whole-byte hex");
+    assert!(
+        hex.bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')),
+        "{label} contains non-canonical hex"
+    );
+}
+
+fn expected_trace(name: &str) -> Vec<TraceEntry> {
+    let corpus = trace_corpus();
+    let scenario = scenario_by_name(&corpus, name);
     scenario["trace"]
         .as_array()
         .unwrap()
@@ -761,23 +836,214 @@ fn expected_trace(name: &str) -> Vec<(u64, u16, u16, u32)> {
             let opcode = u16::try_from(entry["opcode"].as_u64().unwrap()).unwrap();
             let known = KnownOpcode::try_from(opcode).expect("scenario opcode is assigned");
             assert_eq!(entry["operation"], operation_name(known));
-            (
-                entry["request_id"].as_u64().unwrap(),
+            let regions = entry["regions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|region| TraceRegion {
+                    direction: match region["direction"].as_str().unwrap() {
+                        "readable" => "readable",
+                        "writable" => "writable",
+                        other => panic!("unknown trace region direction {other}"),
+                    },
+                    bytes: region["bytes"].as_u64().unwrap(),
+                })
+                .collect::<Vec<_>>();
+            let request_hex = entry["request"].as_str().unwrap().to_owned();
+            let response_hex = entry["response"].as_str().unwrap().to_owned();
+            assert_hex_bytes("trace request", &request_hex);
+            assert_hex_bytes("trace response", &response_hex);
+            let readable_bytes = regions
+                .iter()
+                .filter(|region| region.direction == "readable")
+                .map(|region| region.bytes)
+                .sum::<u64>();
+            assert_eq!(
+                u64::try_from(request_hex.len() / 2).unwrap(),
+                readable_bytes
+            );
+            let writable_bytes = regions
+                .iter()
+                .filter(|region| region.direction == "writable")
+                .map(|region| region.bytes)
+                .sum::<u64>();
+            let used = u32::try_from(entry["used"].as_u64().unwrap()).unwrap();
+            assert_eq!(response_hex.len() / 2, usize::try_from(used).unwrap());
+            assert!(u64::from(used) <= writable_bytes);
+            TraceEntry {
+                request_id: entry["request_id"].as_u64().unwrap(),
                 opcode,
-                u16::try_from(entry["status"].as_u64().unwrap()).unwrap(),
-                u32::try_from(entry["used"].as_u64().unwrap()).unwrap(),
-            )
+                status: u16::try_from(entry["status"].as_u64().unwrap()).unwrap(),
+                used,
+                regions,
+                request_hex,
+                response_hex,
+            }
         })
         .collect()
 }
 
+fn compare_trace(expected: &[TraceEntry], actual: &[TraceEntry]) -> Result<(), String> {
+    if expected.len() != actual.len() {
+        return Err(format!(
+            "trace length mismatch: expected {}, got {}",
+            expected.len(),
+            actual.len()
+        ));
+    }
+
+    for (index, (expected, actual)) in expected.iter().zip(actual.iter()).enumerate() {
+        if expected.request_id != actual.request_id {
+            return Err(format!(
+                "trace[{index}].request_id mismatch: expected {}, got {}",
+                expected.request_id, actual.request_id
+            ));
+        }
+        if expected.opcode != actual.opcode {
+            return Err(format!(
+                "trace[{index}].opcode mismatch: expected {}, got {}",
+                expected.opcode, actual.opcode
+            ));
+        }
+        if expected.status != actual.status {
+            return Err(format!(
+                "trace[{index}].status mismatch: expected {}, got {}",
+                expected.status, actual.status
+            ));
+        }
+        if expected.used != actual.used {
+            return Err(format!(
+                "trace[{index}].used mismatch: expected {}, got {}",
+                expected.used, actual.used
+            ));
+        }
+        if expected.regions != actual.regions {
+            return Err(format!(
+                "trace[{index}].regions mismatch: expected {:?}, got {:?}",
+                expected.regions, actual.regions
+            ));
+        }
+        if expected.request_hex != actual.request_hex {
+            return Err(format!("trace[{index}].request mismatch"));
+        }
+        if expected.response_hex != actual.response_hex {
+            return Err(format!("trace[{index}].response mismatch"));
+        }
+    }
+
+    Ok(())
+}
+
 fn assert_trace(name: &str, control: &HarnessControl) {
-    let actual: Vec<_> = control
-        .trace()
+    let expected = expected_trace(name);
+    let actual = control.trace();
+    compare_trace(&expected, &actual).unwrap_or_else(|error| panic!("{name}: {error}"));
+}
+
+fn assert_trace_mismatch(field: &str, expected: &[TraceEntry], actual: &[TraceEntry]) {
+    let error = compare_trace(expected, actual).expect_err("trace mutation was accepted");
+    assert!(
+        error.contains(field),
+        "mismatch reported `{error}`, expected it to mention `{field}`"
+    );
+}
+
+fn flip_first_hex_byte(hex: &mut String) {
+    let replacement = if &hex[..2] == "ff" { "00" } else { "ff" };
+    hex.replace_range(..2, replacement);
+}
+
+#[test]
+fn trace_comparator_detects_nonconforming_protocol_areas() {
+    let expected = expected_trace("complete_lifecycle");
+
+    let mut actual = expected.clone();
+    actual[0].status ^= 1;
+    assert_trace_mismatch("status", &expected, &actual);
+
+    let mut actual = expected.clone();
+    actual[0].used += 1;
+    assert_trace_mismatch("used", &expected, &actual);
+
+    let mut actual = expected.clone();
+    actual[0].regions[0].bytes += 1;
+    assert_trace_mismatch("regions", &expected, &actual);
+
+    let mut actual = expected.clone();
+    flip_first_hex_byte(&mut actual[0].request_hex);
+    assert_trace_mismatch("request", &expected, &actual);
+
+    let mut actual = expected.clone();
+    flip_first_hex_byte(&mut actual[0].response_hex);
+    assert_trace_mismatch("response", &expected, &actual);
+
+    let ordered = expected_trace("out_of_order");
+    let mut actual = ordered.clone();
+    actual.swap(0, 1);
+    assert_trace_mismatch("request_id", &ordered, &actual);
+}
+
+#[test]
+fn trace_manifest_records_replay_controls_for_future_adapters() {
+    let corpus = trace_corpus();
+    let scenarios = corpus["scenarios"].as_array().unwrap();
+    let mut classes = BTreeSet::new();
+    for scenario in scenarios {
+        for class in scenario["class"].as_array().unwrap() {
+            classes.insert(class.as_str().unwrap());
+        }
+    }
+    for class in [
+        "happy_path",
+        "boundary",
+        "malformed",
+        "exhaustion",
+        "cancellation",
+        "indeterminate",
+        "recovery",
+    ] {
+        assert!(classes.contains(class), "missing scenario class {class}");
+    }
+
+    let indeterminate = scenario_by_name(&corpus, "indeterminate_recovery");
+    assert!(
+        has_control(
+            indeterminate,
+            "backend_fault",
+            "allocate_buffer_error_after_out_of_memory"
+        ) && has_control(
+            indeterminate,
+            "backend_fault",
+            "submit_indeterminate_deadline_expired"
+        ) && has_control(indeterminate, "reset", "backend_discard_required")
+    );
+
+    let reset = scenario_by_name(&corpus, "reset_inflight");
+    assert!(has_control(reset, "reset", "backend_reusable"));
+
+    let notification = scenario_by_name(&corpus, "notification_suppression");
+    assert!(has_control(
+        notification,
+        "queue",
+        "suppress_available_notifications"
+    ));
+
+    let short = scenario_by_name(&corpus, "short_response");
+    assert!(has_control(
+        short,
+        "transport",
+        "publish_used_length_minus_one"
+    ));
+}
+
+fn has_control(scenario: &serde_json::Value, kind: &str, action: &str) -> bool {
+    scenario["controls"]
+        .as_array()
+        .unwrap()
         .iter()
-        .map(|entry| (entry.request_id, entry.opcode, entry.status, entry.used))
-        .collect();
-    assert_eq!(actual, expected_trace(name));
+        .any(|control| {
+            control["kind"].as_str() == Some(kind) && control["action"].as_str() == Some(action)
+        })
 }
 
 #[test]
@@ -1012,12 +1278,20 @@ fn complete_lifecycle_crosses_every_portable_boundary() {
     assert_trace("complete_lifecycle", &control);
     let opcodes: BTreeSet<_> = control.trace().iter().map(|entry| entry.opcode).collect();
     assert_eq!(opcodes.len(), 15, "the lifecycle must cross every opcode");
-    assert!(
-        control
-            .trace()
+    assert!(control.trace().iter().any(|entry| {
+        entry
+            .regions
             .iter()
-            .any(|entry| { entry.readable_segments > 1 && entry.writable_segments > 1 })
-    );
+            .filter(|region| region.direction == "readable")
+            .count()
+            > 1
+            && entry
+                .regions
+                .iter()
+                .filter(|region| region.direction == "writable")
+                .count()
+                > 1
+    }));
 }
 
 #[test]
@@ -1238,6 +1512,7 @@ fn scripted_faults_preserve_ownership_through_guest_and_reset() {
     }));
     faults.discard_all();
     assert!(faults.snapshot().is_clean());
+    assert_trace("indeterminate_recovery", &control);
 }
 
 #[test]
