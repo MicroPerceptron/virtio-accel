@@ -44,6 +44,9 @@ jobs:
       - name: Check normative requirement ledger
         run: python3 ci/check-normative-requirements.py --check
 
+      - name: Check performance budget manifests
+        run: python3 ci/check-performance-budgets.py --check
+
       - name: Lint all targets
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 

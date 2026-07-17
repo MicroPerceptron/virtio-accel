@@ -1,5 +1,6 @@
 use crate::{
-    CaseRequirement, CaseResult, CaseStatus, ConformanceHooks, SkipReason, TargetDescription,
+    CaseRequirement, CaseResult, CaseStatus, ConformanceHooks, SkipReason,
+    SubmissionPathDiagnostics, TargetDescription,
 };
 use core::num::NonZeroU64;
 use std::string::String;
@@ -117,6 +118,7 @@ where
         CaseRequirement::Mandatory,
         submission_binding_validation,
     );
+    run_submission_diagnostics_case(&mut results, factory, target, hooks);
     run_target_case(
         &mut results,
         factory,
@@ -299,6 +301,45 @@ where
         name: "optional resource accounting is balanced",
         requirement: CaseRequirement::AccountingHook,
         status,
+    });
+}
+
+fn run_submission_diagnostics_case<A, F, H>(
+    results: &mut Vec<CaseResult>,
+    factory: &F,
+    target: &TargetDescription,
+    hooks: &H,
+) where
+    A: Accelerator,
+    F: Fn() -> A,
+    H: ConformanceHooks<A>,
+{
+    let backend = factory();
+    let Some(before) = hooks.submission_path_diagnostics(&backend) else {
+        results.push(CaseResult {
+            id: "submission.copy-path-diagnostics",
+            name: "direct binding copy-path diagnostics",
+            requirement: CaseRequirement::DiagnosticsHook,
+            status: CaseStatus::Skipped(SkipReason::DiagnosticsUnavailable),
+        });
+        return;
+    };
+
+    let mut failure = hooks
+        .resource_counts(&backend)
+        .filter(|counts| !counts.is_empty())
+        .map(|counts| format!("factory returned live resources: {counts:?}"));
+    if failure.is_none() {
+        failure = submission_path_diagnostics(backend, target, hooks, before).err();
+    }
+    results.push(CaseResult {
+        id: "submission.copy-path-diagnostics",
+        name: "direct binding copy-path diagnostics",
+        requirement: CaseRequirement::DiagnosticsHook,
+        status: match failure {
+            Some(message) => CaseStatus::Failed(message),
+            None => CaseStatus::Passed,
+        },
     });
 }
 
@@ -619,6 +660,48 @@ fn submission_binding_validation<A: Accelerator, H: ConformanceHooks<A>>(
         complete_event(backend, target, hooks, &resources.buffer, event)
     })();
     merge(operation, resources.release(backend))
+}
+
+fn submission_path_diagnostics<A: Accelerator, H: ConformanceHooks<A>>(
+    backend: A,
+    target: &TargetDescription,
+    hooks: &H,
+    before: SubmissionPathDiagnostics,
+) -> CaseCheck {
+    let resources = StandardResources::create(&backend, target)?;
+    let bindings = [valid_binding(target, &resources.buffer)?];
+    let event = backend
+        .submit(
+            &resources.queue,
+            &resources.program,
+            &bindings,
+            Timeout::Infinite,
+        )
+        .map_err(|failure| {
+            format!(
+                "diagnostic submission was rejected: {:?}",
+                failure_error(&failure)
+            )
+        })?;
+
+    let after = hooks
+        .submission_path_diagnostics(&backend)
+        .ok_or_else(|| "submission diagnostics disappeared after admission".to_owned())?;
+    let delta = after.saturating_delta(before);
+    let diagnostics = if delta.direct_bindings == 0 {
+        Err(format!(
+            "provider-owned direct binding was not reported in diagnostics: {delta:?}"
+        ))
+    } else if delta.has_hidden_direct_staging() {
+        Err(format!(
+            "provider staged a direct binding during submission: {delta:?}"
+        ))
+    } else {
+        Ok(())
+    };
+
+    let completed = complete_event(&backend, target, hooks, &resources.buffer, event);
+    merge(merge(diagnostics, completed), resources.release(&backend))
 }
 
 fn context_isolation<A: Accelerator, H: ConformanceHooks<A>>(

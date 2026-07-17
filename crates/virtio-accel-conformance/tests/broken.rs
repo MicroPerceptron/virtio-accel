@@ -2,7 +2,9 @@ mod support;
 
 use std::cell::Cell;
 use support::{target, target_in};
-use virtio_accel_conformance::{CaseStatus, ConformanceHooks, SkipReason, run};
+use virtio_accel_conformance::{
+    CaseStatus, ConformanceHooks, SkipReason, SubmissionPathDiagnostics, run,
+};
 use virtio_accel_core::{
     Accelerator, AllocatedBuffer, ArtifactRef, BackendError, BindingRef, BufferDesc, BufferInfo,
     BufferUsage, ByteSink, ByteSource, Capabilities, ContextDesc, DeviceInfo, EventState,
@@ -26,6 +28,7 @@ enum Defect {
     TimeoutClassification,
     MissingCancellation,
     CapabilitySubset,
+    HiddenSubmissionStaging,
 }
 
 struct BrokenBackend {
@@ -33,6 +36,9 @@ struct BrokenBackend {
     defect: Defect,
     info_calls: Cell<u32>,
     terminal_polls: Cell<u32>,
+    direct_bindings: Cell<u64>,
+    staged_direct_bindings: Cell<u64>,
+    staged_direct_bytes: Cell<u64>,
 }
 
 impl BrokenBackend {
@@ -42,6 +48,9 @@ impl BrokenBackend {
             defect,
             info_calls: Cell::new(0),
             terminal_polls: Cell::new(0),
+            direct_bindings: Cell::new(0),
+            staged_direct_bindings: Cell::new(0),
+            staged_direct_bytes: Cell::new(0),
         }
     }
 }
@@ -192,6 +201,22 @@ impl Accelerator for BrokenBackend {
             Ok(_event) if self.defect == Defect::AdmissionBoundary => {
                 Err(SubmitFailure::Rejected(BackendError::Busy))
             }
+            Ok(event) if self.defect == Defect::HiddenSubmissionStaging => {
+                self.staged_direct_bindings
+                    .set(self.staged_direct_bindings.get() + bindings.len() as u64);
+                let staged_bytes = bindings
+                    .iter()
+                    .map(|binding| binding.range.bytes())
+                    .sum::<u64>();
+                self.staged_direct_bytes
+                    .set(self.staged_direct_bytes.get() + staged_bytes);
+                Ok(event)
+            }
+            Ok(event) => {
+                self.direct_bindings
+                    .set(self.direct_bindings.get() + bindings.len() as u64);
+                Ok(event)
+            }
             Err(SubmitFailure::Rejected(BackendError::InvalidArgument))
                 if self.defect == Defect::ContextIsolation =>
             {
@@ -242,6 +267,18 @@ impl ConformanceHooks<BrokenBackend> for BrokenHooks {
     ) -> Result<(), BackendError> {
         backend.inner.complete(event)
     }
+
+    fn submission_path_diagnostics(
+        &self,
+        backend: &BrokenBackend,
+    ) -> Option<SubmissionPathDiagnostics> {
+        Some(SubmissionPathDiagnostics {
+            direct_bindings: backend.direct_bindings.get(),
+            staged_direct_bindings: backend.staged_direct_bindings.get(),
+            staged_direct_bytes: backend.staged_direct_bytes.get(),
+            ..SubmissionPathDiagnostics::default()
+        })
+    }
 }
 
 #[test]
@@ -267,6 +304,10 @@ fn major_backend_defects_are_detected_by_named_cases() {
         ),
         (Defect::TimeoutClassification, "timeout.finite-admission"),
         (Defect::MissingCancellation, "event.cancellation-races"),
+        (
+            Defect::HiddenSubmissionStaging,
+            "submission.copy-path-diagnostics",
+        ),
     ] {
         let report = run(|| BrokenBackend::new(defect), &target(), &BrokenHooks);
         let case = report.case(case_id).unwrap();

@@ -132,8 +132,10 @@ allocation or submission error, not permission for a hidden bounce buffer.
 
 `write_buffer` and `read_buffer` are the only baseline bulk-copy boundaries. They accept segmented
 ports and may use bounded staging for device-local transfers. Allocation, submission, polling, and
-release do not copy complete bound ranges. The semantic suite validates direct-binding metadata and
-observable output; issue #29 owns quantitative allocation and copy counters and regression budgets.
+release do not copy complete bound ranges. The semantic suite validates direct-binding metadata,
+observable output, and optional copy-path diagnostics; the v1 budgets in
+[`performance-budgets.json`](../conformance/v1.0/performance-budgets.json) define the regression
+thresholds.
 
 ### Programs, bindings, and admission
 

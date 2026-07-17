@@ -13,6 +13,9 @@ This directory contains implementation-independent inputs for the portable proto
   timeout, reset, and device-loss behavior.
 - [`coverage.md`](coverage.md) maps the normative document areas to executable evidence or an
   explicitly tracked implementation issue.
+- [`performance-budgets.json`](performance-budgets.json) and
+  [`performance-baseline.json`](performance-baseline.json) record the v1 hot-path complexity,
+  allocation, copy-boundary, diagnostic, and baseline evidence.
 - [`requirements.json`](requirements.json) catalogs every normative keyword occurrence with a
   content-derived ID, source line, executable evidence, tracked issues, and rationale.
 - [`../rust-clean-room`](../rust-clean-room) contains a dependency-free `no_std` Rust codec that
@@ -42,3 +45,7 @@ dependency-free.
 `ci/check-normative-requirements.py --check` reconstructs the requirement ledger from the normative
 Markdown. CI fails if a requirement is added, removed, moved, or reworded without regenerating and
 reviewing its exact evidence/rationale entry.
+
+`ci/check-performance-budgets.py --check` validates the performance budget and baseline manifests.
+The root `performance_budgets` test also proves that bulk artifact tails are not read during decode
+and that an unvalidated `SUBMIT` binding count is rejected before the binding tail is touched.

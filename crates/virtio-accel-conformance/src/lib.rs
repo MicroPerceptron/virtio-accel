@@ -202,6 +202,46 @@ impl ResourceCounts {
     }
 }
 
+/// Provider-reported submission path counters used to separate real accelerator work from staging.
+///
+/// A backend that exposes these diagnostics should report cumulative counts for one backend
+/// instance. Direct bindings are provider-owned buffers submitted without a bounce allocation.
+/// Shared/imported bindings are reserved for future external-memory paths. Staged direct bindings
+/// are buffers that should have been directly bound but were instead copied through a temporary
+/// submission buffer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SubmissionPathDiagnostics {
+    pub direct_bindings: u64,
+    pub shared_imported_bindings: u64,
+    pub staged_direct_bindings: u64,
+    pub staged_direct_bytes: u64,
+    pub explicit_transfer_bytes: u64,
+}
+
+impl SubmissionPathDiagnostics {
+    pub const fn has_hidden_direct_staging(self) -> bool {
+        self.staged_direct_bindings != 0 || self.staged_direct_bytes != 0
+    }
+
+    pub const fn saturating_delta(self, before: Self) -> Self {
+        Self {
+            direct_bindings: self.direct_bindings.saturating_sub(before.direct_bindings),
+            shared_imported_bindings: self
+                .shared_imported_bindings
+                .saturating_sub(before.shared_imported_bindings),
+            staged_direct_bindings: self
+                .staged_direct_bindings
+                .saturating_sub(before.staged_direct_bindings),
+            staged_direct_bytes: self
+                .staged_direct_bytes
+                .saturating_sub(before.staged_direct_bytes),
+            explicit_transfer_bytes: self
+                .explicit_transfer_bytes
+                .saturating_sub(before.explicit_transfer_bytes),
+        }
+    }
+}
+
 /// Provider-specific control needed by tests without weakening the [`Accelerator`] contract.
 pub trait ConformanceHooks<A: Accelerator> {
     /// Advance one pending event to its successful terminal state.
@@ -209,6 +249,11 @@ pub trait ConformanceHooks<A: Accelerator> {
 
     /// Return live or indeterminate provider resource totals when the implementation exposes them.
     fn resource_counts(&self, _backend: &A) -> Option<ResourceCounts> {
+        None
+    }
+
+    /// Return cumulative provider copy-path diagnostics when the implementation exposes them.
+    fn submission_path_diagnostics(&self, _backend: &A) -> Option<SubmissionPathDiagnostics> {
         None
     }
 }
@@ -219,6 +264,7 @@ pub enum CaseRequirement {
     Mandatory,
     Capability(Capabilities),
     AccountingHook,
+    DiagnosticsHook,
 }
 
 /// Explicit reason that one conditional case did not run.
@@ -226,6 +272,7 @@ pub enum CaseRequirement {
 pub enum SkipReason {
     CapabilityNotAdvertised(Capabilities),
     AccountingUnavailable,
+    DiagnosticsUnavailable,
 }
 
 /// Outcome of one stable conformance case.

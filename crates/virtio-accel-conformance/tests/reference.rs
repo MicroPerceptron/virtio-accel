@@ -1,7 +1,9 @@
 mod support;
 
 use support::target;
-use virtio_accel_conformance::{CaseStatus, ConformanceHooks, ResourceCounts, run};
+use virtio_accel_conformance::{
+    CaseStatus, ConformanceHooks, ResourceCounts, SubmissionPathDiagnostics, run,
+};
 use virtio_accel_core::BackendError;
 use virtio_accel_mock::fault::{FaultAccelerator, FaultEvent, FaultScript, ResourceState};
 use virtio_accel_mock::{MockAccelerator, MockEvent};
@@ -15,6 +17,16 @@ impl ConformanceHooks<MockAccelerator> for MockHooks {
         event: &MockEvent,
     ) -> Result<(), BackendError> {
         backend.complete(event)
+    }
+
+    fn submission_path_diagnostics(
+        &self,
+        backend: &MockAccelerator,
+    ) -> Option<SubmissionPathDiagnostics> {
+        Some(SubmissionPathDiagnostics {
+            direct_bindings: backend.direct_binding_admissions(),
+            ..SubmissionPathDiagnostics::default()
+        })
     }
 }
 
@@ -44,13 +56,23 @@ impl ConformanceHooks<FaultAccelerator<MockAccelerator>> for TrackedMockHooks {
             events: u64::from(live.events + unknown.events),
         })
     }
+
+    fn submission_path_diagnostics(
+        &self,
+        backend: &FaultAccelerator<MockAccelerator>,
+    ) -> Option<SubmissionPathDiagnostics> {
+        Some(SubmissionPathDiagnostics {
+            direct_bindings: backend.inner().direct_binding_admissions(),
+            ..SubmissionPathDiagnostics::default()
+        })
+    }
 }
 
 #[test]
 fn reference_backend_passes_every_mandatory_and_advertised_case() {
     let report = run(MockAccelerator::default, &target(), &MockHooks);
     report.assert_conformant();
-    assert_eq!(report.cases().len(), 14);
+    assert_eq!(report.cases().len(), 15);
     assert!(matches!(
         report.case("accounting.resource-lifecycle").unwrap().status,
         CaseStatus::Skipped(_)

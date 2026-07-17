@@ -67,8 +67,9 @@ model, compatibility rules, and mandatory baseline. The exact byte layouts live 
 [conformance/v1.0](conformance/v1.0/README.md). See
 [docs/architecture.md](docs/architecture.md) for implementation invariants and
 [docs/threat-model.md](docs/threat-model.md) for trust boundaries and finite resource policy, and
-[docs/portability.md](docs/portability.md) for the enforced target matrix. Backend authors can run
-the standard semantic suite using the
+[docs/portability.md](docs/portability.md) for the enforced target matrix. The v1 performance and
+copy budgets are tracked in [docs/performance.md](docs/performance.md). Backend authors can run the
+standard semantic suite using the
 [accelerator backend implementer guide](docs/backend-implementer-guide.md).
 
 The primary `zerocopy` ABI and the manual clean-room codec both decode and re-encode every canonical
