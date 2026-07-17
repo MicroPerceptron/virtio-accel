@@ -34,7 +34,7 @@ use virtio_accel::transport::{
     QueuePort, QueueSize, QueueState, RegionDirection, UsedChain, UsedLength,
 };
 use virtio_accel_mock::{
-    MockAccelerator, MockBuffer, MockContext, MockEvent, MockProgram, MockQueue,
+    MockAccelerator, MockBuffer, MockContext, MockEvent, MockProgram, MockQueue, reference,
 };
 
 const RESPONSE_HEADER_BYTES: u64 = size_of::<ResponseHeader>() as u64;
@@ -604,22 +604,22 @@ fn create_resources(client: &mut TestClient) -> Resources {
     let (buffer, _) = success(client, pending);
 
     let program_desc = ProgramDesc::new(
-        NonZeroU32::new(1).unwrap(),
-        core::array::from_fn(|index| index as u32),
-        NonZeroU64::new(64).unwrap(),
+        NonZeroU32::new(reference::ARTIFACT_FORMAT.get()).unwrap(),
+        reference::TARGET_IDENTITY.0,
+        NonZeroU64::new(reference::RESIDENT_BYTES).unwrap(),
     );
-    let artifact = [0xa1, 0xb2, 0xc3, 0xd4];
+    let artifact = reference::ReferenceArtifact::xor(0, 0x5a);
     let pending = client
         .load_program(
             chain(
                 size_of::<RequestHeader>()
                     + size_of::<LoadProgramRequest>()
-                    + artifact.as_slice().len(),
+                    + reference::ARTIFACT_BYTES,
                 size_of::<ResponseHeader>() + size_of::<ObjectPayload>(),
             ),
             &context,
             program_desc,
-            artifact.as_slice(),
+            artifact.as_bytes().as_slice(),
         )
         .unwrap();
     let (program, _) = success(client, pending);
@@ -801,21 +801,21 @@ fn complete_lifecycle_crosses_every_portable_boundary() {
     assert_eq!(round_trip, payload);
 
     let program_desc = ProgramDesc::new(
-        NonZeroU32::new(1).unwrap(),
-        [0; 12],
-        NonZeroU64::new(64).unwrap(),
+        NonZeroU32::new(reference::ARTIFACT_FORMAT.get()).unwrap(),
+        reference::TARGET_IDENTITY.0,
+        NonZeroU64::new(reference::RESIDENT_BYTES).unwrap(),
     );
-    let artifact = [0xa1, 0xb2, 0xc3, 0xd4];
+    let artifact = reference::ReferenceArtifact::xor(0, 0x5a);
     let pending = client
         .load_program_prepared(
             prepared_chain(
                 size_of::<RequestHeader>() + size_of::<LoadProgramRequest>(),
-                &artifact,
+                artifact.as_bytes(),
                 size_of::<ResponseHeader>() + size_of::<ObjectPayload>(),
             ),
             &context,
             program_desc,
-            artifact.len(),
+            reference::ARTIFACT_BYTES as u64,
         )
         .unwrap();
     let (program, _) = success(&mut client, pending);
@@ -969,6 +969,69 @@ fn complete_lifecycle_crosses_every_portable_boundary() {
             .iter()
             .any(|entry| { entry.readable_segments > 1 && entry.writable_segments > 1 })
     );
+}
+
+#[test]
+fn reference_execution_is_observable_through_the_portable_stack() {
+    let (mut client, _, backend) = standard_stack();
+    let resources = create_resources(&mut client);
+    let input = *b"0123456789abcdef";
+    let range = BufferRange::new(0, input.len()).unwrap();
+    let pending = client
+        .write_buffer_prepared(
+            prepared_chain(
+                size_of::<RequestHeader>() + size_of::<TransferBufferRequest>(),
+                &input,
+                size_of::<ResponseHeader>(),
+            ),
+            &resources.buffer,
+            range,
+        )
+        .unwrap();
+    success(&mut client, pending);
+
+    backend.auto_complete();
+    let pending = submit(&mut client, &resources, 0);
+    let event = accepted_event(&mut client, pending);
+    let pending = client
+        .poll_event(
+            chain(
+                size_of::<RequestHeader>() + size_of::<ObjectPayload>(),
+                size_of::<ResponseHeader>() + size_of::<WireEventState>(),
+            ),
+            &event,
+        )
+        .unwrap();
+    let (state, _) = success(&mut client, pending);
+    assert_eq!(state, EventState::Complete);
+    let pending = client
+        .destroy_event(
+            chain(
+                size_of::<RequestHeader>() + size_of::<ObjectPayload>(),
+                size_of::<ResponseHeader>(),
+            ),
+            event,
+        )
+        .unwrap();
+    success(&mut client, pending);
+
+    let pending = client
+        .read_buffer(
+            chain(
+                size_of::<RequestHeader>() + size_of::<TransferBufferRequest>(),
+                size_of::<ResponseHeader>() + 16,
+            ),
+            &resources.buffer,
+            range,
+        )
+        .unwrap();
+    let (read, read_chain) = success(&mut client, pending);
+    assert_eq!(read.bytes, input.len());
+    let mut output = [0; 16];
+    read_chain
+        .read_device_writable(RESPONSE_HEADER_BYTES, &mut output)
+        .unwrap();
+    assert_eq!(output, input.map(|byte| byte ^ 0x5a));
 }
 
 #[test]

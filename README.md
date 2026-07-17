@@ -17,7 +17,8 @@ claimed virtio device ID.
 - `virtio-accel-guest`: `no_std + alloc` typed reference client with bounded request tracking.
 - `virtio-accel-core`: `no_std` backend lifecycle, memory, program, queue, and event contracts.
 - `virtio-accel-device`: `no_std + alloc` device-owned state, including bounded generational IDs.
-- `virtio-accel-mock`: cross-platform in-memory backend that exercises the complete lifecycle.
+- `virtio-accel-mock`: cross-platform in-memory backend with a deterministic test-only artifact
+  format and harness-controlled execution.
 - `virtio-accel-cleanroom`: dependency-free `no_std` conformance codec implemented without shared
   protocol types.
 - `virtio-accel`: small `no_std` facade re-exporting the portable layers.

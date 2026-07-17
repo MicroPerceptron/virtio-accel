@@ -236,6 +236,29 @@ submission allocations, retained memory, and host preparation versus device exec
 backend should be diagnosable when it misses the intended path rather than requiring a profiler to
 discover an undocumented copy.
 
+## Deterministic reference execution
+
+`virtio-accel-mock::reference` defines a test-only artifact envelope for executable backend tests.
+Its fixed 24-byte payload carries an artifact version, a binding-ABI version, an operation, binding
+slots, one byte operand, and reserved-zero bytes. The mock additionally requires its provider-owned
+format ID, target identity, and exact resident charge before accepting a program. These values and
+payload bytes are implementation fixtures, not additions to the normative accelerator ABI;
+production command and transport layers continue to pass artifact formats, targets, and payloads
+through opaquely.
+
+The reference operations are a lifecycle barrier, equal-length copy, fill, and in-place XOR. Each
+operation validates its exact slot and access contract before event admission. Buffers use shared
+atomic-byte backing so an accepted event retains only fixed operation metadata, ranges, and atomic
+reference-counted backing pointers. Submission does not lock, stage buffer contents, or allocate an
+owned binding mirror. Explicit segmented transfers use a fixed-size stack window rather than
+coalescing the complete transfer.
+
+Events remain pending until the harness calls `complete`. A single compare-exchange chooses among
+execution, cancellation, and injected device loss; after execution starts, cancellation and device
+loss report `Busy`. Completion publishes buffer mutations before the terminal event state, while
+the harness controls latency and completion order by deciding when and in which order to complete
+accepted events.
+
 ## Next implementation boundary
 
 The portable command engine depends on `virtio-accel-proto`, `virtio-accel-core`, and the
@@ -247,9 +270,9 @@ transport-neutral region metadata re-exported by `virtio-accel-device`. Its base
 4. Passes transfer and artifact regions directly to backend byte ports.
 5. Produces a response without knowing about rust-vmm or a host operating system.
 
-Submission/event retention, deterministic reset, the bounded split-virtqueue model, and the no-std
-reference guest now complete both portable queue endpoints and their full serialized lifecycle. The
-next backend boundary is issue #22's portable reference artifact and deterministic execution model,
-which will exercise real buffer output without standardizing production artifact contents. A thin
-rust-vmm adapter supplying `virtio-device`, `virtio-queue`, and `vm-memory` integration remains a
-later platform layer, as do Linux vhost-user and an in-kernel guest driver.
+Submission/event retention, deterministic reset, the bounded split-virtqueue model, the no-std
+reference guest, and deterministic reference execution now complete both portable queue endpoints
+and exercise verifiable buffer output. The next backend boundary is issue #23's deterministic fault
+injection at every ownership boundary. A thin rust-vmm adapter supplying `virtio-device`,
+`virtio-queue`, and `vm-memory` integration remains a later platform layer, as do Linux vhost-user
+and an in-kernel guest driver.
