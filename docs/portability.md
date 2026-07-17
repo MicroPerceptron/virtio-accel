@@ -16,7 +16,7 @@ Rust 2024 edition selected by the workspace. Every package inherits the same `ru
 | `portable-target` | Stable `aarch64-unknown-none`, `riscv64gc-unknown-none-elf`, and `wasm32-unknown-unknown` | `cleanroom`, `proto`, `transport`, and `core` remain `no_std`; guest, split-queue, device, and facade layers require at most `alloc`; Wasm also checks the std reference crates |
 | `feature-sets-and-dependencies` | Stable on Ubuntu | Every Cargo feature combination plus dependency and `std`/`alloc` leakage guards for the portable codecs, queue ports, and core |
 | `dependency-policy` | Cargo-deny with Rust 1.85.0 | Advisories, yanked crates, duplicate versions, wildcard requirements, licenses, and dependency sources |
-| `fuzz-smoke` | Nightly on Ubuntu when `fuzz/Cargo.toml` exists | Every fuzz target gets bounded smoke iterations; issue #26 activates the job by adding the fuzz workspace |
+| `fuzz-smoke` | Pinned nightly on Ubuntu | Shared harness tests plus bounded smoke iterations over generated seed corpora and committed minimized regressions for every fuzz target |
 
 The native jobs intentionally use GitHub-hosted `*-latest` images so runner security and supported
 host versions advance without changing the project’s semantic target list. Release evidence records
@@ -77,6 +77,16 @@ cargo +1.85.0 check --workspace --all-targets --all-features
 cargo hack check --workspace --feature-powerset --no-dev-deps
 bash ci/check-portable-dependencies.sh
 cargo deny --all-features check
+```
+
+Fuzz smoke coverage can be reproduced with:
+
+```sh
+cargo test --manifest-path fuzz/Cargo.toml --lib --no-default-features
+python3 ci/seed-fuzz-corpus.py
+cargo fuzz run protocol_decode fuzz/corpus/protocol_decode fuzz/regressions/protocol_decode -- -runs=256 -max_total_time=20 -timeout=5 -rss_limit_mb=2048 -max_len=65536
+cargo fuzz run descriptor_end_to_end fuzz/corpus/descriptor_end_to_end fuzz/regressions/descriptor_end_to_end -- -runs=256 -max_total_time=20 -timeout=5 -rss_limit_mb=2048 -max_len=65536
+cargo fuzz run stateful_commands fuzz/corpus/stateful_commands fuzz/regressions/stateful_commands -- -runs=256 -max_total_time=20 -timeout=5 -rss_limit_mb=2048 -max_len=65536
 ```
 
 Target checks require the corresponding Rust standard libraries:

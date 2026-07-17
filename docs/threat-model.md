@@ -73,10 +73,11 @@ wire structures nor guest memory and must not retain borrowed byte ports after a
 All named tests are located in the corresponding crate's `src` unit tests,
 [`crates/virtio-accel-device/tests/command_processor.rs`](../crates/virtio-accel-device/tests/command_processor.rs),
 or [`tests/portable_end_to_end.rs`](../tests/portable_end_to_end.rs). Coverage-guided malformed
-input and stateful sequence expansion is tracked separately by issues
-[#26](https://github.com/MicroPerceptron/virtio-accel/issues/26) and
-[#27](https://github.com/MicroPerceptron/virtio-accel/issues/27); those efforts extend rather than
-define this policy.
+input checks live under [`fuzz/`](../fuzz/): protocol decode is compared with the clean-room codec,
+descriptor segmentation is driven through the split-queue model, and bounded stateful sequences
+check resource accounting after every action. Issue
+[#27](https://github.com/MicroPerceptron/virtio-accel/issues/27) can broaden the state model, but
+the portable v1 policy does not depend on that future expansion.
 
 ## Resource-accounting rules
 

@@ -326,6 +326,8 @@ Submission/event retention, deterministic reset, the bounded split-virtqueue mod
 reference guest, deterministic reference execution, scripted ownership-boundary faults, and the
 reusable backend conformance suite now complete both portable queue endpoints and the provider
 contract evidence. The threat model and enforceable aggregate resource policy close the security
-model; issues #26 and #27 extend its malformed-input and stateful-sequence verification. A thin
-rust-vmm adapter supplying `virtio-device`, `virtio-queue`, and `vm-memory` integration remains a
-later platform layer, as do Linux vhost-user and an in-kernel guest driver.
+model. Coverage-guided fuzzing now exercises protocol decoding, descriptor segmentation, and a
+bounded stateful command model; issue #27 can extend the state model beyond the portable v1
+resource lifecycle. A thin rust-vmm adapter supplying `virtio-device`, `virtio-queue`, and
+`vm-memory` integration remains a later platform layer, as do Linux vhost-user and an in-kernel
+guest driver.
