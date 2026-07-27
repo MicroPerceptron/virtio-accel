@@ -330,7 +330,7 @@ fn run(data: &[u8]) -> Progress {
         let action = input.byte() % ACTION_COUNT;
         let selector = input.byte();
         let argument = input.u16();
-        let entropy = input.u64();
+        let entropy = u64::from(u32::from_le_bytes([input.byte(), input.byte(), input.byte(), input.byte()]));
         harness.step(action, selector, argument, entropy);
         harness.assert_invariants();
     }
