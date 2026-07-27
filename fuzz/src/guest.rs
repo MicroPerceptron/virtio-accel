@@ -988,6 +988,8 @@ impl Harness {
     }
 
     fn notifications(&mut self, selector: u8) {
+        // Bit 1 injects a one-shot transport error on the next pop_used().
+        self.ring.borrow_mut().inject_pop_error = selector & 2 != 0;
         if selector & 1 == 0 {
             let _ = self.client.disable_used_notifications();
         } else {
