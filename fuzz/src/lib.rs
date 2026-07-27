@@ -1,10 +1,12 @@
 #![forbid(unsafe_code)]
 
 mod descriptor;
+mod guest;
 mod protocol;
 mod stateful;
 
 pub use descriptor::fuzz_descriptor_end_to_end;
+pub use guest::fuzz_guest_client;
 pub use protocol::fuzz_protocol_decode;
 pub use stateful::fuzz_stateful_commands;
 

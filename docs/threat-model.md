@@ -76,7 +76,12 @@ All named tests are located in the corresponding crate's `src` unit tests,
 or [`tests/portable_end_to_end.rs`](../tests/portable_end_to_end.rs). Coverage-guided malformed
 input checks live under [`fuzz/`](../fuzz/): protocol decode is compared with the clean-room codec,
 descriptor segmentation is driven through the split-queue model, and bounded stateful sequences
-check resource accounting after every action. The deterministic state-model suite runs a bounded
+check resource accounting after every action. A fourth target drives the reference guest client
+against a non-conforming device. That direction is reference-implementation robustness rather than
+a portable-layer security boundary, because a malicious backend or host process is excluded below;
+it exists so the driver-side obligations in this protocol — opaque unknown statuses, recovery on
+unknown event states, bounded in-flight tracking, and epoch-scoped handle staleness — hold against
+inputs no example test enumerates. The deterministic state-model suite runs a bounded
 seed set in normal CI, asserts stale-ID retirement, context isolation, reference release, quota, and
 retained-byte invariants after every action, and prints minimized replayable schedules for failures.
 An ignored deep test provides manual or nightly-style exploration with `VIRTIO_ACCEL_STATE_MODEL_SEED`.

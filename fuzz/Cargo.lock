@@ -152,9 +152,20 @@ dependencies = [
  "virtio-accel-cleanroom",
  "virtio-accel-core",
  "virtio-accel-device",
+ "virtio-accel-guest",
  "virtio-accel-mock",
  "virtio-accel-proto",
  "virtio-accel-split-queue",
+ "virtio-accel-transport",
+ "zerocopy",
+]
+
+[[package]]
+name = "virtio-accel-guest"
+version = "0.1.0"
+dependencies = [
+ "bitflags",
+ "virtio-accel-proto",
  "virtio-accel-transport",
  "zerocopy",
 ]
