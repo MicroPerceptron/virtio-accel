@@ -4,8 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Reusable semantic conformance suite for virtio-accel backends"
-publish = false
+readme = "README.md"
 
 [dependencies]
 virtio-accel-core.workspace = true

@@ -17,12 +17,20 @@ Rust 2024 edition selected by the workspace. Every package inherits the same `ru
 | `feature-sets-and-dependencies` | Stable on Ubuntu | Every Cargo feature combination plus dependency and `std`/`alloc` leakage guards for the portable codecs, queue ports, and core |
 | `dependency-policy` | Cargo-deny with Rust 1.85.0 | Advisories, yanked crates, duplicate versions, wildcard requirements, licenses, and dependency sources |
 | `fuzz-smoke` | Pinned nightly on Ubuntu | Shared harness tests plus bounded smoke iterations over generated seed corpora and committed minimized regressions for every fuzz target |
+| `publish-dry-run` | Stable on Ubuntu | Every published crate packages in documented order into an isolated local registry, and each one builds, tests, and documents from its own extracted tarball rather than from the workspace |
 
 The native jobs intentionally use GitHub-hosted `*-latest` images so runner security and supported
 host versions advance without changing the project’s semantic target list. Release evidence records
 the concrete runner versions used for the release.
 
 ## Crate portability tiers
+
+Every crate below is published to crates.io, so its tier is a promise to downstream users rather
+than an internal convention: a crate may not move to a less-portable tier without the release-note
+entry and portability review required by [release-policy.md](release-policy.md). The `std-reference`
+tier is the ceiling for the reference and conformance crates, not a licence for host-OS or
+vendor-specific APIs — third parties depend on `virtio-accel-conformance` and `virtio-accel-mock`
+directly, and they must keep working on any platform the portable crates support.
 
 | Tier | Crates | Allowed runtime surface |
 |---|---|---|
@@ -82,6 +90,15 @@ cargo hack check --workspace --feature-powerset --no-dev-deps
 bash ci/check-portable-dependencies.sh
 cargo deny --all-features check
 ```
+
+The ordered publication dry run needs network access the first time, to vendor third-party
+dependencies into its local registry:
+
+```sh
+python3 ci/publish-dry-run.py
+```
+
+Add `--keep` to inspect the registry and the extracted per-crate sources afterwards.
 
 Deeper deterministic state-model exploration can be run manually with:
 

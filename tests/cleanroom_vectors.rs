@@ -1,3 +1,10 @@
+//! Independent clean-room codec assertions against the frozen `conformance/v1.0` golden vectors.
+//!
+//! These assertions live in the facade rather than in `virtio-accel-cleanroom` because the golden
+//! vectors are shipped by this package. A crate cannot `include_str!` data from outside its own
+//! package directory and still have that data present in its published `.crate`. Keeping them here
+//! also leaves `virtio-accel-cleanroom` with no dependencies of any kind, normal or development.
+
 use serde_json::Value;
 use std::collections::BTreeSet;
 use virtio_accel_cleanroom::{
@@ -9,7 +16,7 @@ use virtio_accel_cleanroom::{
 const REQUEST_ID: u64 = 0x0102_0304_0506_0708;
 
 fn corpus() -> Value {
-    serde_json::from_str(include_str!("../../v1.0/vectors.json")).unwrap()
+    serde_json::from_str(include_str!("../conformance/v1.0/vectors.json")).unwrap()
 }
 
 fn decode_hex(hex: &str) -> Vec<u8> {

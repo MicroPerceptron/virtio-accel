@@ -16,6 +16,12 @@ or unpublished, but a public protocol 1.0 release needs a matching release note 
 wire protocol. A wire protocol change must follow the protocol classification below even when the
 Rust crate version is still pre-1.0.
 
+> **Known open item.** The workspace is at `0.1.0` while carrying a frozen protocol 1.0 baseline and
+> a published-package set, so the "private or unpublished" allowance above no longer describes
+> reality. Reconciling the Cargo version with the protocol freeze is deliberately a separate
+> decision from wiring up the package metadata, and is tracked as the prerequisite for the first
+> actual publish. Nothing may be published to crates.io until it is resolved.
+
 ## Change classification examples
 
 | Change | Cargo classification | Protocol classification | Required evidence |
@@ -102,9 +108,99 @@ Dependency review must check:
 - whether a dependency introduces platform defaults; and
 - whether its license remains inside the workspace allowlist.
 
-The workspace license is `MIT OR Apache-2.0`. Current package manifests inherit the workspace
-license and rust-version, include descriptions, and set `publish = false`. Publishing a crate later
-requires an explicit metadata review before changing that field.
+The workspace license is `MIT OR Apache-2.0`. Every published manifest inherits `license`,
+`rust-version`, `repository`, `homepage`, `keywords`, and `categories` from `[workspace.package]`,
+declares its own `description` and `readme`, and carries its own byte-identical copies of
+`LICENSE-MIT` and `LICENSE-APACHE`. Cargo only packages files inside a package directory, so the
+root license files do not reach the sub-crate tarballs; the copies exist for that reason and are
+copies rather than symlinks because CI runs `windows-latest`.
+
+`ci/check-release-policy.py` enforces all of this against an explicit ten-crate allowlist. A new
+package fails that check until it is added to the allowlist, which forces a decision about whether
+it is public rather than letting it default either way. The check also validates the crates.io
+keyword and category limits, which neither `cargo package` nor `cargo publish --dry-run` catches
+before an upload is attempted.
+
+The `fuzz/` harness is a separate workspace at version `0.0.0` and stays `publish = false`.
+
+## Publication, yank, and rollback
+
+Ten packages are published to crates.io. Publication is ordered: a crate cannot be published before
+every crate it depends on, and that includes development dependencies, because a published crate's
+versioned dev-dependencies must resolve from the registry for `cargo test` to run on the packaged
+source.
+
+| # | Crate | Normal dependencies | Development dependencies |
+|---|---|---|---|
+| 1 | `virtio-accel-transport` | — | — |
+| 2 | `virtio-accel-cleanroom` | — | — |
+| 3 | `virtio-accel-proto` | — | `cleanroom` |
+| 4 | `virtio-accel-core` | `transport` | — |
+| 5 | `virtio-accel-split-queue` | `transport` | — |
+| 6 | `virtio-accel-guest` | `proto`, `transport` | `split-queue` |
+| 7 | `virtio-accel-mock` | `core` | — |
+| 8 | `virtio-accel-device` | `core`, `proto`, `transport` | `mock` |
+| 9 | `virtio-accel-conformance` | `core` | `mock` |
+| 10 | `virtio-accel` | the six runtime crates | `conformance`, `mock`, `cleanroom` |
+
+This order is executable, not just documentary: `ci/publish-dry-run.py` walks it against an isolated
+local registry, adding each crate only after it has been built, tested, and documented from its own
+extracted tarball. A crate can therefore only ever resolve its predecessors, so a wrong order fails
+with an unresolvable dependency instead of passing quietly. The same script is a required CI job.
+
+`cargo package`'s own verify step is not sufficient and must not be treated as sufficient: it builds
+only the library target. That is how four cross-package `include_str!` sites reached outside their
+package directories unnoticed, leaving assertions that could never have compiled from a published
+tarball. Any check on packaged output must run the tests inside the packaged source.
+
+### When a mid-order publish fails
+
+crates.io publication is not transactional across crates. If crate N fails after 1..N-1 succeeded,
+those earlier versions are live and permanent.
+
+1. Stop. Do not publish the remaining crates, and do not attempt to reuse the version number.
+2. Diagnose against the local registry, not against crates.io. Reproduce with
+   `ci/publish-dry-run.py`.
+3. Fix forward. Bump the patch version of the crate that failed and of any crate that must depend on
+   the fixed version, then re-run the ordered publication from the first crate whose version
+   changed. Earlier crates that published correctly are left alone.
+4. Yank only if a published version is actively harmful — see below. A version that is merely
+   stranded, because its dependents were never published, is not harmful; it is unreachable.
+
+### Yank versus patch
+
+A crates.io version is immutable. It cannot be edited, replaced, or deleted, and its contents remain
+downloadable even after a yank. Publishing is therefore a one-way action, and a mistaken publish is
+corrected by publishing again, never by trying to undo.
+
+Yanking only stops *new* resolution: existing `Cargo.lock` files continue to resolve a yanked
+version, so a yank is not a security control and never a substitute for an advisory.
+
+Publish a patch, and do not yank, when:
+
+- the defect is a bug, a missing file, or wrong metadata that a newer version supersedes;
+- the version is stranded but harmless; or
+- downstream users are better served by upgrading than by a broken resolution.
+
+Yank, in addition to publishing a patch, when:
+
+- the version is a security risk to anyone who resolves it — coordinate with
+  [SECURITY.md](../SECURITY.md) and publish an advisory, since the yank alone protects nobody;
+- it claims a protocol conformance it does not have, so a driver or device could interoperate
+  incorrectly on the wire; or
+- it was published in error and has no valid use, such as a wrong version number or a crate
+  published out of order with an unsatisfiable dependency.
+
+Never un-yank to "restore" a version that was yanked for a wire-compatibility or security reason.
+Publish a new version instead.
+
+### Rollback
+
+There is no rollback. The recovery path for every publication mistake is a new version, in the same
+documented order, with a release-note entry recording what happened and why. If a protocol-affecting
+defect ships, the classification table above governs whether the fix is an erratum, a protocol minor
+extension, or a new protocol major version with its own conformance directory — a security fix is
+not exempt from that classification.
 
 ## Release review checklist
 

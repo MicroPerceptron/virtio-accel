@@ -4,8 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "No-std reference guest client for virtio-accel protocol 1.0"
-publish = false
+readme = "README.md"
 
 [dependencies]
 bitflags.workspace = true

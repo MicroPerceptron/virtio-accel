@@ -74,7 +74,8 @@ policy is in [docs/public-api.md](docs/public-api.md). Release governance lives 
 [docs/releases/v1.0.md](docs/releases/v1.0.md), and the final freeze audit is
 [conformance/v1.0/freeze-audit.md](conformance/v1.0/freeze-audit.md). Backend authors can run the
 standard semantic suite using the
-[accelerator backend implementer guide](docs/backend-implementer-guide.md).
+[accelerator backend implementer guide](docs/backend-implementer-guide.md). To report a
+vulnerability, see the [security policy](SECURITY.md).
 
 The primary `zerocopy` ABI and the manual clean-room codec both decode and re-encode every canonical
 frame. Their bridge test exchanges bytes only, providing an independent implementation check
@@ -89,6 +90,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
 cargo run --example backend_conformance
 cargo run --example reference_execution
+python3 ci/publish-dry-run.py
 ```
 
 The project remains pre-standardization work and claims no Virtio device ID. Protocol 1.0 numeric

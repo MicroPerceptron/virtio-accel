@@ -14,6 +14,23 @@ provider-owned inputs:
 The same flow is available as a runnable crate-level example:
 `cargo run --example backend_conformance`.
 
+Both crates are published, so a provider outside this repository depends on them directly. The
+conformance suite is test-only and belongs in `[dev-dependencies]`, which keeps it out of the
+shipped dependency graph:
+
+```toml
+[dependencies]
+virtio-accel-core = "0.1"
+
+[dev-dependencies]
+virtio-accel-conformance = "0.1"
+```
+
+`virtio-accel-mock` is also published, if a reference backend is useful to compare against while
+bringing a provider up. Like the conformance suite it is test-only reference code, with
+deterministic non-secret artifacts and scripted faults; see [../SECURITY.md](../SECURITY.md) for
+what that does and does not cover.
+
 The completion hook is test control, not a new production requirement. A backend with an external
 scheduler can signal that scheduler; a deterministic backend can execute the retained invocation
 directly. The target operation must remain pending until the hook runs, transform the fixture's

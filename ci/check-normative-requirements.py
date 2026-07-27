@@ -84,8 +84,9 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
     ("SPEC", 5): coverage(
         "executable",
         (
-            "conformance/rust-clean-room/tests/vectors.rs",
+            "tests/cleanroom_vectors.rs",
             "crates/virtio-accel-proto/src/lib.rs",
+            "tests/wire_abi_conformance.rs",
             "ci/check-release-policy.py",
             "docs/release-policy.md",
         ),
@@ -94,7 +95,7 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
     ("SPEC", 6): coverage(
         "executable",
         (
-            "conformance/rust-clean-room/tests/vectors.rs",
+            "tests/cleanroom_vectors.rs",
             "conformance/v1.0/layout.json",
             "conformance/v1.0/vectors.json",
             "conformance/v1.0/freeze-audit.md",
@@ -124,7 +125,7 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
     ("SPEC", 9): coverage(
         "executable",
         (
-            "conformance/rust-clean-room/tests/vectors.rs",
+            "tests/cleanroom_vectors.rs",
             "crates/virtio-accel-core/src/lib.rs",
             "crates/virtio-accel-device/tests/command_processor.rs",
             "tests/portable_end_to_end.rs",
@@ -156,24 +157,27 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
         "executable",
         (
             "conformance/rust-clean-room/src/lib.rs",
-            "conformance/rust-clean-room/tests/vectors.rs",
+            "tests/cleanroom_vectors.rs",
             "crates/virtio-accel-proto/src/lib.rs",
+            "tests/wire_abi_conformance.rs",
         ),
         rationale="Both codecs use checked arithmetic and independently enforce the global limits.",
     ),
     ("WIRE", 2): coverage(
         "executable",
         (
-            "conformance/rust-clean-room/tests/vectors.rs",
+            "tests/cleanroom_vectors.rs",
             "crates/virtio-accel-proto/src/lib.rs",
+            "tests/wire_abi_conformance.rs",
         ),
         rationale="Configuration limits, version compatibility, queue-size bounds, and features are tested.",
     ),
     ("WIRE", 3): coverage(
         "executable",
         (
-            "conformance/rust-clean-room/tests/vectors.rs",
+            "tests/cleanroom_vectors.rs",
             "crates/virtio-accel-proto/src/lib.rs",
+            "tests/wire_abi_conformance.rs",
         ),
         rationale="Headers, exact lengths, flags, request correlation, and unknown numeric values are tested.",
     ),
@@ -181,14 +185,14 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
         "executable",
         (
             "conformance/rust-clean-room/src/lib.rs",
-            "conformance/rust-clean-room/tests/vectors.rs",
+            "tests/cleanroom_vectors.rs",
         ),
         rationale="The independent semantic codec validates object IDs, domains, usage, access, and event states.",
     ),
     ("WIRE", 5): coverage(
         "executable",
         (
-            "conformance/rust-clean-room/tests/vectors.rs",
+            "tests/cleanroom_vectors.rs",
             "crates/virtio-accel-proto/tests/semantic_interop.rs",
             "crates/virtio-accel-device/src/state.rs",
             "crates/virtio-accel-device/tests/command_processor.rs",
@@ -200,7 +204,7 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
     ("WIRE", 6): coverage(
         "executable",
         (
-            "conformance/rust-clean-room/tests/vectors.rs",
+            "tests/cleanroom_vectors.rs",
             "crates/virtio-accel-core/src/lib.rs",
             "crates/virtio-accel-device/tests/command_processor.rs",
         ),
@@ -223,6 +227,7 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
             "conformance/v1.0/layout.json",
             "conformance/v1.0/vectors.json",
             "crates/virtio-accel-proto/src/lib.rs",
+            "tests/wire_abi_conformance.rs",
         ),
         rationale="Checked-in artifacts are immutable test inputs and drift is detected by both codec suites.",
     ),
@@ -257,6 +262,7 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
         "executable",
         (
             "crates/virtio-accel-device/src/frame.rs",
+            "tests/device_frame.rs",
             "crates/virtio-accel-split-queue/src/chain.rs",
             "crates/virtio-accel-split-queue/src/queue.rs",
             "crates/virtio-accel-transport/src/regions.rs",
@@ -266,8 +272,9 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
     ("VIRTQ", 4): coverage(
         "executable",
         (
-            "conformance/rust-clean-room/tests/vectors.rs",
+            "tests/cleanroom_vectors.rs",
             "crates/virtio-accel-device/src/frame.rs",
+            "tests/device_frame.rs",
             "crates/virtio-accel-split-queue/src/chain.rs",
             "crates/virtio-accel-split-queue/src/queue.rs",
             "crates/virtio-accel-transport/src/regions.rs",
@@ -278,7 +285,7 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
     ("VIRTQ", 5): coverage(
         "executable",
         (
-            "conformance/rust-clean-room/tests/vectors.rs",
+            "tests/cleanroom_vectors.rs",
             "crates/virtio-accel-device/tests/command_processor.rs",
             "crates/virtio-accel-split-queue/src/queue.rs",
             "tests/portable_end_to_end.rs",
@@ -288,7 +295,7 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
     ("VIRTQ", 6): coverage(
         "executable",
         (
-            "conformance/rust-clean-room/tests/vectors.rs",
+            "tests/cleanroom_vectors.rs",
             "crates/virtio-accel-split-queue/src/chain.rs",
             "crates/virtio-accel-split-queue/src/queue.rs",
             "tests/portable_end_to_end.rs",
@@ -329,7 +336,7 @@ COVERAGE: Final[dict[tuple[str, int], Coverage]] = {
     ("VIRTQ", 10): coverage(
         "executable",
         (
-            "conformance/rust-clean-room/tests/vectors.rs",
+            "tests/cleanroom_vectors.rs",
             "crates/virtio-accel-split-queue/src/chain.rs",
             "crates/virtio-accel-split-queue/src/queue.rs",
             "tests/portable_end_to_end.rs",
@@ -377,6 +384,7 @@ PROVIDER_CAPABILITY_COVERAGE: Final = coverage(
         "crates/virtio-accel-core/src/lib.rs",
         "crates/virtio-accel-device/src/decoder.rs",
         "crates/virtio-accel-device/src/engine.rs",
+        "tests/device_decoder.rs",
         "crates/virtio-accel-device/tests/command_processor.rs",
         "crates/virtio-accel-guest/src/client.rs",
         "crates/virtio-accel-mock/src/lib.rs",

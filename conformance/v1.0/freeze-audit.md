@@ -13,7 +13,7 @@ to decide that the remaining optional work is explicitly deferred rather than si
 |---|---|---|
 | Normative requirements | Pass | `requirements.json`; `ci/check-normative-requirements.py --check`; `coverage.md` |
 | Wire layouts and constants | Frozen for v1.0 | `layout.json`; `vectors.json`; `wire-abi.md`; primary `zerocopy` layout assertions |
-| Golden request/response bytes | Frozen for v1.0 | `vectors.json`; `conformance/rust-clean-room/tests/vectors.rs`; `crates/virtio-accel-proto/tests/semantic_interop.rs` |
+| Golden request/response bytes | Frozen for v1.0 | `vectors.json`; `tests/cleanroom_vectors.rs`; `tests/wire_abi_conformance.rs`; `crates/virtio-accel-proto/tests/semantic_interop.rs` |
 | Virtqueue behavior | Pass | `virtqueue.md`; `crates/virtio-accel-split-queue`; `tests/portable_end_to_end.rs`; `scenarios.json` |
 | State machines and ownership | Pass | `docs/architecture.md`; `crates/virtio-accel-device/src/state.rs`; `crates/virtio-accel-device/tests/command_processor.rs`; `tests/portable_end_to_end.rs` |
 | Reset and recovery | Pass | `docs/threat-model.md`; command-processor reset tests; reset and device-loss scenarios |
