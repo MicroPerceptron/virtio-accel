@@ -659,11 +659,15 @@ impl Harness {
             .unwrap_or(0);
 
         let well_formed = selector & 0x80 == 0;
-        let payload = if well_formed {
+        let mut payload = if well_formed {
             self.canonical_payload(opcode)
         } else {
             self.pooled_payload(entropy, argument)
         };
+        if well_formed {
+            let max_payload = chain.writable.len().saturating_sub(RESPONSE_HEADER_BYTES);
+            payload.truncate(max_payload);
+        }
 
         let (status, flags, declared_bytes, response_id) = if well_formed {
             (StatusCode::OK, 0, payload.len() as u32, request_id)
