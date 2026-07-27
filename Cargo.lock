@@ -102,6 +102,7 @@ name = "virtio-accel"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "virtio-accel-cleanroom",
  "virtio-accel-conformance",
  "virtio-accel-core",
  "virtio-accel-device",
@@ -110,14 +111,12 @@ dependencies = [
  "virtio-accel-proto",
  "virtio-accel-split-queue",
  "virtio-accel-transport",
+ "zerocopy",
 ]
 
 [[package]]
 name = "virtio-accel-cleanroom"
 version = "0.1.0"
-dependencies = [
- "serde_json",
-]
 
 [[package]]
 name = "virtio-accel-conformance"
@@ -139,7 +138,6 @@ dependencies = [
 name = "virtio-accel-device"
 version = "0.1.0"
 dependencies = [
- "serde_json",
  "virtio-accel-core",
  "virtio-accel-mock",
  "virtio-accel-proto",
@@ -170,7 +168,6 @@ name = "virtio-accel-proto"
 version = "0.1.0"
 dependencies = [
  "bitflags",
- "serde_json",
  "virtio-accel-cleanroom",
  "zerocopy",
 ]
