@@ -20,6 +20,7 @@ libfuzzer-sys = { version = "0.4", optional = true }
 virtio-accel-cleanroom = { path = "../conformance/rust-clean-room" }
 virtio-accel-core = { path = "../crates/virtio-accel-core" }
 virtio-accel-device = { path = "../crates/virtio-accel-device" }
+virtio-accel-guest = { path = "../crates/virtio-accel-guest" }
 virtio-accel-mock = { path = "../crates/virtio-accel-mock" }
 virtio-accel-proto = { path = "../crates/virtio-accel-proto" }
 virtio-accel-split-queue = { path = "../crates/virtio-accel-split-queue" }
@@ -45,6 +46,14 @@ required-features = ["fuzzing"]
 [[bin]]
 name = "stateful_commands"
 path = "fuzz_targets/stateful_commands.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzzing"]
+
+[[bin]]
+name = "guest_client"
+path = "fuzz_targets/guest_client.rs"
 test = false
 doc = false
 bench = false

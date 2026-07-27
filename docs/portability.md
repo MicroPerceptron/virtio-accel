@@ -114,6 +114,7 @@ python3 ci/seed-fuzz-corpus.py
 cargo fuzz run protocol_decode fuzz/corpus/protocol_decode fuzz/regressions/protocol_decode -- -runs=256 -max_total_time=20 -timeout=5 -rss_limit_mb=2048 -max_len=65536
 cargo fuzz run descriptor_end_to_end fuzz/corpus/descriptor_end_to_end fuzz/regressions/descriptor_end_to_end -- -runs=256 -max_total_time=20 -timeout=5 -rss_limit_mb=2048 -max_len=65536
 cargo fuzz run stateful_commands fuzz/corpus/stateful_commands fuzz/regressions/stateful_commands -- -runs=256 -max_total_time=20 -timeout=5 -rss_limit_mb=2048 -max_len=65536
+cargo fuzz run guest_client fuzz/corpus/guest_client fuzz/regressions/guest_client -- -runs=256 -max_total_time=20 -timeout=5 -rss_limit_mb=2048 -max_len=65536
 ```
 
 Target checks require the corresponding Rust standard libraries:
