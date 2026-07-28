@@ -1,0 +1,46 @@
+title: "[Q] "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Questions are welcome, including basic ones. If the answer turns out to be "the docs are
+        wrong or unclear," that is a docs bug and we would rather hear about it here than not at all.
+
+        For implementing a backend, start with the
+        [backend implementer guide](https://github.com/MicroPerceptron/virtio-accel/blob/main/docs/backend-implementer-guide.md).
+
+  - type: textarea
+    id: question
+    attributes:
+      label: What are you trying to do?
+      description: The goal, not just the error — it often changes the answer.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Implementing a backend / the Accelerator contract
+        - Running the conformance suite
+        - Wire encoding and decoding
+        - Transport, virtqueue, or descriptor chains
+        - Portability, no_std, or MSRV
+        - Building and testing the workspace
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: What have you tried?
+      description: Relevant code, the failing output, or the doc section that did not answer it.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: "0.1.0"

@@ -1,0 +1,91 @@
+name: Protocol change proposal
+description: Propose an erratum, a compatible extension, or a breaking change to the wire protocol.
+labels: ["protocol"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Protocol 1.0 is **frozen** by the
+        [freeze audit](https://github.com/MicroPerceptron/virtio-accel/blob/main/conformance/v1.0/freeze-audit.md).
+        Every wire change is classified before code is merged — see
+        [docs/wire-abi.md §9](https://github.com/MicroPerceptron/virtio-accel/blob/main/docs/wire-abi.md).
+
+        If you are still working out the shape of the idea, start in
+        [Discussions → Ideas](https://github.com/MicroPerceptron/virtio-accel/discussions/categories/ideas)
+        instead. This form is for a proposal you can already classify.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What can a driver, device, or backend not express today? Describe the limitation before the
+        solution — many proposals turn out to be answerable within the 1.0 baseline.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: classification
+    attributes:
+      label: Proposed classification
+      description: Per docs/wire-abi.md §9. If you are wrong we will say so; an honest guess is fine.
+      options:
+        - "1 — Erratum: changes no accepted or emitted bytes"
+        - "2 — Compatible extension: reserved number + negotiation, every 1.0 frame preserved"
+        - "3 — Breaking: changed number, length, meaning, required response, or ownership rule"
+    validations:
+      required: true
+
+  - type: textarea
+    id: justification
+    attributes:
+      label: Why that classification
+      description: >
+        For an erratum, say why no bytes change. For an extension, name the reserved number you
+        intend to use and how it is negotiated. For a breaking change, say what it invalidates.
+    validations:
+      required: true
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Effect on a 1.0 peer
+      description: >
+        What happens when a driver or device implementing this talks to one that does not — in both
+        directions? A 1.0 receiver must not have to guess.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: artifacts
+    attributes:
+      label: Artifacts this would need to update
+      description: >
+        A category 2 or 3 change must update all of these in the same reviewed change. Tick what you
+        believe is affected — you do not have to have written them yet.
+      options:
+        - label: Normative docs (specification.md, wire-abi.md, virtqueue.md)
+        - label: Rust constants and layout assertions
+        - label: Machine layout manifest (layout.json)
+        - label: Canonical vectors (vectors.json)
+        - label: Scenarios and requirements (scenarios.json, requirements.json)
+        - label: Clean-room codec coverage
+        - label: A new conformance directory for the new protocol version
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: >
+        Including "do nothing." If this can be solved in a downstream adapter rather than the
+        portable protocol, that is usually the better answer.
+
+  - type: checkboxes
+    id: deferred
+    attributes:
+      label: Deferred features
+      options:
+        - label: >
+            I have checked that this is not simply one of the deferred optional features
+            (multi-queue, event queues, external memory import/export, timeline fences, secure
+            contexts, packed virtqueues) already listed as out of scope for 1.0.

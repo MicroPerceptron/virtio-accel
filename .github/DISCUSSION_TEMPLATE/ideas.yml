@@ -1,0 +1,43 @@
+title: "[Idea] "
+labels: ["idea"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Early-stage ideas belong here. Nothing needs to be fully worked out — this is the place to
+        find out whether an idea fits the portable scope before writing a proposal or a patch.
+
+        Once the shape is clear, a protocol change gets promoted to a
+        [protocol change proposal](https://github.com/MicroPerceptron/virtio-accel/issues/new?template=protocol_change.yml).
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: The idea
+      description: What would you like to be able to express, and why can't you today?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Which layer does this touch?
+      options:
+        - Wire protocol / ABI
+        - Backend contract (virtio-accel-core)
+        - Transport and virtqueue handling
+        - Device or guest state
+        - Conformance suite
+        - Docs or tooling
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: downstream
+    attributes:
+      label: Could this live downstream instead?
+      description: >
+        A platform adapter, VMM integration, or vendor SDK that depends on these crates is often the
+        right home. Portable crates deliberately stay free of host and vendor behavior — so it helps
+        to say why this needs to be *in* the protocol.

@@ -200,6 +200,8 @@ optional resource-accounting and progress adapters, and the fault-injection harn
 | [backend-implementer-guide.md](docs/backend-implementer-guide.md) | Running the semantic suite against a new backend |
 | [releases/v1.0.md](docs/releases/v1.0.md) | Protocol 1.0 release note |
 | [conformance/v1.0](conformance/v1.0/README.md) | Golden artifacts, canonical frames, and the [freeze audit](conformance/v1.0/freeze-audit.md) |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Development gates, protocol change classification, and scope boundaries |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Expected conduct in project spaces |
 | [SECURITY.md](SECURITY.md) | Reporting a vulnerability |
 
 ## Portability
@@ -269,7 +271,21 @@ the coordinated change procedure in [wire-abi.md](docs/wire-abi.md) and the
 [release and evolution policy](docs/release-policy.md); incompatible changes require a new protocol
 major version.
 
+## Contributing
+
+Contributions are welcome, including disagreement with frozen decisions — a reasoned objection is
+worth more than a workaround built on top of one. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+local gates, the scope boundaries, and how wire changes are classified before code is merged.
+
+- Questions and backend porting help →
+  [Discussions → Q&A](https://github.com/MicroPerceptron/virtio-accel/discussions/categories/q-a)
+- Early design ideas →
+  [Discussions → Ideas](https://github.com/MicroPerceptron/virtio-accel/discussions/categories/ideas)
+- Suspected vulnerabilities → **not** a public issue; follow [SECURITY.md](SECURITY.md)
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 [MIT license](LICENSE-MIT) at your option.
+
+Contributions are dual-licensed on the same terms, with no separate CLA.

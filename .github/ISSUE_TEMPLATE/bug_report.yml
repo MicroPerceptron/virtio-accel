@@ -1,0 +1,91 @@
+name: Bug report
+description: Something behaves differently than the specification or the docs say it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If this is a **security** issue — memory safety, panic reachability from untrusted input, a
+        cross-context leak, or unbounded resource growth — please stop and follow
+        [SECURITY.md](https://github.com/MicroPerceptron/virtio-accel/blob/main/SECURITY.md)
+        instead. Report privately to info@microperceptron.com.
+
+  - type: dropdown
+    id: crate
+    attributes:
+      label: Crate
+      description: Which crate does the behavior live in? Pick the closest one.
+      options:
+        - virtio-accel (facade)
+        - virtio-accel-proto
+        - virtio-accel-transport
+        - virtio-accel-core
+        - virtio-accel-split-queue
+        - virtio-accel-guest
+        - virtio-accel-device
+        - virtio-accel-mock
+        - virtio-accel-conformance
+        - virtio-accel-cleanroom
+        - Not sure / spans several
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: The crates.io version, or a commit hash if you are building from source.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should have happened
+      description: >
+        Where possible, point at the rule you are relying on — a section of the specification, the
+        wire ABI, the virtqueue doc, or a conformance requirement.
+      placeholder: "docs/wire-abi.md §5.6 says an indeterminate submit failure must still return an event…"
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened
+      description: Include the error, panic message, or wrong bytes. Paste output as text, not a screenshot.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: >
+        A failing test, a fuzz input, a byte sequence, or the call order that triggers it. The more
+        mechanical this is, the faster it gets fixed.
+      render: rust
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Does this change accepted or emitted protocol bytes?
+      description: >
+        If fixing this would alter bytes on the wire, it is a compatibility event and gets
+        classified under docs/release-policy.md — not just a patch.
+      options:
+        - "No — Rust-side behavior only"
+        - "Yes — bytes on the wire are affected"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: input
+    id: target
+    attributes:
+      label: Target and toolchain
+      description: Relevant if the bug is portability- or MSRV-related.
+      placeholder: "aarch64-unknown-none, rustc 1.85.0"

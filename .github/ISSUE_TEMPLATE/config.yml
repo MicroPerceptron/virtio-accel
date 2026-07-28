@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/MicroPerceptron/virtio-accel/security/policy
+    about: Report privately to info@microperceptron.com. Please do not open a public issue for a suspected vulnerability.
+  - name: Ask a question or get help porting a backend
+    url: https://github.com/MicroPerceptron/virtio-accel/discussions/categories/q-a
+    about: Implementation questions, conformance-suite help, and "is this supposed to work this way?"
+  - name: Float a design idea
+    url: https://github.com/MicroPerceptron/virtio-accel/discussions/categories/ideas
+    about: Early-stage protocol or API ideas start here. Promote to a proposal once the shape is clear.
