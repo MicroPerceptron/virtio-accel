@@ -765,11 +765,15 @@ impl Timeout {
     }
 }
 
-/// One validated binding. The referenced buffer must remain alive until its event is reclaimed.
+/// One borrowed program binding. The referenced buffer must remain alive until its event is
+/// reclaimed.
 ///
 /// Program-visible buffers carry [`BufferProperties::DIRECT_BINDING`]. A backend must reject an
 /// incompatible buffer/program combination instead of copying the range into a hidden bounce
 /// allocation. Binding order is not semantic; command engines may present the slice in slot order.
+///
+/// Before [`Accelerator::submit`], hosts must reject an [`AccessMode`] incompatible with the
+/// buffer's declared [`BufferUsage`] (see [`Self::validate_for_submit`]).
 #[derive(Debug)]
 pub struct BindingRef<'a, B> {
     pub slot: u32,
@@ -778,6 +782,36 @@ pub struct BindingRef<'a, B> {
     pub access: AccessMode,
 }
 
+impl<'a, B> BindingRef<'a, B> {
+    /// Slot/count checks plus [`BufferDesc::allows_access`] for each binding.
+    ///
+    /// Hosts must call this before [`Accelerator::submit`]. `descs[i]` must be the
+    /// descriptor for the buffer behind `bindings[i].buffer` (equal length alone is
+    /// not enough). A usage mismatch returns [`BackendError::PermissionDenied`].
+    pub fn validate_for_submit(
+        bindings: &[Self],
+        descs: &[BufferDesc],
+        max_bindings: u32,
+    ) -> Result<(), BackendError> {
+        validate_bindings(bindings, max_bindings)?;
+        if bindings.len() != descs.len() {
+            return Err(BackendError::InvalidArgument);
+        }
+        for (binding, desc) in bindings.iter().zip(descs.iter()) {
+            if !desc.allows_access(binding.access) {
+                return Err(BackendError::PermissionDenied);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Slot/count uniqueness helper for program bindings.
+///
+/// Structural only: nonempty, bounded by `max_bindings`, and unique slots. This is
+/// **incomplete** for pre-admission checks -- it does not enforce access/usage
+/// compatibility required before backend admission. Prefer
+/// [`BindingRef::validate_for_submit`] before [`Accelerator::submit`].
 pub fn validate_bindings<B>(
     bindings: &[BindingRef<'_, B>],
     max_bindings: u32,
@@ -1018,6 +1052,10 @@ pub trait Accelerator {
     fn destroy_queue(&self, queue: Self::Queue) -> Result<(), ReleaseFailure<Self::Queue>>;
 
     /// Attempt to admit one program execution and return its event.
+    ///
+    /// Hosts must reject an [`AccessMode`] incompatible with each buffer's [`BufferUsage`] before
+    /// calling this method (see [`BindingRef::validate_for_submit`]). Providers may repeat the check
+    /// as defense in depth, but host-side rejection is required by Wire ABI section 4.4.
     ///
     /// - **Ownership/lifetime:** queue, program, buffers, and the binding slice are borrowed only
     ///   during admission and must not be retained as Rust references. The caller keeps every
@@ -1323,6 +1361,38 @@ mod tests {
         assert_eq!(
             validate_bindings::<()>(&[], 1),
             Err(BackendError::ResourceLimit)
+        );
+    }
+
+    #[test]
+    fn binding_access_rejects_usage_mismatch_with_unique_slots() {
+        let buffer = ();
+        let range = BufferRange::new(0, 16).unwrap();
+        let bindings = [BindingRef {
+            slot: 0,
+            buffer: &buffer,
+            range,
+            access: AccessMode::Write,
+        }];
+        let input = BufferDesc::new(64, 16, MemoryDomain::Host, BufferUsage::PROGRAM_INPUT).unwrap();
+        assert!(!input.allows_access(AccessMode::Write));
+        // Slot-only checks still pass; the usage gate lives on validate_for_submit.
+        assert!(validate_bindings(&bindings, 1).is_ok());
+        assert_eq!(
+            BindingRef::validate_for_submit(&bindings, &[input], 1),
+            Err(BackendError::PermissionDenied)
+        );
+
+        let read_bindings = [BindingRef {
+            slot: 0,
+            buffer: &buffer,
+            range,
+            access: AccessMode::Read,
+        }];
+        assert!(BindingRef::validate_for_submit(&read_bindings, &[input], 1).is_ok());
+        assert_eq!(
+            BindingRef::validate_for_submit(&read_bindings, &[], 1),
+            Err(BackendError::InvalidArgument)
         );
     }
 
