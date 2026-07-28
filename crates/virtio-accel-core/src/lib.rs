@@ -1374,7 +1374,8 @@ mod tests {
             range,
             access: AccessMode::Write,
         }];
-        let input = BufferDesc::new(64, 16, MemoryDomain::Host, BufferUsage::PROGRAM_INPUT).unwrap();
+        let input =
+            BufferDesc::new(64, 16, MemoryDomain::Host, BufferUsage::PROGRAM_INPUT).unwrap();
         assert!(!input.allows_access(AccessMode::Write));
         // Slot-only checks still pass; the usage gate lives on validate_for_submit.
         assert!(validate_bindings(&bindings, 1).is_ok());
