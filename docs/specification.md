@@ -539,7 +539,7 @@ model or is identified as an implementation helper.
 | `ArtifactFormat`, `TargetIdentity`, `ArtifactRef` | Opaque program artifact description over a byte source |
 | `QueueFlags`, `QueueDesc` | Accelerator execution-queue creation intent, not a Virtio queue |
 | `Timeout` | Relative admission timeout; zero on wire means infinite |
-| `BindingRef`, `validate_bindings` | Validated semantic binding and implementation helper |
+| `BindingRef` | Borrowed program binding view. Hosts must reject `AccessMode` incompatible with `BufferUsage` before backend admission |
 | `EventState` | Event completion state |
 | `SubmitFailure` | Rejected versus indeterminate submission acceptance boundary |
 | `ReleaseFailure` | Rejected versus indeterminate resource-release boundary |

@@ -16,7 +16,7 @@ use virtio_accel_core::{
     Accelerator, AcceleratorClass, AllocatedBuffer, ArtifactFormat, ArtifactRef, BackendError,
     BindingRef, BufferDesc, BufferInfo, BufferProperties, ByteSink, ByteSource, Capabilities,
     ContextDesc, DeviceIdentity, DeviceInfo, DeviceLimits, EventState, MemoryDomain, QueueDesc,
-    ReleaseFailure, SubmitFailure, TargetIdentity, Timeout, validate_bindings,
+    ReleaseFailure, SubmitFailure, TargetIdentity, Timeout,
 };
 
 use reference::Operation;
@@ -508,8 +508,10 @@ impl Accelerator for MockAccelerator {
         bindings: &[BindingRef<'_, Self::Buffer>],
         _timeout: Timeout,
     ) -> Result<Self::Event, SubmitFailure<Self::Event>> {
-        validate_bindings(bindings, self.info.limits.max_bindings_per_submission)
-            .map_err(SubmitFailure::Rejected)?;
+        // Provider-side defense-in-depth. Hosts must still call
+        // `BindingRef::validate_for_submit` before `Accelerator::submit`
+        // (as `CommandProcessor` does). Range checks run before the shared usage
+        // gate so overlapping faults prefer `OutOfBounds` over `PermissionDenied`.
         if queue.context_id != program.context_id
             || bindings
                 .iter()
@@ -521,10 +523,14 @@ impl Accelerator for MockAccelerator {
             if binding.range.end() > binding.buffer.desc.bytes() {
                 return Err(SubmitFailure::Rejected(BackendError::OutOfBounds));
             }
-            if !binding.buffer.desc.allows_access(binding.access) {
-                return Err(SubmitFailure::Rejected(BackendError::PermissionDenied));
-            }
         }
+        let descs: Vec<BufferDesc> = bindings.iter().map(|binding| binding.buffer.desc).collect();
+        BindingRef::validate_for_submit(
+            bindings,
+            &descs,
+            self.info.limits.max_bindings_per_submission,
+        )
+        .map_err(SubmitFailure::Rejected)?;
         let invocation = Self::prepare_invocation(program.operation, bindings)
             .map_err(SubmitFailure::Rejected)?;
         self.direct_binding_admissions
@@ -1060,5 +1066,34 @@ mod tests {
             backend.submit(&queue, &program, &bindings, Timeout::Infinite),
             Err(SubmitFailure::Rejected(BackendError::Incompatible))
         ));
+    }
+
+    #[test]
+    fn usage_mismatch_is_rejected_before_admission() {
+        let backend = MockAccelerator::default();
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        let allocation = backend
+            .allocate_buffer(
+                &context,
+                BufferDesc::new(16, 1, MemoryDomain::Host, BufferUsage::PROGRAM_INPUT).unwrap(),
+            )
+            .unwrap();
+        let (buffer, _) = allocation.into_parts();
+        let artifact = reference::ReferenceArtifact::barrier(0);
+        let program = load_reference(&backend, &context, &artifact);
+        let queue = backend
+            .create_queue(&context, QueueDesc::default())
+            .unwrap();
+        let bindings = [BindingRef {
+            slot: 0,
+            buffer: &buffer,
+            range: BufferRange::new(0, 16).unwrap(),
+            access: AccessMode::Write,
+        }];
+        assert!(matches!(
+            backend.submit(&queue, &program, &bindings, Timeout::Infinite),
+            Err(SubmitFailure::Rejected(BackendError::PermissionDenied))
+        ));
+        assert_eq!(backend.direct_binding_admissions(), 0);
     }
 }

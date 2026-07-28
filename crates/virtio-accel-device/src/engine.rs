@@ -8,8 +8,8 @@
 use alloc::vec::Vec;
 
 use virtio_accel_core::{
-    Accelerator, ArtifactRef, BackendError, BindingRef, BufferRange, BufferUsage, ByteSink,
-    ByteSource, Capabilities, DeviceInfo, DeviceInfoError, EventState, ReleaseFailure,
+    Accelerator, ArtifactRef, BackendError, BindingRef, BufferDesc, BufferRange, BufferUsage,
+    ByteSink, ByteSource, Capabilities, DeviceInfo, DeviceInfoError, EventState, ReleaseFailure,
     SubmitFailure, Timeout,
 };
 use virtio_accel_proto::{
@@ -452,13 +452,18 @@ impl<A: Accelerator> CommandProcessor<A> {
         buffer_ids.extend(bindings.iter().map(|binding| binding.buffer_id));
 
         let accelerator = &self.accelerator;
+        let max_bindings = self.info.limits.max_bindings_per_submission;
         let mut admission_status = StatusCode::OK;
         let mut admission_requires_discard = false;
         let result = self
             .state
             .create_event_with(queue_id, program_id, buffer_ids, |resources| {
                 let mut native_bindings = Vec::new();
+                let mut descs: Vec<BufferDesc> = Vec::new();
                 native_bindings
+                    .try_reserve_exact(bindings.len())
+                    .map_err(|_| SubmitCreateError::OutOfMemory)?;
+                descs
                     .try_reserve_exact(bindings.len())
                     .map_err(|_| SubmitCreateError::OutOfMemory)?;
                 for binding in &bindings {
@@ -469,9 +474,7 @@ impl<A: Accelerator> CommandProcessor<A> {
                     if binding.range.end() > desc.bytes() {
                         return Err(SubmitCreateError::Validation(StatusCode::OUT_OF_BOUNDS));
                     }
-                    if !desc.allows_access(binding.access) {
-                        return Err(SubmitCreateError::Validation(StatusCode::PERMISSION_DENIED));
-                    }
+                    descs.push(desc);
                     native_bindings.push(BindingRef {
                         slot: binding.slot,
                         buffer,
@@ -479,6 +482,9 @@ impl<A: Accelerator> CommandProcessor<A> {
                         access: binding.access,
                     });
                 }
+                BindingRef::validate_for_submit(&native_bindings, &descs, max_bindings).map_err(
+                    |error| SubmitCreateError::Validation(status_from_backend_error(error)),
+                )?;
                 match accelerator.submit(
                     resources.queue(),
                     resources.program(),

@@ -166,9 +166,10 @@ retained by the returned program handle, including compiled code and provider me
 to that program. Reject the load when that bound cannot be honored; do not treat it as an estimate.
 
 Submission validates nonempty bounded bindings, unique slots, nonempty in-range regions, declared
-buffer usage, program-specific slot/access compatibility, and one context across queue, program,
-and buffers. Validation and admission are bounded. The borrowed binding slice is not an owned
-per-binding mirror and must not survive the call as Rust references.
+buffer usage (access must be compatible with the buffer’s usage bits), program-specific
+slot/access compatibility, and one context across queue, program, and buffers. Reject usage
+mismatches before provider admission. Validation and admission are bounded. The borrowed binding
+slice is not an owned per-binding mirror and must not survive the call as Rust references.
 
 ### Events, cancellation, and time
 
