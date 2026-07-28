@@ -10,17 +10,29 @@ There are two separate version axes:
 - Cargo crate versions describe the Rust API and package graph.
 - Protocol versions describe driver/device wire compatibility and conformance artifacts.
 
-The root workspace version is allowed to remain lower than `1.0.0` while the repository is private
-or unpublished, but a public protocol 1.0 release needs a matching release note and a frozen
-`conformance/v1.0` directory. A Cargo patch, minor, or major change does not by itself change the
-wire protocol. A wire protocol change must follow the protocol classification below even when the
-Rust crate version is still pre-1.0.
+The two axes advance independently. A Cargo patch, minor, or major change does not by itself change
+the wire protocol, and a wire protocol change must follow the protocol classification below even when
+the Rust crate version is still pre-1.0. A public protocol 1.0 release needs a matching release note
+and a frozen `conformance/v1.0` directory; it does not require a `1.0.0` Cargo version.
 
-> **Known open item.** The workspace is at `0.1.0` while carrying a frozen protocol 1.0 baseline and
-> a published-package set, so the "private or unpublished" allowance above no longer describes
-> reality. Reconciling the Cargo version with the protocol freeze is deliberately a separate
-> decision from wiring up the package metadata, and is tracked as the prerequisite for the first
-> actual publish. Nothing may be published to crates.io until it is resolved.
+### Cargo version posture
+
+The workspace publishes at `0.1.x` while carrying the frozen protocol 1.0 baseline. This is
+deliberate rather than an unreconciled gap:
+
+- The Cargo version tracks the **Rust API and package graph**, which is young and expected to change
+  as backend, guest, device, and transport adapter authors build against it.
+- The protocol version tracks **wire compatibility**, which is frozen by the
+  [v1.0 freeze audit](../conformance/v1.0/freeze-audit.md) and governed by the classification table
+  below.
+
+A pre-1.0 Cargo version is therefore the accurate signal on both axes, and is not a statement about
+protocol stability. Consumers who need the stable artifact should depend on protocol 1.0 and its
+conformance directory, not on a Cargo version number.
+
+Moving the workspace to `1.0.0` is a separate, later decision. It requires the public Rust API to
+have real downstream users and an explicit semver promise recorded in a release note. Until then,
+breaking Rust API changes ship as `0.x` minor bumps under the classification table below.
 
 ## Change classification examples
 
