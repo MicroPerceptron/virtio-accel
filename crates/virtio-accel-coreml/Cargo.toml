@@ -18,4 +18,4 @@ virtio-accel-core.workspace = true
 virtio-accel-conformance.workspace = true
 
 [build-dependencies]
-cc.workspace = true
+cc = "1.2"
