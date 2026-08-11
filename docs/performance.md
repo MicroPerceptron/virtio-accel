@@ -53,3 +53,23 @@ python3 ci/check-performance-budgets.py --check
 cargo test --test performance_budgets --all-features
 cargo test -p virtio-accel-conformance --all-features
 ```
+
+## Core ML provider evidence
+
+`virtio-accel-coreml` sorts validated binding metadata once in Rust (`O(b log b)`) and uses a
+model-load-time slot plan for a linear Objective-C validation/wrapping pass. Its submission path
+copies no tensor bytes. Read-only allocations may be shared by overlapping predictions; any output
+or read-write use remains exclusive.
+
+The crate includes an ignored release-mode measurement for fixed provider overhead:
+
+```sh
+cargo test --release -p virtio-accel-coreml \
+  measures_warm_submission_and_completion_latency -- --ignored --nocapture
+```
+
+On an Apple M4 running macOS 26.5.2, five runs of 200 measured iterations after 20 warmups reported
+per-run median admission between 5.00 and 5.42 microseconds and median completion between 84.13 and
+91.08 microseconds for the embedded `Float32[8]` model. The pre-pass measurement was 5.25
+microseconds admission and 98.46 microseconds completion. This tiny model is evidence for host and
+Core ML fixed overhead, not representative ANE throughput, and remains non-gating wall-clock data.

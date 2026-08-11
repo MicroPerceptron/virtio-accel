@@ -94,6 +94,17 @@ fn float_bytes(values: impl IntoIterator<Item = f32>) -> Vec<u8> {
         .collect::<Vec<_>>()
 }
 
+fn split_artifact() -> Vec<u8> {
+    CoreMlArtifact::new("TwicePlusOne.mlmodel")
+        .unwrap()
+        .map_input(7, "x")
+        .unwrap()
+        .map_output(8, "y")
+        .unwrap()
+        .encode()
+        .unwrap()
+}
+
 fn wait_for_terminal(
     backend: &CoreMlAccelerator,
     event: &CoreMlEvent,
@@ -185,6 +196,172 @@ fn executes_a_coreml_model_with_exact_shared_backing() {
     backend.destroy_context(context).unwrap();
 }
 
+#[test]
+fn accepts_unsorted_distinct_input_and_output_bindings() {
+    let fixture = Fixture::new();
+    let backend = match fixture.backend() {
+        Ok(backend) => backend,
+        Err(InitError::NeuralEngineUnavailable) => return,
+        Err(error) => panic!("Core ML backend initialization failed: {error}"),
+    };
+    let context = backend.create_context(ContextDesc::default()).unwrap();
+    let input_bytes = float_bytes((0..8).map(|value| value as f32));
+    let expected = float_bytes((0..8).map(|value| value as f32 * 2.0 + 1.0));
+    let input_desc = BufferDesc::new(
+        input_bytes.len() as u64,
+        16 * 1024,
+        MemoryDomain::Shared,
+        BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+    )
+    .unwrap();
+    let output_desc = BufferDesc::new(
+        expected.len() as u64,
+        16 * 1024,
+        MemoryDomain::Shared,
+        BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+    )
+    .unwrap();
+    let (mut input, _) = backend
+        .allocate_buffer(&context, input_desc)
+        .unwrap()
+        .into_parts();
+    let (output, _) = backend
+        .allocate_buffer(&context, output_desc)
+        .unwrap()
+        .into_parts();
+    backend
+        .write_buffer(&mut input, 0, &SliceSource(&input_bytes))
+        .unwrap();
+
+    let artifact = split_artifact();
+    let artifact_source = SliceSource(&artifact);
+    let program = backend
+        .load_program(
+            &context,
+            ArtifactRef {
+                format: ARTIFACT_FORMAT,
+                target: TARGET_IDENTITY,
+                payload: &artifact_source,
+                resident_bytes: REQUIRED_RESIDENT_BYTES,
+            },
+        )
+        .unwrap();
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .unwrap();
+    let bindings = [
+        BindingRef {
+            slot: 8,
+            buffer: &output,
+            range: BufferRange::new(0, expected.len() as u64).unwrap(),
+            access: AccessMode::Write,
+        },
+        BindingRef {
+            slot: 7,
+            buffer: &input,
+            range: BufferRange::new(0, input_bytes.len() as u64).unwrap(),
+            access: AccessMode::Read,
+        },
+    ];
+    let event = backend
+        .submit(&queue, &program, &bindings, Timeout::Infinite)
+        .unwrap();
+    assert_eq!(
+        wait_for_terminal(&backend, &event).unwrap(),
+        EventState::Complete
+    );
+    backend.destroy_event(event).unwrap();
+
+    let mut actual = [0; 32];
+    backend.read_buffer(&output, 0, &mut actual).unwrap();
+    assert_eq!(actual.as_slice(), expected);
+    assert_eq!(backend.direct_binding_admissions(), 2);
+    assert_eq!(backend.explicit_transfer_bytes(), 64);
+
+    backend.destroy_queue(queue).unwrap();
+    backend.unload_program(program).unwrap();
+    backend.free_buffer(output).unwrap();
+    backend.free_buffer(input).unwrap();
+    backend.destroy_context(context).unwrap();
+}
+
+#[test]
+fn rejects_misaligned_tensor_bindings_before_admission() {
+    let fixture = Fixture::new();
+    let backend = match fixture.backend() {
+        Ok(backend) => backend,
+        Err(InitError::NeuralEngineUnavailable) => return,
+        Err(error) => panic!("Core ML backend initialization failed: {error}"),
+    };
+    let context = backend.create_context(ContextDesc::default()).unwrap();
+    let input_bytes = float_bytes((0..8).map(|value| value as f32));
+    let input_desc = BufferDesc::new(
+        input_bytes.len() as u64 + 1,
+        16 * 1024,
+        MemoryDomain::Shared,
+        BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+    )
+    .unwrap();
+    let output_desc = BufferDesc::new(
+        input_bytes.len() as u64,
+        16 * 1024,
+        MemoryDomain::Shared,
+        BufferUsage::PROGRAM_OUTPUT,
+    )
+    .unwrap();
+    let (mut input, _) = backend
+        .allocate_buffer(&context, input_desc)
+        .unwrap()
+        .into_parts();
+    let (output, _) = backend
+        .allocate_buffer(&context, output_desc)
+        .unwrap()
+        .into_parts();
+    backend
+        .write_buffer(&mut input, 1, &SliceSource(&input_bytes))
+        .unwrap();
+    let artifact = split_artifact();
+    let artifact_source = SliceSource(&artifact);
+    let program = backend
+        .load_program(
+            &context,
+            ArtifactRef {
+                format: ARTIFACT_FORMAT,
+                target: TARGET_IDENTITY,
+                payload: &artifact_source,
+                resident_bytes: REQUIRED_RESIDENT_BYTES,
+            },
+        )
+        .unwrap();
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .unwrap();
+    let bindings = [
+        BindingRef {
+            slot: 7,
+            buffer: &input,
+            range: BufferRange::new(1, input_bytes.len() as u64).unwrap(),
+            access: AccessMode::Read,
+        },
+        BindingRef {
+            slot: 8,
+            buffer: &output,
+            range: BufferRange::new(0, input_bytes.len() as u64).unwrap(),
+            access: AccessMode::Write,
+        },
+    ];
+    match backend.submit(&queue, &program, &bindings, Timeout::Infinite) {
+        Err(virtio_accel_core::SubmitFailure::Rejected(BackendError::Incompatible)) => {}
+        result => panic!("misaligned binding was not rejected: {result:?}"),
+    }
+
+    backend.destroy_queue(queue).unwrap();
+    backend.unload_program(program).unwrap();
+    backend.free_buffer(output).unwrap();
+    backend.free_buffer(input).unwrap();
+    backend.destroy_context(context).unwrap();
+}
+
 struct Hooks;
 
 impl ConformanceHooks<CoreMlAccelerator> for Hooks {
@@ -207,6 +384,7 @@ impl ConformanceHooks<CoreMlAccelerator> for Hooks {
     ) -> Option<SubmissionPathDiagnostics> {
         Some(SubmissionPathDiagnostics {
             direct_bindings: backend.direct_binding_admissions(),
+            explicit_transfer_bytes: backend.explicit_transfer_bytes(),
             ..SubmissionPathDiagnostics::default()
         })
     }
@@ -302,5 +480,119 @@ fn nonmaximal_resident_charge_is_rejected_before_native_loading() {
         ),
         Err(BackendError::ResourceLimit)
     ));
+    backend.destroy_context(context).unwrap();
+}
+
+#[test]
+#[ignore = "manual native performance evidence"]
+fn measures_warm_submission_and_completion_latency() {
+    const WARMUPS: usize = 20;
+    const ITERATIONS: usize = 200;
+
+    let fixture = Fixture::new();
+    let backend = match fixture.backend() {
+        Ok(backend) => backend,
+        Err(InitError::NeuralEngineUnavailable) => return,
+        Err(error) => panic!("Core ML backend initialization failed: {error}"),
+    };
+    let context = backend.create_context(ContextDesc::default()).unwrap();
+    let input_bytes = float_bytes((0..8).map(|value| value as f32));
+    let expected = float_bytes((0..8).map(|value| value as f32 * 2.0 + 1.0));
+    let input_desc = BufferDesc::new(
+        input_bytes.len() as u64,
+        16 * 1024,
+        MemoryDomain::Shared,
+        BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+    )
+    .unwrap();
+    let output_desc = BufferDesc::new(
+        expected.len() as u64,
+        16 * 1024,
+        MemoryDomain::Shared,
+        BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+    )
+    .unwrap();
+    let (mut input, _) = backend
+        .allocate_buffer(&context, input_desc)
+        .unwrap()
+        .into_parts();
+    let (output, _) = backend
+        .allocate_buffer(&context, output_desc)
+        .unwrap()
+        .into_parts();
+    backend
+        .write_buffer(&mut input, 0, &SliceSource(&input_bytes))
+        .unwrap();
+
+    let artifact = split_artifact();
+    let artifact_source = SliceSource(&artifact);
+    let program = backend
+        .load_program(
+            &context,
+            ArtifactRef {
+                format: ARTIFACT_FORMAT,
+                target: TARGET_IDENTITY,
+                payload: &artifact_source,
+                resident_bytes: REQUIRED_RESIDENT_BYTES,
+            },
+        )
+        .unwrap();
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .unwrap();
+    let bindings = [
+        BindingRef {
+            slot: 7,
+            buffer: &input,
+            range: BufferRange::new(0, input_bytes.len() as u64).unwrap(),
+            access: AccessMode::Read,
+        },
+        BindingRef {
+            slot: 8,
+            buffer: &output,
+            range: BufferRange::new(0, expected.len() as u64).unwrap(),
+            access: AccessMode::Write,
+        },
+    ];
+
+    let mut admission = Vec::with_capacity(ITERATIONS);
+    let mut completion = Vec::with_capacity(ITERATIONS);
+    for iteration in 0..WARMUPS + ITERATIONS {
+        let started = Instant::now();
+        let event = backend
+            .submit(&queue, &program, &bindings, Timeout::Infinite)
+            .unwrap();
+        let admitted = Instant::now();
+        assert_eq!(
+            wait_for_terminal(&backend, &event).unwrap(),
+            EventState::Complete
+        );
+        let completed = Instant::now();
+        backend.destroy_event(event).unwrap();
+        if iteration >= WARMUPS {
+            admission.push(admitted.duration_since(started));
+            completion.push(completed.duration_since(started));
+        }
+    }
+    admission.sort_unstable();
+    completion.sort_unstable();
+    let percentile = |samples: &[Duration], numerator: usize, denominator: usize| {
+        samples[(samples.len() - 1) * numerator / denominator]
+    };
+    eprintln!(
+        "Core ML warm path ({ITERATIONS} iterations): admission median={:?} p95={:?}; completion median={:?} p95={:?}",
+        percentile(&admission, 1, 2),
+        percentile(&admission, 95, 100),
+        percentile(&completion, 1, 2),
+        percentile(&completion, 95, 100),
+    );
+
+    let mut actual = [0; 32];
+    backend.read_buffer(&output, 0, &mut actual).unwrap();
+    assert_eq!(actual.as_slice(), expected);
+    backend.destroy_queue(queue).unwrap();
+    backend.unload_program(program).unwrap();
+    backend.free_buffer(output).unwrap();
+    backend.free_buffer(input).unwrap();
     backend.destroy_context(context).unwrap();
 }
