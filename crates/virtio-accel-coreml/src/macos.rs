@@ -4,7 +4,6 @@ use crate::artifact::{DecodeError, FeatureRole, MAX_ARTIFACT_BYTES, decode};
 use crate::{ARTIFACT_FORMAT, InitError, REQUIRED_RESIDENT_BYTES, TARGET_IDENTITY};
 use core::ffi::c_void;
 use std::alloc::{Layout, alloc_zeroed, dealloc};
-use std::collections::BTreeSet;
 use std::fmt;
 use std::marker::PhantomData;
 use std::os::unix::ffi::OsStrExt;
@@ -14,15 +13,17 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use virtio_accel_core::{
-    Accelerator, AcceleratorClass, AllocatedBuffer, ArtifactRef, BackendError, BindingRef,
-    BufferDesc, BufferInfo, BufferProperties, BufferUsage, ByteSink, ByteSource, Capabilities,
-    ContextDesc, DeviceIdentity, DeviceInfo, DeviceLimits, EventState, MemoryDomain, QueueDesc,
-    ReleaseFailure, SubmitFailure, Timeout, validate_bindings,
+    Accelerator, AcceleratorClass, AccessMode, AllocatedBuffer, ArtifactRef, BackendError,
+    BindingRef, BufferDesc, BufferInfo, BufferProperties, BufferUsage, ByteSink, ByteSource,
+    Capabilities, ContextDesc, DeviceIdentity, DeviceInfo, DeviceLimits, EventState, MemoryDomain,
+    QueueDesc, ReleaseFailure, SubmitFailure, Timeout, validate_bindings,
 };
 
 const COREML_MIN_ALIGNMENT: usize = 16 * 1024;
 const TRANSFER_CHUNK_BYTES: usize = 16 * 1024;
 const COREML_EXTERNAL_DOMAIN: u32 = 0x434d_4c45;
+const EXCLUSIVE_NATIVE_ACCESS: u64 = 1 << 63;
+const MAX_SHARED_NATIVE_USERS: u64 = EXCLUSIVE_NATIVE_ACCESS - 1;
 
 const ERROR_UNSUPPORTED: u32 = 1;
 const ERROR_INCOMPATIBLE: u32 = 2;
@@ -132,23 +133,112 @@ impl AlignedAllocation {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackingAccess {
+    Shared,
+    Exclusive,
+}
+
+impl BackingAccess {
+    const fn for_binding(access: AccessMode) -> Self {
+        match access {
+            AccessMode::Read => Self::Shared,
+            AccessMode::Write | AccessMode::ReadWrite => Self::Exclusive,
+        }
+    }
+
+    const fn combine(self, other: Self) -> Self {
+        if matches!(self, Self::Exclusive) || matches!(other, Self::Exclusive) {
+            Self::Exclusive
+        } else {
+            Self::Shared
+        }
+    }
+}
+
 #[derive(Debug)]
-struct InFlightBacking(Arc<AlignedAllocation>);
+struct PendingBacking {
+    key: usize,
+    allocation: Arc<AlignedAllocation>,
+    access: BackingAccess,
+}
+
+impl PendingBacking {
+    fn new(allocation: Arc<AlignedAllocation>, access: AccessMode) -> Self {
+        Self {
+            key: Arc::as_ptr(&allocation) as usize,
+            allocation,
+            access: BackingAccess::for_binding(access),
+        }
+    }
+}
+
+fn deduplicate_backings(backings: &mut Vec<PendingBacking>) {
+    backings.sort_unstable_by_key(|backing| backing.key);
+    backings.dedup_by(|current, previous| {
+        if current.key != previous.key {
+            return false;
+        }
+        previous.access = previous.access.combine(current.access);
+        true
+    });
+}
+
+#[derive(Debug)]
+struct InFlightBacking {
+    allocation: Arc<AlignedAllocation>,
+    access: BackingAccess,
+}
 
 impl InFlightBacking {
-    fn acquire(allocation: Arc<AlignedAllocation>) -> Result<Self, BackendError> {
-        allocation
-            .in_flight
-            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| BackendError::Busy)?;
-        Ok(Self(allocation))
+    fn acquire(pending: PendingBacking) -> Result<Self, BackendError> {
+        match pending.access {
+            BackingAccess::Shared => {
+                pending
+                    .allocation
+                    .in_flight
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                        (current < MAX_SHARED_NATIVE_USERS).then_some(current + 1)
+                    })
+                    .map_err(|_| BackendError::Busy)?;
+            }
+            BackingAccess::Exclusive => {
+                pending
+                    .allocation
+                    .in_flight
+                    .compare_exchange(
+                        0,
+                        EXCLUSIVE_NATIVE_ACCESS,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .map_err(|_| BackendError::Busy)?;
+            }
+        }
+        Ok(Self {
+            allocation: pending.allocation,
+            access: pending.access,
+        })
     }
 }
 
 impl Drop for InFlightBacking {
     fn drop(&mut self) {
-        let prior = self.0.in_flight.fetch_sub(1, Ordering::Release);
-        debug_assert_eq!(prior, 1);
+        match self.access {
+            BackingAccess::Shared => {
+                let prior = self.allocation.in_flight.fetch_sub(1, Ordering::Release);
+                debug_assert!((1..=MAX_SHARED_NATIVE_USERS).contains(&prior));
+            }
+            BackingAccess::Exclusive => {
+                let result = self.allocation.in_flight.compare_exchange(
+                    EXCLUSIVE_NATIVE_ACCESS,
+                    0,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                );
+                debug_assert_eq!(result, Ok(EXCLUSIVE_NATIVE_ACCESS));
+            }
+        }
     }
 }
 
@@ -168,7 +258,7 @@ impl Drop for AlignedAllocation {
 }
 
 /// Core ML context handle.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct CoreMlContext {
     id: u64,
 }
@@ -205,7 +295,7 @@ impl Drop for CoreMlProgram {
 }
 
 /// Core ML execution queue handle.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct CoreMlQueue {
     context_id: u64,
 }
@@ -237,6 +327,7 @@ pub struct CoreMlAccelerator {
     model_root: PathBuf,
     next_id: AtomicU64,
     direct_binding_admissions: AtomicU64,
+    explicit_transfer_bytes: AtomicU64,
     info: DeviceInfo,
 }
 
@@ -258,6 +349,7 @@ impl CoreMlAccelerator {
             model_root,
             next_id: AtomicU64::new(1),
             direct_binding_admissions: AtomicU64::new(0),
+            explicit_transfer_bytes: AtomicU64::new(0),
             info: DeviceInfo {
                 identity: DeviceIdentity {
                     uuid: *b"apple-coreml-ane",
@@ -283,6 +375,11 @@ impl CoreMlAccelerator {
     /// Number of exact provider allocations admitted as Core ML bindings.
     pub fn direct_binding_admissions(&self) -> u64 {
         self.direct_binding_admissions.load(Ordering::Relaxed)
+    }
+
+    /// Bytes copied through the two explicit transfer methods.
+    pub fn explicit_transfer_bytes(&self) -> u64 {
+        self.explicit_transfer_bytes.load(Ordering::Relaxed)
     }
 
     fn next_id(&self) -> Result<u64, BackendError> {
@@ -447,6 +544,8 @@ impl Accelerator for CoreMlAccelerator {
                     target_len,
                 )
             };
+            self.explicit_transfer_bytes
+                .fetch_add(target_len as u64, Ordering::Relaxed);
             return Ok(());
         }
 
@@ -463,6 +562,8 @@ impl Accelerator for CoreMlAccelerator {
                     chunk,
                 )
             };
+            self.explicit_transfer_bytes
+                .fetch_add(chunk as u64, Ordering::Relaxed);
             copied += chunk;
         }
         Ok(())
@@ -495,6 +596,8 @@ impl Accelerator for CoreMlAccelerator {
                     source_len,
                 )
             };
+            self.explicit_transfer_bytes
+                .fetch_add(source_len as u64, Ordering::Relaxed);
             return Ok(());
         }
 
@@ -511,6 +614,8 @@ impl Accelerator for CoreMlAccelerator {
                 )
             };
             data.write_at(copied as u64, &scratch[..chunk])?;
+            self.explicit_transfer_bytes
+                .fetch_add(chunk as u64, Ordering::Relaxed);
             copied += chunk;
         }
         Ok(())
@@ -609,16 +714,14 @@ impl Accelerator for CoreMlAccelerator {
         }
 
         let mut native_bindings = Vec::new();
-        let mut allocations = Vec::new();
+        let mut pending_backings = Vec::new();
         native_bindings
             .try_reserve_exact(bindings.len())
             .map_err(|_| SubmitFailure::Rejected(BackendError::OutOfMemory))?;
-        allocations
+        pending_backings
             .try_reserve_exact(bindings.len())
             .map_err(|_| SubmitFailure::Rejected(BackendError::OutOfMemory))?;
-        let mut contexts = BTreeSet::new();
         for binding in bindings {
-            contexts.insert(binding.buffer.context_id);
             if binding.buffer.context_id != queue.context_id {
                 return Err(SubmitFailure::Rejected(BackendError::InvalidArgument));
             }
@@ -634,18 +737,15 @@ impl Accelerator for CoreMlAccelerator {
                 data: binding.buffer.allocation.pointer_at(start).cast(),
                 bytes: binding.range.bytes(),
             });
-            if !allocations
-                .iter()
-                .any(|prior| Arc::ptr_eq(prior, &binding.buffer.allocation))
-            {
-                allocations.push(Arc::clone(&binding.buffer.allocation));
-            }
-        }
-        if contexts.len() != 1 {
-            return Err(SubmitFailure::Rejected(BackendError::InvalidArgument));
+            pending_backings.push(PendingBacking::new(
+                Arc::clone(&binding.buffer.allocation),
+                binding.access,
+            ));
         }
 
-        let backings = allocations
+        native_bindings.sort_unstable_by_key(|binding| binding.slot);
+        deduplicate_backings(&mut pending_backings);
+        let backings = pending_backings
             .into_iter()
             .map(InFlightBacking::acquire)
             .collect::<Result<Vec<_>, _>>()
@@ -714,14 +814,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_backing_guard_excludes_a_second_user() {
+    fn native_backing_guard_allows_shared_users_and_excludes_writers() {
         let allocation = Arc::new(AlignedAllocation::new(32, 16).unwrap());
-        let guard = InFlightBacking::acquire(Arc::clone(&allocation)).unwrap();
+        let first = InFlightBacking::acquire(PendingBacking::new(
+            Arc::clone(&allocation),
+            AccessMode::Read,
+        ))
+        .unwrap();
+        let second = InFlightBacking::acquire(PendingBacking::new(
+            Arc::clone(&allocation),
+            AccessMode::Read,
+        ))
+        .unwrap();
         assert_eq!(
-            InFlightBacking::acquire(Arc::clone(&allocation)).unwrap_err(),
+            InFlightBacking::acquire(PendingBacking::new(
+                Arc::clone(&allocation),
+                AccessMode::Write,
+            ))
+            .unwrap_err(),
             BackendError::Busy
         );
-        drop(guard);
-        assert!(InFlightBacking::acquire(allocation).is_ok());
+        drop(first);
+        drop(second);
+        let writer = InFlightBacking::acquire(PendingBacking::new(
+            Arc::clone(&allocation),
+            AccessMode::ReadWrite,
+        ))
+        .unwrap();
+        assert_eq!(
+            InFlightBacking::acquire(PendingBacking::new(allocation, AccessMode::Read,))
+                .unwrap_err(),
+            BackendError::Busy
+        );
+        drop(writer);
+    }
+
+    #[test]
+    fn duplicate_allocation_access_collapses_to_exclusive() {
+        let allocation = Arc::new(AlignedAllocation::new(32, 16).unwrap());
+        let mut pending = vec![
+            PendingBacking::new(Arc::clone(&allocation), AccessMode::Read),
+            PendingBacking::new(allocation, AccessMode::Write),
+        ];
+        deduplicate_backings(&mut pending);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].access, BackingAccess::Exclusive);
     }
 }

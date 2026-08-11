@@ -17,16 +17,27 @@ static const uint32_t VA_COREML_NSError_DOMAIN = 0x434d4c45;
 @property(nonatomic, copy) NSArray<NSNumber *> *shape;
 @property(nonatomic, copy) NSArray<NSNumber *> *strides;
 @property(nonatomic) MLMultiArrayDataType dataType;
+@property(nonatomic) uint64_t elementSize;
 @property(nonatomic) uint64_t bytes;
+@property(nonatomic) NSUInteger bindingIndex;
 @end
 
 @implementation VAFeatureSpec
 @end
 
+@interface VASlotSpec : NSObject
+@property(nonatomic) uint32_t slot;
+@property(nonatomic) uint8_t access;
+@end
+
+@implementation VASlotSpec
+@end
+
 @interface VAProgram : NSObject
 @property(nonatomic, strong) MLModel *model;
-@property(nonatomic, copy) NSArray<VAFeatureSpec *> *features;
-@property(nonatomic, copy) NSSet<NSNumber *> *slots;
+@property(nonatomic, copy) NSArray<VAFeatureSpec *> *inputFeatures;
+@property(nonatomic, copy) NSArray<VAFeatureSpec *> *outputFeatures;
+@property(nonatomic, copy) NSArray<VASlotSpec *> *slots;
 @property(nonatomic, strong, nullable) NSURL *temporaryCompiledURL;
 @end
 
@@ -178,6 +189,7 @@ static VAFeatureSpec *va_feature_spec(MLFeatureDescription *description,
     spec.shape = constraint.shape;
     spec.strides = strides;
     spec.dataType = constraint.dataType;
+    spec.elementSize = elementSize;
     spec.bytes = elements * elementSize;
     return spec;
 }
@@ -185,6 +197,21 @@ static VAFeatureSpec *va_feature_spec(MLFeatureDescription *description,
 static BOOL va_same_layout(VAFeatureSpec *left, VAFeatureSpec *right) {
     return left.bytes == right.bytes && left.dataType == right.dataType &&
            [left.shape isEqualToArray:right.shape] && [left.strides isEqualToArray:right.strides];
+}
+
+static uint8_t va_access_for_slot(NSArray<VAFeatureSpec *> *features, uint32_t slot) {
+    BOOL reads = NO;
+    BOOL writes = NO;
+    for (VAFeatureSpec *feature in features) {
+        if (feature.slot == slot) {
+            reads |= feature.role == VA_COREML_INPUT;
+            writes |= feature.role == VA_COREML_OUTPUT;
+        }
+    }
+    if (reads && writes) {
+        return VA_COREML_READ_WRITE;
+    }
+    return reads ? VA_COREML_READ : VA_COREML_WRITE;
 }
 
 void *va_coreml_model_load(const uint8_t *path,
@@ -209,7 +236,9 @@ void *va_coreml_model_load(const uint8_t *path,
             NSURL *modelURL = sourceURL;
             NSURL *temporaryURL = nil;
             NSError *nativeError = nil;
-            if ([sourceURL.pathExtension.lowercaseString isEqualToString:@"mlmodel"]) {
+            NSString *extension = sourceURL.pathExtension.lowercaseString;
+            if ([extension isEqualToString:@"mlmodel"] ||
+                [extension isEqualToString:@"mlpackage"]) {
                 modelURL = [MLModel compileModelAtURL:sourceURL error:&nativeError];
                 if (modelURL == nil) {
                     va_set_nserror(error, nativeError);
@@ -223,6 +252,14 @@ void *va_coreml_model_load(const uint8_t *path,
 
             MLModelConfiguration *configuration = [MLModelConfiguration new];
             configuration.computeUnits = MLComputeUnitsCPUAndNeuralEngine;
+            if (@available(macOS 14.4, *)) {
+                MLOptimizationHints *hints = [MLOptimizationHints new];
+                hints.reshapeFrequency = MLReshapeFrequencyHintInfrequent;
+                if (@available(macOS 15.0, *)) {
+                    hints.specializationStrategy = MLSpecializationStrategyFastPrediction;
+                }
+                configuration.optimizationHints = hints;
+            }
             MLModel *model = [MLModel modelWithContentsOfURL:modelURL
                                               configuration:configuration
                                                       error:&nativeError];
@@ -241,6 +278,12 @@ void *va_coreml_model_load(const uint8_t *path,
                 model.modelDescription.inputDescriptionsByName;
             NSDictionary<NSString *, MLFeatureDescription *> *outputs =
                 model.modelDescription.outputDescriptionsByName;
+            if (@available(macOS 15.0, *)) {
+                if (model.modelDescription.stateDescriptionsByName.count != 0) {
+                    va_set_error(error, VA_COREML_UNSUPPORTED, VA_COREML_BRIDGE_DOMAIN, 24);
+                    return NULL;
+                }
+            }
             if (mapping_count != inputs.count + outputs.count) {
                 va_set_error(error, VA_COREML_INCOMPATIBLE, VA_COREML_BRIDGE_DOMAIN, 9);
                 return NULL;
@@ -294,8 +337,37 @@ void *va_coreml_model_load(const uint8_t *path,
                 }
             }
 
-            program.features = features;
-            program.slots = slots;
+            NSArray<NSNumber *> *sortedSlots =
+                [slots.allObjects sortedArrayUsingSelector:@selector(compare:)];
+            NSMutableArray<VASlotSpec *> *slotSpecs =
+                [NSMutableArray arrayWithCapacity:sortedSlots.count];
+            for (NSUInteger index = 0; index < sortedSlots.count; index++) {
+                uint32_t slot = sortedSlots[index].unsignedIntValue;
+                VASlotSpec *slotSpec = [VASlotSpec new];
+                slotSpec.slot = slot;
+                slotSpec.access = va_access_for_slot(features, slot);
+                [slotSpecs addObject:slotSpec];
+                for (VAFeatureSpec *feature in features) {
+                    if (feature.slot == slot) {
+                        feature.bindingIndex = index;
+                    }
+                }
+            }
+
+            NSMutableArray<VAFeatureSpec *> *inputFeatures =
+                [NSMutableArray arrayWithCapacity:inputs.count];
+            NSMutableArray<VAFeatureSpec *> *outputFeatures =
+                [NSMutableArray arrayWithCapacity:outputs.count];
+            for (VAFeatureSpec *feature in features) {
+                if (feature.role == VA_COREML_INPUT) {
+                    [inputFeatures addObject:feature];
+                } else {
+                    [outputFeatures addObject:feature];
+                }
+            }
+            program.inputFeatures = inputFeatures;
+            program.outputFeatures = outputFeatures;
+            program.slots = slotSpecs;
             return (__bridge_retained void *)program;
         } @catch (NSException *exception) {
             va_set_error(error, VA_COREML_EXTERNAL, VA_COREML_BRIDGE_DOMAIN, 15);
@@ -312,29 +384,26 @@ void va_coreml_model_release(void *model) {
     }
 }
 
-static const struct va_coreml_binding *va_binding_for_slot(
-    const struct va_coreml_binding *bindings, size_t binding_count, uint32_t slot) {
-    for (size_t index = 0; index < binding_count; index++) {
-        if (bindings[index].slot == slot) {
-            return &bindings[index];
-        }
+static MLMultiArray *va_array_for_feature(VAFeatureSpec *feature,
+                                          const struct va_coreml_binding *bindings,
+                                          NSError **nativeError,
+                                          struct va_coreml_error *error) {
+    const struct va_coreml_binding *binding = &bindings[feature.bindingIndex];
+    if (binding->data == NULL || binding->bytes != feature.bytes ||
+        (uintptr_t)binding->data % feature.elementSize != 0) {
+        va_set_error(error, VA_COREML_INCOMPATIBLE, VA_COREML_BRIDGE_DOMAIN, 19);
+        return nil;
     }
-    return NULL;
-}
-
-static uint8_t va_access_for_slot(NSArray<VAFeatureSpec *> *features, uint32_t slot) {
-    BOOL reads = NO;
-    BOOL writes = NO;
-    for (VAFeatureSpec *feature in features) {
-        if (feature.slot == slot) {
-            reads |= feature.role == VA_COREML_INPUT;
-            writes |= feature.role == VA_COREML_OUTPUT;
-        }
+    MLMultiArray *array = [[MLMultiArray alloc] initWithDataPointer:binding->data
+                                                              shape:feature.shape
+                                                           dataType:feature.dataType
+                                                            strides:feature.strides
+                                                        deallocator:nil
+                                                              error:nativeError];
+    if (array == nil) {
+        va_set_nserror(error, *nativeError);
     }
-    if (reads && writes) {
-        return VA_COREML_READ_WRITE;
-    }
-    return reads ? VA_COREML_READ : VA_COREML_WRITE;
+    return array;
 }
 
 void *va_coreml_submit(void *model,
@@ -355,11 +424,10 @@ void *va_coreml_submit(void *model,
             va_set_error(error, VA_COREML_INCOMPATIBLE, VA_COREML_BRIDGE_DOMAIN, 17);
             return NULL;
         }
-        for (NSNumber *slotNumber in program.slots) {
-            uint32_t slot = slotNumber.unsignedIntValue;
-            const struct va_coreml_binding *binding =
-                va_binding_for_slot(bindings, binding_count, slot);
-            if (binding == NULL || binding->access != va_access_for_slot(program.features, slot)) {
+        for (NSUInteger index = 0; index < program.slots.count; index++) {
+            VASlotSpec *slot = program.slots[index];
+            const struct va_coreml_binding *binding = &bindings[index];
+            if (binding->slot != slot.slot || binding->access != slot.access) {
                 va_set_error(error, VA_COREML_INCOMPATIBLE, VA_COREML_BRIDGE_DOMAIN, 18);
                 return NULL;
             }
@@ -367,33 +435,27 @@ void *va_coreml_submit(void *model,
 
         @try {
             NSError *nativeError = nil;
-            NSMutableDictionary<NSString *, MLFeatureValue *> *inputValues = [NSMutableDictionary dictionary];
-            NSMutableDictionary<NSString *, MLMultiArray *> *outputBackings = [NSMutableDictionary dictionary];
-            NSMutableArray<VAFeatureSpec *> *outputFeatures = [NSMutableArray array];
-            for (VAFeatureSpec *feature in program.features) {
-                const struct va_coreml_binding *binding =
-                    va_binding_for_slot(bindings, binding_count, feature.slot);
-                if (binding == NULL || binding->data == NULL || binding->bytes != feature.bytes) {
-                    va_set_error(error, VA_COREML_INCOMPATIBLE, VA_COREML_BRIDGE_DOMAIN, 19);
-                    return NULL;
-                }
-                MLMultiArray *array = [[MLMultiArray alloc] initWithDataPointer:binding->data
-                                                                          shape:feature.shape
-                                                                       dataType:feature.dataType
-                                                                        strides:feature.strides
-                                                                    deallocator:nil
-                                                                          error:&nativeError];
+            NSMutableDictionary<NSString *, MLFeatureValue *> *inputValues =
+                [NSMutableDictionary dictionaryWithCapacity:program.inputFeatures.count];
+            for (VAFeatureSpec *feature in program.inputFeatures) {
+                MLMultiArray *array =
+                    va_array_for_feature(feature, bindings, &nativeError, error);
                 if (array == nil) {
-                    va_set_nserror(error, nativeError);
                     return NULL;
                 }
-                if (feature.role == VA_COREML_INPUT) {
-                    inputValues[feature.name] = [MLFeatureValue featureValueWithMultiArray:array];
-                } else {
-                    outputBackings[feature.name] = array;
-                    [outputFeatures addObject:feature];
-                }
+                inputValues[feature.name] = [MLFeatureValue featureValueWithMultiArray:array];
             }
+            NSMutableDictionary<NSString *, MLMultiArray *> *outputBackings =
+                [NSMutableDictionary dictionaryWithCapacity:program.outputFeatures.count];
+            for (VAFeatureSpec *feature in program.outputFeatures) {
+                MLMultiArray *array =
+                    va_array_for_feature(feature, bindings, &nativeError, error);
+                if (array == nil) {
+                    return NULL;
+                }
+                outputBackings[feature.name] = array;
+            }
+            NSArray<VAFeatureSpec *> *outputFeatures = program.outputFeatures;
 
             MLDictionaryFeatureProvider *provider =
                 [[MLDictionaryFeatureProvider alloc] initWithDictionary:inputValues error:&nativeError];
@@ -412,49 +474,57 @@ void *va_coreml_submit(void *model,
             [program.model predictionFromFeatures:provider
                                           options:options
                                 completionHandler:^(id<MLFeatureProvider> output, NSError *predictionError) {
-                uint32_t terminalStatus = VA_COREML_EVENT_COMPLETE;
-                @try {
-                    if (predictionError != nil || output == nil) {
+                @autoreleasepool {
+                    uint32_t terminalStatus = VA_COREML_EVENT_COMPLETE;
+                    @try {
+                        if (predictionError != nil || output == nil) {
+                            atomic_store_explicit(&event->error_kind,
+                                                  VA_COREML_EXTERNAL,
+                                                  memory_order_relaxed);
+                            atomic_store_explicit(&event->error_domain,
+                                                  va_hash_domain(predictionError.domain),
+                                                  memory_order_relaxed);
+                            atomic_store_explicit(&event->error_code,
+                                                  predictionError.code,
+                                                  memory_order_relaxed);
+                            terminalStatus = VA_COREML_EVENT_FAILED;
+                        } else {
+                            for (VAFeatureSpec *feature in outputFeatures) {
+                                MLMultiArray *actual =
+                                    [output featureValueForName:feature.name].multiArrayValue;
+                                MLMultiArray *expected = outputBackings[feature.name];
+                                if (actual == nil || actual.dataPointer != expected.dataPointer ||
+                                    actual.dataType != feature.dataType ||
+                                    ![actual.shape isEqualToArray:feature.shape] ||
+                                    ![actual.strides isEqualToArray:feature.strides]) {
+                                    atomic_store_explicit(&event->error_kind,
+                                                          VA_COREML_INCOMPATIBLE,
+                                                          memory_order_relaxed);
+                                    atomic_store_explicit(&event->error_domain,
+                                                          VA_COREML_BRIDGE_DOMAIN,
+                                                          memory_order_relaxed);
+                                    atomic_store_explicit(&event->error_code,
+                                                          20,
+                                                          memory_order_relaxed);
+                                    terminalStatus = VA_COREML_EVENT_FAILED;
+                                    break;
+                                }
+                            }
+                        }
+                    } @catch (NSException *exception) {
                         atomic_store_explicit(&event->error_kind,
                                               VA_COREML_EXTERNAL,
                                               memory_order_relaxed);
                         atomic_store_explicit(&event->error_domain,
-                                              va_hash_domain(predictionError.domain),
+                                              VA_COREML_BRIDGE_DOMAIN,
                                               memory_order_relaxed);
-                        atomic_store_explicit(&event->error_code,
-                                              predictionError.code,
-                                              memory_order_relaxed);
+                        atomic_store_explicit(&event->error_code, 23, memory_order_relaxed);
                         terminalStatus = VA_COREML_EVENT_FAILED;
-                    } else {
-                        for (VAFeatureSpec *feature in outputFeatures) {
-                            MLMultiArray *actual =
-                                [output featureValueForName:feature.name].multiArrayValue;
-                            if (actual != outputBackings[feature.name]) {
-                                atomic_store_explicit(&event->error_kind,
-                                                      VA_COREML_INCOMPATIBLE,
-                                                      memory_order_relaxed);
-                                atomic_store_explicit(&event->error_domain,
-                                                      VA_COREML_BRIDGE_DOMAIN,
-                                                      memory_order_relaxed);
-                                atomic_store_explicit(&event->error_code, 20, memory_order_relaxed);
-                                terminalStatus = VA_COREML_EVENT_FAILED;
-                                break;
-                            }
-                        }
                     }
-                } @catch (NSException *exception) {
-                    atomic_store_explicit(&event->error_kind,
-                                          VA_COREML_EXTERNAL,
-                                          memory_order_relaxed);
-                    atomic_store_explicit(&event->error_domain,
-                                          VA_COREML_BRIDGE_DOMAIN,
-                                          memory_order_relaxed);
-                    atomic_store_explicit(&event->error_code, 23, memory_order_relaxed);
-                    terminalStatus = VA_COREML_EVENT_FAILED;
+                    release_context(context);
+                    atomic_store_explicit(&event->status, terminalStatus, memory_order_release);
+                    va_event_release_inner(event);
                 }
-                release_context(context);
-                atomic_store_explicit(&event->status, terminalStatus, memory_order_release);
-                va_event_release_inner(event);
             }];
             eventForException = NULL;
             return event;

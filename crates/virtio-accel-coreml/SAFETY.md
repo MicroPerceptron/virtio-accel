@@ -18,13 +18,17 @@ release-store to the event status; polling uses an acquire-load before Rust read
 
 `AlignedAllocation` owns exactly one `std::alloc::Layout`. Its pointer is non-null, is deallocated
 with the same layout, and is kept alive by completion-owned `Arc` clones. `CoreMlBuffer` is
-deliberately neither `Send` nor `Sync`, and an atomic in-flight gate rejects host transfers and a
-second submission until Core ML has stopped accessing the allocation. The completion callback drops
-its backing guards before publishing the terminal event state, so a successful acquire-poll makes
-the output bytes available to the next host transfer. The backend never creates public slices or
-raw-pointer accessors. A direct trait user can drop handles early without causing a dangling native
-pointer because the completion-owned `Arc`s outlive prediction.
+deliberately neither `Send` nor `Sync`. Its atomic in-flight state admits multiple native readers or
+one native writer, rejects host transfers while either mode is active, and rejects every conflicting
+submission. Multiple bindings from one event to the same allocation are collapsed to the strongest
+required access before acquiring a guard. The completion callback drops its backing guards before
+publishing the terminal event state, so a successful acquire-poll makes the output bytes available
+to the next host transfer. The backend never creates public slices or raw-pointer accessors. A
+direct trait user can drop handles early without causing a dangling native pointer because the
+completion-owned `Arc`s outlive prediction.
 
 Core ML receives `MLMultiArray` objects with a no-op deallocator because Rust owns the backing. The
-bridge verifies output object identity before reporting completion, making it an execution failure
-if Core ML declines the proposed direct output backing.
+bridge validates scalar alignment before exposing a bound pointer and verifies the output data
+pointer, element type, shape, and strides before reporting completion. A different Objective-C
+wrapper over the same storage is safe; declining the exact proposed output storage is an execution
+failure.
