@@ -37,6 +37,13 @@ directly, and they must keep working on any platform the portable crates support
 | `core-only` | `virtio-accel-cleanroom`, `virtio-accel-proto`, `virtio-accel-transport`, `virtio-accel-core` | `core`; the clean-room codec and transport ports have no normal/build dependencies, while proc-macros used by other crates may execute with `std` on the build host |
 | `alloc-portable` | `virtio-accel-guest`, `virtio-accel-split-queue`, `virtio-accel-device`, `virtio-accel` | `core + alloc`; no OS, filesystem, sockets, threads, or host synchronization |
 | `std-reference` | `virtio-accel-mock`, `virtio-accel-conformance` | Portable `std`; no host-OS or vendor-specific API |
+| `host-native` | `virtio-accel-coreml` | Core ML/Foundation on macOS 14+; a compile-only unsupported-platform placeholder elsewhere |
+
+The Core ML crate is not a dependency of the facade or any portable layer. Its Objective-C bridge
+is compiled only when the Cargo target is macOS. The Linux, Windows, and Wasm workspace jobs compile
+the placeholder API, while the macOS native job executes its real model and semantic-conformance
+tests. An accessible Apple Neural Engine is required to construct the real backend; macOS runners
+without one skip execution after checking that availability through Core ML.
 
 Concrete VMM, kernel, OS, and vendor adapters are outside the portable-v1 milestone and must not
 become default dependencies of a portable crate.

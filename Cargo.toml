@@ -28,6 +28,7 @@ members = [
     "conformance/rust-clean-room",
     "crates/virtio-accel-conformance",
     "crates/virtio-accel-core",
+    "crates/virtio-accel-coreml",
     "crates/virtio-accel-device",
     "crates/virtio-accel-guest",
     "crates/virtio-accel-mock",
@@ -49,6 +50,7 @@ categories = ["no-std", "hardware-support", "virtualization"]
 
 [workspace.dependencies]
 bitflags = { version = "2.13.1", default-features = false }
+cc = "1.2"
 serde_json = "1.0.149"
 zerocopy = { version = "0.8.54", default-features = false, features = ["derive"] }
 virtio-accel-core = { path = "crates/virtio-accel-core", version = "0.1.0" }

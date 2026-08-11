@@ -15,9 +15,9 @@ guest: contexts, buffers, opaque programs, execution queues, submissions, and ev
 target is NPU execution, while the object model deliberately leaves room for GPUs, DSPs, and other
 program-driven accelerators.
 
-The repository is the portable majority of such a system, and nothing else. It contains no Linux
-ioctls, macOS frameworks, Windows APIs, guest physical addresses, vendor command formats, or claimed
-virtio device ID. Those adapters are meant to be written against these layers, not inside them.
+The repository is mostly portable protocol and lifecycle code. Host integrations are isolated in
+adapter crates and never become dependencies of the portable facade; the first such adapter is the
+macOS Core ML backend. The project claims no Virtio device ID.
 
 This project is pre-standardization and experimental. Protocol 1.0 is frozen as a versioned review
 input for independent implementation — it is stable enough to build against and to disagree with in
@@ -31,6 +31,7 @@ writing, not an approved Virtio specification.
 | `virtio-accel-proto` | `core` | Pointer-free, little-endian protocol 1.0 wire structures |
 | `virtio-accel-transport` | `core` | Dependency-free descriptor-chain, queue, reset, and notification ports |
 | `virtio-accel-core` | `core` | Backend lifecycle, memory, program, queue, and event contracts |
+| `virtio-accel-coreml` | macOS `std` | Core ML backend with direct buffers and asynchronous ANE-capable prediction |
 | `virtio-accel-split-queue` | `core + alloc` | Bounded in-memory split-ring reference model |
 | `virtio-accel-guest` | `core + alloc` | Typed reference client with bounded request tracking |
 | `virtio-accel-device` | `core + alloc` | Device-owned state, including bounded generational IDs |
@@ -53,7 +54,8 @@ virtio-accel-guest -----------> virtio-accel-transport
           +--------------------> virtio-accel-proto
 
 virtio-accel-conformance --------------------> virtio-accel-core
-provider adapters --------------------------> virtio-accel-core
+virtio-accel-coreml -------------------------> virtio-accel-core
+other provider adapters --------------------> virtio-accel-core
 ```
 
 The transport crate exposes reset-scoped chain identities, flattened direction/length metadata, and
@@ -73,6 +75,9 @@ The facade is `no_std`. Add the reference backend as a dev-dependency to run the
 [dev-dependencies]
 virtio-accel-mock = "0.1"
 ```
+
+On an ANE-capable Mac, add `virtio-accel-coreml = "0.1"` separately for the host-native Core ML
+backend. It is intentionally not re-exported by the portable facade.
 
 ## Example
 
@@ -206,17 +211,18 @@ optional resource-accounting and progress adapters, and the fault-injection harn
 
 ## Portability
 
-Every crate is `#![forbid(unsafe_code)]`. CI enforces the tier of each crate on
-`aarch64-unknown-none`, `riscv64gc-unknown-none-elf`, and `wasm32-unknown-unknown`, so a crate
-cannot quietly acquire a host dependency.
+Every portable and reference crate is `#![forbid(unsafe_code)]`. The audited Core ML adapter keeps
+its unsafe FFI isolated to macOS. CI enforces each portability tier, including compile-only checks
+of the adapter's unsupported-platform surface.
 
 | Tier | Allowed runtime surface |
 | --- | --- |
 | `core` | `core` only; no allocation |
 | `core + alloc` | `core + alloc`; no OS, filesystem, sockets, threads, or host synchronization |
 | `std` | Portable `std`; no host-OS or vendor-specific API |
+| macOS `std` | Host-native Core ML/Foundation adapter; never a portable default dependency |
 
-Concrete VMM, kernel, OS, and vendor adapters are outside the portable v1 milestone and must not
+Concrete VMM, kernel, OS, and vendor adapters do not change the portable v1 protocol and must not
 become default dependencies of a portable crate. Cargo features must be additive: disabling default
 features may remove convenience behavior, but must never select a different protocol interpretation.
 

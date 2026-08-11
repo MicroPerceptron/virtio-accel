@@ -25,6 +25,7 @@ PUBLISHED_PACKAGES = {
     "conformance/rust-clean-room": "virtio-accel-cleanroom",
     "crates/virtio-accel-conformance": "virtio-accel-conformance",
     "crates/virtio-accel-core": "virtio-accel-core",
+    "crates/virtio-accel-coreml": "virtio-accel-coreml",
     "crates/virtio-accel-device": "virtio-accel-device",
     "crates/virtio-accel-guest": "virtio-accel-guest",
     "crates/virtio-accel-mock": "virtio-accel-mock",
@@ -33,7 +34,7 @@ PUBLISHED_PACKAGES = {
     "crates/virtio-accel-transport": "virtio-accel-transport",
 }
 
-# Publish metadata that must be inherited from [workspace.package] so ten manifests cannot drift
+# Publish metadata that must be inherited from [workspace.package] so manifests cannot drift
 # apart, mapped to the value the workspace is required to declare. `None` means "any value, but it
 # must be present and inherited".
 INHERITED_PACKAGE_KEYS = {
@@ -65,6 +66,11 @@ CRATE_ROOTS = (
     ROOT / "fuzz" / "src" / "lib.rs",
     *((manifest.parent / "src" / "lib.rs") for manifest in (ROOT / "crates").glob("*/Cargo.toml")),
 )
+
+UNSAFE_AUDITS = {
+    ROOT / "crates" / "virtio-accel-coreml" / "src" / "lib.rs":
+        ROOT / "crates" / "virtio-accel-coreml" / "SAFETY.md",
+}
 
 REQUIRED_LINKS = {
     ROOT / "README.md": (
@@ -147,7 +153,7 @@ def check_manifest(path: pathlib.Path) -> None:
     if not isinstance(description, str) or not description.strip():
         fail(f"{rel(path)} package.description must be present")
 
-    # These ten are published. `publish = false` on any of them is a regression, and an explicit
+    # These packages are published. `publish = false` on any of them is a regression, and an explicit
     # allowlist beats a blanket rule the next new crate would silently join.
     publish = package.get("publish")
     if publish not in (None, True):
@@ -186,8 +192,17 @@ def check_crate_root(path: pathlib.Path) -> None:
     if not path.exists():
         fail(f"missing crate root {rel(path)}")
     text = path.read_text()
-    if "#![forbid(unsafe_code)]" not in text:
+    if "#![forbid(unsafe_code)]" in text:
+        return
+    audit = UNSAFE_AUDITS.get(path)
+    if audit is None or not audit.is_file():
         fail(f"{rel(path)} must keep #![forbid(unsafe_code)] or document an audited exception")
+    if 'cfg_attr(not(target_os = "macos"), forbid(unsafe_code))' not in text:
+        fail(f"{rel(path)} unsafe exception must remain confined to macOS")
+    audit_text = audit.read_text()
+    for required in ("Objective-C bridge", "AlignedAllocation", "atomic two-reference"):
+        if required not in audit_text:
+            fail(f"{rel(audit)} must document the {required!r} unsafe invariant")
 
 
 def check_links() -> None:
@@ -199,7 +214,7 @@ def check_links() -> None:
 
 
 def check_publication_order_agrees() -> None:
-    """The publication order and the published-package allowlist must describe the same ten crates.
+    """The publication order and the published-package allowlist must describe the same crates.
 
     They live in different files for good reasons -- one is an order, the other is a policy -- but a
     crate added to only one of them would either never be published or never be verified.
@@ -233,7 +248,7 @@ def check_publication_order_agrees() -> None:
 
 
 def check_fuzz_stays_unpublished() -> None:
-    """The fuzz harness is a separate workspace and is deliberately not one of the ten."""
+    """The fuzz harness is a separate workspace and is deliberately not published."""
     manifest = ROOT / "fuzz" / "Cargo.toml"
     package = tomllib.loads(manifest.read_text()).get("package", {})
     if package.get("publish") is not False:

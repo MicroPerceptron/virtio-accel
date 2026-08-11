@@ -5,9 +5,9 @@ provider target, progress, and optional resource-accounting adapters. Third-part
 authors run this suite to check their implementation against the normative semantics.
 
 Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an experimental, native-Rust foundation for a
-transport-neutral virtual accelerator device. The workspace contains no Linux ioctls, macOS
-frameworks, Windows APIs, guest physical addresses, vendor command formats, or claimed virtio
-device ID.
+transport-neutral virtual accelerator device. Portable crates contain no host-OS or vendor APIs;
+host integrations live in separate adapter crates and never become their dependencies. The
+project claims no Virtio device ID.
 
 **Portability tier:** `std-reference` — Portable `std`; no host-OS or vendor-specific API.
 

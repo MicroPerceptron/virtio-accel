@@ -5,9 +5,9 @@ harness-controlled execution, and scripted ownership-boundary faults. It is the 
 workspace examples and conformance suite run against.
 
 Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an experimental, native-Rust foundation for a
-transport-neutral virtual accelerator device. The workspace contains no Linux ioctls, macOS
-frameworks, Windows APIs, guest physical addresses, vendor command formats, or claimed virtio
-device ID.
+transport-neutral virtual accelerator device. Portable crates contain no host-OS or vendor APIs;
+host integrations live in separate adapter crates and never become their dependencies. The
+project claims no Virtio device ID.
 
 **Portability tier:** `std-reference` — Portable `std`; no host-OS or vendor-specific API.
 
