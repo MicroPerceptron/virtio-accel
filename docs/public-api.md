@@ -45,8 +45,9 @@ lifecycle against the portable mock backend.
 Baseline v1 is the mandatory command, queue, object, reset, error, and conformance behavior in the
 normative documents. Reserved feature bits, opcodes, flags, and fields are not optional features;
 they are invalid until a later policy assigns semantics. Platform integrations such as KVM,
-vhost-user, VFIO, Windows, macOS, or vendor SDK adapters are post-v1 work and must not leak into
-portable default dependencies.
+vhost-user, VFIO, Windows, macOS, or vendor SDK adapters do not change protocol 1.0 and must not
+leak into portable default dependencies. `virtio-accel-coreml` is the first concrete example: it
+depends inward on `virtio-accel-core`, while the facade and portable crates do not depend on it.
 
 The compatibility and release classification rules are in
 [`release-policy.md`](release-policy.md). The protocol 1.0 frozen surface is summarized in

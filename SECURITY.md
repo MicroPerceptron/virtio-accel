@@ -59,7 +59,9 @@ In scope, in the crates published from this repository:
   across the boundaries described in [docs/threat-model.md](docs/threat-model.md);
 - unbounded resource growth reachable from a bounded guest request; and
 - any breach of the `#![forbid(unsafe_code)]` invariant recorded in
-  [docs/release-policy.md](docs/release-policy.md).
+  [docs/release-policy.md](docs/release-policy.md); and
+- memory-safety, path-containment, direct-backing, or event-publication defects in the audited
+  `virtio-accel-coreml` unsafe boundary.
 
 Out of scope:
 
@@ -70,6 +72,10 @@ Out of scope:
 - The absence of a claimed Virtio device ID. That is deliberate and documented.
 - Vulnerabilities in a downstream VMM, kernel, operating system, or vendor adapter that merely
   depends on these crates. Please report those to the relevant project.
+
+The in-repository Core ML adapter is in scope; it is not considered a downstream vendor adapter.
+Its unsafe invariants and ownership scheme are recorded in
+[`crates/virtio-accel-coreml/SAFETY.md`](crates/virtio-accel-coreml/SAFETY.md).
 
 ## Advisories
 

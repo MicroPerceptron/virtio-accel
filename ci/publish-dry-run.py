@@ -51,6 +51,7 @@ PUBLISH_ORDER = (
     "virtio-accel-mock",
     "virtio-accel-device",
     "virtio-accel-conformance",
+    "virtio-accel-coreml",
     "virtio-accel",
 )
 
