@@ -4,13 +4,14 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use virtio_accel_conformance::numerics::{IDENTITY_EDGES_FP32, MATMUL_FP32, MAX_POOL2D_FP32};
 use virtio_accel_conformance::{
     BindingFixture, ConformanceHooks, ProgramFixture, SubmissionPathDiagnostics, TargetDescription,
     run,
 };
 use virtio_accel_core::{
     Accelerator, AccessMode, ArtifactRef, BackendError, BindingRef, BufferDesc, BufferRange,
-    BufferUsage, ByteSource, ContextDesc, EventState, MemoryDomain, QueueDesc, Timeout,
+    BufferUsage, ByteSink, ByteSource, ContextDesc, EventState, MemoryDomain, QueueDesc, Timeout,
 };
 use virtio_accel_coreml::{
     ARTIFACT_FORMAT, COREML_TOSA_TARGET, CoreMlAccelerator, CoreMlArtifact, CoreMlEvent, InitError,
@@ -28,10 +29,32 @@ const MODEL: &[u8] = &[
 ];
 
 const TOSA_IDENTITY: &[u8] = include_bytes!("data/identity-fp32-v1.0.0.tosa");
-
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug)]
 struct SliceSource<'a>(&'a [u8]);
+
+#[derive(Debug)]
+struct VecSink(Vec<u8>);
+
+impl ByteSink for VecSink {
+    fn len(&self) -> u64 {
+        self.0.len() as u64
+    }
+
+    fn write_at(&mut self, offset: u64, source: &[u8]) -> Result<(), BackendError> {
+        let start = usize::try_from(offset).map_err(|_| BackendError::OutOfBounds)?;
+        let end = start
+            .checked_add(source.len())
+            .filter(|end| *end <= self.0.len())
+            .ok_or(BackendError::OutOfBounds)?;
+        self.0[start..end].copy_from_slice(source);
+        Ok(())
+    }
+
+    fn as_contiguous_mut(&mut self) -> Option<&mut [u8]> {
+        Some(self.0.as_mut_slice())
+    }
+}
 
 impl ByteSource for SliceSource<'_> {
     fn len(&self) -> u64 {
@@ -121,6 +144,101 @@ fn wait_for_terminal(
     }
 }
 
+fn run_tosa_fp32(artifact: &[u8], inputs: &[&[f32]], output_elements: usize) -> Option<Vec<f32>> {
+    let backend = match CoreMlAccelerator::new_tosa() {
+        Ok(backend) => backend,
+        Err(InitError::NeuralEngineUnavailable) => return None,
+        Err(error) => panic!("Core ML backend initialization failed: {error}"),
+    };
+    let context = backend.create_context(ContextDesc::default()).unwrap();
+    let mut input_buffers = Vec::with_capacity(inputs.len());
+    for values in inputs {
+        let bytes = float_bytes(values.iter().copied());
+        let desc = BufferDesc::new(
+            bytes.len() as u64,
+            16 * 1024,
+            MemoryDomain::Shared,
+            BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+        )
+        .unwrap();
+        let (mut buffer, _) = backend
+            .allocate_buffer(&context, desc)
+            .unwrap()
+            .into_parts();
+        backend
+            .write_buffer(&mut buffer, 0, &SliceSource(&bytes))
+            .unwrap();
+        input_buffers.push(buffer);
+    }
+    let output_bytes = output_elements.checked_mul(4).unwrap();
+    let output_desc = BufferDesc::new(
+        output_bytes as u64,
+        16 * 1024,
+        MemoryDomain::Shared,
+        BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+    )
+    .unwrap();
+    let (output, _) = backend
+        .allocate_buffer(&context, output_desc)
+        .unwrap()
+        .into_parts();
+
+    let model = parse(artifact).unwrap();
+    let program = backend
+        .load_program(
+            &context,
+            model
+                .artifact_ref(COREML_TOSA_TARGET, REQUIRED_RESIDENT_BYTES)
+                .unwrap(),
+        )
+        .unwrap();
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .unwrap();
+    let mut bindings = input_buffers
+        .iter()
+        .enumerate()
+        .map(|(slot, buffer)| BindingRef {
+            slot: slot as u32,
+            buffer,
+            range: BufferRange::new(0, inputs[slot].len() as u64 * 4).unwrap(),
+            access: AccessMode::Read,
+        })
+        .collect::<Vec<_>>();
+    bindings.push(BindingRef {
+        slot: inputs.len() as u32,
+        buffer: &output,
+        range: BufferRange::new(0, output_bytes as u64).unwrap(),
+        access: AccessMode::Write,
+    });
+    let event = backend
+        .submit(&queue, &program, &bindings, Timeout::Infinite)
+        .unwrap();
+    assert_eq!(
+        wait_for_terminal(&backend, &event).unwrap(),
+        EventState::Complete
+    );
+    backend.destroy_event(event).unwrap();
+
+    let mut bytes = VecSink(vec![0; output_bytes]);
+    backend.read_buffer(&output, 0, &mut bytes).unwrap();
+    let actual = bytes
+        .0
+        .chunks_exact(4)
+        .map(|bytes| f32::from_ne_bytes(bytes.try_into().unwrap()))
+        .collect();
+
+    drop(bindings);
+    backend.destroy_queue(queue).unwrap();
+    backend.unload_program(program).unwrap();
+    backend.free_buffer(output).unwrap();
+    for buffer in input_buffers {
+        backend.free_buffer(buffer).unwrap();
+    }
+    backend.destroy_context(context).unwrap();
+    Some(actual)
+}
+
 #[test]
 fn lowers_and_executes_device_neutral_tosa() {
     let backend = match CoreMlAccelerator::new_tosa() {
@@ -193,6 +311,221 @@ fn lowers_and_executes_device_neutral_tosa() {
     backend.unload_program(program).unwrap();
     backend.free_buffer(output).unwrap();
     backend.free_buffer(input).unwrap();
+    backend.destroy_context(context).unwrap();
+}
+
+#[test]
+fn lowers_and_executes_compute_heavy_tosa_matmul() {
+    let inputs = MATMUL_FP32
+        .inputs
+        .iter()
+        .map(|tensor| tensor.values)
+        .collect::<Vec<_>>();
+    let Some(actual) = run_tosa_fp32(
+        MATMUL_FP32.artifact,
+        &inputs,
+        MATMUL_FP32.outputs[0].values.len(),
+    ) else {
+        return;
+    };
+
+    assert!(MATMUL_FP32.output_matches(0, &actual));
+}
+
+#[test]
+fn lowers_and_executes_nhwc_tosa_max_pool2d() {
+    let inputs = MAX_POOL2D_FP32
+        .inputs
+        .iter()
+        .map(|tensor| tensor.values)
+        .collect::<Vec<_>>();
+    let Some(actual) = run_tosa_fp32(
+        MAX_POOL2D_FP32.artifact,
+        &inputs,
+        MAX_POOL2D_FP32.outputs[0].values.len(),
+    ) else {
+        return;
+    };
+
+    assert!(MAX_POOL2D_FP32.output_matches(0, &actual));
+}
+
+#[test]
+fn preserves_tosa_fp32_nonfinite_subnormal_and_signed_zero_edges() {
+    let inputs = IDENTITY_EDGES_FP32
+        .inputs
+        .iter()
+        .map(|tensor| tensor.values)
+        .collect::<Vec<_>>();
+    let Some(actual) = run_tosa_fp32(
+        IDENTITY_EDGES_FP32.artifact,
+        &inputs,
+        IDENTITY_EDGES_FP32.outputs[0].values.len(),
+    ) else {
+        return;
+    };
+
+    assert!(IDENTITY_EDGES_FP32.output_matches(0, &actual));
+}
+
+#[test]
+fn permits_overlapping_read_only_inputs_across_async_tosa_predictions() {
+    const PREDICTIONS: usize = 16;
+
+    let backend = match CoreMlAccelerator::new_tosa() {
+        Ok(backend) => backend,
+        Err(InitError::NeuralEngineUnavailable) => return,
+        Err(error) => panic!("Core ML backend initialization failed: {error}"),
+    };
+    let context = backend.create_context(ContextDesc::default()).unwrap();
+    let input_desc = BufferDesc::new(
+        4,
+        16 * 1024,
+        MemoryDomain::Shared,
+        BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+    )
+    .unwrap();
+    let output_desc = BufferDesc::new(
+        4,
+        16 * 1024,
+        MemoryDomain::Shared,
+        BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+    )
+    .unwrap();
+    let (mut input, _) = backend
+        .allocate_buffer(&context, input_desc)
+        .unwrap()
+        .into_parts();
+    let expected = (-0.0_f32).to_ne_bytes();
+    backend
+        .write_buffer(&mut input, 0, &SliceSource(&expected))
+        .unwrap();
+    let mut outputs = Vec::with_capacity(PREDICTIONS);
+    for _ in 0..PREDICTIONS {
+        outputs.push(
+            backend
+                .allocate_buffer(&context, output_desc)
+                .unwrap()
+                .into_parts()
+                .0,
+        );
+    }
+
+    let model = parse(TOSA_IDENTITY).unwrap();
+    let program = backend
+        .load_program(
+            &context,
+            model
+                .artifact_ref(COREML_TOSA_TARGET, REQUIRED_RESIDENT_BYTES)
+                .unwrap(),
+        )
+        .unwrap();
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .unwrap();
+    let mut events = Vec::with_capacity(PREDICTIONS);
+    for output in &outputs {
+        events.push(
+            backend
+                .submit(
+                    &queue,
+                    &program,
+                    &[
+                        BindingRef {
+                            slot: 0,
+                            buffer: &input,
+                            range: BufferRange::new(0, 4).unwrap(),
+                            access: AccessMode::Read,
+                        },
+                        BindingRef {
+                            slot: 1,
+                            buffer: output,
+                            range: BufferRange::new(0, 4).unwrap(),
+                            access: AccessMode::Write,
+                        },
+                    ],
+                    Timeout::Infinite,
+                )
+                .unwrap(),
+        );
+    }
+    assert_eq!(backend.direct_binding_admissions(), PREDICTIONS as u64 * 2);
+
+    for event in events {
+        assert_eq!(
+            wait_for_terminal(&backend, &event).unwrap(),
+            EventState::Complete
+        );
+        backend.destroy_event(event).unwrap();
+    }
+    for output in outputs {
+        let mut actual = [0; 4];
+        backend.read_buffer(&output, 0, &mut actual).unwrap();
+        assert_eq!(actual, expected);
+        backend.free_buffer(output).unwrap();
+    }
+
+    backend.destroy_queue(queue).unwrap();
+    backend.unload_program(program).unwrap();
+    backend.free_buffer(input).unwrap();
+    backend.destroy_context(context).unwrap();
+}
+
+#[test]
+fn repeated_tosa_compilation_leaves_no_source_directories() {
+    const LOADS: usize = 8;
+
+    let backend = match CoreMlAccelerator::new_tosa() {
+        Ok(backend) => backend,
+        Err(InitError::NeuralEngineUnavailable) => return,
+        Err(error) => panic!("Core ML backend initialization failed: {error}"),
+    };
+    let context = backend.create_context(ContextDesc::default()).unwrap();
+    let source_directories = || {
+        fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                let suffix = name.strip_prefix("virtio-accel-coreml-");
+                suffix.is_some_and(|suffix| {
+                    suffix.len() == 36
+                        && suffix.bytes().enumerate().all(|(index, byte)| match index {
+                            8 | 13 | 18 | 23 => byte == b'-',
+                            _ => byte.is_ascii_hexdigit(),
+                        })
+                })
+            })
+            .map(|entry| entry.file_name())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let before = source_directories();
+    let model = parse(MATMUL_FP32.artifact).unwrap();
+    for _ in 0..LOADS {
+        let program = backend
+            .load_program(
+                &context,
+                model
+                    .artifact_ref(COREML_TOSA_TARGET, REQUIRED_RESIDENT_BYTES)
+                    .unwrap(),
+            )
+            .unwrap();
+        backend.unload_program(program).unwrap();
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let after = source_directories();
+        if after.difference(&before).next().is_none() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "TOSA compilation left source directories behind: {:?}",
+            after.difference(&before).collect::<Vec<_>>()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     backend.destroy_context(context).unwrap();
 }
 

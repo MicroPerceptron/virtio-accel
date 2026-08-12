@@ -2,11 +2,14 @@
 //!
 //! The suite depends only on the transport-independent backend contract. An implementer supplies a
 //! fresh-backend factory, one executable target fixture, and a small hook that advances an event to
-//! completion. Optional accounting lets the same cases detect leaked provider resources.
+//! completion. Optional accounting lets the same cases detect leaked provider resources. The
+//! [`numerics`] module adds stable, device-neutral TOSA graphs and numerical oracles that host
+//! backends can execute without substituting provider-specific fixtures.
 
 #![forbid(unsafe_code)]
 
 mod cases;
+pub mod numerics;
 
 use std::fmt;
 use std::vec::Vec;

@@ -40,7 +40,7 @@ writing, not an approved Virtio specification.
 | `virtio-accel-guest` | `core + alloc` | Typed reference client with bounded request tracking |
 | `virtio-accel-device` | `core + alloc` | Device-owned state, including bounded generational IDs |
 | `virtio-accel-mock` | `std` | In-memory backend with deterministic test-only artifacts and scripted faults |
-| `virtio-accel-conformance` | `std` | Transport-free semantic backend suite |
+| `virtio-accel-conformance` | `std` | Transport-free semantic suite and shared numerical TOSA corpus |
 | `virtio-accel-cleanroom` | `core` | Independent conformance codec, written without the shared protocol types |
 
 Dependencies point downward only:
