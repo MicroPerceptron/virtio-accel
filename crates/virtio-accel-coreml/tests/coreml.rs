@@ -4,7 +4,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use virtio_accel_conformance::numerics::{IDENTITY_EDGES_FP32, MATMUL_FP32, MAX_POOL2D_FP32};
+use virtio_accel_conformance::numerics::{
+    IDENTITY_EDGES_FP16, IDENTITY_EDGES_FP32, MATMUL_FP16, MATMUL_FP32, MAX_POOL2D_FP16,
+    MAX_POOL2D_FP32,
+};
 use virtio_accel_conformance::{
     BindingFixture, ConformanceHooks, ProgramFixture, SubmissionPathDiagnostics, TargetDescription,
     run,
@@ -144,7 +147,7 @@ fn wait_for_terminal(
     }
 }
 
-fn run_tosa_fp32(artifact: &[u8], inputs: &[&[f32]], output_elements: usize) -> Option<Vec<f32>> {
+fn run_tosa_bytes(artifact: &[u8], inputs: &[&[u8]], output_bytes: usize) -> Option<Vec<u8>> {
     let backend = match CoreMlAccelerator::new_tosa() {
         Ok(backend) => backend,
         Err(InitError::NeuralEngineUnavailable) => return None,
@@ -152,8 +155,7 @@ fn run_tosa_fp32(artifact: &[u8], inputs: &[&[f32]], output_elements: usize) -> 
     };
     let context = backend.create_context(ContextDesc::default()).unwrap();
     let mut input_buffers = Vec::with_capacity(inputs.len());
-    for values in inputs {
-        let bytes = float_bytes(values.iter().copied());
+    for bytes in inputs {
         let desc = BufferDesc::new(
             bytes.len() as u64,
             16 * 1024,
@@ -166,11 +168,10 @@ fn run_tosa_fp32(artifact: &[u8], inputs: &[&[f32]], output_elements: usize) -> 
             .unwrap()
             .into_parts();
         backend
-            .write_buffer(&mut buffer, 0, &SliceSource(&bytes))
+            .write_buffer(&mut buffer, 0, &SliceSource(bytes))
             .unwrap();
         input_buffers.push(buffer);
     }
-    let output_bytes = output_elements.checked_mul(4).unwrap();
     let output_desc = BufferDesc::new(
         output_bytes as u64,
         16 * 1024,
@@ -201,7 +202,7 @@ fn run_tosa_fp32(artifact: &[u8], inputs: &[&[f32]], output_elements: usize) -> 
         .map(|(slot, buffer)| BindingRef {
             slot: slot as u32,
             buffer,
-            range: BufferRange::new(0, inputs[slot].len() as u64 * 4).unwrap(),
+            range: BufferRange::new(0, inputs[slot].len() as u64).unwrap(),
             access: AccessMode::Read,
         })
         .collect::<Vec<_>>();
@@ -222,12 +223,6 @@ fn run_tosa_fp32(artifact: &[u8], inputs: &[&[f32]], output_elements: usize) -> 
 
     let mut bytes = VecSink(vec![0; output_bytes]);
     backend.read_buffer(&output, 0, &mut bytes).unwrap();
-    let actual = bytes
-        .0
-        .chunks_exact(4)
-        .map(|bytes| f32::from_ne_bytes(bytes.try_into().unwrap()))
-        .collect();
-
     drop(bindings);
     backend.destroy_queue(queue).unwrap();
     backend.unload_program(program).unwrap();
@@ -236,7 +231,50 @@ fn run_tosa_fp32(artifact: &[u8], inputs: &[&[f32]], output_elements: usize) -> 
         backend.free_buffer(buffer).unwrap();
     }
     backend.destroy_context(context).unwrap();
-    Some(actual)
+    Some(bytes.0)
+}
+
+fn run_tosa_fp32(artifact: &[u8], inputs: &[&[f32]], output_elements: usize) -> Option<Vec<f32>> {
+    let encoded = inputs
+        .iter()
+        .map(|values| float_bytes(values.iter().copied()))
+        .collect::<Vec<_>>();
+    let input_bytes = encoded.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    run_tosa_bytes(
+        artifact,
+        &input_bytes,
+        output_elements.checked_mul(4).unwrap(),
+    )
+    .map(|bytes| {
+        bytes
+            .chunks_exact(4)
+            .map(|bytes| f32::from_ne_bytes(bytes.try_into().unwrap()))
+            .collect()
+    })
+}
+
+fn run_tosa_fp16(artifact: &[u8], inputs: &[&[u16]], output_elements: usize) -> Option<Vec<u16>> {
+    let encoded = inputs
+        .iter()
+        .map(|values| {
+            values
+                .iter()
+                .flat_map(|bits| bits.to_ne_bytes())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let input_bytes = encoded.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    run_tosa_bytes(
+        artifact,
+        &input_bytes,
+        output_elements.checked_mul(2).unwrap(),
+    )
+    .map(|bytes| {
+        bytes
+            .chunks_exact(2)
+            .map(|bytes| u16::from_ne_bytes(bytes.try_into().unwrap()))
+            .collect()
+    })
 }
 
 #[test]
@@ -333,6 +371,24 @@ fn lowers_and_executes_compute_heavy_tosa_matmul() {
 }
 
 #[test]
+fn lowers_and_executes_compute_heavy_tosa_matmul_fp16() {
+    let inputs = MATMUL_FP16
+        .inputs
+        .iter()
+        .map(|tensor| tensor.bits)
+        .collect::<Vec<_>>();
+    let Some(actual) = run_tosa_fp16(
+        MATMUL_FP16.artifact,
+        &inputs,
+        MATMUL_FP16.outputs[0].bits.len(),
+    ) else {
+        return;
+    };
+
+    assert!(MATMUL_FP16.output_matches(0, &actual));
+}
+
+#[test]
 fn lowers_and_executes_nhwc_tosa_max_pool2d() {
     let inputs = MAX_POOL2D_FP32
         .inputs
@@ -351,6 +407,24 @@ fn lowers_and_executes_nhwc_tosa_max_pool2d() {
 }
 
 #[test]
+fn lowers_and_executes_nhwc_tosa_max_pool2d_fp16() {
+    let inputs = MAX_POOL2D_FP16
+        .inputs
+        .iter()
+        .map(|tensor| tensor.bits)
+        .collect::<Vec<_>>();
+    let Some(actual) = run_tosa_fp16(
+        MAX_POOL2D_FP16.artifact,
+        &inputs,
+        MAX_POOL2D_FP16.outputs[0].bits.len(),
+    ) else {
+        return;
+    };
+
+    assert!(MAX_POOL2D_FP16.output_matches(0, &actual));
+}
+
+#[test]
 fn preserves_tosa_fp32_nonfinite_subnormal_and_signed_zero_edges() {
     let inputs = IDENTITY_EDGES_FP32
         .inputs
@@ -366,6 +440,24 @@ fn preserves_tosa_fp32_nonfinite_subnormal_and_signed_zero_edges() {
     };
 
     assert!(IDENTITY_EDGES_FP32.output_matches(0, &actual));
+}
+
+#[test]
+fn preserves_tosa_fp16_nonfinite_subnormal_and_signed_zero_edges() {
+    let inputs = IDENTITY_EDGES_FP16
+        .inputs
+        .iter()
+        .map(|tensor| tensor.bits)
+        .collect::<Vec<_>>();
+    let Some(actual) = run_tosa_fp16(
+        IDENTITY_EDGES_FP16.artifact,
+        &inputs,
+        IDENTITY_EDGES_FP16.outputs[0].bits.len(),
+    ) else {
+        return;
+    };
+
+    assert!(IDENTITY_EDGES_FP16.output_matches(0, &actual));
 }
 
 #[test]

@@ -24,7 +24,9 @@ pub const COREML_TOSA_TARGET: Target = Target::new(
     ExtensionSet::NONE,
 );
 
-const COREML_SPECIFICATION_VERSION: u64 = 4;
+// Float16 MLMultiArray model boundaries require the iOS 16 / macOS 13 format revision. The
+// backend itself requires macOS 14, so all production TOSA models can use this version uniformly.
+const COREML_SPECIFICATION_VERSION: u64 = 7;
 const COREML_FLOAT16: u64 = 65_552;
 const COREML_FLOAT32: u64 = 65_568;
 const COREML_INT32: u64 = 131_104;
@@ -861,6 +863,18 @@ mod tests {
             2
         );
         assert!(lowered.bytes.windows(2).any(|bytes| bytes == [0xc2, 0x07]));
+    }
+
+    #[test]
+    fn lowers_every_shared_fp16_numerical_artifact() {
+        use virtio_accel_conformance::numerics::{
+            IDENTITY_EDGES_FP16, MATMUL_FP16, MAX_POOL2D_FP16,
+        };
+
+        for case in [IDENTITY_EDGES_FP16, MATMUL_FP16, MAX_POOL2D_FP16] {
+            let lowered = lower_tosa(case.artifact, COREML_TOSA_TARGET).unwrap();
+            assert!(!lowered.bytes.is_empty(), "{}", case.name);
+        }
     }
 
     #[test]

@@ -338,7 +338,7 @@ fn conv2d_bytes(output_height: i32, connect_ctc: bool) -> Vec<u8> {
     builder.finished_data().to_vec()
 }
 
-fn matmul_fp32_bytes() -> Vec<u8> {
+fn matmul_float_bytes(dtype: wire::DType) -> Vec<u8> {
     let mut builder = flatbuffers::FlatBufferBuilder::new();
     let region_name = builder.create_string("main");
     let block_name = builder.create_string("entry");
@@ -354,7 +354,7 @@ fn matmul_fp32_bytes() -> Vec<u8> {
         &wire::TosaTensorArgs {
             name: Some(lhs_name),
             shape: Some(lhs_shape),
-            type_: wire::DType::FP32,
+            type_: dtype,
             ..Default::default()
         },
     );
@@ -364,18 +364,23 @@ fn matmul_fp32_bytes() -> Vec<u8> {
         &wire::TosaTensorArgs {
             name: Some(rhs_name),
             shape: Some(rhs_shape),
-            type_: wire::DType::FP32,
+            type_: dtype,
             ..Default::default()
         },
     );
     let zero_shape = builder.create_vector(&[1_i32]);
-    let zero_data = builder.create_vector(&0_f32.to_le_bytes());
+    let zero_bytes = if dtype == wire::DType::FP16 {
+        0_u16.to_le_bytes().to_vec()
+    } else {
+        0_f32.to_le_bytes().to_vec()
+    };
+    let zero_data = builder.create_vector(&zero_bytes);
     let lhs_zp = wire::TosaTensor::create(
         &mut builder,
         &wire::TosaTensorArgs {
             name: Some(lhs_zp_name),
             shape: Some(zero_shape),
-            type_: wire::DType::FP32,
+            type_: dtype,
             data: Some(zero_data),
             ..Default::default()
         },
@@ -385,7 +390,7 @@ fn matmul_fp32_bytes() -> Vec<u8> {
         &wire::TosaTensorArgs {
             name: Some(rhs_zp_name),
             shape: Some(zero_shape),
-            type_: wire::DType::FP32,
+            type_: dtype,
             data: Some(zero_data),
             ..Default::default()
         },
@@ -396,7 +401,7 @@ fn matmul_fp32_bytes() -> Vec<u8> {
         &wire::TosaTensorArgs {
             name: Some(output_name),
             shape: Some(output_shape),
-            type_: wire::DType::FP32,
+            type_: dtype,
             ..Default::default()
         },
     );
@@ -486,7 +491,7 @@ fn matmul_fp32_bytes() -> Vec<u8> {
     builder.finished_data().to_vec()
 }
 
-fn max_pool2d_fp32_bytes() -> Vec<u8> {
+fn max_pool2d_float_bytes(dtype: wire::DType) -> Vec<u8> {
     let mut builder = flatbuffers::FlatBufferBuilder::new();
     let region_name = builder.create_string("main");
     let block_name = builder.create_string("entry");
@@ -499,7 +504,7 @@ fn max_pool2d_fp32_bytes() -> Vec<u8> {
         &wire::TosaTensorArgs {
             name: Some(input_name),
             shape: Some(input_shape),
-            type_: wire::DType::FP32,
+            type_: dtype,
             ..Default::default()
         },
     );
@@ -508,7 +513,7 @@ fn max_pool2d_fp32_bytes() -> Vec<u8> {
         &wire::TosaTensorArgs {
             name: Some(output_name),
             shape: Some(output_shape),
-            type_: wire::DType::FP32,
+            type_: dtype,
             ..Default::default()
         },
     );
@@ -584,30 +589,34 @@ fn max_pool2d_fp32_bytes() -> Vec<u8> {
 
 #[test]
 fn matmul_fixture_is_semantically_valid() {
-    let bytes = matmul_fp32_bytes();
-    parse(&bytes)
-        .unwrap()
-        .validate_for(Target::new(
-            Version::TOSA_1_0,
-            ProfileSet::FLOATING_POINT,
-            Level::Level8K,
-            ExtensionSet::NONE,
-        ))
-        .unwrap();
+    for dtype in [wire::DType::FP16, wire::DType::FP32] {
+        let bytes = matmul_float_bytes(dtype);
+        parse(&bytes)
+            .unwrap()
+            .validate_for(Target::new(
+                Version::TOSA_1_0,
+                ProfileSet::FLOATING_POINT,
+                Level::Level8K,
+                ExtensionSet::NONE,
+            ))
+            .unwrap();
+    }
 }
 
 #[test]
 fn max_pool2d_fixture_is_semantically_valid() {
-    let bytes = max_pool2d_fp32_bytes();
-    parse(&bytes)
-        .unwrap()
-        .validate_for(Target::new(
-            Version::TOSA_1_0,
-            ProfileSet::FLOATING_POINT,
-            Level::Level8K,
-            ExtensionSet::NONE,
-        ))
-        .unwrap();
+    for dtype in [wire::DType::FP16, wire::DType::FP32] {
+        let bytes = max_pool2d_float_bytes(dtype);
+        parse(&bytes)
+            .unwrap()
+            .validate_for(Target::new(
+                Version::TOSA_1_0,
+                ProfileSet::FLOATING_POINT,
+                Level::Level8K,
+                ExtensionSet::NONE,
+            ))
+            .unwrap();
+    }
 }
 
 #[test]
@@ -615,7 +624,15 @@ fn max_pool2d_fixture_is_semantically_valid() {
 fn regenerate_matmul_fixture() {
     let destination = std::env::var_os("VIRTIO_ACCEL_TOSA_FIXTURE_OUT")
         .expect("set VIRTIO_ACCEL_TOSA_FIXTURE_OUT to the exact output path");
-    std::fs::write(destination, matmul_fp32_bytes()).unwrap();
+    std::fs::write(destination, matmul_float_bytes(wire::DType::FP32)).unwrap();
+}
+
+#[test]
+#[ignore = "writes a requested checked-in test fixture"]
+fn regenerate_matmul_fp16_fixture() {
+    let destination = std::env::var_os("VIRTIO_ACCEL_TOSA_FIXTURE_OUT")
+        .expect("set VIRTIO_ACCEL_TOSA_FIXTURE_OUT to the exact output path");
+    std::fs::write(destination, matmul_float_bytes(wire::DType::FP16)).unwrap();
 }
 
 #[test]
@@ -623,7 +640,15 @@ fn regenerate_matmul_fixture() {
 fn regenerate_max_pool2d_fixture() {
     let destination = std::env::var_os("VIRTIO_ACCEL_TOSA_FIXTURE_OUT")
         .expect("set VIRTIO_ACCEL_TOSA_FIXTURE_OUT to the exact output path");
-    std::fs::write(destination, max_pool2d_fp32_bytes()).unwrap();
+    std::fs::write(destination, max_pool2d_float_bytes(wire::DType::FP32)).unwrap();
+}
+
+#[test]
+#[ignore = "writes a requested checked-in test fixture"]
+fn regenerate_max_pool2d_fp16_fixture() {
+    let destination = std::env::var_os("VIRTIO_ACCEL_TOSA_FIXTURE_OUT")
+        .expect("set VIRTIO_ACCEL_TOSA_FIXTURE_OUT to the exact output path");
+    std::fs::write(destination, max_pool2d_float_bytes(wire::DType::FP16)).unwrap();
 }
 
 #[test]
@@ -635,6 +660,22 @@ fn regenerate_identity_edges_fixture() {
         destination,
         model_bytes(Fixture {
             dtype: wire::DType::FP32.0,
+            tensor_shape: &[8],
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+}
+
+#[test]
+#[ignore = "writes a requested checked-in test fixture"]
+fn regenerate_identity_edges_fp16_fixture() {
+    let destination = std::env::var_os("VIRTIO_ACCEL_TOSA_FIXTURE_OUT")
+        .expect("set VIRTIO_ACCEL_TOSA_FIXTURE_OUT to the exact output path");
+    std::fs::write(
+        destination,
+        model_bytes(Fixture {
+            dtype: wire::DType::FP16.0,
             tensor_shape: &[8],
             ..Default::default()
         }),

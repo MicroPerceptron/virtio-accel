@@ -337,7 +337,7 @@ analysis directly. Dense value/operator IDs, topological order, liveness, runtim
 specialization keys are provider-neutral; only capability selection, operator lowering, native
 memory import, and synchronization around the provider-owned compiled-program cache remain
 backend-specific. Its first validation pass on the Intel host should run the backend conformance
-suite and shared numerical TOSA corpus, add provider-specific differential checks, and record
+suite and shared FP16/FP32 numerical TOSA corpus, add provider-specific differential checks, and record
 cold/warm specialization, throughput, and copy/allocation counters. This keeps the Core ML and
 Intel paths on one bounded TOSA contract without requiring either provider to adopt the other's
 native graph representation.
