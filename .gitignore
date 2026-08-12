@@ -2,3 +2,5 @@
 /fuzz/artifacts/
 /fuzz/corpus/
 /fuzz/target/
+
+.DS_Store
