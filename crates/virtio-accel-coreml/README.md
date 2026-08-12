@@ -26,9 +26,11 @@ device, guest, transport, or queue crates.
 The initial lowering tier accepts one static region and basic block with static `FP16`/`FP32`
 boundary tensors (`INT32` outputs are also accepted for operators such as `ARGMAX`). It covers
 identity and constants; floating-point unary, binary, comparison, logical, selection, clamp, and
-reduction layers; and concat, reshape, reverse, and transpose. `supports_tosa_operator` exposes the
-exact operator set. Unsupported control flow, dynamic shapes, profiles, extensions, dtypes, and
-operators are rejected during program loading rather than failing after admission.
+reduction layers; batched matrix multiplication; unpadded NHWC max pooling through explicit NCHW
+layout transposes; and concat, reshape, reverse, and transpose. `supports_tosa_operator` exposes the
+operator set; unsupported attribute combinations such as nonzero pooling padding are rejected while
+loading. Unsupported control flow, dynamic shapes, profiles, extensions, dtypes, and operators are
+likewise rejected before admission.
 
 Bindings use a device-neutral deterministic rule: block inputs occupy slots `0..N` in declared
 order and block outputs occupy `N..N+M`. Lowering assigns private Core ML feature and blob names;
@@ -83,6 +85,12 @@ end-to-end and conformance tests on an ANE-capable Mac with:
 ```sh
 cargo test -p virtio-accel-coreml
 ```
+
+The native suite consumes the same numerical TOSA corpus exported by
+`virtio-accel-conformance`. It checks FP32 non-finite values, subnormals and signed zero, non-square
+batched matrix multiplication, multi-channel NHWC max-pooling layout, overlapping asynchronous
+predictions, and repeated compile/unload source cleanup. Future host backends inherit these exact
+artifacts and oracles instead of substituting provider-specific graphs.
 
 For local warm-path latency evidence, run the ignored release-mode measurement:
 

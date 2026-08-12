@@ -312,6 +312,11 @@ synchronization. The [backend implementer guide](backend-implementer-guide.md) m
 trait obligations and separates semantic evidence from the quantitative allocation and copy budgets
 in [performance.md](performance.md).
 
+Its `numerics` module complements lifecycle conformance with checked-in TOSA graphs and FP32
+oracles. Identity edge values, non-square batched matrix multiplication, and NHWC max pooling are
+the first shared cases. Core ML consumes them directly, and each subsequent hardware backend must
+run those same bytes before adding provider-specific coverage.
+
 ## Production lowering boundaries
 
 The first production artifact path is now TOSA-to-Core ML. The facade, guest, transport, and device
@@ -332,9 +337,10 @@ analysis directly. Dense value/operator IDs, topological order, liveness, runtim
 specialization keys are provider-neutral; only capability selection, operator lowering, native
 memory import, and synchronization around the provider-owned compiled-program cache remain
 backend-specific. Its first validation pass on the Intel host should run the backend conformance
-suite and TOSA corpus, add numerical differential checks, and record cold/warm specialization,
-throughput, and copy/allocation counters. This keeps the Core ML and Intel paths on one bounded
-TOSA contract without requiring either provider to adopt the other's native graph representation.
+suite and shared numerical TOSA corpus, add provider-specific differential checks, and record
+cold/warm specialization, throughput, and copy/allocation counters. This keeps the Core ML and
+Intel paths on one bounded TOSA contract without requiring either provider to adopt the other's
+native graph representation.
 
 The portable command engine depends on `virtio-accel-proto`, `virtio-accel-core`, and the
 transport-neutral region metadata re-exported by `virtio-accel-device`. Its baseline processor:

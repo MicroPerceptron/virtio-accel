@@ -72,6 +72,8 @@ pub const fn supports_tosa_operator(op: Op) -> bool {
     matches!(
         op,
         Op::ARGMAX
+            | Op::MATMUL
+            | Op::MAX_POOL2D
             | Op::CLAMP
             | Op::ERF
             | Op::SIGMOID
@@ -239,6 +241,17 @@ fn encode_operator(
     let all_inputs = analysis.operator_inputs(operator_id);
     let outputs = analysis.operator_outputs(operator_id);
     let inputs = match op {
+        Op::MATMUL => {
+            for zero_point in &all_inputs[2..4] {
+                let bytes = analysis
+                    .serialized_constant(*zero_point)
+                    .ok_or(LoweringError::UnsupportedGraph)?;
+                if !serialized_float_is_zero(tensor(analysis, *zero_point)?.dtype(), bytes) {
+                    return Err(LoweringError::UnsupportedGraph);
+                }
+            }
+            &all_inputs[..2]
+        }
         Op::MUL => {
             let shift = analysis
                 .serialized_constant(all_inputs[2])
@@ -275,11 +288,11 @@ fn encode_operator(
     }
     if op == Op::CONST {
         let output = outputs[0];
+        if constant_is_parameter_only(analysis, output) {
+            return Ok(());
+        }
         let dtype = tensor(analysis, output)?.dtype();
         if !matches!(dtype, DType::FP16 | DType::FP32 | DType::BOOL) {
-            if constant_is_parameter_only(analysis, output) {
-                return Ok(());
-            }
             return Err(LoweringError::UnsupportedType(dtype));
         }
     }
@@ -290,6 +303,10 @@ fn encode_operator(
             require_propagating_nan(nan_mode)?;
         }
         _ => {}
+    }
+
+    if op == Op::MAX_POOL2D {
+        return encode_max_pool2d(network, analysis, operator_id, inputs, outputs, names);
     }
 
     let mut layer = Vec::new();
@@ -307,6 +324,7 @@ fn encode_operator(
 
     match op {
         Op::IDENTITY => field_message(&mut layer, 600, &[]),
+        Op::MATMUL => field_message(&mut layer, 1045, &[]),
         Op::ADD => field_message(&mut layer, 880, &[]),
         Op::SUB => field_message(&mut layer, 905, &[]),
         Op::MUL => field_message(&mut layer, 900, &[]),
@@ -315,6 +333,7 @@ fn encode_operator(
         Op::MINIMUM => field_message(&mut layer, 870, &[]),
         Op::EQUAL => field_message(&mut layer, 815, &[]),
         Op::GREATER => field_message(&mut layer, 830, &[]),
+        Op::GREATER_EQUAL => field_message(&mut layer, 832, &[]),
         Op::LOGICAL_OR => field_message(&mut layer, 840, &[]),
         Op::LOGICAL_XOR => field_message(&mut layer, 845, &[]),
         Op::LOGICAL_NOT => field_message(&mut layer, 850, &[]),
@@ -439,6 +458,93 @@ fn encode_operator(
     Ok(())
 }
 
+fn encode_max_pool2d(
+    network: &mut Vec<u8>,
+    analysis: &TosaAnalysis<'_>,
+    operator_id: virtio_accel_tosa::OperatorId,
+    inputs: &[ValueId],
+    outputs: &[ValueId],
+    names: &[String],
+) -> Result<(), LoweringError> {
+    let OpAttributes::MaxPool2d {
+        kernel,
+        stride,
+        pad,
+        nan_mode,
+    } = analysis.operator(operator_id).source().attributes()
+    else {
+        return Err(LoweringError::UnsupportedGraph);
+    };
+    require_propagating_nan(nan_mode)?;
+    let kernel = kernel.iter().collect::<Vec<_>>();
+    let stride = stride.iter().collect::<Vec<_>>();
+    let pad = pad.iter().collect::<Vec<_>>();
+    if kernel.len() != 2
+        || stride.len() != 2
+        || pad.len() != 4
+        || kernel.iter().chain(&stride).any(|value| *value <= 0)
+        || pad.iter().any(|value| *value != 0)
+    {
+        return Err(LoweringError::UnsupportedGraph);
+    }
+
+    let stem = format!("tosa_{}_max_pool2d", operator_id.get());
+    let nchw_input = format!("{stem}_nchw_input");
+    let nchw_output = format!("{stem}_nchw_output");
+    encode_transpose_layer(
+        network,
+        &format!("{stem}_to_nchw"),
+        &names[inputs[0].get() as usize],
+        &nchw_input,
+        [0, 3, 1, 2],
+    );
+
+    let mut params = Vec::new();
+    field_packed_varints(
+        &mut params,
+        10,
+        kernel.into_iter().map(|value| value as u64),
+    );
+    field_packed_varints(
+        &mut params,
+        20,
+        stride.into_iter().map(|value| value as u64),
+    );
+    field_message(&mut params, 30, &[]);
+    let mut pooling = Vec::new();
+    field_string(&mut pooling, 1, &stem);
+    field_string(&mut pooling, 2, &nchw_input);
+    field_string(&mut pooling, 3, &nchw_output);
+    field_message(&mut pooling, 120, &params);
+    field_message(network, 1, &pooling);
+
+    encode_transpose_layer(
+        network,
+        &format!("{stem}_to_nhwc"),
+        &nchw_output,
+        &names[outputs[0].get() as usize],
+        [0, 2, 3, 1],
+    );
+    Ok(())
+}
+
+fn encode_transpose_layer(
+    network: &mut Vec<u8>,
+    name: &str,
+    input: &str,
+    output: &str,
+    axes: impl IntoIterator<Item = u64>,
+) {
+    let mut params = Vec::new();
+    field_packed_varints(&mut params, 1, axes);
+    let mut layer = Vec::new();
+    field_string(&mut layer, 1, name);
+    field_string(&mut layer, 2, input);
+    field_string(&mut layer, 3, output);
+    field_message(&mut layer, 985, &params);
+    field_message(network, 1, &layer);
+}
+
 fn constant_is_parameter_only(analysis: &TosaAnalysis<'_>, value: ValueId) -> bool {
     let mut consumed = false;
     for operator in analysis.operators() {
@@ -449,7 +555,7 @@ fn constant_is_parameter_only(analysis: &TosaAnalysis<'_>, value: ValueId) -> bo
             consumed = true;
             if !matches!(
                 (operator.op(), index),
-                (Op::MUL, 2) | (Op::NEGATE, 1 | 2) | (Op::RESHAPE, 1)
+                (Op::MATMUL, 2 | 3) | (Op::MUL, 2) | (Op::NEGATE, 1 | 2) | (Op::RESHAPE, 1)
             ) {
                 return false;
             }
@@ -594,8 +700,40 @@ fn coreml_data_type(dtype: DType) -> Result<u64, LoweringError> {
 
 fn decode_float(dtype: DType, bytes: &[u8]) -> Result<f32, LoweringError> {
     match dtype {
+        DType::FP16 if bytes.len() == 2 => Ok(f16_to_f32(u16::from_le_bytes(
+            bytes.try_into().expect("length checked"),
+        ))),
         DType::FP32 if bytes.len() == 4 => Ok(f32::from_le_bytes(bytes.try_into().unwrap())),
         _ => Err(LoweringError::UnsupportedType(dtype)),
+    }
+}
+
+fn f16_to_f32(bits: u16) -> f32 {
+    let sign = u32::from(bits & 0x8000) << 16;
+    let exponent = (bits >> 10) & 0x1f;
+    let fraction = u32::from(bits & 0x03ff);
+    let converted = match exponent {
+        0 if fraction == 0 => sign,
+        0 => {
+            let shift = fraction.leading_zeros() - 21;
+            let normalized = fraction << shift;
+            sign | ((127 - 15 - shift + 1) << 23) | ((normalized & 0x03ff) << 13)
+        }
+        0x1f => sign | 0x7f80_0000 | (fraction << 13),
+        _ => sign | ((u32::from(exponent) + 127 - 15) << 23) | (fraction << 13),
+    };
+    f32::from_bits(converted)
+}
+
+fn serialized_float_is_zero(dtype: DType, bytes: &[u8]) -> bool {
+    match dtype {
+        DType::FP16 if bytes.len() == 2 => {
+            u16::from_le_bytes(bytes.try_into().expect("length checked")) & 0x7fff == 0
+        }
+        DType::FP32 if bytes.len() == 4 => {
+            u32::from_le_bytes(bytes.try_into().expect("length checked")) & 0x7fff_ffff == 0
+        }
+        _ => false,
     }
 }
 
@@ -648,7 +786,6 @@ mod tests {
     use super::*;
 
     const IDENTITY_FP32: &[u8] = include_bytes!("../tests/data/identity-fp32-v1.0.0.tosa");
-
     #[test]
     fn lowers_a_verified_tosa_model_without_host_dependencies() {
         let lowered = lower_tosa(IDENTITY_FP32, COREML_TOSA_TARGET).unwrap();
@@ -674,5 +811,89 @@ mod tests {
             lower_tosa(IDENTITY_FP32, target),
             Err(LoweringError::UnsupportedGraph)
         ));
+    }
+
+    #[test]
+    fn lowers_batched_matmul_without_encoding_parameter_constants() {
+        let lowered = lower_tosa(
+            virtio_accel_conformance::numerics::MATMUL_FP32.artifact,
+            COREML_TOSA_TARGET,
+        )
+        .unwrap();
+
+        assert!(!lowered.bytes.is_empty());
+        assert_eq!(lowered.features.len(), 3);
+        assert_eq!(lowered.features[0].slot, 0);
+        assert_eq!(lowered.features[1].slot, 1);
+        assert_eq!(lowered.features[2].slot, 2);
+        // NeuralNetworkLayer.batchedMatmul is field 1045 (wire key 8362 = 0xaa 0x41).
+        assert!(lowered.bytes.windows(2).any(|bytes| bytes == [0xaa, 0x41]));
+    }
+
+    #[test]
+    fn lowers_the_shared_fp32_edge_identity_artifact() {
+        let lowered = lower_tosa(
+            virtio_accel_conformance::numerics::IDENTITY_EDGES_FP32.artifact,
+            COREML_TOSA_TARGET,
+        )
+        .unwrap();
+
+        assert_eq!(lowered.features.len(), 2);
+        assert!(!lowered.bytes.is_empty());
+    }
+
+    #[test]
+    fn lowers_nhwc_max_pool_through_explicit_layout_transposes() {
+        let lowered = lower_tosa(
+            virtio_accel_conformance::numerics::MAX_POOL2D_FP32.artifact,
+            COREML_TOSA_TARGET,
+        )
+        .unwrap();
+
+        // The lowering emits transpose -> pooling -> transpose. Pooling is field 120
+        // (wire key 962 = 0xc2 0x07); transpose is field 985 (0xca 0x3d).
+        assert_eq!(
+            lowered
+                .bytes
+                .windows(2)
+                .filter(|bytes| *bytes == [0xca, 0x3d])
+                .count(),
+            2
+        );
+        assert!(lowered.bytes.windows(2).any(|bytes| bytes == [0xc2, 0x07]));
+    }
+
+    #[test]
+    fn greater_equal_uses_the_distinct_core_ml_field() {
+        assert!(supports_tosa_operator(Op::GREATER_EQUAL));
+        let mut layer = Vec::new();
+        field_message(&mut layer, 832, &[]);
+        assert_eq!(layer, [0x82, 0x34, 0x00]);
+    }
+
+    #[test]
+    fn fp16_parameters_preserve_zero_finite_and_nan_classes() {
+        assert_eq!(decode_float(DType::FP16, &0_u16.to_le_bytes()), Ok(0.0));
+        assert_eq!(
+            decode_float(DType::FP16, &0x8000_u16.to_le_bytes())
+                .unwrap()
+                .to_bits(),
+            (-0.0_f32).to_bits()
+        );
+        assert_eq!(
+            decode_float(DType::FP16, &0x3c00_u16.to_le_bytes()),
+            Ok(1.0)
+        );
+        assert!(
+            decode_float(DType::FP16, &0x7e00_u16.to_le_bytes())
+                .unwrap()
+                .is_nan()
+        );
+        assert_eq!(
+            decode_float(DType::FP16, &0x0001_u16.to_le_bytes())
+                .unwrap()
+                .to_bits(),
+            (2.0_f32.powi(-24)).to_bits()
+        );
     }
 }

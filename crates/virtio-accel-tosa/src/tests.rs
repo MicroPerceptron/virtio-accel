@@ -1,5 +1,7 @@
 use alloc::vec::Vec;
 
+extern crate std;
+
 use crate::generated::tosa as wire;
 use crate::{
     DType, Error, ExtensionSet, Level, Limits, Op, ProfileSet, Resource, SemanticError,
@@ -16,6 +18,7 @@ struct Fixture {
     repeat_operator: bool,
     variable_output: bool,
     shape_value: Option<(u32, &'static [u8])>,
+    tensor_shape: &'static [i32],
 }
 
 impl Default for Fixture {
@@ -29,6 +32,7 @@ impl Default for Fixture {
             repeat_operator: false,
             variable_output: false,
             shape_value: None,
+            tensor_shape: &[1],
         }
     }
 }
@@ -40,7 +44,7 @@ fn model_bytes(fixture: Fixture) -> Vec<u8> {
     let input_name = builder.create_string("input");
     let output_name = builder.create_string("output");
     let output_reference = builder.create_string(fixture.output_reference);
-    let tensor_shape = builder.create_vector(&[1_i32]);
+    let tensor_shape = builder.create_vector(fixture.tensor_shape);
     let shape_value = fixture.shape_value.map(|(rank, data)| {
         let name = builder.create_string("shape");
         let data = builder.create_vector(data);
@@ -332,6 +336,310 @@ fn conv2d_bytes(output_height: i32, connect_ctc: bool) -> Vec<u8> {
     );
     wire::finish_tosa_graph_buffer(&mut builder, graph);
     builder.finished_data().to_vec()
+}
+
+fn matmul_fp32_bytes() -> Vec<u8> {
+    let mut builder = flatbuffers::FlatBufferBuilder::new();
+    let region_name = builder.create_string("main");
+    let block_name = builder.create_string("entry");
+    let lhs_name = builder.create_string("lhs");
+    let rhs_name = builder.create_string("rhs");
+    let lhs_zp_name = builder.create_string("lhs_zp");
+    let rhs_zp_name = builder.create_string("rhs_zp");
+    let output_name = builder.create_string("output");
+
+    let lhs_shape = builder.create_vector(&[1_i32, 2, 3]);
+    let lhs = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(lhs_name),
+            shape: Some(lhs_shape),
+            type_: wire::DType::FP32,
+            ..Default::default()
+        },
+    );
+    let rhs_shape = builder.create_vector(&[1_i32, 3, 2]);
+    let rhs = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(rhs_name),
+            shape: Some(rhs_shape),
+            type_: wire::DType::FP32,
+            ..Default::default()
+        },
+    );
+    let zero_shape = builder.create_vector(&[1_i32]);
+    let zero_data = builder.create_vector(&0_f32.to_le_bytes());
+    let lhs_zp = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(lhs_zp_name),
+            shape: Some(zero_shape),
+            type_: wire::DType::FP32,
+            data: Some(zero_data),
+            ..Default::default()
+        },
+    );
+    let rhs_zp = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(rhs_zp_name),
+            shape: Some(zero_shape),
+            type_: wire::DType::FP32,
+            data: Some(zero_data),
+            ..Default::default()
+        },
+    );
+    let output_shape = builder.create_vector(&[1_i32, 2, 2]);
+    let output = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(output_name),
+            shape: Some(output_shape),
+            type_: wire::DType::FP32,
+            ..Default::default()
+        },
+    );
+
+    let const_attribute = wire::ConstAttribute::create(&mut builder, &Default::default());
+    let lhs_zp_outputs = builder.create_vector(&[lhs_zp_name]);
+    let lhs_zp_const = wire::TosaOperator::create(
+        &mut builder,
+        &wire::TosaOperatorArgs {
+            op: wire::Op::CONST,
+            attribute_type: wire::Attribute::ConstAttribute,
+            attribute: Some(const_attribute.as_union_value()),
+            inputs: None,
+            outputs: Some(lhs_zp_outputs),
+            location: None,
+        },
+    );
+    let rhs_zp_outputs = builder.create_vector(&[rhs_zp_name]);
+    let rhs_zp_const = wire::TosaOperator::create(
+        &mut builder,
+        &wire::TosaOperatorArgs {
+            op: wire::Op::CONST,
+            attribute_type: wire::Attribute::ConstAttribute,
+            attribute: Some(const_attribute.as_union_value()),
+            inputs: None,
+            outputs: Some(rhs_zp_outputs),
+            location: None,
+        },
+    );
+    let matmul_attribute = wire::MatMulAttribute::create(&mut builder, &Default::default());
+    let matmul_inputs = builder.create_vector(&[lhs_name, rhs_name, lhs_zp_name, rhs_zp_name]);
+    let matmul_outputs = builder.create_vector(&[output_name]);
+    let matmul = wire::TosaOperator::create(
+        &mut builder,
+        &wire::TosaOperatorArgs {
+            op: wire::Op::MATMUL,
+            attribute_type: wire::Attribute::MatMulAttribute,
+            attribute: Some(matmul_attribute.as_union_value()),
+            inputs: Some(matmul_inputs),
+            outputs: Some(matmul_outputs),
+            location: None,
+        },
+    );
+
+    let tensors = builder.create_vector(&[lhs, rhs, lhs_zp, rhs_zp, output]);
+    let operators = builder.create_vector(&[lhs_zp_const, rhs_zp_const, matmul]);
+    let block_inputs = builder.create_vector(&[lhs_name, rhs_name]);
+    let block_outputs = builder.create_vector(&[output_name]);
+    let block = wire::TosaBasicBlock::create(
+        &mut builder,
+        &wire::TosaBasicBlockArgs {
+            name: Some(block_name),
+            operators: Some(operators),
+            tensors: Some(tensors),
+            inputs: Some(block_inputs),
+            outputs: Some(block_outputs),
+            shapes: None,
+        },
+    );
+    let blocks = builder.create_vector(&[block]);
+    let region = wire::TosaRegion::create(
+        &mut builder,
+        &wire::TosaRegionArgs {
+            name: Some(region_name),
+            blocks: Some(blocks),
+        },
+    );
+    let regions = builder.create_vector(&[region]);
+    let version = wire::Version::create(
+        &mut builder,
+        &wire::VersionArgs {
+            _major: 1,
+            _minor: 0,
+            _patch: 0,
+            _draft: false,
+        },
+    );
+    let graph = wire::TosaGraph::create(
+        &mut builder,
+        &wire::TosaGraphArgs {
+            version: Some(version),
+            regions: Some(regions),
+            software_version: None,
+        },
+    );
+    wire::finish_tosa_graph_buffer(&mut builder, graph);
+    builder.finished_data().to_vec()
+}
+
+fn max_pool2d_fp32_bytes() -> Vec<u8> {
+    let mut builder = flatbuffers::FlatBufferBuilder::new();
+    let region_name = builder.create_string("main");
+    let block_name = builder.create_string("entry");
+    let input_name = builder.create_string("input");
+    let output_name = builder.create_string("output");
+    let input_shape = builder.create_vector(&[1_i32, 4, 4, 2]);
+    let output_shape = builder.create_vector(&[1_i32, 2, 2, 2]);
+    let input = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(input_name),
+            shape: Some(input_shape),
+            type_: wire::DType::FP32,
+            ..Default::default()
+        },
+    );
+    let output = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(output_name),
+            shape: Some(output_shape),
+            type_: wire::DType::FP32,
+            ..Default::default()
+        },
+    );
+    let kernel = builder.create_vector(&[2_i32, 2]);
+    let stride = builder.create_vector(&[2_i32, 2]);
+    let pad = builder.create_vector(&[0_i32; 4]);
+    let attribute = wire::MaxPool2dAttribute::create(
+        &mut builder,
+        &wire::MaxPool2dAttributeArgs {
+            kernel: Some(kernel),
+            stride: Some(stride),
+            pad: Some(pad),
+            nan_mode: wire::NanPropagationMode::PROPAGATE,
+        },
+    );
+    let operator_inputs = builder.create_vector(&[input_name]);
+    let operator_outputs = builder.create_vector(&[output_name]);
+    let operator = wire::TosaOperator::create(
+        &mut builder,
+        &wire::TosaOperatorArgs {
+            op: wire::Op::MAX_POOL2D,
+            attribute_type: wire::Attribute::MaxPool2dAttribute,
+            attribute: Some(attribute.as_union_value()),
+            inputs: Some(operator_inputs),
+            outputs: Some(operator_outputs),
+            location: None,
+        },
+    );
+    let tensors = builder.create_vector(&[input, output]);
+    let operators = builder.create_vector(&[operator]);
+    let block_inputs = builder.create_vector(&[input_name]);
+    let block_outputs = builder.create_vector(&[output_name]);
+    let block = wire::TosaBasicBlock::create(
+        &mut builder,
+        &wire::TosaBasicBlockArgs {
+            name: Some(block_name),
+            operators: Some(operators),
+            tensors: Some(tensors),
+            inputs: Some(block_inputs),
+            outputs: Some(block_outputs),
+            shapes: None,
+        },
+    );
+    let blocks = builder.create_vector(&[block]);
+    let region = wire::TosaRegion::create(
+        &mut builder,
+        &wire::TosaRegionArgs {
+            name: Some(region_name),
+            blocks: Some(blocks),
+        },
+    );
+    let regions = builder.create_vector(&[region]);
+    let version = wire::Version::create(
+        &mut builder,
+        &wire::VersionArgs {
+            _major: 1,
+            _minor: 0,
+            _patch: 0,
+            _draft: false,
+        },
+    );
+    let graph = wire::TosaGraph::create(
+        &mut builder,
+        &wire::TosaGraphArgs {
+            version: Some(version),
+            regions: Some(regions),
+            software_version: None,
+        },
+    );
+    wire::finish_tosa_graph_buffer(&mut builder, graph);
+    builder.finished_data().to_vec()
+}
+
+#[test]
+fn matmul_fixture_is_semantically_valid() {
+    let bytes = matmul_fp32_bytes();
+    parse(&bytes)
+        .unwrap()
+        .validate_for(Target::new(
+            Version::TOSA_1_0,
+            ProfileSet::FLOATING_POINT,
+            Level::Level8K,
+            ExtensionSet::NONE,
+        ))
+        .unwrap();
+}
+
+#[test]
+fn max_pool2d_fixture_is_semantically_valid() {
+    let bytes = max_pool2d_fp32_bytes();
+    parse(&bytes)
+        .unwrap()
+        .validate_for(Target::new(
+            Version::TOSA_1_0,
+            ProfileSet::FLOATING_POINT,
+            Level::Level8K,
+            ExtensionSet::NONE,
+        ))
+        .unwrap();
+}
+
+#[test]
+#[ignore = "writes a requested checked-in test fixture"]
+fn regenerate_matmul_fixture() {
+    let destination = std::env::var_os("VIRTIO_ACCEL_TOSA_FIXTURE_OUT")
+        .expect("set VIRTIO_ACCEL_TOSA_FIXTURE_OUT to the exact output path");
+    std::fs::write(destination, matmul_fp32_bytes()).unwrap();
+}
+
+#[test]
+#[ignore = "writes a requested checked-in test fixture"]
+fn regenerate_max_pool2d_fixture() {
+    let destination = std::env::var_os("VIRTIO_ACCEL_TOSA_FIXTURE_OUT")
+        .expect("set VIRTIO_ACCEL_TOSA_FIXTURE_OUT to the exact output path");
+    std::fs::write(destination, max_pool2d_fp32_bytes()).unwrap();
+}
+
+#[test]
+#[ignore = "writes a requested checked-in test fixture"]
+fn regenerate_identity_edges_fixture() {
+    let destination = std::env::var_os("VIRTIO_ACCEL_TOSA_FIXTURE_OUT")
+        .expect("set VIRTIO_ACCEL_TOSA_FIXTURE_OUT to the exact output path");
+    std::fs::write(
+        destination,
+        model_bytes(Fixture {
+            dtype: wire::DType::FP32.0,
+            tensor_shape: &[8],
+            ..Default::default()
+        }),
+    )
+    .unwrap();
 }
 
 #[test]
