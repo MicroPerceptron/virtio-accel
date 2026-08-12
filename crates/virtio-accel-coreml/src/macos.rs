@@ -1,6 +1,7 @@
 //! Audited macOS implementation. See `SAFETY.md`.
 
 use crate::artifact::{DecodeError, FeatureRole, MAX_ARTIFACT_BYTES, decode};
+use crate::lower::{LoweredFeature, LoweredFeatureRole, LoweringError, lower_tosa};
 use crate::{ARTIFACT_FORMAT, InitError, REQUIRED_RESIDENT_BYTES, TARGET_IDENTITY};
 use core::ffi::c_void;
 use std::alloc::{Layout, alloc_zeroed, dealloc};
@@ -25,6 +26,7 @@ const TRANSFER_CHUNK_BYTES: usize = 16 * 1024;
 const COREML_EXTERNAL_DOMAIN: u32 = 0x434d_4c45;
 const EXCLUSIVE_NATIVE_ACCESS: u64 = 1 << 63;
 const MAX_SHARED_NATIVE_USERS: u64 = EXCLUSIVE_NATIVE_ACCESS - 1;
+const MAX_TOSA_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
 
 const ERROR_UNSUPPORTED: u32 = 1;
 const ERROR_INCOMPATIBLE: u32 = 2;
@@ -87,6 +89,13 @@ unsafe extern "C" {
     fn va_coreml_model_load(
         path: *const u8,
         path_len: usize,
+        mappings: *const NativeFeatureMapping,
+        mapping_count: usize,
+        error: *mut NativeError,
+    ) -> *mut c_void;
+    fn va_coreml_model_load_memory(
+        bytes: *const u8,
+        bytes_len: usize,
         mappings: *const NativeFeatureMapping,
         mapping_count: usize,
         error: *mut NativeError,
@@ -336,10 +345,10 @@ impl Drop for CoreMlEvent {
     }
 }
 
-/// One Core ML backend instance rooted at a host-controlled model directory.
+/// One Core ML backend instance.
 #[derive(Debug)]
 pub struct CoreMlAccelerator {
-    model_root: PathBuf,
+    model_root: Option<PathBuf>,
     next_id: AtomicU64,
     direct_binding_admissions: AtomicU64,
     explicit_transfer_bytes: AtomicU64,
@@ -347,18 +356,30 @@ pub struct CoreMlAccelerator {
 }
 
 impl CoreMlAccelerator {
-    /// Construct a backend and require an accessible Apple Neural Engine.
+    /// Construct a backend with the production TOSA-to-Core ML path and require an accessible ANE.
+    pub fn new_tosa() -> Result<Self, InitError> {
+        Self::with_model_root(None)
+    }
+
+    /// Construct a backend with TOSA lowering plus the legacy host-path artifact escape hatch.
+    ///
+    /// New device integrations should use [`Self::new_tosa`]. The model root exists only for
+    /// explicitly host-owned Core ML artifacts and is never encoded into portable TOSA payloads.
     pub fn new(model_root: impl AsRef<Path>) -> Result<Self, InitError> {
-        // SAFETY: the function has no pointer arguments and returns a scalar availability result.
-        if unsafe { va_coreml_has_neural_engine() } == 0 {
-            return Err(InitError::NeuralEngineUnavailable);
-        }
         let model_root = model_root
             .as_ref()
             .canonicalize()
             .map_err(|_| InitError::InvalidModelRoot)?;
         if !model_root.is_dir() || model_root.to_str().is_none() {
             return Err(InitError::InvalidModelRoot);
+        }
+        Self::with_model_root(Some(model_root))
+    }
+
+    fn with_model_root(model_root: Option<PathBuf>) -> Result<Self, InitError> {
+        // SAFETY: the function has no pointer arguments and returns a scalar availability result.
+        if unsafe { va_coreml_has_neural_engine() } == 0 {
+            return Err(InitError::NeuralEngineUnavailable);
         }
         Ok(Self {
             model_root,
@@ -381,7 +402,7 @@ impl CoreMlAccelerator {
                     max_events_per_context: 4_096,
                     max_bindings_per_submission: 256,
                     max_buffer_bytes: 16 * 1024 * 1024 * 1024,
-                    max_artifact_bytes: MAX_ARTIFACT_BYTES,
+                    max_artifact_bytes: MAX_TOSA_ARTIFACT_BYTES,
                 },
             },
         })
@@ -406,6 +427,7 @@ impl CoreMlAccelerator {
     }
 
     fn resolve_model(&self, relative: &str) -> Result<PathBuf, BackendError> {
+        let model_root = self.model_root.as_ref().ok_or(BackendError::Unsupported)?;
         let path = Path::new(relative);
         if path.is_absolute()
             || path
@@ -414,12 +436,11 @@ impl CoreMlAccelerator {
         {
             return Err(BackendError::PermissionDenied);
         }
-        let resolved = self
-            .model_root
+        let resolved = model_root
             .join(path)
             .canonicalize()
             .map_err(|_| BackendError::InvalidArgument)?;
-        if !resolved.starts_with(&self.model_root) || resolved.as_os_str().to_str().is_none() {
+        if !resolved.starts_with(model_root) || resolved.as_os_str().to_str().is_none() {
             return Err(BackendError::PermissionDenied);
         }
         Ok(resolved)
@@ -465,6 +486,18 @@ impl CoreMlAccelerator {
             },
         }
     }
+
+    fn lowering_error(error: LoweringError) -> BackendError {
+        match error {
+            LoweringError::Parse(_)
+            | LoweringError::Analysis(_)
+            | LoweringError::InvalidConstant => BackendError::InvalidArgument,
+            LoweringError::UnsupportedGraph
+            | LoweringError::UnsupportedType(_)
+            | LoweringError::UnsupportedOperator(_) => BackendError::Unsupported,
+            LoweringError::ResourceLimit => BackendError::ResourceLimit,
+        }
+    }
 }
 
 fn build_slot_plan(
@@ -492,6 +525,19 @@ fn build_slot_plan(
         true
     });
     Ok(slots)
+}
+
+fn build_lowered_slot_plan(mappings: &[LoweredFeature]) -> Vec<SlotPlan> {
+    mappings
+        .iter()
+        .map(|mapping| SlotPlan {
+            slot: mapping.slot,
+            access: match mapping.role {
+                LoweredFeatureRole::Input => AccessMode::Read as u8,
+                LoweredFeatureRole::Output => AccessMode::Write as u8,
+            },
+        })
+        .collect()
 }
 
 unsafe extern "C" fn release_event_backings(context: *mut c_void) {
@@ -672,16 +718,72 @@ impl Accelerator for CoreMlAccelerator {
         context: &Self::Context,
         artifact: ArtifactRef<'_>,
     ) -> Result<Self::Program, BackendError> {
+        if artifact.payload.len() > self.info.limits.max_artifact_bytes {
+            return Err(BackendError::ResourceLimit);
+        }
+        if artifact.resident_bytes != REQUIRED_RESIDENT_BYTES {
+            return Err(BackendError::ResourceLimit);
+        }
+        if artifact.format == virtio_accel_tosa::ARTIFACT_FORMAT {
+            let target = virtio_accel_tosa::Target::from_identity(artifact.target)
+                .map_err(|_| BackendError::Incompatible)?;
+            let mut owned = Vec::new();
+            let bytes = match artifact.payload.as_contiguous() {
+                Some(bytes) => bytes,
+                None => {
+                    let len = usize::try_from(artifact.payload.len())
+                        .map_err(|_| BackendError::ResourceLimit)?;
+                    owned
+                        .try_reserve_exact(len)
+                        .map_err(|_| BackendError::OutOfMemory)?;
+                    owned.resize(len, 0);
+                    artifact.payload.read_at(0, &mut owned)?;
+                    &owned
+                }
+            };
+            let lowered = lower_tosa(bytes, target).map_err(Self::lowering_error)?;
+            let slots = build_lowered_slot_plan(&lowered.features);
+            let mappings = lowered
+                .features
+                .iter()
+                .map(|mapping| NativeFeatureMapping {
+                    slot: mapping.slot,
+                    role: match mapping.role {
+                        LoweredFeatureRole::Input => 1,
+                        LoweredFeatureRole::Output => 2,
+                    },
+                    name: mapping.name.as_ptr(),
+                    name_len: mapping.name.len(),
+                })
+                .collect::<Vec<_>>();
+            let mut error = NativeError::default();
+            // SAFETY: model and feature-name bytes remain valid for this synchronous call. The
+            // bridge writes the model to a unique temporary source, compiles and loads it, removes
+            // the source, copies retained strings, and returns one owned model reference.
+            let native = unsafe {
+                va_coreml_model_load_memory(
+                    lowered.bytes.as_ptr(),
+                    lowered.bytes.len(),
+                    mappings.as_ptr(),
+                    mappings.len(),
+                    &mut error,
+                )
+            };
+            let native = NonNull::new(native).ok_or_else(|| Self::native_error(error))?;
+            return Ok(CoreMlProgram {
+                context_id: context.id,
+                native,
+                slots,
+            });
+        }
+
         if artifact.format != ARTIFACT_FORMAT {
             return Err(BackendError::Unsupported);
         }
         if artifact.target != TARGET_IDENTITY {
             return Err(BackendError::Incompatible);
         }
-        if artifact.payload.len() > self.info.limits.max_artifact_bytes {
-            return Err(BackendError::ResourceLimit);
-        }
-        if artifact.resident_bytes != REQUIRED_RESIDENT_BYTES {
+        if artifact.payload.len() > MAX_ARTIFACT_BYTES {
             return Err(BackendError::ResourceLimit);
         }
         let decoded = decode(artifact.payload).map_err(|error| match error {

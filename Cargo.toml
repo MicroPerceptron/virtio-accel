@@ -8,7 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "Portable Rust foundations for a virtio accelerator device"
+description = "Portable Rust protocol and runtime layers for a virtio accelerator device"
 readme = "README.md"
 include = [
     "/Cargo.toml",
@@ -62,6 +62,7 @@ virtio-accel-guest = { path = "crates/virtio-accel-guest", version = "0.1.0" }
 virtio-accel-mock = { path = "crates/virtio-accel-mock", version = "0.1.0" }
 virtio-accel-proto = { path = "crates/virtio-accel-proto", version = "0.1.0" }
 virtio-accel-split-queue = { path = "crates/virtio-accel-split-queue", version = "0.1.0" }
+virtio-accel-tosa = { path = "crates/virtio-accel-tosa", version = "0.1.0" }
 virtio-accel-transport = { path = "crates/virtio-accel-transport", version = "0.1.0" }
 
 [dependencies]

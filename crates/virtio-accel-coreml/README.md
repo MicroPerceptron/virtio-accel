@@ -13,43 +13,47 @@ operations can fall back to the CPU.
 a placeholder constructor that returns `InitError::UnsupportedPlatform`, keeping workspace and
 cross-target dependency checks intact.
 
-## Model artifacts
+## Production TOSA artifacts
 
-`CoreMlAccelerator::new(model_root)` establishes a host-controlled root. A `CoreMlArtifact` names a
-`.mlmodel` file, `.mlpackage` directory, or `.mlmodelc` directory beneath that root and maps every
-model input/output feature to a virtio-accel slot. Absolute paths, parent traversal, symlink escape,
-unmapped features, optional features, non-`MLMultiArray` features, and incompatible aliased layouts
-are rejected.
+`CoreMlAccelerator::new_tosa()` accepts raw TOSA 1.0 FlatBuffers using
+`virtio_accel_tosa::ARTIFACT_FORMAT` and `COREML_TOSA_TARGET`. Program loading verifies the bounded
+FlatBuffer, runs the complete TOSA semantic and lowering analysis, emits a Core ML neural-network
+model in memory, and asks Core ML to compile and load it. A unique temporary `.mlmodel` source exists
+only inside the native bridge for that synchronous compile and is removed before `load_program`
+returns. No Core ML path, protobuf, feature name, or crate dependency crosses into the facade,
+device, guest, transport, or queue crates.
 
-```rust,no_run
-# #[cfg(target_os = "macos")]
-# fn example() -> Result<(), Box<dyn std::error::Error>> {
-use virtio_accel_coreml::CoreMlArtifact;
+The initial lowering tier accepts one static region and basic block with static `FP16`/`FP32`
+boundary tensors (`INT32` outputs are also accepted for operators such as `ARGMAX`). It covers
+identity and constants; floating-point unary, binary, comparison, logical, selection, clamp, and
+reduction layers; and concat, reshape, reverse, and transpose. `supports_tosa_operator` exposes the
+exact operator set. Unsupported control flow, dynamic shapes, profiles, extensions, dtypes, and
+operators are rejected during program loading rather than failing after admission.
 
-let artifact = CoreMlArtifact::new("models/TwicePlusOne.mlmodel")?
-    .map_input(7, "x")?
-    .map_output(7, "y")?
-    .encode()?;
+Bindings use a device-neutral deterministic rule: block inputs occupy slots `0..N` in declared
+order and block outputs occupy `N..N+M`. Lowering assigns private Core ML feature and blob names;
+portable callers never construct `CoreMlArtifact` or know those names.
 
-// Input x and output y share slot 7, so submissions bind one ReadWrite range.
-assert!(!artifact.is_empty());
-# Ok(())
-# }
+Run the real TOSA-to-Core ML path on an ANE-capable Mac:
+
+```sh
+cargo run -p virtio-accel-coreml --example tosa_coreml
 ```
 
-Artifact ABI v1 supports nonoptional `MLMultiArray` features with `Float16`, `Float32`, `Float64`,
-or `Int32` elements. Each feature uses the model constraint's declared default shape; alternate
-flexible shapes are not selected by the artifact. Image, sequence, dictionary, scalar, optional,
-and Core ML state features are rejected at model load rather than failing after admission. The
-model's default function is used for multi-function assets.
+Core ML does not publish a finite model-residency ceiling, so TOSA artifacts must declare
+`REQUIRED_RESIDENT_BYTES` (`u64::MAX`). This deliberately forces the device's aggregate
+resident-program policy to opt into one Core ML model instead of pretending an unverifiable smaller
+charge is exact.
 
-Source `.mlmodel` files and `.mlpackage` directories are compiled synchronously during
-`load_program`; compiled `.mlmodelc` directories load directly and are recommended for predictable
-startup latency. Fixed-shape models receive Core ML's infrequent-reshape hint on macOS 14.4+ and the
-fast-prediction specialization strategy on macOS 15+. Core ML does not publish a finite
-model-residency ceiling, so artifacts must declare `REQUIRED_RESIDENT_BYTES` (`u64::MAX`). This
-deliberately forces the device's aggregate resident-program policy to opt into one Core ML model
-instead of pretending an unverifiable smaller charge is exact.
+## Host-owned Core ML compatibility path
+
+`CoreMlAccelerator::new(model_root)` retains the original provider-specific path artifact for hosts
+that already own `.mlmodel`, `.mlpackage`, or `.mlmodelc` assets. `CoreMlArtifact` paths remain
+confined beneath that canonical root and are never the portable production format. Absolute paths,
+parent traversal, symlink escape, unmapped features, optional features, non-`MLMultiArray` features,
+and incompatible aliased layouts are rejected. Source assets compile synchronously; compiled
+`.mlmodelc` directories load directly. Fixed-shape models receive Core ML's infrequent-reshape hint
+on macOS 14.4+ and fast-prediction specialization on macOS 15+.
 
 ## Direct buffers and events
 

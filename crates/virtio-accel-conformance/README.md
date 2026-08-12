@@ -4,7 +4,7 @@ A reusable, transport-free semantic conformance suite for virtio-accel backends,
 provider target, progress, and optional resource-accounting adapters. Third-party backend
 authors run this suite to check their implementation against the normative semantics.
 
-Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an experimental, native-Rust foundation for a
+Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an experimental native-Rust protocol and implementation stack for a
 transport-neutral virtual accelerator device. Portable crates contain no host-OS or vendor APIs;
 host integrations live in separate adapter crates and never become their dependencies. The
 project claims no Virtio device ID.

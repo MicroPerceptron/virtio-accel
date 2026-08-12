@@ -1,16 +1,19 @@
 //! Core ML host backend for Apple Neural Engine capable Macs.
 //!
-//! The backend loads a provider-specific path artifact rooted beneath a directory selected by the
-//! host. Core ML models are configured with `CPUAndNeuralEngine`: supported operations may execute
-//! on the ANE, while Core ML remains free to place unsupported operations on the CPU. Program
-//! buffers are page-aligned allocations wrapped directly by `MLMultiArray`; output execution is
-//! accepted only when Core ML uses the same allocation as its output backing.
+//! The production path accepts device-neutral TOSA 1.0 FlatBuffers, validates and analyzes them
+//! with `virtio-accel-tosa`, and lowers supported static floating-point graphs inside this
+//! host-native crate. Core ML models are configured with `CPUAndNeuralEngine`: supported
+//! operations may execute on the ANE, while Core ML remains free to place unsupported operations
+//! on the CPU. Program buffers are page-aligned allocations wrapped directly by `MLMultiArray`;
+//! output execution is accepted only when Core ML uses the same allocation as its output backing.
 
 #![cfg_attr(not(target_os = "macos"), forbid(unsafe_code))]
 
 mod artifact;
+mod lower;
 
 pub use artifact::{ArtifactBuildError, CoreMlArtifact, FeatureRole};
+pub use lower::{COREML_TOSA_TARGET, LoweringError, supports_tosa_operator};
 
 use virtio_accel_core::{ArtifactFormat, TargetIdentity};
 
@@ -78,6 +81,11 @@ pub struct CoreMlAccelerator;
 impl CoreMlAccelerator {
     /// Report that Core ML is unavailable on this target.
     pub fn new(_model_root: impl AsRef<std::path::Path>) -> Result<Self, InitError> {
+        Err(InitError::UnsupportedPlatform)
+    }
+
+    /// Report that the native TOSA-to-Core ML execution path is unavailable on this target.
+    pub fn new_tosa() -> Result<Self, InitError> {
         Err(InitError::UnsupportedPlatform)
     }
 }

@@ -2,9 +2,10 @@
 
 ## Scope
 
+The repository contains both the portable protocol implementation and concrete host backend work.
 The portable layers define the semantics that must agree across every guest transport, virtual
 machine monitor, host operating system, and hardware provider. Platform integrations are adapters;
-they do not own accelerator semantics.
+they implement those semantics without owning or redefining them.
 
 Protocol 1.0 does not assign a Virtio device ID. It also does not standardize vendor executable
 formats: artifact format identifiers and target words remain opaque to the transport.
@@ -311,7 +312,20 @@ synchronization. The [backend implementer guide](backend-implementer-guide.md) m
 trait obligations and separates semantic evidence from the quantitative allocation and copy budgets
 in [performance.md](performance.md).
 
-## Next implementation boundary
+## Production lowering boundaries
+
+The first production artifact path is now TOSA-to-Core ML. The facade, guest, transport, and device
+engine pass the TOSA format ID, target words, and opaque bytes without importing Core ML. The Core ML
+adapter depends inward on `virtio-accel-tosa`, verifies and analyzes one static TOSA graph, derives
+ordinal input/output slots, emits a Core ML model, and confines temporary model compilation plus
+Foundation/Objective-C state to the host-native boundary. Program-visible buffers remain exact
+provider allocations from load through asynchronous prediction; lowering never authorizes staging
+at submission.
+
+The provider-neutral analysis is intentionally the shared seam rather than a second repository-wide
+graph IR. A host backend may lower its supported subset directly, reject unsupported semantics at
+program load, and add capability coverage without making its native SDK or model representation a
+dependency of the portable stack.
 
 The planned Intel Level Zero/OpenVINO provider should consume `virtio-accel-tosa`'s compact
 analysis directly. Dense value/operator IDs, topological order, liveness, runtime conditions, and

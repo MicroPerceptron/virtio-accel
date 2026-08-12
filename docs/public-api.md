@@ -41,14 +41,17 @@ through `ModelValidator`; generated FlatBuffers tables and unchecked roots remai
 
 ## Runnable entry points
 
-Two examples are part of the default CI workflow:
+Three examples are part of the default CI workflow:
 
 - `cargo run --example backend_conformance`
 - `cargo run --example reference_execution`
+- `cargo run -p virtio-accel-coreml --example tosa_coreml`
 
 `backend_conformance` shows how a backend author wires a provider to the reusable conformance
 suite. `reference_execution` runs a complete context/buffer/program/queue/submit/poll/read/release
-lifecycle against the portable mock backend.
+lifecycle against the portable mock backend. `tosa_coreml` proves the production path from a
+device-neutral TOSA artifact through backend-local Core ML lowering and direct-bound asynchronous
+execution; non-macOS hosts compile the placeholder, and macOS hosts without an ANE skip execution.
 
 ## Baseline, reserved, and post-v1 work
 
@@ -56,8 +59,9 @@ Baseline v1 is the mandatory command, queue, object, reset, error, and conforman
 normative documents. Reserved feature bits, opcodes, flags, and fields are not optional features;
 they are invalid until a later policy assigns semantics. Platform integrations such as KVM,
 vhost-user, VFIO, Windows, macOS, or vendor SDK adapters do not change protocol 1.0 and must not
-leak into portable default dependencies. `virtio-accel-coreml` is the first concrete example: it
-depends inward on `virtio-accel-core`, while the facade and portable crates do not depend on it.
+leak into portable default dependencies. `virtio-accel-coreml` is the first concrete host backend:
+it depends inward on `virtio-accel-core` and `virtio-accel-tosa`, while the facade and portable
+runtime crates do not depend on it.
 
 The compatibility and release classification rules are in
 [`release-policy.md`](release-policy.md). The protocol 1.0 frozen surface is summarized in

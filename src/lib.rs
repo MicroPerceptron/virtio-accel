@@ -1,7 +1,8 @@
-//! Portable foundations for an experimental virtio accelerator device.
+//! Portable facade for the executable virtio-accel guest/device stack.
 //!
-//! The facade intentionally contains no transport, operating-system, or vendor implementation.
-//! Those adapters depend on the portable layers re-exported here.
+//! The wider workspace ships concrete queue, guest, device, TOSA, conformance, mock, and Core ML
+//! implementations. This facade intentionally re-exports only the portable runtime layers;
+//! host-native backends depend inward on them instead of becoming cross-platform dependencies.
 
 #![no_std]
 #![forbid(unsafe_code)]

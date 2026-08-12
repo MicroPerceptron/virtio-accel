@@ -1,9 +1,9 @@
 # Contributing to virtio-accel
 
-Thanks for looking. This project is a portable, pre-standardization protocol and Rust foundation for
-a transport-neutral accelerator device. Contributions are welcome, including the kind that argue the
-design is wrong — a well-reasoned objection to a frozen decision is worth more to us than a
-workaround built on top of it.
+Thanks for looking. This project develops a portable, pre-standardization protocol together with
+executable Rust guest, device, transport, TOSA, conformance, and host-backend implementations.
+Contributions are welcome, including the kind that argue the design is wrong — a well-reasoned
+objection to a frozen decision is worth more to us than a workaround built on top of it.
 
 Please read [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before participating.
 
@@ -32,6 +32,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
 cargo run --example backend_conformance
 cargo run --example reference_execution
+cargo run -p virtio-accel-coreml --example tosa_coreml
 python3 ci/publish-dry-run.py
 ```
 
