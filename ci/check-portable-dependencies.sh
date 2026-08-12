@@ -19,6 +19,15 @@ for package in "${packages[@]}"; do
   fi
 done
 
+# FlatBuffers uses a pure-Rust build script to detect the compiler version, so its host-only
+# rustc_version/semver dependencies legitimately enable std. The TOSA target graph itself must not.
+tosa_tree="$(cargo tree -p virtio-accel-tosa -e normal,features --prefix none)"
+if grep -Eq 'feature "(std|alloc)"' <<<"$tosa_tree"; then
+  echo "virtio-accel-tosa unexpectedly enables a std or alloc target dependency feature:" >&2
+  echo "$tosa_tree" >&2
+  exit 1
+fi
+
 cleanroom_tree="$(cargo tree -p virtio-accel-cleanroom -e normal,build --depth 1 --prefix none)"
 cleanroom_dependencies="$(sed '1d' <<<"$cleanroom_tree")"
 if [[ -n "$cleanroom_dependencies" ]]; then

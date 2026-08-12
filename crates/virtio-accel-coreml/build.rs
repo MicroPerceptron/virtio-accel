@@ -12,11 +12,14 @@ fn main() {
         return;
     }
 
+    let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo must provide OUT_DIR"));
+    let module_cache = output.join("clang-module-cache");
     cc::Build::new()
         .file("native/coreml_bridge.m")
         .flag("-fobjc-arc")
         .flag("-fblocks")
         .flag("-fmodules")
+        .flag(format!("-fmodules-cache-path={}", module_cache.display()))
         .flag("-mmacosx-version-min=14.0")
         .warnings(true)
         .compile("virtio_accel_coreml_bridge");
@@ -25,7 +28,6 @@ fn main() {
     // archiver selected by `cc` only guarantees the traditional 2-byte alignment, so whether a
     // bridge links would otherwise depend on the preceding member sizes. Re-archive with Apple's
     // `libtool`, which records the required member alignment deterministically.
-    let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo must provide OUT_DIR"));
     let archive = output.join("libvirtio_accel_coreml_bridge.a");
     let aligned_archive = output.join("libvirtio_accel_coreml_bridge.aligned.a");
     let object = std::fs::read_dir(&output)

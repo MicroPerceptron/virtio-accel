@@ -149,6 +149,7 @@ jobs:
           -p virtio-accel-device
           -p virtio-accel-guest
           -p virtio-accel-split-queue
+          -p virtio-accel-tosa
           -p virtio-accel
           --target ${{ matrix.target }}
           --no-default-features

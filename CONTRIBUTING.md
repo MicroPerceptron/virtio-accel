@@ -80,8 +80,9 @@ These are scope boundaries, not judgments about the code:
   kernel glue, and vendor SDKs belong in downstream crates that depend on these layers.
 - **A default feature that selects host behavior** in a portable crate. Features must be additive:
   disabling them may remove convenience, never change protocol interpretation.
-- **`unsafe` code.** Every crate is `#![forbid(unsafe_code)]`. If you believe a case genuinely
-  requires it, open a discussion before writing the patch.
+- **Unaudited `unsafe` code.** Project-authored portable code forbids or denies unsafe code. The
+  existing Core ML FFI and private generated TOSA bindings are confined by their `SAFETY.md`
+  audits. A new exception requires a discussion and the release-policy evidence before a patch.
 - **A claimed Virtio device ID.** Its absence is deliberate and documented.
 - **Advertising a deferred feature** — multi-queue, event queues, external memory import/export,
   timeline fences, secure contexts, or packed virtqueues — without the negotiation, ownership,

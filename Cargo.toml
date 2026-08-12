@@ -34,6 +34,7 @@ members = [
     "crates/virtio-accel-mock",
     "crates/virtio-accel-proto",
     "crates/virtio-accel-split-queue",
+    "crates/virtio-accel-tosa",
     "crates/virtio-accel-transport",
 ]
 resolver = "3"
@@ -50,6 +51,7 @@ categories = ["no-std", "hardware-support", "virtualization"]
 
 [workspace.dependencies]
 bitflags = { version = "2.13.1", default-features = false }
+flatbuffers = { version = "=25.2.10", default-features = false }
 serde_json = "1.0.149"
 zerocopy = { version = "0.8.54", default-features = false, features = ["derive"] }
 virtio-accel-core = { path = "crates/virtio-accel-core", version = "0.1.0" }

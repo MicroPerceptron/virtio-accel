@@ -31,6 +31,7 @@ PUBLISHED_PACKAGES = {
     "crates/virtio-accel-mock": "virtio-accel-mock",
     "crates/virtio-accel-proto": "virtio-accel-proto",
     "crates/virtio-accel-split-queue": "virtio-accel-split-queue",
+    "crates/virtio-accel-tosa": "virtio-accel-tosa",
     "crates/virtio-accel-transport": "virtio-accel-transport",
 }
 
@@ -68,8 +69,20 @@ CRATE_ROOTS = (
 )
 
 UNSAFE_AUDITS = {
-    ROOT / "crates" / "virtio-accel-coreml" / "src" / "lib.rs":
+    ROOT / "crates" / "virtio-accel-coreml" / "src" / "lib.rs": (
         ROOT / "crates" / "virtio-accel-coreml" / "SAFETY.md",
+        'cfg_attr(not(target_os = "macos"), forbid(unsafe_code))',
+        ("Objective-C bridge", "AlignedAllocation", "atomic two-reference"),
+    ),
+    ROOT / "crates" / "virtio-accel-tosa" / "src" / "lib.rs": (
+        ROOT / "crates" / "virtio-accel-tosa" / "SAFETY.md",
+        "#![deny(unsafe_code)]",
+        (
+            "generated module is private",
+            "root_as_tosa_graph_with_opts",
+            "Regeneration is a security-sensitive source change",
+        ),
+    ),
 }
 
 REQUIRED_LINKS = {
@@ -194,13 +207,16 @@ def check_crate_root(path: pathlib.Path) -> None:
     text = path.read_text()
     if "#![forbid(unsafe_code)]" in text:
         return
-    audit = UNSAFE_AUDITS.get(path)
-    if audit is None or not audit.is_file():
+    audit_spec = UNSAFE_AUDITS.get(path)
+    if audit_spec is None:
         fail(f"{rel(path)} must keep #![forbid(unsafe_code)] or document an audited exception")
-    if 'cfg_attr(not(target_os = "macos"), forbid(unsafe_code))' not in text:
-        fail(f"{rel(path)} unsafe exception must remain confined to macOS")
+    audit, root_marker, required_markers = audit_spec
+    if not audit.is_file():
+        fail(f"{rel(path)} unsafe exception is missing {rel(audit)}")
+    if root_marker not in text:
+        fail(f"{rel(path)} unsafe exception must keep its confinement marker {root_marker!r}")
     audit_text = audit.read_text()
-    for required in ("Objective-C bridge", "AlignedAllocation", "atomic two-reference"):
+    for required in required_markers:
         if required not in audit_text:
             fail(f"{rel(audit)} must document the {required!r} unsafe invariant")
 

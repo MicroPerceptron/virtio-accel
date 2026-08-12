@@ -35,7 +35,7 @@ directly, and they must keep working on any platform the portable crates support
 | Tier | Crates | Allowed runtime surface |
 |---|---|---|
 | `core-only` | `virtio-accel-cleanroom`, `virtio-accel-proto`, `virtio-accel-transport`, `virtio-accel-core` | `core`; the clean-room codec and transport ports have no normal/build dependencies, while proc-macros used by other crates may execute with `std` on the build host |
-| `alloc-portable` | `virtio-accel-guest`, `virtio-accel-split-queue`, `virtio-accel-device`, `virtio-accel` | `core + alloc`; no OS, filesystem, sockets, threads, or host synchronization |
+| `alloc-portable` | `virtio-accel-guest`, `virtio-accel-split-queue`, `virtio-accel-device`, `virtio-accel-tosa`, `virtio-accel` | `core + alloc`; no OS, filesystem, sockets, threads, or host synchronization |
 | `std-reference` | `virtio-accel-mock`, `virtio-accel-conformance` | Portable `std`; no host-OS or vendor-specific API |
 | `host-native` | `virtio-accel-coreml` | Core ML/Foundation on macOS 14+; a compile-only unsupported-platform placeholder elsewhere |
 
@@ -56,11 +56,16 @@ protocol interpretation.
 
 The portable dependency guard inspects normal and build target features for
 `virtio-accel-cleanroom`, `virtio-accel-proto`, `virtio-accel-transport`, and
-`virtio-accel-core`, `virtio-accel-guest`, and `virtio-accel-split-queue`; test-only development dependencies are
+`virtio-accel-core`, `virtio-accel-guest`, `virtio-accel-split-queue`, and
+`virtio-accel-tosa`; test-only development dependencies are
 intentionally outside the target runtime graph. It additionally proves that the clean-room codec
 and transport ports have no normal or build dependencies at all. A dependency's host-side derive
 macro may use `std`, but the target graph for these crates must not enable a dependency feature
 named `std` or `alloc`.
+
+The official FlatBuffers runtime uses a pure-Rust build script with `rustc_version` and `semver` to
+detect the compiler. Those host-only dependencies use `std`; the guard checks the TOSA crate's
+normal target graph separately and still forbids a `std` or `alloc` dependency feature there.
 
 ## Dependency policy
 
@@ -122,6 +127,7 @@ cargo fuzz run protocol_decode fuzz/corpus/protocol_decode fuzz/regressions/prot
 cargo fuzz run descriptor_end_to_end fuzz/corpus/descriptor_end_to_end fuzz/regressions/descriptor_end_to_end -- -runs=256 -max_total_time=20 -timeout=5 -rss_limit_mb=2048 -max_len=65536
 cargo fuzz run stateful_commands fuzz/corpus/stateful_commands fuzz/regressions/stateful_commands -- -runs=256 -max_total_time=20 -timeout=5 -rss_limit_mb=2048 -max_len=65536
 cargo fuzz run guest_client fuzz/corpus/guest_client fuzz/regressions/guest_client -- -runs=256 -max_total_time=20 -timeout=5 -rss_limit_mb=2048 -max_len=65536
+cargo fuzz run tosa_parse fuzz/corpus/tosa_parse fuzz/regressions/tosa_parse -- -runs=256 -max_total_time=20 -timeout=5 -rss_limit_mb=2048 -max_len=65536
 ```
 
 Target checks require the corresponding Rust standard libraries:
@@ -136,6 +142,7 @@ cargo check \
   -p virtio-accel-device \
   -p virtio-accel-guest \
   -p virtio-accel-split-queue \
+  -p virtio-accel-tosa \
   -p virtio-accel \
   --target aarch64-unknown-none \
   --no-default-features

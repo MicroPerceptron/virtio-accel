@@ -3,7 +3,8 @@
 The public Rust API is split into three documentation layers:
 
 1. Human-facing contracts in `virtio-accel-core`, `virtio-accel-guest`,
-   `virtio-accel-device`, `virtio-accel-transport`, and `virtio-accel-conformance`.
+   `virtio-accel-device`, `virtio-accel-transport`, `virtio-accel-tosa`, and
+   `virtio-accel-conformance`.
 2. Pointer-free wire mirrors in `virtio-accel-proto`.
 3. Independent conformance artifacts and the clean-room codec under `conformance/`.
 
@@ -28,6 +29,15 @@ terms so another implementer can compare behavior without importing the primary 
 These are documented exceptions, not permission for platform adapters or future public crates to
 skip API docs. New ergonomic APIs should document ownership, lifetime, error, blocking, allocation,
 copy, and portability behavior at the item where consumers call it.
+
+`virtio-accel-tosa` is an ergonomic exception around private raw bindings: its public API exposes
+only verified borrowed views, typed stable-op attributes, and raw forward-compatible enum numbers.
+`Model::validate_for` applies the complete stable TOSA 1.0 target semantic pass.
+`Model::analyze_for` additionally returns the compact dense-ID execution/liveness/constant/runtime
+plan intended for provider lowering, and retains verified `Operator`/`Tensor`/`Shape` views rather
+than copying an owned graph. Dynamic providers can validate host-readable CTC values and use the
+bounded exact-key specialization cache. Provider-specific capability utilities extend the layer
+through `ModelValidator`; generated FlatBuffers tables and unchecked roots remain private.
 
 ## Runnable entry points
 

@@ -31,6 +31,7 @@ writing, not an approved Virtio specification.
 | `virtio-accel-proto` | `core` | Pointer-free, little-endian protocol 1.0 wire structures |
 | `virtio-accel-transport` | `core` | Dependency-free descriptor-chain, queue, reset, and notification ports |
 | `virtio-accel-core` | `core` | Backend lifecycle, memory, program, queue, and event contracts |
+| `virtio-accel-tosa` | `core + alloc` | Bounded zero-copy TOSA 1.0 validation, lowering analysis, and specialization utilities |
 | `virtio-accel-coreml` | macOS `std` | Core ML backend with direct buffers and asynchronous ANE-capable prediction |
 | `virtio-accel-split-queue` | `core + alloc` | Bounded in-memory split-ring reference model |
 | `virtio-accel-guest` | `core + alloc` | Typed reference client with bounded request tracking |
@@ -54,6 +55,7 @@ virtio-accel-guest -----------> virtio-accel-transport
           +--------------------> virtio-accel-proto
 
 virtio-accel-conformance --------------------> virtio-accel-core
+virtio-accel-tosa ---------------------------> virtio-accel-core
 virtio-accel-coreml -------------------------> virtio-accel-core
 other provider adapters --------------------> virtio-accel-core
 ```
@@ -78,6 +80,12 @@ virtio-accel-mock = "0.1"
 
 On an ANE-capable Mac, add `virtio-accel-coreml = "0.1"` separately for the host-native Core ML
 backend. It is intentionally not re-exported by the portable facade.
+
+Add `virtio-accel-tosa = "0.1"` separately to validate TOSA 1.0 artifacts, inspect safe borrowed
+graph and typed-attribute views, enforce complete stable-op semantics for a declared target, and
+construct the device-neutral TOSA artifact envelope. `Model::analyze_for` also produces bounded
+dense IDs, topological order, liveness, runtime obligations, and specialization keys for Core ML,
+OpenVINO, or another provider. It is intentionally not re-exported by the facade.
 
 ## Example
 
@@ -211,9 +219,10 @@ optional resource-accounting and progress adapters, and the fault-injection harn
 
 ## Portability
 
-Every portable and reference crate is `#![forbid(unsafe_code)]`. The audited Core ML adapter keeps
-its unsafe FFI isolated to macOS. CI enforces each portability tier, including compile-only checks
-of the adapter's unsupported-platform surface.
+Project-authored portable and reference code forbids or denies unsafe code. The audited Core ML
+adapter keeps its unsafe FFI isolated to macOS; the TOSA crate confines official generated
+FlatBuffers accessors to a private module behind bounded verification. CI enforces each portability
+tier, including compile-only checks of the adapter's unsupported-platform surface.
 
 | Tier | Allowed runtime surface |
 | --- | --- |

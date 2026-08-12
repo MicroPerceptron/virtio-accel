@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 VECTORS = ROOT / "conformance" / "v1.0" / "vectors.json"
 CORPUS = ROOT / "fuzz" / "corpus"
+TOSA_SELECT = ROOT / "crates" / "virtio-accel-tosa" / "tests" / "data" / "select-v1.0.0.tosa"
 
 PROTOCOL_CONTROLS = bytes([0x00, 0x40, 1, 2, 4, 8, 16, 32])
 DESCRIPTOR_MARKER = 0xA5
@@ -30,6 +31,7 @@ def main() -> None:
     reset_target("descriptor_end_to_end")
     reset_target("stateful_commands")
     reset_target("guest_client")
+    reset_target("tosa_parse")
 
     write_seed("protocol_decode", "empty", b"")
     write_seed("protocol_decode", "short_header", PROTOCOL_CONTROLS + b"\x00\x01\x02")
@@ -53,6 +55,8 @@ def main() -> None:
     write_seed("guest_client", "conforming_lifecycle", guest_lifecycle_seed(responses))
     write_seed("guest_client", "hostile_completion", guest_hostile_seed(responses))
     write_seed("guest_client", "reset_with_inflight", guest_reset_seed(responses))
+    write_seed("tosa_parse", "stable_select", TOSA_SELECT.read_bytes())
+    write_seed("tosa_parse", "identifier_only", b"\x08\x00\x00\x00TOSA")
 
 
 def reset_target(target: str) -> None:
