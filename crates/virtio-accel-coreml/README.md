@@ -87,9 +87,10 @@ cargo test -p virtio-accel-coreml
 ```
 
 The native suite consumes the same numerical TOSA corpus exported by
-`virtio-accel-conformance`. It checks FP32 non-finite values, subnormals and signed zero, non-square
-batched matrix multiplication, multi-channel NHWC max-pooling layout, overlapping asynchronous
-predictions, and repeated compile/unload source cleanup. Future host backends inherit these exact
+`virtio-accel-conformance`. Both the production-oriented FP16 tier and the FP32 reference tier check
+non-finite values, subnormals and signed zero, non-square batched matrix multiplication, and
+multi-channel NHWC max-pooling layout on the ANE. The suite also checks overlapping asynchronous
+predictions and repeated compile/unload source cleanup. Future host backends inherit these exact
 artifacts and oracles instead of substituting provider-specific graphs.
 
 For local warm-path latency evidence, run the ignored release-mode measurement:

@@ -4,11 +4,13 @@ A reusable, transport-free semantic conformance suite for virtio-accel backends,
 provider target, progress, and optional resource-accounting adapters. Third-party backend
 authors run this suite to check their implementation against the normative semantics.
 
-The `numerics` module also publishes stable TOSA 1.0 acceptance artifacts with FP32 tensor shapes,
-inputs, expected outputs, and tolerance policy. The initial corpus covers non-finite and signed-zero
-identity behavior, non-square batched matrix multiplication, and NHWC max pooling. Hardware
-backends consume the same graph bytes and oracles, making numerical and layout comparisons
-device-neutral rather than provider-specific.
+The `numerics` module also publishes stable TOSA 1.0 acceptance artifacts with FP16 and FP32 tensor
+shapes, inputs, expected outputs, and comparison policy. The corpus covers non-finite, subnormal,
+and signed-zero identity behavior, non-square batched matrix multiplication, and multi-channel NHWC
+max pooling. Binary16 values are represented by exact `u16` bit patterns, preserving the workspace's
+stable Rust 1.85 baseline without depending on nightly's primitive `f16`. Hardware backends consume
+the same graph bytes and oracles, making numerical and layout comparisons device-neutral rather
+than provider-specific.
 
 Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an experimental native-Rust protocol and implementation stack for a
 transport-neutral virtual accelerator device. Portable crates contain no host-OS or vendor APIs;
