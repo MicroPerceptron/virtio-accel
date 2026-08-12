@@ -4,6 +4,10 @@
 //! verified TOSA model and provider-neutral analysis; no Core ML type, path, or dependency crosses
 //! the backend boundary.
 
+// Non-macOS builds type-check and unit-test this backend-local encoder, but only the macOS runtime
+// calls it from `load_program`.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+
 use std::fmt;
 
 use virtio_accel_tosa::{
