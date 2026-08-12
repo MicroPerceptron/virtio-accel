@@ -222,7 +222,7 @@ jobs:
         with:
           rust-version: "1.85.0"
           command: check
-          arguments: --all-features
+          arguments: --workspace --all-features
 
   fuzz-smoke:
     name: fuzz-smoke
