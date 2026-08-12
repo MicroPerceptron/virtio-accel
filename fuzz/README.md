@@ -12,6 +12,7 @@ code is regular Rust and can be tested without libFuzzer; the `fuzzing` feature 
 | `descriptor_end_to_end` | Builds raw or canonical split-virtqueue descriptor chains, runs valid chains through the command processor, and verifies used-length, truncation, and response-tail behavior. |
 | `stateful_commands` | Generates bounded create/use/destroy/reset command sequences and checks resource counts, retained bytes, stale IDs, and backend health after every action. |
 | `guest_client` | Drives the reference guest client against an arbitrary, non-conforming device and checks in-flight bounds, epoch staleness, and caller-chain ownership after every action. |
+| `tosa_parse` | Mutates a stable upstream TOSA graph, checks every safe graph/attribute view against collected statistics, and runs complete plus minimal Level 8K semantic targets. |
 
 All targets cap input length before allocation. A resource-limit rejection, malformed descriptor,
 or protocol error is not a crash unless it violates a processor, queue, or codec invariant.
@@ -34,6 +35,7 @@ cargo fuzz run protocol_decode fuzz/corpus/protocol_decode -- -runs=256 -max_tot
 cargo fuzz run descriptor_end_to_end fuzz/corpus/descriptor_end_to_end -- -runs=256 -max_total_time=20 -timeout=5 -rss_limit_mb=2048 -max_len=65536
 cargo fuzz run stateful_commands fuzz/corpus/stateful_commands -- -runs=256 -max_total_time=20 -timeout=5 -rss_limit_mb=2048 -max_len=65536
 cargo fuzz run guest_client fuzz/corpus/guest_client -- -runs=256 -max_total_time=20 -timeout=5 -rss_limit_mb=2048 -max_len=65536
+cargo fuzz run tosa_parse fuzz/corpus/tosa_parse -- -runs=256 -max_total_time=20 -timeout=5 -rss_limit_mb=2048 -max_len=65536
 ```
 
 Minimize a failing input with `cargo fuzz tmin <target> <artifact>`, then commit the minimized file

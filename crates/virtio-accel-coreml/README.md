@@ -66,10 +66,12 @@ allocation concurrently; any output or read-write binding retains exclusive nati
 transfers return `BackendError::Busy` while either access mode is active. Event cancellation is not
 advertised because Core ML does not expose cancellation for an admitted prediction.
 
-Submission sorts its bounded binding metadata once (`O(b log b)`) and the native bridge then performs
-a linear validation and wrapping pass. It never copies tensor contents. Cumulative direct-binding
-admissions and explicit-transfer bytes are available through `direct_binding_admissions()` and
-`explicit_transfer_bytes()`.
+Program loading builds the sorted slot/access plan once. A queue retains reusable native-binding
+scratch, so warm submission accepts arbitrary binding order without the former quadratic duplicate
+scan or native-binding allocation. Only the event-owned, deduplicated backing guards are allocated
+per admitted prediction; the native bridge performs a linear validation/wrapping pass and never
+copies tensor contents. Cumulative direct-binding admissions and explicit-transfer bytes are
+available through `direct_binding_admissions()` and `explicit_transfer_bytes()`.
 
 The FFI and allocation invariants are documented in [SAFETY.md](SAFETY.md). Run the native
 end-to-end and conformance tests on an ANE-capable Mac with:

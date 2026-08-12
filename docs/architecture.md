@@ -313,6 +313,15 @@ in [performance.md](performance.md).
 
 ## Next implementation boundary
 
+The planned Intel Level Zero/OpenVINO provider should consume `virtio-accel-tosa`'s compact
+analysis directly. Dense value/operator IDs, topological order, liveness, runtime conditions, and
+specialization keys are provider-neutral; only capability selection, operator lowering, native
+memory import, and synchronization around the provider-owned compiled-program cache remain
+backend-specific. Its first validation pass on the Intel host should run the backend conformance
+suite and TOSA corpus, add numerical differential checks, and record cold/warm specialization,
+throughput, and copy/allocation counters. This keeps the Core ML and Intel paths on one bounded
+TOSA contract without requiring either provider to adopt the other's native graph representation.
+
 The portable command engine depends on `virtio-accel-proto`, `virtio-accel-core`, and the
 transport-neutral region metadata re-exported by `virtio-accel-device`. Its baseline processor:
 

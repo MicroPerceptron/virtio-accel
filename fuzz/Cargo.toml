@@ -24,6 +24,7 @@ virtio-accel-guest = { path = "../crates/virtio-accel-guest" }
 virtio-accel-mock = { path = "../crates/virtio-accel-mock" }
 virtio-accel-proto = { path = "../crates/virtio-accel-proto" }
 virtio-accel-split-queue = { path = "../crates/virtio-accel-split-queue" }
+virtio-accel-tosa = { path = "../crates/virtio-accel-tosa" }
 virtio-accel-transport = { path = "../crates/virtio-accel-transport" }
 zerocopy = { version = "0.8.54", default-features = false, features = ["derive"] }
 
@@ -54,6 +55,14 @@ required-features = ["fuzzing"]
 [[bin]]
 name = "guest_client"
 path = "fuzz_targets/guest_client.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzzing"]
+
+[[bin]]
+name = "tosa_parse"
+path = "fuzz_targets/tosa_parse.rs"
 test = false
 doc = false
 bench = false

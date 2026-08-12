@@ -1,0 +1,26 @@
+[package]
+name = "virtio-accel-tosa"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Safe, bounded TOSA artifacts and zero-copy graph views for virtio-accel"
+readme = "README.md"
+include = [
+    "/Cargo.toml",
+    "/README.md",
+    "/SAFETY.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+    "/schema/**",
+    "/src/**",
+    "/tests/**",
+]
+
+[dependencies]
+flatbuffers.workspace = true
+virtio-accel-core.workspace = true

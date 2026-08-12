@@ -4,6 +4,7 @@ use crate::artifact::{DecodeError, FeatureRole, MAX_ARTIFACT_BYTES, decode};
 use crate::{ARTIFACT_FORMAT, InitError, REQUIRED_RESIDENT_BYTES, TARGET_IDENTITY};
 use core::ffi::c_void;
 use std::alloc::{Layout, alloc_zeroed, dealloc};
+use std::cell::RefCell;
 use std::fmt;
 use std::marker::PhantomData;
 use std::os::unix::ffi::OsStrExt;
@@ -16,7 +17,7 @@ use virtio_accel_core::{
     Accelerator, AcceleratorClass, AccessMode, AllocatedBuffer, ArtifactRef, BackendError,
     BindingRef, BufferDesc, BufferInfo, BufferProperties, BufferUsage, ByteSink, ByteSource,
     Capabilities, ContextDesc, DeviceIdentity, DeviceInfo, DeviceLimits, EventState, MemoryDomain,
-    QueueDesc, ReleaseFailure, SubmitFailure, Timeout, validate_bindings,
+    QueueDesc, ReleaseFailure, SubmitFailure, Timeout,
 };
 
 const COREML_MIN_ALIGNMENT: usize = 16 * 1024;
@@ -62,6 +63,21 @@ struct NativeBinding {
     access: u8,
     data: *mut c_void,
     bytes: u64,
+}
+
+impl NativeBinding {
+    const EMPTY: Self = Self {
+        slot: 0,
+        access: 0,
+        data: core::ptr::null_mut(),
+        bytes: 0,
+    };
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SlotPlan {
+    slot: u32,
+    access: u8,
 }
 
 type NativeReleaseContext = unsafe extern "C" fn(*mut c_void);
@@ -157,45 +173,27 @@ impl BackingAccess {
 }
 
 #[derive(Debug)]
-struct PendingBacking {
+struct EventBacking {
     key: usize,
     allocation: Arc<AlignedAllocation>,
     access: BackingAccess,
+    acquired: bool,
 }
 
-impl PendingBacking {
+impl EventBacking {
     fn new(allocation: Arc<AlignedAllocation>, access: AccessMode) -> Self {
         Self {
             key: Arc::as_ptr(&allocation) as usize,
             allocation,
             access: BackingAccess::for_binding(access),
+            acquired: false,
         }
     }
-}
 
-fn deduplicate_backings(backings: &mut Vec<PendingBacking>) {
-    backings.sort_unstable_by_key(|backing| backing.key);
-    backings.dedup_by(|current, previous| {
-        if current.key != previous.key {
-            return false;
-        }
-        previous.access = previous.access.combine(current.access);
-        true
-    });
-}
-
-#[derive(Debug)]
-struct InFlightBacking {
-    allocation: Arc<AlignedAllocation>,
-    access: BackingAccess,
-}
-
-impl InFlightBacking {
-    fn acquire(pending: PendingBacking) -> Result<Self, BackendError> {
-        match pending.access {
+    fn acquire(&mut self) -> Result<(), BackendError> {
+        match self.access {
             BackingAccess::Shared => {
-                pending
-                    .allocation
+                self.allocation
                     .in_flight
                     .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                         (current < MAX_SHARED_NATIVE_USERS).then_some(current + 1)
@@ -203,8 +201,7 @@ impl InFlightBacking {
                     .map_err(|_| BackendError::Busy)?;
             }
             BackingAccess::Exclusive => {
-                pending
-                    .allocation
+                self.allocation
                     .in_flight
                     .compare_exchange(
                         0,
@@ -215,15 +212,31 @@ impl InFlightBacking {
                     .map_err(|_| BackendError::Busy)?;
             }
         }
-        Ok(Self {
-            allocation: pending.allocation,
-            access: pending.access,
-        })
+        self.acquired = true;
+        Ok(())
     }
 }
 
-impl Drop for InFlightBacking {
+fn prepare_event_backings(backings: &mut Vec<EventBacking>) -> Result<(), BackendError> {
+    backings.sort_unstable_by_key(|backing| backing.key);
+    backings.dedup_by(|current, previous| {
+        if current.key != previous.key {
+            return false;
+        }
+        previous.access = previous.access.combine(current.access);
+        true
+    });
+    for backing in backings {
+        backing.acquire()?;
+    }
+    Ok(())
+}
+
+impl Drop for EventBacking {
     fn drop(&mut self) {
+        if !self.acquired {
+            return;
+        }
         match self.access {
             BackingAccess::Shared => {
                 let prior = self.allocation.in_flight.fetch_sub(1, Ordering::Release);
@@ -276,6 +289,7 @@ pub struct CoreMlBuffer {
 pub struct CoreMlProgram {
     context_id: u64,
     native: NonNull<c_void>,
+    slots: Vec<SlotPlan>,
 }
 
 impl fmt::Debug for CoreMlProgram {
@@ -298,6 +312,7 @@ impl Drop for CoreMlProgram {
 #[derive(Debug)]
 pub struct CoreMlQueue {
     context_id: u64,
+    native_bindings: RefCell<Vec<NativeBinding>>,
 }
 
 /// Asynchronous Core ML prediction event.
@@ -452,10 +467,37 @@ impl CoreMlAccelerator {
     }
 }
 
+fn build_slot_plan(
+    mappings: &[crate::artifact::FeatureMapping],
+) -> Result<Vec<SlotPlan>, BackendError> {
+    let mut slots = Vec::new();
+    slots
+        .try_reserve_exact(mappings.len())
+        .map_err(|_| BackendError::OutOfMemory)?;
+    for mapping in mappings {
+        slots.push(SlotPlan {
+            slot: mapping.slot,
+            access: match mapping.role {
+                FeatureRole::Input => AccessMode::Read as u8,
+                FeatureRole::Output => AccessMode::Write as u8,
+            },
+        });
+    }
+    slots.sort_unstable_by_key(|slot| slot.slot);
+    slots.dedup_by(|current, previous| {
+        if current.slot != previous.slot {
+            return false;
+        }
+        previous.access |= current.access;
+        true
+    });
+    Ok(slots)
+}
+
 unsafe extern "C" fn release_event_backings(context: *mut c_void) {
     // SAFETY: successful submission transfers exactly one pointer produced by `Box::into_raw` to
     // the bridge, and its completion block calls this function exactly once.
-    drop(unsafe { Box::from_raw(context.cast::<Vec<InFlightBacking>>()) });
+    drop(unsafe { Box::from_raw(context.cast::<Vec<EventBacking>>()) });
 }
 
 impl Accelerator for CoreMlAccelerator {
@@ -648,6 +690,7 @@ impl Accelerator for CoreMlAccelerator {
             DecodeError::ResourceLimit => BackendError::ResourceLimit,
         })?;
         let model_path = self.resolve_model(&decoded.model_path)?;
+        let slots = build_slot_plan(&decoded.mappings)?;
         let path = model_path.as_os_str().as_bytes();
         let mappings = decoded
             .mappings
@@ -678,6 +721,7 @@ impl Accelerator for CoreMlAccelerator {
         Ok(CoreMlProgram {
             context_id: context.id,
             native,
+            slots,
         })
     }
 
@@ -693,6 +737,7 @@ impl Accelerator for CoreMlAccelerator {
         self.info.validate_queue_desc(desc)?;
         Ok(CoreMlQueue {
             context_id: context.id,
+            native_bindings: RefCell::new(Vec::new()),
         })
     }
 
@@ -707,20 +752,25 @@ impl Accelerator for CoreMlAccelerator {
         bindings: &[BindingRef<'_, Self::Buffer>],
         _timeout: Timeout,
     ) -> Result<Self::Event, SubmitFailure<Self::Event>> {
-        validate_bindings(bindings, self.info.limits.max_bindings_per_submission)
-            .map_err(SubmitFailure::Rejected)?;
+        if bindings.is_empty()
+            || bindings.len() > self.info.limits.max_bindings_per_submission as usize
+        {
+            return Err(SubmitFailure::Rejected(BackendError::ResourceLimit));
+        }
         if queue.context_id != program.context_id {
             return Err(SubmitFailure::Rejected(BackendError::InvalidArgument));
         }
-
-        let mut native_bindings = Vec::new();
-        let mut pending_backings = Vec::new();
+        let mut native_bindings = queue.native_bindings.borrow_mut();
+        native_bindings.clear();
         native_bindings
+            .try_reserve(program.slots.len())
+            .map_err(|_| SubmitFailure::Rejected(BackendError::OutOfMemory))?;
+        native_bindings.resize(program.slots.len(), NativeBinding::EMPTY);
+        let mut event_backings = Vec::new();
+        event_backings
             .try_reserve_exact(bindings.len())
             .map_err(|_| SubmitFailure::Rejected(BackendError::OutOfMemory))?;
-        pending_backings
-            .try_reserve_exact(bindings.len())
-            .map_err(|_| SubmitFailure::Rejected(BackendError::OutOfMemory))?;
+        let mut seen = [0_u64; 4];
         for binding in bindings {
             if binding.buffer.context_id != queue.context_id {
                 return Err(SubmitFailure::Rejected(BackendError::InvalidArgument));
@@ -731,26 +781,35 @@ impl Accelerator for CoreMlAccelerator {
             let (start, _) =
                 Self::checked_range(binding.buffer, binding.range.offset, binding.range.bytes())
                     .map_err(SubmitFailure::Rejected)?;
-            native_bindings.push(NativeBinding {
+            let index = program
+                .slots
+                .binary_search_by_key(&binding.slot, |slot| slot.slot)
+                .map_err(|_| SubmitFailure::Rejected(BackendError::Incompatible))?;
+            let bit = 1_u64 << (index % 64);
+            if seen[index / 64] & bit != 0 {
+                return Err(SubmitFailure::Rejected(BackendError::InvalidArgument));
+            }
+            seen[index / 64] |= bit;
+            if binding.access as u8 != program.slots[index].access {
+                return Err(SubmitFailure::Rejected(BackendError::Incompatible));
+            }
+            native_bindings[index] = NativeBinding {
                 slot: binding.slot,
                 access: binding.access as u8,
                 data: binding.buffer.allocation.pointer_at(start).cast(),
                 bytes: binding.range.bytes(),
-            });
-            pending_backings.push(PendingBacking::new(
+            };
+            event_backings.push(EventBacking::new(
                 Arc::clone(&binding.buffer.allocation),
                 binding.access,
             ));
         }
+        if bindings.len() != program.slots.len() {
+            return Err(SubmitFailure::Rejected(BackendError::Incompatible));
+        }
 
-        native_bindings.sort_unstable_by_key(|binding| binding.slot);
-        deduplicate_backings(&mut pending_backings);
-        let backings = pending_backings
-            .into_iter()
-            .map(InFlightBacking::acquire)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(SubmitFailure::Rejected)?;
-        let backings = Box::new(backings);
+        prepare_event_backings(&mut event_backings).map_err(SubmitFailure::Rejected)?;
+        let backings = Box::new(event_backings);
         let backing_context = Box::into_raw(backings).cast::<c_void>();
         let mut error = NativeError::default();
         // SAFETY: model and binding pointers remain valid through this admission call. The Core ML
@@ -770,7 +829,7 @@ impl Accelerator for CoreMlAccelerator {
             Some(native) => native,
             None => {
                 // SAFETY: the bridge contract retains the context only when it returns an event.
-                drop(unsafe { Box::from_raw(backing_context.cast::<Vec<InFlightBacking>>()) });
+                drop(unsafe { Box::from_raw(backing_context.cast::<Vec<EventBacking>>()) });
                 return Err(SubmitFailure::Rejected(Self::native_error(error)));
             }
         };
@@ -816,36 +875,18 @@ mod tests {
     #[test]
     fn native_backing_guard_allows_shared_users_and_excludes_writers() {
         let allocation = Arc::new(AlignedAllocation::new(32, 16).unwrap());
-        let first = InFlightBacking::acquire(PendingBacking::new(
-            Arc::clone(&allocation),
-            AccessMode::Read,
-        ))
-        .unwrap();
-        let second = InFlightBacking::acquire(PendingBacking::new(
-            Arc::clone(&allocation),
-            AccessMode::Read,
-        ))
-        .unwrap();
-        assert_eq!(
-            InFlightBacking::acquire(PendingBacking::new(
-                Arc::clone(&allocation),
-                AccessMode::Write,
-            ))
-            .unwrap_err(),
-            BackendError::Busy
-        );
+        let mut first = EventBacking::new(Arc::clone(&allocation), AccessMode::Read);
+        first.acquire().unwrap();
+        let mut second = EventBacking::new(Arc::clone(&allocation), AccessMode::Read);
+        second.acquire().unwrap();
+        let mut blocked_writer = EventBacking::new(Arc::clone(&allocation), AccessMode::Write);
+        assert_eq!(blocked_writer.acquire().unwrap_err(), BackendError::Busy);
         drop(first);
         drop(second);
-        let writer = InFlightBacking::acquire(PendingBacking::new(
-            Arc::clone(&allocation),
-            AccessMode::ReadWrite,
-        ))
-        .unwrap();
-        assert_eq!(
-            InFlightBacking::acquire(PendingBacking::new(allocation, AccessMode::Read,))
-                .unwrap_err(),
-            BackendError::Busy
-        );
+        let mut writer = EventBacking::new(Arc::clone(&allocation), AccessMode::ReadWrite);
+        writer.acquire().unwrap();
+        let mut blocked_reader = EventBacking::new(allocation, AccessMode::Read);
+        assert_eq!(blocked_reader.acquire().unwrap_err(), BackendError::Busy);
         drop(writer);
     }
 
@@ -853,11 +894,38 @@ mod tests {
     fn duplicate_allocation_access_collapses_to_exclusive() {
         let allocation = Arc::new(AlignedAllocation::new(32, 16).unwrap());
         let mut pending = vec![
-            PendingBacking::new(Arc::clone(&allocation), AccessMode::Read),
-            PendingBacking::new(allocation, AccessMode::Write),
+            EventBacking::new(Arc::clone(&allocation), AccessMode::Read),
+            EventBacking::new(allocation, AccessMode::Write),
         ];
-        deduplicate_backings(&mut pending);
+        prepare_event_backings(&mut pending).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].access, BackingAccess::Exclusive);
+    }
+
+    #[test]
+    fn slot_plan_is_sorted_and_combines_input_output_access() {
+        let mappings = vec![
+            crate::artifact::FeatureMapping {
+                slot: 8,
+                role: FeatureRole::Output,
+                name: "y".into(),
+            },
+            crate::artifact::FeatureMapping {
+                slot: 7,
+                role: FeatureRole::Input,
+                name: "x".into(),
+            },
+            crate::artifact::FeatureMapping {
+                slot: 8,
+                role: FeatureRole::Input,
+                name: "state".into(),
+            },
+        ];
+        let plan = build_slot_plan(&mappings).unwrap();
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan[0].slot, 7);
+        assert_eq!(plan[0].access, AccessMode::Read as u8);
+        assert_eq!(plan[1].slot, 8);
+        assert_eq!(plan[1].access, AccessMode::ReadWrite as u8);
     }
 }

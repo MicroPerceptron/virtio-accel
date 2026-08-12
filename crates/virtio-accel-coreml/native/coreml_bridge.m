@@ -95,6 +95,14 @@ static void va_event_release_inner(struct VAEvent *event) {
     }
 }
 
+// Use Foundation's runtime query instead of Clang's `@available` lowering. Xcode 26 emits
+// ___isPlatformVersionAtLeast for the latter; Rust 1.85's Darwin runtime predates that compiler
+// symbol even though every guarded Core ML API remains weak-linked correctly.
+static BOOL va_macos_at_least(NSInteger major, NSInteger minor, NSInteger patch) {
+    NSOperatingSystemVersion version = {major, minor, patch};
+    return [NSProcessInfo.processInfo isOperatingSystemAtLeastVersion:version];
+}
+
 static struct VAEvent *va_event_create(struct va_coreml_error *error) {
     struct VAEvent *event = calloc(1, sizeof(struct VAEvent));
     if (event == NULL) {
@@ -111,7 +119,7 @@ static struct VAEvent *va_event_create(struct va_coreml_error *error) {
 
 int va_coreml_has_neural_engine(void) {
     @autoreleasepool {
-        if (@available(macOS 14.0, *)) {
+        if (va_macos_at_least(14, 0, 0)) {
             for (id device in MLModel.availableComputeDevices) {
                 if ([device isKindOfClass:MLNeuralEngineComputeDevice.class]) {
                     return 1;
@@ -214,6 +222,10 @@ static uint8_t va_access_for_slot(NSArray<VAFeatureSpec *> *features, uint32_t s
     return reads ? VA_COREML_READ : VA_COREML_WRITE;
 }
 
+#pragma clang diagnostic push
+// `va_macos_at_least` guards every use below, but Clang recognizes only its builtin availability
+// syntax. Keep the runtime-compatible implementation warning-clean for Cargo consumers.
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
 void *va_coreml_model_load(const uint8_t *path,
                            size_t path_len,
                            const struct va_coreml_feature_mapping *mappings,
@@ -252,10 +264,10 @@ void *va_coreml_model_load(const uint8_t *path,
 
             MLModelConfiguration *configuration = [MLModelConfiguration new];
             configuration.computeUnits = MLComputeUnitsCPUAndNeuralEngine;
-            if (@available(macOS 14.4, *)) {
+            if (va_macos_at_least(14, 4, 0)) {
                 MLOptimizationHints *hints = [MLOptimizationHints new];
                 hints.reshapeFrequency = MLReshapeFrequencyHintInfrequent;
-                if (@available(macOS 15.0, *)) {
+                if (va_macos_at_least(15, 0, 0)) {
                     hints.specializationStrategy = MLSpecializationStrategyFastPrediction;
                 }
                 configuration.optimizationHints = hints;
@@ -278,7 +290,7 @@ void *va_coreml_model_load(const uint8_t *path,
                 model.modelDescription.inputDescriptionsByName;
             NSDictionary<NSString *, MLFeatureDescription *> *outputs =
                 model.modelDescription.outputDescriptionsByName;
-            if (@available(macOS 15.0, *)) {
+            if (va_macos_at_least(15, 0, 0)) {
                 if (model.modelDescription.stateDescriptionsByName.count != 0) {
                     va_set_error(error, VA_COREML_UNSUPPORTED, VA_COREML_BRIDGE_DOMAIN, 24);
                     return NULL;
@@ -375,6 +387,7 @@ void *va_coreml_model_load(const uint8_t *path,
         }
     }
 }
+#pragma clang diagnostic pop
 
 void va_coreml_model_release(void *model) {
     if (model != NULL) {

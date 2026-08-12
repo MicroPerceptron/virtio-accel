@@ -46,6 +46,7 @@ PUBLISH_ORDER = (
     "virtio-accel-cleanroom",
     "virtio-accel-proto",
     "virtio-accel-core",
+    "virtio-accel-tosa",
     "virtio-accel-split-queue",
     "virtio-accel-guest",
     "virtio-accel-mock",

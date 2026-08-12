@@ -4,11 +4,13 @@ mod descriptor;
 mod guest;
 mod protocol;
 mod stateful;
+mod tosa;
 
 pub use descriptor::fuzz_descriptor_end_to_end;
 pub use guest::fuzz_guest_client;
 pub use protocol::fuzz_protocol_decode;
 pub use stateful::fuzz_stateful_commands;
+pub use tosa::fuzz_tosa_parse;
 
 pub(crate) const MAX_FRAME_BYTES: usize = 16 * 1024;
 
