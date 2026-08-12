@@ -6,6 +6,7 @@
 #import <CoreML/MLNeuralEngineComputeDevice.h>
 #import <Foundation/Foundation.h>
 #include <stdatomic.h>
+#include <string.h>
 
 static const uint32_t VA_COREML_BRIDGE_DOMAIN = 0x434d4c42;
 static const uint32_t VA_COREML_NSError_DOMAIN = 0x434d4c45;
@@ -388,6 +389,62 @@ void *va_coreml_model_load(const uint8_t *path,
     }
 }
 #pragma clang diagnostic pop
+
+void *va_coreml_model_load_memory(const uint8_t *bytes,
+                                  size_t bytes_len,
+                                  const struct va_coreml_feature_mapping *mappings,
+                                  size_t mapping_count,
+                                  struct va_coreml_error *error) {
+    @autoreleasepool {
+        va_set_error(error, VA_COREML_OK, 0, 0);
+        if (bytes == NULL || bytes_len == 0) {
+            va_set_error(error, VA_COREML_INVALID_ARGUMENT, VA_COREML_BRIDGE_DOMAIN, 25);
+            return NULL;
+        }
+        NSURL *sourceDirectoryURL = nil;
+        @try {
+            NSString *directoryName = [@"virtio-accel-coreml-"
+                stringByAppendingString:NSUUID.UUID.UUIDString];
+            sourceDirectoryURL = [NSFileManager.defaultManager.temporaryDirectory
+                URLByAppendingPathComponent:directoryName isDirectory:YES];
+            NSError *nativeError = nil;
+            if (![NSFileManager.defaultManager createDirectoryAtURL:sourceDirectoryURL
+                                         withIntermediateDirectories:NO
+                                                          attributes:nil
+                                                               error:&nativeError]) {
+                va_set_nserror(error, nativeError);
+                return NULL;
+            }
+            NSURL *sourceURL = [sourceDirectoryURL
+                URLByAppendingPathComponent:@"model.mlmodel" isDirectory:NO];
+            NSData *modelData = [NSData dataWithBytes:bytes length:bytes_len];
+            if (modelData == nil ||
+                ![modelData writeToURL:sourceURL options:NSDataWritingAtomic error:&nativeError]) {
+                va_set_nserror(error, nativeError);
+                return NULL;
+            }
+            const char *path = sourceURL.path.UTF8String;
+            void *model = NULL;
+            if (path == NULL) {
+                va_set_error(error, VA_COREML_INVALID_ARGUMENT, VA_COREML_BRIDGE_DOMAIN, 26);
+            } else {
+                model = va_coreml_model_load((const uint8_t *)path,
+                                             strlen(path),
+                                             mappings,
+                                             mapping_count,
+                                             error);
+            }
+            return model;
+        } @catch (NSException *exception) {
+            va_set_error(error, VA_COREML_EXTERNAL, VA_COREML_BRIDGE_DOMAIN, 27);
+            return NULL;
+        } @finally {
+            if (sourceDirectoryURL != nil) {
+                [NSFileManager.defaultManager removeItemAtURL:sourceDirectoryURL error:nil];
+            }
+        }
+    }
+}
 
 void va_coreml_model_release(void *model) {
     if (model != NULL) {

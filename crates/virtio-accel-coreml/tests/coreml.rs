@@ -13,9 +13,10 @@ use virtio_accel_core::{
     BufferUsage, ByteSource, ContextDesc, EventState, MemoryDomain, QueueDesc, Timeout,
 };
 use virtio_accel_coreml::{
-    ARTIFACT_FORMAT, CoreMlAccelerator, CoreMlArtifact, CoreMlEvent, InitError,
+    ARTIFACT_FORMAT, COREML_TOSA_TARGET, CoreMlAccelerator, CoreMlArtifact, CoreMlEvent, InitError,
     REQUIRED_RESIDENT_BYTES, TARGET_IDENTITY,
 };
+use virtio_accel_tosa::parse;
 
 // Core ML protobuf for one Float32[8] neural network: y = 2*x + 1.
 const MODEL: &[u8] = &[
@@ -26,8 +27,9 @@ const MODEL: &[u8] = &[
     0x08, 0x0c, 0x2a, 0x0a, 0x0d, 0x00, 0x00, 0x00, 0x40, 0x15, 0x00, 0x00, 0x80, 0x3f,
 ];
 
-static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
+const TOSA_IDENTITY: &[u8] = include_bytes!("data/identity-fp32-v1.0.0.tosa");
 
+static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug)]
 struct SliceSource<'a>(&'a [u8]);
 
@@ -117,6 +119,81 @@ fn wait_for_terminal(
             terminal => return Ok(terminal),
         }
     }
+}
+
+#[test]
+fn lowers_and_executes_device_neutral_tosa() {
+    let backend = match CoreMlAccelerator::new_tosa() {
+        Ok(backend) => backend,
+        Err(InitError::NeuralEngineUnavailable) => return,
+        Err(error) => panic!("Core ML backend initialization failed: {error}"),
+    };
+    let context = backend.create_context(ContextDesc::default()).unwrap();
+    let desc = |usage| BufferDesc::new(4, 16 * 1024, MemoryDomain::Shared, usage).unwrap();
+    let (mut input, _) = backend
+        .allocate_buffer(
+            &context,
+            desc(BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT),
+        )
+        .unwrap()
+        .into_parts();
+    let (output, _) = backend
+        .allocate_buffer(
+            &context,
+            desc(BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT),
+        )
+        .unwrap()
+        .into_parts();
+    let expected = 3.25_f32.to_ne_bytes();
+    backend
+        .write_buffer(&mut input, 0, &SliceSource(&expected))
+        .unwrap();
+
+    let model = parse(TOSA_IDENTITY).unwrap();
+    let program = backend
+        .load_program(
+            &context,
+            model
+                .artifact_ref(COREML_TOSA_TARGET, REQUIRED_RESIDENT_BYTES)
+                .unwrap(),
+        )
+        .unwrap();
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .unwrap();
+    let bindings = [
+        BindingRef {
+            slot: 0,
+            buffer: &input,
+            range: BufferRange::new(0, 4).unwrap(),
+            access: AccessMode::Read,
+        },
+        BindingRef {
+            slot: 1,
+            buffer: &output,
+            range: BufferRange::new(0, 4).unwrap(),
+            access: AccessMode::Write,
+        },
+    ];
+    let event = backend
+        .submit(&queue, &program, &bindings, Timeout::Infinite)
+        .unwrap();
+    assert_eq!(
+        wait_for_terminal(&backend, &event).unwrap(),
+        EventState::Complete
+    );
+    backend.destroy_event(event).unwrap();
+
+    let mut actual = [0; 4];
+    backend.read_buffer(&output, 0, &mut actual).unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(backend.direct_binding_admissions(), 2);
+
+    backend.destroy_queue(queue).unwrap();
+    backend.unload_program(program).unwrap();
+    backend.free_buffer(output).unwrap();
+    backend.free_buffer(input).unwrap();
+    backend.destroy_context(context).unwrap();
 }
 
 #[test]

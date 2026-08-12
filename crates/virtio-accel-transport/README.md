@@ -4,7 +4,7 @@ Dependency-free descriptor-chain, virtqueue, reset, and notification port contra
 exposes reset-scoped chain identities, flattened direction/length metadata, and owned
 publication/completion tokens without leaking guest addresses or concrete descriptor types.
 
-Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an experimental, native-Rust foundation for a
+Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an experimental native-Rust protocol and implementation stack for a
 transport-neutral virtual accelerator device. Portable crates contain no host-OS or vendor APIs;
 host integrations live in separate adapter crates and never become their dependencies. The
 project claims no Virtio device ID.

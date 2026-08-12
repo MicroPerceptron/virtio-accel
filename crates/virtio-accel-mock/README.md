@@ -4,7 +4,7 @@ A cross-platform in-memory reference backend with deterministic test-only artifa
 harness-controlled execution, and scripted ownership-boundary faults. It is the backend the
 workspace examples and conformance suite run against.
 
-Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an experimental, native-Rust foundation for a
+Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an experimental native-Rust protocol and implementation stack for a
 transport-neutral virtual accelerator device. Portable crates contain no host-OS or vendor APIs;
 host integrations live in separate adapter crates and never become their dependencies. The
 project claims no Virtio device ID.

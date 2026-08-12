@@ -40,10 +40,11 @@ directly, and they must keep working on any platform the portable crates support
 | `host-native` | `virtio-accel-coreml` | Core ML/Foundation on macOS 14+; a compile-only unsupported-platform placeholder elsewhere |
 
 The Core ML crate is not a dependency of the facade or any portable layer. Its Objective-C bridge
-is compiled only when the Cargo target is macOS. The Linux, Windows, and Wasm workspace jobs compile
-the placeholder API, while the macOS native job executes its real model and semantic-conformance
-tests. An accessible Apple Neural Engine is required to construct the real backend; macOS runners
-without one skip execution after checking that availability through Core ML.
+and TOSA-to-Core ML model compilation are built only when the Cargo target is macOS. The Linux,
+Windows, and Wasm workspace jobs compile the placeholder API and backend-local lowering utilities,
+while the macOS native job executes its real model and semantic-conformance tests. An accessible
+Apple Neural Engine is required to construct the real backend; macOS runners without one skip
+execution after checking that availability through Core ML.
 
 Concrete VMM, kernel, OS, and vendor adapters are outside the portable-v1 milestone and must not
 become default dependencies of a portable crate.
@@ -97,6 +98,7 @@ cargo test -p virtio-accel-device --test state_model
 cargo test --workspace --doc --all-features
 cargo run --example backend_conformance
 cargo run --example reference_execution
+cargo run -p virtio-accel-coreml --example tosa_coreml
 cargo +1.85.0 check --workspace --all-targets --all-features
 cargo hack check --workspace --feature-powerset --no-dev-deps
 bash ci/check-portable-dependencies.sh

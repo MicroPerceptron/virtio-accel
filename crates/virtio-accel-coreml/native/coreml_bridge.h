@@ -63,6 +63,12 @@ void *va_coreml_model_load(const uint8_t *path,
                            size_t mapping_count,
                            struct va_coreml_error *error);
 
+void *va_coreml_model_load_memory(const uint8_t *bytes,
+                                  size_t bytes_len,
+                                  const struct va_coreml_feature_mapping *mappings,
+                                  size_t mapping_count,
+                                  struct va_coreml_error *error);
+
 void va_coreml_model_release(void *model);
 
 void *va_coreml_submit(void *model,

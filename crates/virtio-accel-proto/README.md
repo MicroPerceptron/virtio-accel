@@ -4,7 +4,7 @@ Pointer-free, little-endian wire structures for the portable virtio-accel protoc
 candidate. Decoding untrusted bytes never constructs an invalid Rust enum: unknown opcodes,
 statuses, flags, and event states stay raw integers until they are validated.
 
-Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an experimental, native-Rust foundation for a
+Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an experimental native-Rust protocol and implementation stack for a
 transport-neutral virtual accelerator device. Portable crates contain no host-OS or vendor APIs;
 host integrations live in separate adapter crates and never become their dependencies. The
 project claims no Virtio device ID.

@@ -196,9 +196,11 @@ rejected and indeterminate outcomes at each native API boundary. The standard su
 without a vendor fault API, while the command-engine and full-stack fault tests prove the portable
 recovery policy.
 
-For a complete successful lifecycle without the conformance harness, run
-`cargo run --example reference_execution`. It demonstrates the portable context, buffer, program,
-queue, submit, poll, transfer, and teardown sequence against the mock backend.
+For a complete portable lifecycle without the conformance harness, run
+`cargo run --example reference_execution`. It demonstrates the context, buffer, program, queue,
+submit, poll, transfer, and teardown sequence against the mock backend. On macOS, run
+`cargo run -p virtio-accel-coreml --example tosa_coreml` for the production artifact path from a
+device-neutral TOSA graph through Core ML execution and the same backend lifecycle.
 
 ## Common traps
 

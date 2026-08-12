@@ -92,6 +92,9 @@ jobs:
       - name: Run reference execution example
         run: cargo run --example reference_execution
 
+      - name: Run TOSA-to-Core ML example
+        run: cargo run -p virtio-accel-coreml --example tosa_coreml
+
       - name: Check release profile
         run: cargo check --workspace --release --all-features
 

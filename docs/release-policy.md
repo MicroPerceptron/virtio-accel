@@ -159,7 +159,7 @@ source.
 | 8 | `virtio-accel-mock` | `core` | — |
 | 9 | `virtio-accel-device` | `core`, `proto`, `transport` | `mock` |
 | 10 | `virtio-accel-conformance` | `core` | `mock` |
-| 11 | `virtio-accel-coreml` | `core` | `conformance` |
+| 11 | `virtio-accel-coreml` | `core`, `tosa` | `conformance` |
 | 12 | `virtio-accel` | the six runtime crates | `conformance`, `mock`, `cleanroom` |
 
 This order is executable, not just documentary: `ci/publish-dry-run.py` walks it against an isolated

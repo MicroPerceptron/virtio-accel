@@ -188,6 +188,7 @@ dependencies = [
  "cc",
  "virtio-accel-conformance",
  "virtio-accel-core",
+ "virtio-accel-tosa",
 ]
 
 [[package]]

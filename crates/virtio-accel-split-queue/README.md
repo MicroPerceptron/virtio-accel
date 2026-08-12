@@ -4,7 +4,7 @@ A bounded in-memory split-virtqueue reference model. It implements the transport
 against plain memory so protocol and device behavior can be exercised with no VMM, kernel,
 or guest physical addresses involved.
 
-Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an experimental, native-Rust foundation for a
+Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an experimental native-Rust protocol and implementation stack for a
 transport-neutral virtual accelerator device. Portable crates contain no host-OS or vendor APIs;
 host integrations live in separate adapter crates and never become their dependencies. The
 project claims no Virtio device ID.

@@ -8,16 +8,19 @@
 [![MSRV](https://img.shields.io/badge/rustc-1.85+-blue.svg)](#development)
 [![no_std](https://img.shields.io/badge/no__std-supported-brightgreen.svg)](#portability)
 
-Portable Rust foundations for a transport-neutral virtual accelerator device.
+An experimental virtual-accelerator protocol plus production-oriented Rust implementations.
 
-`virtio-accel` defines a protocol and a set of `no_std` Rust layers for exposing an accelerator to a
-guest: contexts, buffers, opaque programs, execution queues, submissions, and events. The first
-target is NPU execution, while the object model deliberately leaves room for GPUs, DSPs, and other
-program-driven accelerators.
+`virtio-accel` defines a protocol and ships executable `no_std` guest, device, transport, queue, and
+TOSA layers for exposing an accelerator to a guest: contexts, buffers, programs, execution queues,
+submissions, and events. The workspace also contains a real macOS Core ML backend that lowers
+device-neutral TOSA into Core ML and submits ANE-capable predictions with direct buffer bindings.
+The first target is NPU execution, while the object model deliberately leaves room for GPUs, DSPs,
+and other program-driven accelerators.
 
-The repository is mostly portable protocol and lifecycle code. Host integrations are isolated in
-adapter crates and never become dependencies of the portable facade; the first such adapter is the
-macOS Core ML backend. The project claims no Virtio device ID.
+This is no longer a specification-only repository: the frozen protocol review input is developed
+alongside runnable guest/device machinery, conformance infrastructure, TOSA ingestion and analysis,
+and host backends. Host integrations remain isolated in adapter crates and never become dependencies
+of the portable facade. The project claims no Virtio device ID.
 
 This project is pre-standardization and experimental. Protocol 1.0 is frozen as a versioned review
 input for independent implementation — it is stable enough to build against and to disagree with in
@@ -32,7 +35,7 @@ writing, not an approved Virtio specification.
 | `virtio-accel-transport` | `core` | Dependency-free descriptor-chain, queue, reset, and notification ports |
 | `virtio-accel-core` | `core` | Backend lifecycle, memory, program, queue, and event contracts |
 | `virtio-accel-tosa` | `core + alloc` | Bounded zero-copy TOSA 1.0 validation, lowering analysis, and specialization utilities |
-| `virtio-accel-coreml` | macOS `std` | Core ML backend with direct buffers and asynchronous ANE-capable prediction |
+| `virtio-accel-coreml` | macOS `std` | TOSA-to-Core ML lowering, direct buffers, and asynchronous ANE-capable prediction |
 | `virtio-accel-split-queue` | `core + alloc` | Bounded in-memory split-ring reference model |
 | `virtio-accel-guest` | `core + alloc` | Typed reference client with bounded request tracking |
 | `virtio-accel-device` | `core + alloc` | Device-owned state, including bounded generational IDs |
@@ -56,7 +59,9 @@ virtio-accel-guest -----------> virtio-accel-transport
 
 virtio-accel-conformance --------------------> virtio-accel-core
 virtio-accel-tosa ---------------------------> virtio-accel-core
-virtio-accel-coreml -------------------------> virtio-accel-core
+virtio-accel-coreml ----------+--------------> virtio-accel-core
+                              |
+                              +--------------> virtio-accel-tosa
 other provider adapters --------------------> virtio-accel-core
 ```
 
@@ -78,8 +83,9 @@ The facade is `no_std`. Add the reference backend as a dev-dependency to run the
 virtio-accel-mock = "0.1"
 ```
 
-On an ANE-capable Mac, add `virtio-accel-coreml = "0.1"` separately for the host-native Core ML
-backend. It is intentionally not re-exported by the portable facade.
+On an ANE-capable Mac, add `virtio-accel-coreml = "0.1"` separately for the host-native backend.
+Its production program format is TOSA 1.0; validation, analysis, and Core ML model generation all
+happen inside that adapter. It is intentionally not re-exported by the portable facade.
 
 Add `virtio-accel-tosa = "0.1"` separately to validate TOSA 1.0 artifacts, inspect safe borrowed
 graph and typed-attribute views, enforce complete stable-op semantics for a declared target, and
@@ -87,7 +93,25 @@ construct the device-neutral TOSA artifact envelope. `Model::analyze_for` also p
 dense IDs, topological order, liveness, runtime obligations, and specialization keys for Core ML,
 OpenVINO, or another provider. It is intentionally not re-exported by the facade.
 
-## Example
+## Production TOSA-to-Core ML example
+
+On macOS 14+ with an accessible Apple Neural Engine, the backend-local example sends a TOSA 1.0
+`IDENTITY` graph through the real lowering, compilation, direct-binding, asynchronous prediction,
+and teardown path:
+
+```sh
+cargo run -p virtio-accel-coreml --example tosa_coreml
+```
+
+```text
+TOSA -> Core ML -> ANE-capable result: 3.25
+```
+
+The portable facade, device engine, transport, and guest layers see only the TOSA artifact format,
+target identity, and opaque bytes. Core ML protobufs, temporary compilation assets, Foundation, and
+the Objective-C bridge remain owned by `virtio-accel-coreml`.
+
+## Portable lifecycle example
 
 A full submission against the in-memory reference backend — allocate a buffer, load an artifact,
 bind it to a slot, submit, and observe the event:
@@ -246,6 +270,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
 cargo run --example backend_conformance
 cargo run --example reference_execution
+cargo run -p virtio-accel-coreml --example tosa_coreml # macOS 14+ with ANE
 python3 ci/publish-dry-run.py
 ```
 
@@ -277,7 +302,7 @@ until a future version assigns its negotiation, ownership, synchronization, and 
 - timeline fences
 - secure contexts
 - packed virtqueues
-- concrete VMM, kernel, OS, and vendor SDK adapters
+- protocol-level negotiation for additional VMM, kernel, OS, and vendor integrations
 - a standardized graph IR, compiler, or executable format
 
 Protocol 1.0 numeric opcodes, statuses, and payload layouts are frozen for the portable v1.0
