@@ -109,3 +109,31 @@ microseconds admission and 98.46 microseconds completion. The optimization there
 submission allocation/scan work without claiming a timing improvement below the noise floor of this
 micro-model. This is evidence for host and Core ML fixed overhead, not representative ANE
 throughput, and remains non-gating wall-clock data.
+
+## OpenVINO provider evidence
+
+`virtio-accel-openvino` builds the sorted slot/access/shape plan once at program load. Warm
+submission reuses the queue's pointer-slot storage plus one empty high-water vector allocation for
+backing guards and one for tensor/check metadata. Each spare is cleared before the queue can retain
+it; therefore reuse removes Rust metadata allocations without retaining buffer pointers, backing
+guards, tensor handles, or native requests. Concurrent events remain supported: when the one spare
+is occupied, another event allocates independently, and completion retains at most the larger
+returned allocation.
+
+The native infer request remains event-owned and is created for every submission. Pooling it would
+be an unsafe optimization because OpenVINO copies bound tensor objects into the request and its C
+API has no reset operation that detaches all input and output tensors. Submission still copies no
+tensor bytes.
+
+The crate includes an ignored release-mode measurement that reports admission separately from
+submit-to-complete latency:
+
+```sh
+cargo test --release -p virtio-accel-openvino \
+  measures_warm_submission_and_completion_latency -- --ignored --nocapture
+```
+
+Wall-clock results must be recorded on a pinned OpenVINO runtime and identified device before a
+timing claim is made; the deterministic regression tests instead pin capacity reuse, pointer
+scrubbing, guard release at terminal observation, and tensor-metadata release after request
+destruction.

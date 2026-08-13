@@ -716,6 +716,7 @@ fn measure_warm_latency_on(device: &str) {
         let event = backend
             .submit(&queue, &program, &bindings, Timeout::Infinite)
             .unwrap_or_else(|_| panic!("warm submission rejected"));
+        let admission = started.elapsed();
         let deadline = started + Duration::from_secs(15);
         loop {
             match backend.poll_event(&event).unwrap() {
@@ -727,22 +728,26 @@ fn measure_warm_latency_on(device: &str) {
                 state => panic!("unexpected terminal state {state:?}"),
             }
         }
-        let elapsed = started.elapsed();
+        let completion = started.elapsed();
         backend.destroy_event(event).unwrap();
-        elapsed
+        (admission, completion)
     };
 
     for _ in 0..20 {
         submit_once();
     }
-    let mut samples = (0..200).map(|_| submit_once()).collect::<Vec<_>>();
-    samples.sort_unstable();
+    let (mut admission, mut completion): (Vec<_>, Vec<_>) = (0..200).map(|_| submit_once()).unzip();
+    admission.sort_unstable();
+    completion.sort_unstable();
     eprintln!(
-        "device {}: warm submit-to-complete p50 {:?} p95 {:?} p99 {:?}",
+        "device {}: warm admission p50 {:?} p95 {:?} p99 {:?}; submit-to-complete p50 {:?} p95 {:?} p99 {:?}",
         backend.device_name(),
-        samples[samples.len() / 2],
-        samples[samples.len() * 95 / 100],
-        samples[samples.len() * 99 / 100],
+        admission[admission.len() / 2],
+        admission[admission.len() * 95 / 100],
+        admission[admission.len() * 99 / 100],
+        completion[completion.len() / 2],
+        completion[completion.len() * 95 / 100],
+        completion[completion.len() * 99 / 100],
     );
 
     backend.destroy_queue(queue).unwrap();

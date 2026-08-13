@@ -6,11 +6,13 @@
 //! owns Rust memory.
 
 use std::alloc::{Layout, alloc_zeroed, dealloc};
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, RefCell, RefMut};
 use std::ffi::{CStr, CString, c_void};
 use std::marker::PhantomData;
+use std::mem;
+use std::ops::{Deref, DerefMut};
 use std::ptr::{self, NonNull};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -384,6 +386,139 @@ impl Drop for TensorHandle {
     }
 }
 
+/// One event-owned tensor plus the information needed to verify direct output backing.
+///
+/// Inputs use a null `expected_output`; output buffer pointers are always non-null because they
+/// originate in a live [`AlignedAllocation`]. Keeping the verification metadata beside the
+/// tensor removes a second per-event allocation.
+struct BoundTensor {
+    _tensor: TensorHandle,
+    output_io_index: usize,
+    expected_output: *mut c_void,
+}
+
+#[derive(Default)]
+struct EventMetadata {
+    tensors: Vec<BoundTensor>,
+    backings: Vec<EventBacking>,
+}
+
+/// Queue-owned warm-path metadata capacity.
+///
+/// Only one empty vector of each kind is retained. Returned vectors are cleared before entering
+/// the spare slots, so this object never owns an OpenVINO handle, a buffer backing guard, or a
+/// guest-memory pointer. Events hold a weak reference so outstanding work cannot keep a queue
+/// alive after its owner destroys it.
+#[derive(Default)]
+struct QueueScratch {
+    pointer_slots: RefCell<Vec<*mut c_void>>,
+    metadata_spare: RefCell<Option<EventMetadata>>,
+}
+
+impl QueueScratch {
+    fn take_pointer_slots(&self, count: usize) -> Result<PointerSlots<'_>, BackendError> {
+        let mut slots = self.pointer_slots.borrow_mut();
+        slots.clear();
+        slots
+            .try_reserve(count)
+            .map_err(|_| BackendError::OutOfMemory)?;
+        slots.resize(count, ptr::null_mut());
+        Ok(PointerSlots { slots })
+    }
+
+    fn take_metadata(
+        &self,
+        backing_count: usize,
+        tensor_count: usize,
+    ) -> Result<EventMetadata, BackendError> {
+        let mut metadata = self.metadata_spare.borrow_mut().take().unwrap_or_default();
+        debug_assert!(metadata.backings.is_empty());
+        debug_assert!(metadata.tensors.is_empty());
+        metadata
+            .backings
+            .try_reserve_exact(backing_count)
+            .map_err(|_| BackendError::OutOfMemory)?;
+        metadata
+            .tensors
+            .try_reserve_exact(tensor_count)
+            .map_err(|_| BackendError::OutOfMemory)?;
+        Ok(metadata)
+    }
+
+    fn recycle_metadata(&self, mut returned: EventMetadata) {
+        returned.tensors.clear();
+        returned.backings.clear();
+        let mut spare = self.metadata_spare.borrow_mut();
+        let returned_capacity = returned
+            .tensors
+            .capacity()
+            .saturating_add(returned.backings.capacity());
+        if spare.as_ref().is_none_or(|current| {
+            current
+                .tensors
+                .capacity()
+                .saturating_add(current.backings.capacity())
+                < returned_capacity
+        }) {
+            *spare = Some(returned);
+        }
+    }
+}
+
+impl std::fmt::Debug for QueueScratch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("QueueScratch")
+            .field("pointer_capacity", &self.pointer_slots.borrow().capacity())
+            .field(
+                "backing_capacity",
+                &self
+                    .metadata_spare
+                    .borrow()
+                    .as_ref()
+                    .map_or(0, |metadata| metadata.backings.capacity()),
+            )
+            .field(
+                "tensor_capacity",
+                &self
+                    .metadata_spare
+                    .borrow()
+                    .as_ref()
+                    .map_or(0, |metadata| metadata.tensors.capacity()),
+            )
+            .finish()
+    }
+}
+
+/// Borrowed queue pointer slots that are scrubbed on every exit path.
+///
+/// Submission validation needs random slot lookup, but the queue must not retain guest pointers
+/// after `submit` returns, including on rejection. The guard makes that property independent of
+/// every `?` in the admission and native-binding phases.
+struct PointerSlots<'a> {
+    slots: RefMut<'a, Vec<*mut c_void>>,
+}
+
+impl Deref for PointerSlots<'_> {
+    type Target = Vec<*mut c_void>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.slots
+    }
+}
+
+impl DerefMut for PointerSlots<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.slots
+    }
+}
+
+impl Drop for PointerSlots<'_> {
+    fn drop(&mut self) {
+        self.slots.clear();
+    }
+}
+
 /// Owned `ov_model_t`; a short-lived reader artifact freed right after compilation.
 struct ModelHandle {
     model: NonNull<ffi::ov_model_t>,
@@ -575,7 +710,7 @@ impl std::fmt::Debug for OpenVinoProgram {
 #[derive(Debug)]
 pub struct OpenVinoQueue {
     context_id: u64,
-    scratch: RefCell<Vec<*mut c_void>>,
+    scratch: Rc<QueueScratch>,
 }
 
 /// Asynchronous OpenVINO inference event.
@@ -585,9 +720,8 @@ pub struct OpenVinoQueue {
 /// published.
 pub struct OpenVinoEvent {
     request: NonNull<ffi::ov_infer_request_t>,
-    tensors: Vec<TensorHandle>,
-    output_checks: Vec<(usize, *mut c_void)>,
-    backings: RefCell<Vec<EventBacking>>,
+    metadata: RefCell<EventMetadata>,
+    scratch: Weak<QueueScratch>,
     latched: Cell<Option<EventState>>,
     deadline: Option<Instant>,
     cancel_issued: Cell<bool>,
@@ -607,20 +741,38 @@ impl OpenVinoEvent {
     /// Publish the first observed terminal state; guard release precedes latch publication so a
     /// caller observing a terminal state can immediately transfer buffer bytes.
     fn latch(&self, state: EventState) -> EventState {
-        self.backings.borrow_mut().clear();
+        self.metadata.borrow_mut().backings.clear();
         self.latched.set(Some(state));
         state
     }
 
+    fn recycle_metadata(&self) {
+        let mut metadata = self.metadata.borrow_mut();
+        if metadata.tensors.capacity() == 0 && metadata.backings.capacity() == 0 {
+            return;
+        }
+        metadata.tensors.clear();
+        metadata.backings.clear();
+        let returned = mem::take(&mut *metadata);
+        drop(metadata);
+        if let Some(scratch) = self.scratch.upgrade() {
+            scratch.recycle_metadata(returned);
+        }
+    }
+
     /// Verify the runtime executed into the caller's own output allocations.
     fn outputs_are_directly_backed(&self) -> Result<bool, BackendError> {
-        for (io_index, expected) in &self.output_checks {
+        let metadata = self.metadata.borrow();
+        for bound in &metadata.tensors {
+            if bound.expected_output.is_null() {
+                continue;
+            }
             let mut tensor = ptr::null_mut();
             // SAFETY: the request is live; the runtime returns one owned tensor reference.
             check_status(unsafe {
                 ffi::ov_infer_request_get_output_tensor_by_index(
                     self.request.as_ptr(),
-                    *io_index,
+                    bound.output_io_index,
                     &mut tensor,
                 )
             })?;
@@ -632,7 +784,7 @@ impl OpenVinoEvent {
             let mut data = ptr::null_mut();
             // SAFETY: the probe tensor is live and `data` is a valid out-pointer.
             check_status(unsafe { ffi::ov_tensor_data(probe.as_const_ptr(), &mut data) })?;
-            if data != *expected {
+            if data != bound.expected_output {
                 return Ok(false);
             }
         }
@@ -654,8 +806,10 @@ impl Drop for OpenVinoEvent {
             }
         }
         // SAFETY: this handle owns the request reference and frees it exactly once; the bound
-        // tensor handles and backing guards drop afterwards in field order.
+        // tensors are dropped only after this call, then the already-terminal backing guards are
+        // released. This ordering also applies to a pre-start rejection.
         unsafe { ffi::ov_infer_request_free(self.request.as_ptr()) };
+        self.recycle_metadata();
     }
 }
 
@@ -1100,7 +1254,7 @@ impl Accelerator for OpenVinoAccelerator {
         self.info.validate_queue_desc(desc)?;
         Ok(OpenVinoQueue {
             context_id: context.id,
-            scratch: RefCell::new(Vec::new()),
+            scratch: Rc::new(QueueScratch::default()),
         })
     }
 
@@ -1123,16 +1277,14 @@ impl Accelerator for OpenVinoAccelerator {
         if queue.context_id != program.context_id {
             return Err(SubmitFailure::Rejected(BackendError::InvalidArgument));
         }
-        let mut pointers = queue.scratch.borrow_mut();
-        pointers.clear();
-        pointers
-            .try_reserve(program.slots.len())
-            .map_err(|_| SubmitFailure::Rejected(BackendError::OutOfMemory))?;
-        pointers.resize(program.slots.len(), ptr::null_mut());
-        let mut event_backings = Vec::new();
-        event_backings
-            .try_reserve_exact(bindings.len())
-            .map_err(|_| SubmitFailure::Rejected(BackendError::OutOfMemory))?;
+        let mut pointers = queue
+            .scratch
+            .take_pointer_slots(program.slots.len())
+            .map_err(SubmitFailure::Rejected)?;
+        let mut event_metadata = queue
+            .scratch
+            .take_metadata(bindings.len(), program.slots.len())
+            .map_err(SubmitFailure::Rejected)?;
         let mut seen = [0_u64; 4];
         for binding in bindings {
             if binding.buffer.context_id != queue.context_id {
@@ -1163,7 +1315,7 @@ impl Accelerator for OpenVinoAccelerator {
                 return Err(SubmitFailure::Rejected(BackendError::Incompatible));
             }
             pointers[index] = binding.buffer.allocation.pointer_at(start).cast();
-            event_backings.push(EventBacking::new(
+            event_metadata.backings.push(EventBacking::new(
                 Arc::clone(&binding.buffer.allocation),
                 binding.access,
             ));
@@ -1172,7 +1324,7 @@ impl Accelerator for OpenVinoAccelerator {
             return Err(SubmitFailure::Rejected(BackendError::Incompatible));
         }
 
-        prepare_event_backings(&mut event_backings).map_err(SubmitFailure::Rejected)?;
+        prepare_event_backings(&mut event_metadata.backings).map_err(SubmitFailure::Rejected)?;
 
         // Native phase. Failures below free every created handle and reject: nothing observable
         // was started until `start_async` succeeds, so `SubmitFailure::Indeterminate` is never
@@ -1192,11 +1344,10 @@ impl Accelerator for OpenVinoAccelerator {
                 code: 0,
             }));
         };
-        let mut event = OpenVinoEvent {
+        let event = OpenVinoEvent {
             request,
-            tensors: Vec::new(),
-            output_checks: Vec::new(),
-            backings: RefCell::new(event_backings),
+            metadata: RefCell::new(event_metadata),
+            scratch: Rc::downgrade(&queue.scratch),
             // A pre-latched event never re-enters the runtime: on rejection below, `Drop` frees
             // the never-started request and tensors immediately.
             latched: Cell::new(Some(EventState::Failed(BackendError::InvalidArgument))),
@@ -1209,15 +1360,8 @@ impl Accelerator for OpenVinoAccelerator {
             cancel_issued: Cell::new(false),
             _not_send_sync: PhantomData,
         };
-        event
-            .tensors
-            .try_reserve_exact(program.slots.len())
-            .map_err(|_| SubmitFailure::Rejected(BackendError::OutOfMemory))?;
-        event
-            .output_checks
-            .try_reserve_exact(program.slots.len())
-            .map_err(|_| SubmitFailure::Rejected(BackendError::OutOfMemory))?;
 
+        let mut metadata = event.metadata.borrow_mut();
         for (plan, data) in program.slots.iter().zip(pointers.iter()) {
             let tensor = TensorHandle::from_host_ptr(plan.element, plan.shape.as_value(), *data)
                 .map_err(SubmitFailure::Rejected)?;
@@ -1237,11 +1381,17 @@ impl Accelerator for OpenVinoAccelerator {
                 }
             };
             check_status(status).map_err(SubmitFailure::Rejected)?;
-            if plan.role == LoweredFeatureRole::Output {
-                event.output_checks.push((plan.io_index, *data));
-            }
-            event.tensors.push(tensor);
+            metadata.tensors.push(BoundTensor {
+                _tensor: tensor,
+                output_io_index: plan.io_index,
+                expected_output: if plan.role == LoweredFeatureRole::Output {
+                    *data
+                } else {
+                    ptr::null_mut()
+                },
+            });
         }
+        drop(metadata);
 
         // SAFETY: the request is live with every boundary tensor bound.
         let status = unsafe { ffi::ov_infer_request_start_async(event.request.as_ptr()) };
@@ -1413,6 +1563,39 @@ mod tests {
         assert_eq!(pending[0].access, BackingAccess::Exclusive);
     }
 
+    #[test]
+    fn queue_scratch_reuses_only_cleared_metadata_capacity() {
+        let scratch = QueueScratch::default();
+        let allocation = Arc::new(AlignedAllocation::new(32, 16).unwrap());
+
+        let mut metadata = scratch.take_metadata(2, 2).unwrap();
+        let backing_storage = metadata.backings.as_ptr();
+        let tensor_storage = metadata.tensors.as_ptr();
+        metadata
+            .backings
+            .push(EventBacking::new(Arc::clone(&allocation), AccessMode::Read));
+        assert_eq!(Arc::strong_count(&allocation), 2);
+        scratch.recycle_metadata(metadata);
+        assert_eq!(Arc::strong_count(&allocation), 1);
+
+        let reused = scratch.take_metadata(2, 2).unwrap();
+        assert_eq!(reused.backings.as_ptr(), backing_storage);
+        assert_eq!(reused.tensors.as_ptr(), tensor_storage);
+        assert!(reused.backings.is_empty());
+        assert!(reused.tensors.is_empty());
+    }
+
+    #[test]
+    fn pointer_scratch_is_scrubbed_on_every_exit() {
+        let scratch = QueueScratch::default();
+        {
+            let mut slots = scratch.take_pointer_slots(2).unwrap();
+            slots[0] = NonNull::<u8>::dangling().as_ptr().cast();
+            slots[1] = NonNull::<u16>::dangling().as_ptr().cast();
+        }
+        assert!(scratch.pointer_slots.borrow().is_empty());
+    }
+
     /// Pins the runtime facts the lowering design depends on: in-memory IR v11 acceptance with a
     /// null weights tensor, a direct parameter-to-result edge, the variadic property convention
     /// of `ov_core_compile_model`, and index-stable I/O sizes — via the production load path.
@@ -1495,6 +1678,8 @@ mod tests {
                 }
             });
         assert_eq!(wait_for_terminal(&backend, &event), EventState::Complete);
+        assert!(event.metadata.borrow().backings.is_empty());
+        assert!(queue.scratch.metadata_spare.borrow().is_none());
 
         let mut result = vec![0u8; bytes as usize];
         backend
@@ -1504,6 +1689,19 @@ mod tests {
         assert_eq!(backend.direct_binding_admissions(), 2);
 
         backend.destroy_event(event).unwrap();
+        assert!(
+            queue
+                .scratch
+                .metadata_spare
+                .borrow()
+                .as_ref()
+                .is_some_and(|metadata| {
+                    metadata.backings.is_empty()
+                        && metadata.backings.capacity() >= bindings.len()
+                        && metadata.tensors.is_empty()
+                        && metadata.tensors.capacity() >= bindings.len()
+                })
+        );
         backend.destroy_queue(queue).unwrap();
         backend.unload_program(program).unwrap();
         backend.free_buffer(input).unwrap();

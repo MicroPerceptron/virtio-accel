@@ -38,6 +38,15 @@ joins the request, then frees the request and tensors, and only then releases th
 runtime threads can never touch freed Rust memory. The backend never creates public slices or
 raw-pointer accessors.
 
+The queue may retain one empty high-water vector allocation for backing metadata and one for
+bound-tensor metadata. Recycling clears and drops every element before the allocation enters the
+queue spare, so a spare owns no OpenVINO handle, `Arc`, backing guard, or buffer pointer. Events
+refer to the queue scratch weakly and therefore cannot extend queue lifetime. The separate
+pointer-slot scratch uses an RAII guard that clears its length on every return path, including a
+rejected submission. Native infer requests themselves are deliberately not pooled: OpenVINO
+retains copied tensor objects after `set_*_tensor_by_index`, and the C API supplies no operation
+that detaches all of those guest-backed tensors before reuse.
+
 OpenVINO receives tensors created from host pointers over Rust-owned memory. Submission
 validates range length and scalar alignment before exposing a bound pointer, and completion
 verifies the output tensor's data pointer before reporting success. A runtime that substitutes
