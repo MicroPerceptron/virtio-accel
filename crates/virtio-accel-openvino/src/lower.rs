@@ -419,6 +419,7 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, L
     }
     let model = parse(bytes).map_err(LoweringError::Parse)?;
     let analysis = model.analyze_for(target).map_err(LoweringError::Analysis)?;
+    validate_target_types(&analysis, target)?;
     if analysis.regions().len() != 1
         || analysis.blocks().len() != 1
         || !analysis.conditions().is_empty()
@@ -510,6 +511,28 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, L
     let mut lowered = builder.finish();
     lowered.features = features;
     Ok(lowered)
+}
+
+/// Keep the artifact's declared TOSA profile load-bearing after individual operators gain support
+/// for more than one dtype. TOSA profile analysis validates operator legality, but a simple op such
+/// as IDENTITY can be legal for several profiles; the provider target still selects exactly one
+/// lowering tier and must not be used to smuggle a differently typed graph into it.
+fn validate_target_types(analysis: &TosaAnalysis<'_>, target: Target) -> Result<(), LoweringError> {
+    for value in analysis.values() {
+        let AnalyzedValueKind::Tensor(tensor) = value.kind() else {
+            continue;
+        };
+        let dtype = tensor.dtype();
+        let mismatched = if target == OPENVINO_TOSA_TARGET {
+            dtype == DType::INT8
+        } else {
+            matches!(dtype, DType::FP16 | DType::FP32)
+        };
+        if mismatched {
+            return Err(LoweringError::UnsupportedType(dtype));
+        }
+    }
+    Ok(())
 }
 
 fn tensor<'a>(
@@ -1345,6 +1368,18 @@ mod tests {
         assert_eq!(lowered.features[0].element, OvElement::I8);
         assert_eq!(lowered.features[0].byte_len, 8);
         assert_eq!(lowered.features[1].byte_len, 8);
+    }
+
+    #[test]
+    fn target_profiles_cannot_admit_the_other_tiers_tensor_types() {
+        assert_eq!(
+            lower_tosa(IDENTITY_INT8.artifact, OPENVINO_TOSA_TARGET).unwrap_err(),
+            LoweringError::UnsupportedType(DType::INT8)
+        );
+        assert!(matches!(
+            lower_tosa(IDENTITY_FP32_LOCAL, OPENVINO_TOSA_INTEGER_TARGET),
+            Err(LoweringError::Analysis(_))
+        ));
     }
 
     #[test]
