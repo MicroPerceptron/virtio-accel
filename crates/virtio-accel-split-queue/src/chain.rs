@@ -143,10 +143,16 @@ pub enum ChainBuildError {
 enum ChainAnalysis {
     Valid {
         layout: ChainLayout,
-        order: Box<[u16]>,
+        spans: Box<[DescriptorSpan]>,
         regions: Box<[ChainRegion]>,
     },
     Invalid(MalformedChain),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DescriptorSpan {
+    descriptor: u16,
+    end: u64,
 }
 
 impl ChainAnalysis {
@@ -157,9 +163,16 @@ impl ChainAnalysis {
         }
     }
 
-    fn order(&self) -> &[u16] {
+    fn spans(&self, writable: bool) -> &[DescriptorSpan] {
         match self {
-            Self::Valid { order, .. } => order,
+            Self::Valid { layout, spans, .. } => {
+                let readable = usize::from(layout.readable_descriptors());
+                if writable {
+                    &spans[readable..]
+                } else {
+                    &spans[..readable]
+                }
+            }
             Self::Invalid(_) => &[],
         }
     }
@@ -491,8 +504,8 @@ fn analyze_chain(
     head: u16,
     visited: &mut [u16],
 ) -> Result<ChainAnalysis, ChainBuildError> {
-    let mut order = Vec::new();
-    order
+    let mut spans = Vec::new();
+    spans
         .try_reserve_exact(descriptors.len())
         .map_err(|_| ChainBuildError::AllocationFailed)?;
     let mut regions = Vec::new();
@@ -500,6 +513,8 @@ fn analyze_chain(
         .try_reserve_exact(descriptors.len())
         .map_err(|_| ChainBuildError::AllocationFailed)?;
 
+    let mut readable_end = 0_u64;
+    let mut writable_end = 0_u64;
     let mut current = head;
     loop {
         let Some(descriptor) = descriptors.get(usize::from(current)) else {
@@ -519,7 +534,19 @@ fn analyze_chain(
             return Ok(ChainAnalysis::Invalid(MalformedChain::Address));
         }
 
-        order.push(current);
+        let logical_end = if descriptor.is_writable() {
+            &mut writable_end
+        } else {
+            &mut readable_end
+        };
+        let Some(end) = logical_end.checked_add(descriptor.len()) else {
+            return Ok(ChainAnalysis::Invalid(MalformedChain::LengthOverflow));
+        };
+        *logical_end = end;
+        spans.push(DescriptorSpan {
+            descriptor: current,
+            end,
+        });
         regions.push(if descriptor.is_writable() {
             ChainRegion::writable(descriptor.len())
         } else {
@@ -532,7 +559,7 @@ fn analyze_chain(
         current = descriptor.next;
     }
 
-    if order.len() != descriptors.len() {
+    if spans.len() != descriptors.len() {
         return Ok(ChainAnalysis::Invalid(MalformedChain::DescriptorCount));
     }
 
@@ -542,9 +569,13 @@ fn analyze_chain(
     };
     Ok(ChainAnalysis::Valid {
         layout,
-        order: order.into_boxed_slice(),
+        spans: spans.into_boxed_slice(),
         regions: regions.into_boxed_slice(),
     })
+}
+
+fn first_touched_span(spans: &[DescriptorSpan], offset: u64) -> usize {
+    spans.partition_point(|span| span.end <= offset)
 }
 
 fn copy_from_descriptors(
@@ -556,24 +587,26 @@ fn copy_from_descriptors(
     if target.is_empty() {
         return Ok(());
     }
-    let mut skip = offset;
     let mut copied = 0;
-    for index in data.analysis.order() {
-        let descriptor = &data.descriptors[usize::from(*index)];
-        if descriptor.is_writable() != writable {
-            continue;
-        }
-        if skip >= descriptor.len() {
-            skip -= descriptor.len();
-            continue;
-        }
-        let available = usize::try_from(descriptor.len() - skip).unwrap_or(usize::MAX);
+    let spans = data.analysis.spans(writable);
+    let first = first_touched_span(spans, offset);
+    for (index, span) in spans.iter().enumerate().skip(first) {
+        let descriptor = &data.descriptors[usize::from(span.descriptor)];
+        let span_start = index.checked_sub(1).map_or(0, |prior| spans[prior].end);
+        let logical_offset = offset + copied as u64;
+        let descriptor_offset = logical_offset
+            .checked_sub(span_start)
+            .ok_or(ByteAccessError::OutOfBounds)?;
+        let span_remaining = span
+            .end
+            .checked_sub(logical_offset)
+            .ok_or(ByteAccessError::OutOfBounds)?;
+        let available = usize::try_from(span_remaining).unwrap_or(usize::MAX);
         let count = min(available, target.len() - copied);
         descriptor
             .buffer
-            .read_at(skip, &mut target[copied..copied + count])?;
+            .read_at(descriptor_offset, &mut target[copied..copied + count])?;
         copied += count;
-        skip = 0;
         if copied == target.len() {
             return Ok(());
         }
@@ -590,24 +623,26 @@ fn copy_to_descriptors(
     if source.is_empty() {
         return Ok(());
     }
-    let mut skip = offset;
     let mut copied = 0;
-    for index in data.analysis.order() {
-        let descriptor = &data.descriptors[usize::from(*index)];
-        if descriptor.is_writable() != writable {
-            continue;
-        }
-        if skip >= descriptor.len() {
-            skip -= descriptor.len();
-            continue;
-        }
-        let available = usize::try_from(descriptor.len() - skip).unwrap_or(usize::MAX);
+    let spans = data.analysis.spans(writable);
+    let first = first_touched_span(spans, offset);
+    for (index, span) in spans.iter().enumerate().skip(first) {
+        let descriptor = &data.descriptors[usize::from(span.descriptor)];
+        let span_start = index.checked_sub(1).map_or(0, |prior| spans[prior].end);
+        let logical_offset = offset + copied as u64;
+        let descriptor_offset = logical_offset
+            .checked_sub(span_start)
+            .ok_or(ByteAccessError::OutOfBounds)?;
+        let span_remaining = span
+            .end
+            .checked_sub(logical_offset)
+            .ok_or(ByteAccessError::OutOfBounds)?;
+        let available = usize::try_from(span_remaining).unwrap_or(usize::MAX);
         let count = min(available, source.len() - copied);
         descriptor
             .buffer
-            .write_at(skip, &source[copied..copied + count])?;
+            .write_at(descriptor_offset, &source[copied..copied + count])?;
         copied += count;
-        skip = 0;
         if copied == source.len() {
             return Ok(());
         }
@@ -646,4 +681,34 @@ fn checked_range(
         .filter(|end| *end <= len)
         .ok_or(ByteAccessError::OutOfBounds)?;
     Ok(start..end)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DescriptorSpan, first_touched_span};
+
+    #[test]
+    fn logical_span_search_skips_every_untouched_descriptor_prefix() {
+        let spans = [
+            DescriptorSpan {
+                descriptor: 4,
+                end: 8,
+            },
+            DescriptorSpan {
+                descriptor: 2,
+                end: 24,
+            },
+            DescriptorSpan {
+                descriptor: 7,
+                end: 32,
+            },
+        ];
+
+        assert_eq!(first_touched_span(&spans, 0), 0);
+        assert_eq!(first_touched_span(&spans, 7), 0);
+        assert_eq!(first_touched_span(&spans, 8), 1);
+        assert_eq!(first_touched_span(&spans, 23), 1);
+        assert_eq!(first_touched_span(&spans, 24), 2);
+        assert_eq!(first_touched_span(&spans, 32), 3);
+    }
 }

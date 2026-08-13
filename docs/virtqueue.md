@@ -285,6 +285,12 @@ record table, available ring, and used ring from a validated power-of-two `Queue
 available consumption, out-of-order completion, used consumption, and notification rechecks move
 owned values or update fixed slots; none allocates or coalesces payload bytes.
 
+`DriverChain` records each descriptor's logical byte span during its bounded construction pass.
+Segmented byte access binary-searches the first intersecting span and visits only descriptors that
+contain requested bytes, avoiding repeated prefix scans when a command decoder performs many small
+reads. The span metadata remains caller-owned chain storage and is never allocated from descriptor
+byte lengths.
+
 `DriverChain::direct` constructs the baseline direct profile. `DriverChain::raw` retains malformed
 topology for deterministic device tests, while `SplitQueue::inject_available` bypasses only normal
 driver-side profile validation. Traversal remains bounded by the supplied descriptor table and
