@@ -69,6 +69,30 @@ The transport crate exposes reset-scoped chain identities, flattened direction/l
 owned publication/completion tokens. Neither it nor the device-state layer leaks guest addresses,
 ring pointers, or concrete descriptor types into the command engine or provider backend.
 
+## Backend support
+
+“Supported” below means that the backend admits the declared program and dtype and exercises it
+end-to-end; support in the TOSA parser or shared numerical corpus alone does not imply hardware
+execution. “Not implemented” describes this repository, not necessarily the underlying hardware.
+
+| Backend | Status | Program admission | FP32 | FP16 | FP8 E4M3/E5M2 | INT8 | Packed INT4 | Program-visible buffers |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Apple Core ML / ANE (`virtio-accel-coreml`) | Implemented; macOS 14+ | Static TOSA 1.0 floating-point subset | Supported | Supported | Not implemented | Not implemented | Not implemented | Direct host/shared bindings |
+| Intel Level Zero / OpenVINO | Planned | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented |
+| AMD XDNA | Planned | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented |
+| Qualcomm Hexagon | Planned | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented |
+
+The Core ML row describes model-boundary support; restricted INT32 outputs are also available for
+operators such as `ARGMAX`. Core ML chooses ANE or CPU placement per operation. Its INT4 facilities
+are compressed-weight storage rather than TOSA INT4 tensor execution, and this backend does not
+silently dequantize unsupported FP8, INT8, or INT4 graphs. See the
+[`virtio-accel-coreml` support boundary](crates/virtio-accel-coreml/README.md#low-precision-boundary).
+
+Independently of backend execution, `virtio-accel-tosa` validates the TOSA 1.0 profiles and
+extensions for all five dtype columns, and `virtio-accel-conformance` ships shared fixtures and
+oracles for them. The byte-oriented `virtio-accel-mock` backend remains test infrastructure rather
+than a typed hardware implementation.
+
 ## Install
 
 ```toml
