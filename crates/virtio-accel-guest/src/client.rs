@@ -835,6 +835,10 @@ where
         if binding_count > info.max_bindings_per_submission {
             return self.start_failure(chain, operation, StartErrorKind::DeviceLimit);
         }
+        // Canonical slot order proves uniqueness in one linear pass. Keep the
+        // prefix-scan fallback below so arbitrary binding order and its existing
+        // validation precedence remain unchanged without allocating scratch space.
+        let bindings_are_canonical = bindings.windows(2).all(|pair| pair[0].slot < pair[1].slot);
         for (index, binding) in bindings.iter().enumerate() {
             if binding.buffer.epoch() != epoch {
                 return self.start_failure(chain, operation, StartErrorKind::StaleHandle);
@@ -842,9 +846,10 @@ where
             if binding.buffer.context != context
                 || !binding.range.fits(binding.buffer.desc.bytes)
                 || !usage_allows(binding.buffer.desc.usage, binding.access)
-                || bindings[..index]
-                    .iter()
-                    .any(|prior| prior.slot == binding.slot)
+                || (!bindings_are_canonical
+                    && bindings[..index]
+                        .iter()
+                        .any(|prior| prior.slot == binding.slot))
             {
                 return self.start_failure(chain, operation, StartErrorKind::InvalidArgument);
             }

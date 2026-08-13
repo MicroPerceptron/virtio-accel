@@ -8,9 +8,9 @@
 use alloc::vec::Vec;
 
 use virtio_accel_core::{
-    Accelerator, ArtifactRef, BackendError, BindingRef, BufferDesc, BufferRange, BufferUsage,
-    ByteSink, ByteSource, Capabilities, DeviceInfo, DeviceInfoError, EventState, ReleaseFailure,
-    SubmitFailure, Timeout,
+    Accelerator, ArtifactRef, BackendError, BindingRef, BufferRange, BufferUsage, ByteSink,
+    ByteSource, Capabilities, DeviceInfo, DeviceInfoError, EventState, ReleaseFailure,
+    SubmitFailure, Timeout, validate_bindings,
 };
 use virtio_accel_proto::{
     KnownEventState, Le16, Le32, Le64, ObjectPayload, StatusCode, SubmitResponse, WireConfig,
@@ -459,11 +459,7 @@ impl<A: Accelerator> CommandProcessor<A> {
             .state
             .create_event_with(queue_id, program_id, buffer_ids, |resources| {
                 let mut native_bindings = Vec::new();
-                let mut descs: Vec<BufferDesc> = Vec::new();
                 native_bindings
-                    .try_reserve_exact(bindings.len())
-                    .map_err(|_| SubmitCreateError::OutOfMemory)?;
-                descs
                     .try_reserve_exact(bindings.len())
                     .map_err(|_| SubmitCreateError::OutOfMemory)?;
                 for binding in &bindings {
@@ -474,7 +470,9 @@ impl<A: Accelerator> CommandProcessor<A> {
                     if binding.range.end() > desc.bytes() {
                         return Err(SubmitCreateError::Validation(StatusCode::OUT_OF_BOUNDS));
                     }
-                    descs.push(desc);
+                    if !desc.allows_access(binding.access) {
+                        return Err(SubmitCreateError::Validation(StatusCode::PERMISSION_DENIED));
+                    }
                     native_bindings.push(BindingRef {
                         slot: binding.slot,
                         buffer,
@@ -482,9 +480,9 @@ impl<A: Accelerator> CommandProcessor<A> {
                         access: binding.access,
                     });
                 }
-                BindingRef::validate_for_submit(&native_bindings, &descs, max_bindings).map_err(
-                    |error| SubmitCreateError::Validation(status_from_backend_error(error)),
-                )?;
+                validate_bindings(&native_bindings, max_bindings).map_err(|error| {
+                    SubmitCreateError::Validation(status_from_backend_error(error))
+                })?;
                 match accelerator.submit(
                     resources.queue(),
                     resources.program(),

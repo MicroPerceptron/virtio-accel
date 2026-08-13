@@ -135,6 +135,9 @@ def check_contents(crate_file: pathlib.Path, name: str, version: str) -> None:
             if required not in contents:
                 raise Failure(f"{name}: tarball is missing {required}")
 
+        if name == "virtio-accel" and "include/virtio_accel.h" not in contents:
+            raise Failure("virtio-accel: tarball is missing include/virtio_accel.h")
+
         for license_name in ("LICENSE-MIT", "LICENSE-APACHE"):
             packaged = tar.extractfile(prefix + license_name)
             assert packaged is not None

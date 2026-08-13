@@ -18,6 +18,7 @@ include = [
     "/LICENSE-APACHE",
     "/src/**",
     "/examples/**",
+    "/include/**",
     "/tests/**",
     "/docs/**",
     "/conformance/v1.0/**",

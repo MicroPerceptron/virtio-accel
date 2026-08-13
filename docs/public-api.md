@@ -5,7 +5,8 @@ The public Rust API is split into three documentation layers:
 1. Human-facing contracts in `virtio-accel-core`, `virtio-accel-guest`,
    `virtio-accel-device`, `virtio-accel-transport`, `virtio-accel-tosa`, and
    `virtio-accel-conformance`.
-2. Pointer-free wire mirrors in `virtio-accel-proto`.
+2. Pointer-free wire mirrors in `virtio-accel-proto` and the checked C projection in
+   [`include/virtio_accel.h`](../include/virtio_accel.h).
 3. Independent conformance artifacts and the clean-room codec under `conformance/`.
 
 The first layer documents ownership, blocking behavior, allocation, copy boundaries, and recovery
@@ -21,6 +22,11 @@ normative wire names exactly. Field-level rustdoc would mostly duplicate
 [`wire-abi.md`](wire-abi.md) and increase drift risk. The authoritative field semantics are the
 normative document, [`layout.json`](../conformance/v1.0/layout.json), and
 [`vectors.json`](../conformance/v1.0/vectors.json).
+
+`include/virtio_accel.h` exposes the same constants and packed layouts to C11 and C++11 consumers.
+It deliberately contains no functions, provider handles, allocator hooks, or callbacks: it is a
+wire header, not a stable backend plugin ABI. `ci/check-c-header.py` compiles manifest-derived
+assertions so adding or changing a recorded namespace or layout cannot silently drift the header.
 
 `virtio-accel-cleanroom` is also intentionally raw. It is a dependency-free independent decoder for
 golden-vector validation, not the ergonomic production API. Its public names mirror protocol

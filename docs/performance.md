@@ -17,7 +17,7 @@ evidence, but they are not stable enough for ordinary pull-request gating across
 | Segmented byte-port access | `O(s + n)` | none | exact caller-requested range |
 | Object lookup | `O(1)` | none | none |
 | Command dispatch | request-specific | bounded object-table reservation before mutation | response publication, except explicit transfers |
-| Submission admission | `O(b log b)` plus lookups | bounded event dependency and binding metadata | no hidden buffer staging |
+| Submission admission | `O(b log b)` plus lookups; canonical binding revalidation is `O(b)` | bounded event dependency and binding metadata | no hidden buffer staging |
 | Polling | `O(1)` | none | event-state response only |
 | Reset | object graph walk | releases existing state; no new guest-count allocation | none |
 | TOSA parse + target semantics | `O(f + g log s + c)` | bounded borrowed-name/symbol/control-flow metadata after FlatBuffer verification | no graph, string, or constant-data copy |
@@ -47,6 +47,15 @@ The portable decoder keeps one bounded `DecodedBinding` vector for `SUBMIT` dupl
 validation. The command engine also owns bounded event dependency and binding metadata while
 admitting a submission. These allocations are deliberately after guest count validation and contain
 metadata only, never program-buffer contents.
+
+The decoder's slot sort is also the canonical handoff to core admission. Core and guest validation
+recognize strictly increasing slot order in `O(b)` without allocation. Their public APIs continue to
+accept arbitrary binding order through an allocation-free fallback, so this optimization does not
+make ordering semantic.
+
+Device admission validates each resolved buffer descriptor in place instead of retaining a parallel
+descriptor vector. The provider-facing binding vector and event-owned buffer dependency vector remain
+necessary, but descriptor validation adds no per-submission allocation.
 
 The current v1 budget treats those metadata allocations as acceptable. It does not permit an
 allocation sized by an unvalidated guest count and does not permit full-range program-buffer copies

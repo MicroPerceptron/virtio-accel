@@ -36,6 +36,37 @@
       "SECURE_CONTEXTS": "0x0000000000000010"
     }
   },
+  "accelerator_classes": {
+    "OTHER": 0,
+    "NPU": 1,
+    "GPU": 2,
+    "DSP": 3
+  },
+  "memory_domains": {
+    "HOST": 1,
+    "DEVICE": 2,
+    "SHARED": 3
+  },
+  "buffer_usage": {
+    "TRANSFER_SOURCE": "0x00000001",
+    "TRANSFER_DESTINATION": "0x00000002",
+    "PROGRAM_INPUT": "0x00000004",
+    "PROGRAM_OUTPUT": "0x00000008",
+    "MUTABLE_STATE": "0x00000010",
+    "KNOWN_BITS": "0x0000001f"
+  },
+  "binding_access": {
+    "READ": 1,
+    "WRITE": 2,
+    "READ_WRITE": 3
+  },
+  "known_flags": {
+    "REQUEST": 0,
+    "CONTEXT": 0,
+    "PROGRAM": 0,
+    "QUEUE": 0,
+    "SUBMIT": 0
+  },
   "opcodes": {
     "GET_DEVICE_INFO": "0x0001",
     "CREATE_CONTEXT": "0x0100",

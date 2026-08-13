@@ -785,9 +785,13 @@ pub struct BindingRef<'a, B> {
 impl<'a, B> BindingRef<'a, B> {
     /// Slot/count checks plus [`BufferDesc::allows_access`] for each binding.
     ///
-    /// Hosts must call this before [`Accelerator::submit`]. `descs[i]` must be the
-    /// descriptor for the buffer behind `bindings[i].buffer` (equal length alone is
-    /// not enough). A usage mismatch returns [`BackendError::PermissionDenied`].
+    /// Hosts must enforce both checks before [`Accelerator::submit`]. This combined
+    /// helper is suitable when descriptors are already available as a slice. A host
+    /// resolving descriptors individually may call [`validate_bindings`] once and
+    /// [`BufferDesc::allows_access`] as each buffer is resolved, avoiding a descriptor
+    /// mirror allocation. `descs[i]` must be the descriptor for the buffer behind
+    /// `bindings[i].buffer` (equal length alone is not enough). A usage mismatch
+    /// returns [`BackendError::PermissionDenied`].
     pub fn validate_for_submit(
         bindings: &[Self],
         descs: &[BufferDesc],
@@ -811,7 +815,9 @@ impl<'a, B> BindingRef<'a, B> {
 /// Structural only: nonempty, bounded by `max_bindings`, and unique slots. This is
 /// **incomplete** for pre-admission checks -- it does not enforce access/usage
 /// compatibility required before backend admission. Prefer
-/// [`BindingRef::validate_for_submit`] before [`Accelerator::submit`].
+/// [`BindingRef::validate_for_submit`] before [`Accelerator::submit`]. Strictly
+/// slot-ordered input takes a linear, allocation-free path; arbitrary order remains
+/// supported by the allocation-free fallback.
 pub fn validate_bindings<B>(
     bindings: &[BindingRef<'_, B>],
     max_bindings: u32,
@@ -819,6 +825,14 @@ pub fn validate_bindings<B>(
     if bindings.is_empty() || bindings.len() > max_bindings as usize {
         return Err(BackendError::ResourceLimit);
     }
+
+    // The wire decoder canonicalizes bindings into slot order. Recognizing that
+    // invariant here avoids a second quadratic uniqueness pass on every host
+    // submission while preserving the public API's order-independent semantics.
+    if bindings.windows(2).all(|pair| pair[0].slot < pair[1].slot) {
+        return Ok(());
+    }
+
     for (index, binding) in bindings.iter().enumerate() {
         if bindings[..index]
             .iter()
@@ -1054,8 +1068,9 @@ pub trait Accelerator {
     /// Attempt to admit one program execution and return its event.
     ///
     /// Hosts must reject an [`AccessMode`] incompatible with each buffer's [`BufferUsage`] before
-    /// calling this method (see [`BindingRef::validate_for_submit`]). Providers may repeat the check
-    /// as defense in depth, but host-side rejection is required by Wire ABI section 4.4.
+    /// calling this method (see [`BufferDesc::allows_access`] and
+    /// [`BindingRef::validate_for_submit`]). Providers may repeat the check as defense in depth, but
+    /// host-side rejection is required by Wire ABI section 4.4.
     ///
     /// - **Ownership/lifetime:** queue, program, buffers, and the binding slice are borrowed only
     ///   during admission and must not be retained as Rust references. The caller keeps every
@@ -1362,6 +1377,38 @@ mod tests {
             validate_bindings::<()>(&[], 1),
             Err(BackendError::ResourceLimit)
         );
+
+        let arbitrary_order = [
+            BindingRef {
+                slot: 7,
+                buffer: &buffer,
+                range,
+                access: AccessMode::Read,
+            },
+            BindingRef {
+                slot: 2,
+                buffer: &buffer,
+                range,
+                access: AccessMode::Write,
+            },
+        ];
+        assert!(validate_bindings(&arbitrary_order, 2).is_ok());
+
+        let canonical_order = [
+            BindingRef {
+                slot: 2,
+                buffer: &buffer,
+                range,
+                access: AccessMode::Read,
+            },
+            BindingRef {
+                slot: 7,
+                buffer: &buffer,
+                range,
+                access: AccessMode::Write,
+            },
+        ];
+        assert!(validate_bindings(&canonical_order, 2).is_ok());
     }
 
     #[test]
