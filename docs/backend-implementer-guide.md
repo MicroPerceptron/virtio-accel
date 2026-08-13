@@ -8,7 +8,8 @@ The reusable `virtio-accel-conformance` crate exercises that boundary directly. 
 provider-owned inputs:
 
 1. A factory that returns a fresh backend instance for each case.
-2. One executable `TargetDescription` containing an artifact and one observable binding.
+2. One executable `TargetDescription` containing an artifact and its bindings — a single
+   observable binding, or one fixture per slot for programs with disjoint input and output slots.
 3. A `ConformanceHooks` implementation that advances a pending event to successful completion.
 
 The same flow is available as a runnable crate-level example:
@@ -36,6 +37,12 @@ scheduler can signal that scheduler; a deterministic backend can execute the ret
 directly. The target operation must remain pending until the hook runs, transform the fixture's
 initial bytes into its expected bytes, and use the declared slot and access mode. Its observable
 binding is `Write` or `ReadWrite`; a read-only binding cannot carry the required output evidence.
+
+A program whose artifact declares disjoint input and output slots — the shape every lowered TOSA
+graph produces — is described with `TargetDescription::with_bindings`, pairing
+`BindingFixture::read_only` inputs with at least one observable writable fixture. The executing
+cases bind every fixture in declared order and, after completion, verify every fixture's expected
+bytes, so clobbered inputs fail the suite alongside wrong outputs.
 
 ```rust,ignore
 use virtio_accel_conformance::{
