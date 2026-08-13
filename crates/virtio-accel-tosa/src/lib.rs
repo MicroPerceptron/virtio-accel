@@ -44,6 +44,7 @@ mod attribute;
 )]
 #[rustfmt::skip]
 mod generated;
+mod numeric;
 mod runtime;
 mod semantic;
 mod specialize;
@@ -62,6 +63,9 @@ pub use artifact::{
 };
 pub use attribute::{
     I32List, I32Values, NanPropagationMode, OpAttributes, ResizeMode, RoundingMode,
+};
+pub use numeric::{
+    fp8e4m3_to_f32, fp8e5m2_to_f32, low_precision_storage_bytes, pack_int4, unpack_int4,
 };
 pub use runtime::{
     RuntimeError, RuntimeErrorKind, RuntimeValidation, RuntimeValue, validate_runtime_values,

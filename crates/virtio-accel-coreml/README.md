@@ -32,6 +32,21 @@ operator set; unsupported attribute combinations such as nonzero pooling padding
 loading. Unsupported control flow, dynamic shapes, profiles, extensions, dtypes, and operators are
 likewise rejected before admission.
 
+### Low-precision boundary
+
+`supports_tosa_dtype` exposes the current model-boundary capability independently of operator
+coverage. This NeuralNetwork-format lowering accepts FP16 and FP32 tensors, plus the restricted
+INT32 outputs described above. It deliberately rejects TOSA INT8, packed INT4, FP8E4M3, and
+FP8E5M2 before native compilation.
+
+Core ML's INT8 model inputs and outputs require the newer ML Program path and operating-system
+support; merely encoding INT8 multi-array metadata in a NeuralNetwork model is not executable.
+Core ML INT4 support is compressed-weight storage rather than TOSA INT4 tensor semantics, and Core
+ML exposes no FP8 tensor boundary. A future quantized CoreML tier therefore needs an ML Program
+lowering with explicit activation/weight legalization and calibration metadata. Until then, the
+shared conformance crate supplies device-neutral packed fixtures for other backends without
+silently dequantizing or falsely advertising ANE execution here.
+
 Bindings use a device-neutral deterministic rule: block inputs occupy slots `0..N` in declared
 order and block outputs occupy `N..N+M`. Lowering assigns private Core ML feature and blob names;
 portable callers never construct `CoreMlArtifact` or know those names.

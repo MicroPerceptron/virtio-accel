@@ -144,7 +144,7 @@ fn valid_encoding(analysis: &TosaAnalysis<'_>, value: ValueId, bytes: &[u8]) -> 
     }
     match dtype {
         DType::BOOL => bytes.iter().all(|value| *value <= 1),
-        DType::INT4 => (0..elements).all(|index| integer_at(dtype, bytes, index) != Some(-8)),
+        DType::INT4 => (0..elements).all(|index| crate::unpack_int4(bytes, index) != Some(-8)),
         DType::INT48 => (0..elements).all(|index| {
             integer_at(dtype, bytes, index)
                 .is_some_and(|value| (-(1_i64 << 47)..(1_i64 << 47)).contains(&value))
@@ -358,15 +358,7 @@ fn integer_at(dtype: DType, bytes: &[u8], index: usize) -> Option<i64> {
     };
     let start = index.checked_mul(width)?;
     match dtype {
-        DType::INT4 => {
-            let byte = *bytes.get(index / 2)?;
-            let nibble = if index % 2 == 0 {
-                byte & 0x0f
-            } else {
-                byte >> 4
-            };
-            Some(i64::from((nibble as i8) << 4 >> 4))
-        }
+        DType::INT4 => Some(i64::from(crate::unpack_int4(bytes, index)?)),
         DType::INT8 => Some(i64::from(*bytes.get(start)? as i8)),
         DType::INT16 => Some(i64::from(i16::from_le_bytes(
             bytes.get(start..start + 2)?.try_into().ok()?,

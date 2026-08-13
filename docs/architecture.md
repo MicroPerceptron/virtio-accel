@@ -312,10 +312,11 @@ synchronization. The [backend implementer guide](backend-implementer-guide.md) m
 trait obligations and separates semantic evidence from the quantitative allocation and copy budgets
 in [performance.md](performance.md).
 
-Its `numerics` module complements lifecycle conformance with checked-in TOSA graphs and FP32
-oracles. Identity edge values, non-square batched matrix multiplication, and NHWC max pooling are
-the first shared cases. Core ML consumes them directly, and each subsequent hardware backend must
-run those same bytes before adding provider-specific coverage.
+Its `numerics` module complements lifecycle conformance with checked-in TOSA graphs and shared
+FP32, FP16, FP8E4M3, FP8E5M2, INT8, and packed INT4 oracles. Identity edge values, non-square
+batched matrix multiplication, and NHWC max pooling are the first shared cases. A backend runs every
+case it advertises and rejects unsupported profiles, extensions, and dtypes at program admission;
+provider-specific graphs cannot stand in for the shared bytes.
 
 ## Production lowering boundaries
 
@@ -337,7 +338,7 @@ analysis directly. Dense value/operator IDs, topological order, liveness, runtim
 specialization keys are provider-neutral; only capability selection, operator lowering, native
 memory import, and synchronization around the provider-owned compiled-program cache remain
 backend-specific. Its first validation pass on the Intel host should run the backend conformance
-suite and shared FP16/FP32 numerical TOSA corpus, add provider-specific differential checks, and record
+suite and shared low-precision numerical TOSA corpus, add provider-specific differential checks, and record
 cold/warm specialization, throughput, and copy/allocation counters. This keeps the Core ML and
 Intel paths on one bounded TOSA contract without requiring either provider to adopt the other's
 native graph representation.

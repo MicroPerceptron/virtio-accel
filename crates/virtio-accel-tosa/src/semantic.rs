@@ -682,15 +682,7 @@ fn validate_tensor_encoding(
         }
         let valid_values = match tensor.dtype() {
             DType::BOOL => data.iter().all(|value| *value <= 1),
-            DType::INT4 => (0..elements).all(|index| {
-                let byte = data[index / 2];
-                let nibble = if index % 2 == 0 {
-                    byte & 0x0f
-                } else {
-                    byte >> 4
-                };
-                nibble != 8
-            }),
+            DType::INT4 => (0..elements).all(|index| crate::unpack_int4(data, index) != Some(-8)),
             DType::INT48 => data.chunks_exact(8).all(|bytes| {
                 let value = i64::from_le_bytes(bytes.try_into().expect("chunk size is exact"));
                 (-(1_i64 << 47)..(1_i64 << 47)).contains(&value)
@@ -1651,15 +1643,7 @@ fn constant_integer(model: &Model<'_>, value: Tensor<'_>, index: usize) -> Optio
     let data = tensor_data(model, value);
     let start = index.checked_mul(dtype_width(value.dtype())?)?;
     match value.dtype() {
-        DType::INT4 => {
-            let byte = *data.get(index / 2)?;
-            let nibble = if index % 2 == 0 {
-                byte & 0x0f
-            } else {
-                byte >> 4
-            };
-            Some(i64::from((nibble as i8) << 4 >> 4))
-        }
+        DType::INT4 => Some(i64::from(crate::unpack_int4(data, index)?)),
         DType::INT8 => Some(i64::from(*data.get(start)? as i8)),
         DType::INT16 => Some(i64::from(i16::from_le_bytes(
             data.get(start..start + 2)?.try_into().ok()?,

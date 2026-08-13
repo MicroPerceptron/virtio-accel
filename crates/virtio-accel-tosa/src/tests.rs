@@ -683,6 +683,44 @@ fn regenerate_identity_edges_fp16_fixture() {
     .unwrap();
 }
 
+fn regenerate_identity_fixture(dtype: wire::DType) {
+    let destination = std::env::var_os("VIRTIO_ACCEL_TOSA_FIXTURE_OUT")
+        .expect("set VIRTIO_ACCEL_TOSA_FIXTURE_OUT to the exact output path");
+    std::fs::write(
+        destination,
+        model_bytes(Fixture {
+            dtype: dtype.0,
+            tensor_shape: &[8],
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+}
+
+#[test]
+#[ignore = "writes a requested checked-in test fixture"]
+fn regenerate_identity_int8_fixture() {
+    regenerate_identity_fixture(wire::DType::INT8);
+}
+
+#[test]
+#[ignore = "writes a requested checked-in test fixture"]
+fn regenerate_identity_int4_fixture() {
+    regenerate_identity_fixture(wire::DType::INT4);
+}
+
+#[test]
+#[ignore = "writes a requested checked-in test fixture"]
+fn regenerate_identity_fp8e4m3_fixture() {
+    regenerate_identity_fixture(wire::DType::FP8E4M3);
+}
+
+#[test]
+#[ignore = "writes a requested checked-in test fixture"]
+fn regenerate_identity_fp8e5m2_fixture() {
+    regenerate_identity_fixture(wire::DType::FP8E5M2);
+}
+
 #[test]
 fn valid_graph_is_zero_copy_and_iterable() {
     let bytes = model_bytes(Fixture::default());

@@ -78,6 +78,12 @@ defines their failure as unpredictable. `SpecializationKeyBuilder` and `Speciali
 bounded, exact-key shape/CTC specialization without host dependencies. A backend still decides
 which `CUSTOM` domains/operators and implementation payloads it supports.
 
+The crate also exposes stable-Rust helpers for the TOSA low-precision wire formats:
+`low_precision_storage_bytes`, low-nibble-first `pack_int4`/`unpack_int4`, and exact
+`fp8e4m3_to_f32`/`fp8e5m2_to_f32` reference conversion. They are serialization and numerical
+utilities, not a claim that every backend natively executes those dtypes; providers must publish
+and enforce their own capability boundary.
+
 ## Schema provenance
 
 `schema/tosa.fbs` is copied byte-for-byte from TOSA Tools `v2026.05.0`; its SHA-256 is

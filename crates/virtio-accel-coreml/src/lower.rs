@@ -118,6 +118,15 @@ pub const fn supports_tosa_operator(op: Op) -> bool {
     )
 }
 
+/// Whether this lowering can expose `dtype` at a Core ML model boundary.
+///
+/// Operator-specific validation still applies. In particular, INT32 is limited to outputs from
+/// operators such as `ARGMAX`. Quantized TOSA tensor types require a future ML Program lowering;
+/// the current dependency-free NeuralNetwork encoder rejects them during program admission.
+pub const fn supports_tosa_dtype(dtype: DType) -> bool {
+    matches!(dtype, DType::FP16 | DType::FP32 | DType::INT32)
+}
+
 pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, LoweringError> {
     if target != COREML_TOSA_TARGET {
         return Err(LoweringError::UnsupportedGraph);
@@ -813,6 +822,68 @@ mod tests {
             lower_tosa(IDENTITY_FP32, target),
             Err(LoweringError::UnsupportedGraph)
         ));
+    }
+
+    #[test]
+    fn reports_low_precision_types_as_unsupported_in_the_neural_network_lowering() {
+        assert!(supports_tosa_dtype(DType::FP16));
+        assert!(supports_tosa_dtype(DType::FP32));
+        assert!(supports_tosa_dtype(DType::INT32));
+        assert!(!supports_tosa_dtype(DType::INT8));
+        assert!(!supports_tosa_dtype(DType::INT4));
+        assert!(!supports_tosa_dtype(DType::FP8E4M3));
+        assert!(!supports_tosa_dtype(DType::FP8E5M2));
+    }
+
+    #[test]
+    fn rejects_shared_quantized_artifacts_at_the_declared_target_boundary() {
+        use virtio_accel_conformance::numerics::{
+            IDENTITY_FP8E4M3, IDENTITY_FP8E5M2, IDENTITY_INT4, IDENTITY_INT8,
+        };
+
+        for (case, target) in [
+            (
+                IDENTITY_INT8,
+                Target::new(
+                    Version::TOSA_1_0,
+                    ProfileSet::INTEGER,
+                    Level::Level8K,
+                    ExtensionSet::NONE,
+                ),
+            ),
+            (
+                IDENTITY_INT4,
+                Target::new(
+                    Version::TOSA_1_0,
+                    ProfileSet::INTEGER,
+                    Level::Level8K,
+                    ExtensionSet::INT4,
+                ),
+            ),
+            (
+                IDENTITY_FP8E4M3,
+                Target::new(
+                    Version::TOSA_1_0,
+                    ProfileSet::FLOATING_POINT,
+                    Level::Level8K,
+                    ExtensionSet::FP8E4M3,
+                ),
+            ),
+            (
+                IDENTITY_FP8E5M2,
+                Target::new(
+                    Version::TOSA_1_0,
+                    ProfileSet::FLOATING_POINT,
+                    Level::Level8K,
+                    ExtensionSet::FP8E5M2,
+                ),
+            ),
+        ] {
+            assert!(matches!(
+                lower_tosa(case.artifact, target),
+                Err(LoweringError::UnsupportedGraph)
+            ));
+        }
     }
 
     #[test]
