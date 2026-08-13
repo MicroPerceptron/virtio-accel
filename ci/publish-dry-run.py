@@ -36,26 +36,9 @@ import sys
 import tarfile
 import tempfile
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+from publication import PUBLISH_ORDER, PublicationPolicyError, workspace_version
 
-# Topologically sorted with development dependencies included: a published crate's versioned
-# dev-dependencies must resolve from the registry too, or `cargo test` on the packaged source
-# cannot run. Keep this list in sync with docs/release-policy.md.
-PUBLISH_ORDER = (
-    "virtio-accel-transport",
-    "virtio-accel-cleanroom",
-    "virtio-accel-proto",
-    "virtio-accel-core",
-    "virtio-accel-tosa",
-    "virtio-accel-split-queue",
-    "virtio-accel-guest",
-    "virtio-accel-mock",
-    "virtio-accel-device",
-    "virtio-accel-conformance",
-    "virtio-accel-coreml",
-    "virtio-accel-openvino",
-    "virtio-accel",
-)
+ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 # Examples live in the facade and are part of its published surface.
 EXAMPLES = {"virtio-accel": ("backend_conformance", "reference_execution")}
@@ -83,24 +66,6 @@ def capture(argv: list[str], cwd: pathlib.Path) -> str:
     if result.returncode != 0:
         raise Failure(f"{' '.join(argv)} failed:\n{result.stderr}")
     return result.stdout
-
-
-def workspace_version() -> str:
-    metadata = json.loads(
-        capture(["cargo", "metadata", "--format-version", "1", "--no-deps"], ROOT)
-    )
-    versions = {
-        package["name"]: package["version"]
-        for package in metadata["packages"]
-        if package["name"] in PUBLISH_ORDER
-    }
-    missing = set(PUBLISH_ORDER) - versions.keys()
-    if missing:
-        raise Failure(f"packages missing from the workspace: {sorted(missing)}")
-    distinct = set(versions.values())
-    if len(distinct) != 1:
-        raise Failure(f"expected one workspace version, found {sorted(distinct)}")
-    return distinct.pop()
 
 
 def vendor_third_party(registry: pathlib.Path, version: str) -> None:
@@ -270,7 +235,7 @@ def main() -> int:
             flush=True,
         )
         return 0
-    except Failure as error:
+    except (Failure, PublicationPolicyError) as error:
         print(f"\ndry run failed: {error}", file=sys.stderr)
         return 1
     finally:

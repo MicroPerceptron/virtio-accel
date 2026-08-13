@@ -1,0 +1,56 @@
+name: Publish crates
+
+"on":
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crates-io-release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: publish-crates-io
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out the released tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: stable
+
+      - name: Require the released commit to be on the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: git merge-base --is-ancestor HEAD "origin/$DEFAULT_BRANCH"
+
+      - name: Test the publication driver
+        run: python3 -m unittest discover -s ci -p 'test_*.py'
+
+      - name: Check release policy invariants
+        run: python3 ci/check-release-policy.py
+
+      - name: Validate the release tag and checkout
+        run: python3 ci/publish.py --tag "$GITHUB_REF_NAME" --check-only
+
+      - name: Verify every packaged crate in dependency order
+        run: python3 ci/publish-dry-run.py
+
+      - name: Publish every crate in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_KEY }}
+        run: python3 ci/publish.py --tag "$GITHUB_REF_NAME"
