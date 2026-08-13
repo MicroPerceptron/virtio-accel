@@ -80,8 +80,8 @@
     {
       "id": "device.submission_admission",
       "path": "hot",
-      "complexity": "O(b log b + object lookups)",
-      "allocation_profile": "bounded event dependency storage and native binding metadata after decode validation; providers must not allocate hidden direct-binding bounce buffers",
+      "complexity": "O(b log b + object lookups), including O(b) revalidation after canonical slot sorting",
+      "allocation_profile": "bounded event dependency storage and native binding metadata after decode validation; resolved buffer descriptors are validated in place without a mirror allocation; providers must not allocate hidden direct-binding bounce buffers",
       "copy_profile": "metadata only; no full-range program-buffer copy",
       "permitted_copy_boundary": "none",
       "allocates_from_unvalidated_guest_count": false,

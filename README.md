@@ -251,6 +251,11 @@ The primary `zerocopy` ABI and the manual clean-room codec both decode and re-en
 frame. Their bridge test exchanges bytes only, providing an independent implementation check without
 making the conformance codec a production dependency.
 
+Non-Rust device and driver implementations can include
+[`include/virtio_accel.h`](include/virtio_accel.h). The header is a packed C projection of the wire
+contract, not a host backend plugin ABI. CI compiles it as C11 and C++11 and derives constant,
+size, alignment, and offset assertions from the frozen layout manifest.
+
 ## Writing a backend
 
 Implement the `Accelerator` contract from `virtio-accel-core`, then run the standard semantic suite
@@ -278,6 +283,7 @@ optional resource-accounting and progress adapters, and the fault-injection harn
 | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
 | [specification.md](docs/specification.md)                         | Normative terminology, object model, compatibility rules, mandatory baseline                 |
 | [wire-abi.md](docs/wire-abi.md)                                   | Exact byte layouts and the coordinated change procedure                                      |
+| [virtio_accel.h](include/virtio_accel.h)                          | Checked C and C++ projection of the protocol 1.0 wire contract                               |
 | [virtqueue.md](docs/virtqueue.md)                                 | Command-chain rules                                                                          |
 | [architecture.md](docs/architecture.md)                           | Implementation invariants                                                                    |
 | [threat-model.md](docs/threat-model.md)                           | Trust boundaries and finite resource policy                                                  |

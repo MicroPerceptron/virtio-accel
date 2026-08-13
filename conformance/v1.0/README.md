@@ -4,6 +4,8 @@ This directory contains implementation-independent inputs for the portable proto
 
 - [`layout.json`](layout.json) records protocol constants and every structure size, byte alignment,
   and field offset.
+- [`../../include/virtio_accel.h`](../../include/virtio_accel.h) is the packed C11/C++11 wire
+  projection. CI derives compile-time constant and layout assertions from `layout.json`.
 - [`vectors.json`](vectors.json) contains canonical hexadecimal bytes for the device configuration,
   all 15 request opcodes, every success and command-specific response shape, all event states, and
   reviewed malformed/unknown boundary cases.
