@@ -113,14 +113,14 @@ ring pointers, or concrete descriptor types into the command engine or provider 
 
 ```toml
 [dependencies]
-virtio-accel = "0.1"
+virtio-accel = "0.2"
 ```
 
 The facade is `no_std`. Add the reference backend as a dev-dependency to run the example below:
 
 ```toml
 [dev-dependencies]
-virtio-accel-mock = "0.1"
+virtio-accel-mock = "0.2"
 ```
 
 On an ANE-capable Mac, add `virtio-accel-coreml = "0.1"` separately for the host-native backend.
