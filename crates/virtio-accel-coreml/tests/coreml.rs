@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use virtio_accel_conformance::numerics::{
-    IDENTITY_EDGES_FP16, IDENTITY_EDGES_FP32, MATMUL_FP16, MATMUL_FP32, MAX_POOL2D_FP16,
-    MAX_POOL2D_FP32,
+    IDENTITY_EDGES_FP16, IDENTITY_EDGES_FP32, IDENTITY_INT8, MATMUL_FP16, MATMUL_FP32, MATMUL_INT8,
+    MAX_POOL2D_FP16, MAX_POOL2D_FP32,
 };
 use virtio_accel_conformance::{
     BindingFixture, ConformanceHooks, ProgramFixture, SubmissionPathDiagnostics, TargetDescription,
@@ -17,10 +17,10 @@ use virtio_accel_core::{
     BufferUsage, ByteSink, ByteSource, ContextDesc, EventState, MemoryDomain, QueueDesc, Timeout,
 };
 use virtio_accel_coreml::{
-    ARTIFACT_FORMAT, COREML_TOSA_TARGET, CoreMlAccelerator, CoreMlArtifact, CoreMlEvent, InitError,
-    REQUIRED_RESIDENT_BYTES, TARGET_IDENTITY,
+    ARTIFACT_FORMAT, COREML_TOSA_INTEGER_TARGET, COREML_TOSA_TARGET, CoreMlAccelerator,
+    CoreMlArtifact, CoreMlEvent, InitError, REQUIRED_RESIDENT_BYTES, TARGET_IDENTITY,
 };
-use virtio_accel_tosa::parse;
+use virtio_accel_tosa::{Target, parse};
 
 // Core ML protobuf for one Float32[8] neural network: y = 2*x + 1.
 const MODEL: &[u8] = &[
@@ -147,7 +147,12 @@ fn wait_for_terminal(
     }
 }
 
-fn run_tosa_bytes(artifact: &[u8], inputs: &[&[u8]], output_bytes: usize) -> Option<Vec<u8>> {
+fn run_tosa_bytes(
+    artifact: &[u8],
+    target: Target,
+    inputs: &[&[u8]],
+    output_bytes: usize,
+) -> Option<Vec<u8>> {
     let backend = match CoreMlAccelerator::new_tosa() {
         Ok(backend) => backend,
         Err(InitError::NeuralEngineUnavailable) => return None,
@@ -185,14 +190,21 @@ fn run_tosa_bytes(artifact: &[u8], inputs: &[&[u8]], output_bytes: usize) -> Opt
         .into_parts();
 
     let model = parse(artifact).unwrap();
-    let program = backend
-        .load_program(
-            &context,
-            model
-                .artifact_ref(COREML_TOSA_TARGET, REQUIRED_RESIDENT_BYTES)
-                .unwrap(),
-        )
-        .unwrap();
+    let program = match backend.load_program(
+        &context,
+        model.artifact_ref(target, REQUIRED_RESIDENT_BYTES).unwrap(),
+    ) {
+        Ok(program) => program,
+        Err(BackendError::Unsupported) if target == COREML_TOSA_INTEGER_TARGET => {
+            backend.free_buffer(output).unwrap();
+            for buffer in input_buffers {
+                backend.free_buffer(buffer).unwrap();
+            }
+            backend.destroy_context(context).unwrap();
+            return None;
+        }
+        Err(error) => panic!("Core ML TOSA load failed: {error:?}"),
+    };
     let queue = backend
         .create_queue(&context, QueueDesc::default())
         .unwrap();
@@ -242,6 +254,7 @@ fn run_tosa_fp32(artifact: &[u8], inputs: &[&[f32]], output_elements: usize) -> 
     let input_bytes = encoded.iter().map(Vec::as_slice).collect::<Vec<_>>();
     run_tosa_bytes(
         artifact,
+        COREML_TOSA_TARGET,
         &input_bytes,
         output_elements.checked_mul(4).unwrap(),
     )
@@ -266,6 +279,7 @@ fn run_tosa_fp16(artifact: &[u8], inputs: &[&[u16]], output_elements: usize) -> 
     let input_bytes = encoded.iter().map(Vec::as_slice).collect::<Vec<_>>();
     run_tosa_bytes(
         artifact,
+        COREML_TOSA_TARGET,
         &input_bytes,
         output_elements.checked_mul(2).unwrap(),
     )
@@ -386,6 +400,43 @@ fn lowers_and_executes_compute_heavy_tosa_matmul_fp16() {
     };
 
     assert!(MATMUL_FP16.output_matches(0, &actual));
+}
+
+#[test]
+fn lowers_and_executes_exact_int8_identity() {
+    let input = IDENTITY_INT8.inputs[0].bytes;
+    let Some(actual) = run_tosa_bytes(
+        IDENTITY_INT8.artifact,
+        COREML_TOSA_INTEGER_TARGET,
+        &[input],
+        IDENTITY_INT8.outputs[0].bytes.len(),
+    ) else {
+        // INT8 multi-array model boundaries are a macOS 26 runtime capability.
+        return;
+    };
+    assert!(IDENTITY_INT8.output_matches(0, &actual));
+}
+
+#[test]
+fn lowers_and_executes_exact_int8_matmul() {
+    let inputs = MATMUL_INT8
+        .inputs
+        .iter()
+        .map(|tensor| tensor.bytes)
+        .collect::<Vec<_>>();
+    let Some(actual) = run_tosa_bytes(
+        MATMUL_INT8.artifact,
+        COREML_TOSA_INTEGER_TARGET,
+        &inputs,
+        MATMUL_INT8.outputs[0].values.len().checked_mul(4).unwrap(),
+    ) else {
+        return;
+    };
+    let actual = actual
+        .chunks_exact(4)
+        .map(|bytes| i32::from_ne_bytes(bytes.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert!(MATMUL_INT8.output_matches(0, &actual));
 }
 
 #[test]

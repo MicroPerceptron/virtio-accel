@@ -16,36 +16,38 @@ cross-target dependency checks intact.
 ## Production TOSA artifacts
 
 `CoreMlAccelerator::new_tosa()` accepts raw TOSA 1.0 FlatBuffers using
-`virtio_accel_tosa::ARTIFACT_FORMAT` and `COREML_TOSA_TARGET`. Program loading verifies the bounded
-FlatBuffer, runs the complete TOSA semantic and lowering analysis, emits a Core ML neural-network
-model in memory, and asks Core ML to compile and load it. A unique temporary `.mlmodel` source exists
+`virtio_accel_tosa::ARTIFACT_FORMAT`. Floating-point programs declare `COREML_TOSA_TARGET`; exact
+INT8 programs declare `COREML_TOSA_INTEGER_TARGET`. Program loading verifies the bounded
+FlatBuffer, runs the complete TOSA semantic and lowering analysis, emits a Core ML NeuralNetwork
+or ML Program model in memory, and asks Core ML to compile and load it. A unique temporary `.mlmodel` source exists
 only inside the native bridge for that synchronous compile and is removed before `load_program`
 returns. No Core ML path, protobuf, feature name, or crate dependency crosses into the facade,
 device, guest, transport, or queue crates.
 
-The initial lowering tier accepts one static region and basic block with static `FP16`/`FP32`
+The floating-point lowering tier accepts one static region and basic block with static `FP16`/`FP32`
 boundary tensors (`INT32` outputs are also accepted for operators such as `ARGMAX`). It covers
 identity and constants; floating-point unary, binary, comparison, logical, selection, clamp, and
 reduction layers; batched matrix multiplication; unpadded NHWC max pooling through explicit NCHW
 layout transposes; and concat, reshape, reverse, and transpose. `supports_tosa_operator` exposes the
 operator set; unsupported attribute combinations such as nonzero pooling padding are rejected while
 loading. Unsupported control flow, dynamic shapes, profiles, extensions, dtypes, and operators are
-likewise rejected before admission.
+likewise rejected before admission. The separate integer-profile tier currently admits exact INT8
+identity and INT8 batched matrix multiplication with INT32 output. MATMUL widens both operands to
+INT32, explicitly subtracts the two TOSA zero points, and accumulates in INT32; it never converts
+through floating point.
 
 ### Low-precision boundary
 
-`supports_tosa_dtype` exposes the current model-boundary capability independently of operator
-coverage. This NeuralNetwork-format lowering accepts FP16 and FP32 tensors, plus the restricted
-INT32 outputs described above. It deliberately rejects TOSA INT8, packed INT4, FP8E4M3, and
-FP8E5M2 before native compilation.
+`supports_tosa_dtype` exposes model-boundary encoding capability independently of operator
+coverage. FP16, FP32, INT8, and restricted INT32 outputs are encoded. INT8 requires the ML Program
+path and macOS 26 or newer; older runtimes reject `COREML_TOSA_INTEGER_TARGET` before compilation.
+The native suite executes identity across all signed-byte edge values and a non-square MATMUL with
+nonzero zero points against the shared exact Rust oracle.
 
-Core ML's INT8 model inputs and outputs require the newer ML Program path and operating-system
-support; merely encoding INT8 multi-array metadata in a NeuralNetwork model is not executable.
-Core ML INT4 support is compressed-weight storage rather than TOSA INT4 tensor semantics, and Core
-ML exposes no FP8 tensor boundary. A future quantized CoreML tier therefore needs an ML Program
-lowering with explicit activation/weight legalization and calibration metadata. Until then, the
-shared conformance crate supplies device-neutral packed fixtures for other backends without
-silently dequantizing or falsely advertising ANE execution here.
+Packed INT4, FP8E4M3, and FP8E5M2 remain unsupported. Core ML INT4 facilities are compressed-weight
+storage rather than TOSA INT4 tensor semantics, and Core ML exposes no FP8 tensor boundary. Those
+artifacts are rejected without silent dequantization. Additional INT8 operators likewise require
+explicit integer legalization and exact shared-oracle coverage before admission.
 
 Bindings use a device-neutral deterministic rule: block inputs occupy slots `0..N` in declared
 order and block outputs occupy `N..N+M`. Lowering assigns private Core ML feature and blob names;
@@ -102,9 +104,10 @@ cargo test -p virtio-accel-coreml
 ```
 
 The native suite consumes the same numerical TOSA corpus exported by
-`virtio-accel-conformance`. Both the production-oriented FP16 tier and the FP32 reference tier check
+`virtio-accel-conformance`. The FP16 and FP32 tiers check
 non-finite values, subnormals and signed zero, non-square batched matrix multiplication, and
-multi-channel NHWC max-pooling layout on the ANE. The suite also checks overlapping asynchronous
+multi-channel NHWC max-pooling layout through Core ML. On macOS 26+, the INT8 tier additionally
+checks bit-exact identity and INT32-accumulating MATMUL. The suite also checks overlapping asynchronous
 predictions and repeated compile/unload source cleanup. Future host backends inherit these exact
 artifacts and oracles instead of substituting provider-specific graphs.
 

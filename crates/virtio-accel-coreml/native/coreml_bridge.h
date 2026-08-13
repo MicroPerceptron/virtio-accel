@@ -57,6 +57,8 @@ typedef void (*va_coreml_release_context_fn)(void *context);
 
 int va_coreml_has_neural_engine(void);
 
+int va_coreml_supports_int8(void);
+
 void *va_coreml_model_load(const uint8_t *path,
                            size_t path_len,
                            const struct va_coreml_feature_mapping *mappings,

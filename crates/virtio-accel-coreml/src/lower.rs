@@ -29,6 +29,7 @@ pub const COREML_TOSA_TARGET: Target = Target::new(
 const COREML_SPECIFICATION_VERSION: u64 = 7;
 const COREML_FLOAT16: u64 = 65_552;
 const COREML_FLOAT32: u64 = 65_568;
+const COREML_INT8: u64 = 131_080;
 const COREML_INT32: u64 = 131_104;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,14 +121,20 @@ pub const fn supports_tosa_operator(op: Op) -> bool {
 
 /// Whether this lowering can expose `dtype` at a Core ML model boundary.
 ///
-/// Operator-specific validation still applies. In particular, INT32 is limited to outputs from
-/// operators such as `ARGMAX`. Quantized TOSA tensor types require a future ML Program lowering;
-/// the current dependency-free NeuralNetwork encoder rejects them during program admission.
+/// Operator-specific and target-specific validation still applies. INT8 is admitted only through
+/// the integer-profile ML Program tier on macOS 26 or newer; it is never silently dequantized into
+/// the floating-point NeuralNetwork tier.
 pub const fn supports_tosa_dtype(dtype: DType) -> bool {
-    matches!(dtype, DType::FP16 | DType::FP32 | DType::INT32)
+    matches!(
+        dtype,
+        DType::FP16 | DType::FP32 | DType::INT8 | DType::INT32
+    )
 }
 
 pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, LoweringError> {
+    if target == crate::mlprogram::COREML_TOSA_INTEGER_TARGET {
+        return crate::mlprogram::lower_integer_tosa(bytes, target);
+    }
     if target != COREML_TOSA_TARGET {
         return Err(LoweringError::UnsupportedGraph);
     }
@@ -211,7 +218,7 @@ fn tensor<'a>(
     }
 }
 
-fn encode_feature(
+pub(crate) fn encode_feature(
     description: &mut Vec<u8>,
     field: u32,
     name: &str,
@@ -691,7 +698,9 @@ fn encode_constant(
     Ok(())
 }
 
-fn static_shape(tensor: virtio_accel_tosa::Tensor<'_>) -> Result<Vec<i32>, LoweringError> {
+pub(crate) fn static_shape(
+    tensor: virtio_accel_tosa::Tensor<'_>,
+) -> Result<Vec<i32>, LoweringError> {
     tensor.rank().ok_or(LoweringError::UnsupportedGraph)?;
     let shape = tensor.dimensions().collect::<Vec<_>>();
     if shape.iter().any(|dimension| *dimension <= 0) {
@@ -704,6 +713,7 @@ fn coreml_data_type(dtype: DType) -> Result<u64, LoweringError> {
     match dtype {
         DType::FP16 => Ok(COREML_FLOAT16),
         DType::FP32 => Ok(COREML_FLOAT32),
+        DType::INT8 => Ok(COREML_INT8),
         DType::INT32 => Ok(COREML_INT32),
         _ => Err(LoweringError::UnsupportedType(dtype)),
     }
@@ -815,7 +825,7 @@ mod tests {
             Version::TOSA_1_0,
             ProfileSet::INTEGER,
             Level::Level8K,
-            ExtensionSet::NONE,
+            ExtensionSet::INT4,
         );
 
         assert!(matches!(
@@ -825,32 +835,30 @@ mod tests {
     }
 
     #[test]
-    fn reports_low_precision_types_as_unsupported_in_the_neural_network_lowering() {
+    fn reports_int8_for_the_separate_ml_program_tier() {
         assert!(supports_tosa_dtype(DType::FP16));
         assert!(supports_tosa_dtype(DType::FP32));
         assert!(supports_tosa_dtype(DType::INT32));
-        assert!(!supports_tosa_dtype(DType::INT8));
+        assert!(supports_tosa_dtype(DType::INT8));
         assert!(!supports_tosa_dtype(DType::INT4));
         assert!(!supports_tosa_dtype(DType::FP8E4M3));
         assert!(!supports_tosa_dtype(DType::FP8E5M2));
     }
 
     #[test]
-    fn rejects_shared_quantized_artifacts_at_the_declared_target_boundary() {
+    fn admits_only_the_implemented_int8_low_precision_tier() {
         use virtio_accel_conformance::numerics::{
             IDENTITY_FP8E4M3, IDENTITY_FP8E5M2, IDENTITY_INT4, IDENTITY_INT8,
         };
 
+        assert!(
+            lower_tosa(
+                IDENTITY_INT8.artifact,
+                crate::mlprogram::COREML_TOSA_INTEGER_TARGET
+            )
+            .is_ok()
+        );
         for (case, target) in [
-            (
-                IDENTITY_INT8,
-                Target::new(
-                    Version::TOSA_1_0,
-                    ProfileSet::INTEGER,
-                    Level::Level8K,
-                    ExtensionSet::NONE,
-                ),
-            ),
             (
                 IDENTITY_INT4,
                 Target::new(

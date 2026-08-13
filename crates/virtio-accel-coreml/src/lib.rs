@@ -1,8 +1,8 @@
 //! Core ML host backend for Apple Neural Engine capable Macs.
 //!
 //! The production path accepts device-neutral TOSA 1.0 FlatBuffers, validates and analyzes them
-//! with `virtio-accel-tosa`, and lowers supported static floating-point graphs inside this
-//! host-native crate. Core ML models are configured with `CPUAndNeuralEngine`: supported
+//! with `virtio-accel-tosa`, and lowers supported static floating-point and exact INT8 graphs
+//! inside this host-native crate. Core ML models are configured with `CPUAndNeuralEngine`: supported
 //! operations may execute on the ANE, while Core ML remains free to place unsupported operations
 //! on the CPU. Program buffers are page-aligned allocations wrapped directly by `MLMultiArray`;
 //! output execution is accepted only when Core ML uses the same allocation as its output backing.
@@ -11,9 +11,11 @@
 
 mod artifact;
 mod lower;
+mod mlprogram;
 
 pub use artifact::{ArtifactBuildError, CoreMlArtifact, FeatureRole};
 pub use lower::{COREML_TOSA_TARGET, LoweringError, supports_tosa_dtype, supports_tosa_operator};
+pub use mlprogram::COREML_TOSA_INTEGER_TARGET;
 
 use virtio_accel_core::{ArtifactFormat, TargetIdentity};
 

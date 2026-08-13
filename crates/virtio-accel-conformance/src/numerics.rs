@@ -85,6 +85,39 @@ pub struct PackedTensor {
     pub bytes: &'static [u8],
 }
 
+/// One immutable INT32 tensor produced by an integer-profile acceptance case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Int32Tensor {
+    /// Static row-major shape.
+    pub shape: &'static [usize],
+    /// Exact row-major tensor elements.
+    pub values: &'static [i32],
+}
+
+/// A stable TOSA INT8 matrix multiplication with exact INT32 accumulation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TosaInt8MatmulCase {
+    /// Diagnostic case name.
+    pub name: &'static str,
+    /// TOSA 1.0 FlatBuffer payload.
+    pub artifact: &'static [u8],
+    /// Signed INT8 block inputs in declared slot order.
+    pub inputs: &'static [PackedTensor],
+    /// Compile-time zero points for the left and right operands.
+    pub zero_points: [i8; 2],
+    /// Exact INT32 block outputs in declared slot order.
+    pub outputs: &'static [Int32Tensor],
+}
+
+impl TosaInt8MatmulCase {
+    /// Compare one backend output with the exact INT32 oracle.
+    pub fn output_matches(&self, output: usize, actual: &[i32]) -> bool {
+        self.outputs
+            .get(output)
+            .is_some_and(|expected| expected.values == actual)
+    }
+}
+
 /// A stable TOSA graph and packed low-precision oracle shared by host backends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TosaPackedCase {
@@ -337,6 +370,33 @@ pub const IDENTITY_INT8: TosaPackedCase = TosaPackedCase {
     outputs: IDENTITY_INT8_TENSORS,
 };
 
+const MATMUL_INT8_LHS: &[u8] = &[0x80, 0xff, 0x7f, 0x05, 0xfa, 0x07];
+const MATMUL_INT8_RHS: &[u8] = &[0x08, 0xf7, 0x0a, 0x0b, 0x0c, 0xf3];
+const MATMUL_INT8_INPUTS: &[PackedTensor] = &[
+    PackedTensor {
+        shape: &[1, 2, 3],
+        bytes: MATMUL_INT8_LHS,
+    },
+    PackedTensor {
+        shape: &[1, 3, 2],
+        bytes: MATMUL_INT8_RHS,
+    },
+];
+const MATMUL_INT8_OUTPUT: &[i32] = &[538, -544, 88, -260];
+const MATMUL_INT8_OUTPUTS: &[Int32Tensor] = &[Int32Tensor {
+    shape: &[1, 2, 2],
+    values: MATMUL_INT8_OUTPUT,
+}];
+
+/// Non-square INT8 batched matrix multiplication with nonzero zero points and INT32 accumulation.
+pub const MATMUL_INT8: TosaInt8MatmulCase = TosaInt8MatmulCase {
+    name: "matmul-int8",
+    artifact: include_bytes!("data/matmul-int8-v1.0.0.tosa"),
+    inputs: MATMUL_INT8_INPUTS,
+    zero_points: [-2, 3],
+    outputs: MATMUL_INT8_OUTPUTS,
+};
+
 // Logical values [-7, -3, -1, 0, 1, 3, 6, 7], packed low nibble first.
 const IDENTITY_INT4_BYTES: &[u8] = &[0xd9, 0x0f, 0x31, 0x76];
 const IDENTITY_INT4_TENSORS: &[PackedTensor] = &[PackedTensor {
@@ -472,6 +532,34 @@ mod tests {
     }
 
     #[test]
+    fn int8_matmul_oracle_is_derived_from_the_shared_exact_dot_product() {
+        use virtio_accel_tosa::dot_i8_i32;
+
+        let lhs = MATMUL_INT8.inputs[0].bytes;
+        let rhs = MATMUL_INT8.inputs[1].bytes;
+        let mut actual = Vec::new();
+        for row in 0..2 {
+            for column in 0..2 {
+                let left = &lhs[row * 3..row * 3 + 3];
+                let right = [rhs[column], rhs[2 + column], rhs[4 + column]];
+                actual.push(
+                    dot_i8_i32(
+                        left,
+                        &right,
+                        MATMUL_INT8.zero_points[0],
+                        MATMUL_INT8.zero_points[1],
+                        0,
+                    )
+                    .unwrap(),
+                );
+            }
+        }
+        assert!(MATMUL_INT8.output_matches(0, &actual));
+        assert!(!MATMUL_INT8.output_matches(0, &[538, -544]));
+        assert!(!MATMUL_INT8.output_matches(1, &actual));
+    }
+
+    #[test]
     fn packed_artifacts_are_valid_for_their_declared_tosa_profiles_and_extensions() {
         let integer = Target::new(
             Version::TOSA_1_0,
@@ -517,5 +605,9 @@ mod tests {
                 Some(case.inputs[0].bytes.len())
             );
         }
+        parse(MATMUL_INT8.artifact)
+            .unwrap()
+            .validate_for(integer)
+            .unwrap();
     }
 }

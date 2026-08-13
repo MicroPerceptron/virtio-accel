@@ -44,6 +44,7 @@ mod attribute;
 )]
 #[rustfmt::skip]
 mod generated;
+mod integer;
 mod numeric;
 mod runtime;
 mod semantic;
@@ -64,6 +65,7 @@ pub use artifact::{
 pub use attribute::{
     I32List, I32Values, NanPropagationMode, OpAttributes, ResizeMode, RoundingMode,
 };
+pub use integer::{IntegerError, apply_scale_16, apply_scale_32, dot_i8_i32, rescale_i32_to_i8};
 pub use numeric::{
     fp8e4m3_to_f32, fp8e5m2_to_f32, low_precision_storage_bytes, pack_int4, unpack_int4,
 };

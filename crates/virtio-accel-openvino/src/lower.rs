@@ -33,6 +33,14 @@ pub const OPENVINO_TOSA_TARGET: Target = Target::new(
     ExtensionSet::NONE,
 );
 
+/// TOSA integer-profile target lowered with exact INT8 storage and INT32 arithmetic.
+pub const OPENVINO_TOSA_INTEGER_TARGET: Target = Target::new(
+    Version::TOSA_1_0,
+    ProfileSet::INTEGER,
+    Level::Level8K,
+    ExtensionSet::NONE,
+);
+
 /// Weights-blob entries are aligned generously so every element type loads aligned.
 const WEIGHTS_ALIGNMENT: usize = 64;
 
@@ -60,6 +68,7 @@ impl std::error::Error for LoweringError {}
 pub(crate) enum OvElement {
     F32,
     F16,
+    I8,
     I32,
     I64,
     Bool,
@@ -71,6 +80,7 @@ impl OvElement {
         match self {
             Self::F32 => "f32",
             Self::F16 => "f16",
+            Self::I8 => "i8",
             Self::I32 => "i32",
             Self::I64 => "i64",
             Self::Bool => "boolean",
@@ -82,6 +92,7 @@ impl OvElement {
         match self {
             Self::F32 => "FP32",
             Self::F16 => "FP16",
+            Self::I8 => "I8",
             Self::I32 => "I32",
             Self::I64 => "I64",
             Self::Bool => "BOOL",
@@ -93,6 +104,7 @@ impl OvElement {
         match self {
             Self::F32 | Self::I32 => 4,
             Self::F16 => 2,
+            Self::I8 => 1,
             Self::I64 => 8,
             Self::Bool => 1,
         }
@@ -102,6 +114,7 @@ impl OvElement {
         match dtype {
             DType::FP32 => Ok(Self::F32),
             DType::FP16 => Ok(Self::F16),
+            DType::INT8 => Ok(Self::I8),
             DType::INT32 => Ok(Self::I32),
             DType::BOOL => Ok(Self::Bool),
             _ => Err(LoweringError::UnsupportedType(dtype)),
@@ -114,6 +127,7 @@ fn boundary_element(dtype: DType) -> Result<OvElement, LoweringError> {
     match dtype {
         DType::FP16 => Ok(OvElement::F16),
         DType::FP32 => Ok(OvElement::F32),
+        DType::INT8 => Ok(OvElement::I8),
         DType::INT32 => Ok(OvElement::I32),
         _ => Err(LoweringError::UnsupportedType(dtype)),
     }
@@ -196,12 +210,14 @@ pub const fn supports_tosa_operator(op: Op) -> bool {
 
 /// Whether this lowering can expose `dtype` at an OpenVINO model boundary.
 ///
-/// Operator-specific validation still applies. In particular, INT32 is limited to outputs from
-/// operators such as `ARGMAX`. Quantized TOSA tensor types require a future quantization-aware
-/// lowering tier with explicit calibration semantics; the current IR encoder rejects them during
-/// program admission instead of silently dequantizing.
+/// Operator-specific and target-specific validation still applies. INT8 is currently limited to
+/// exact identity and zero-point-aware MATMUL; other integer operators are rejected instead of
+/// silently dequantized.
 pub const fn supports_tosa_dtype(dtype: DType) -> bool {
-    matches!(dtype, DType::FP16 | DType::FP32 | DType::INT32)
+    matches!(
+        dtype,
+        DType::FP16 | DType::FP32 | DType::INT8 | DType::INT32
+    )
 }
 
 /// A produced tensor inside the document: one output port of one layer.
@@ -398,7 +414,7 @@ fn element_byte_len(element: OvElement, dims: &[i64]) -> Result<u64, LoweringErr
 }
 
 pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, LoweringError> {
-    if target != OPENVINO_TOSA_TARGET {
+    if target != OPENVINO_TOSA_TARGET && target != OPENVINO_TOSA_INTEGER_TARGET {
         return Err(LoweringError::UnsupportedGraph);
     }
     let model = parse(bytes).map_err(LoweringError::Parse)?;
@@ -548,6 +564,9 @@ fn encode_operator(
     }
     let all_inputs = analysis.operator_inputs(operator_id);
     let outputs = analysis.operator_outputs(operator_id);
+    if op == Op::MATMUL && tensor(analysis, all_inputs[0])?.dtype() == DType::INT8 {
+        return encode_int8_matmul(builder, analysis, operator_id, all_inputs, outputs);
+    }
     let inputs = match op {
         Op::MATMUL => {
             for zero_point in &all_inputs[2..4] {
@@ -872,6 +891,84 @@ fn encode_max_pool2d(
     Ok(())
 }
 
+/// Lower TOSA INT8 MATMUL without relying on provider-specific implicit quantization.
+///
+/// TOSA requires `(a - a_zp) * (b - b_zp)` with exact INT32 accumulation. OpenVINO's ordinary
+/// MatMul does not carry TOSA zero points, so both operands are widened and adjusted explicitly.
+/// This preserves the integer-profile contract on every plugin; a plugin may fuse the pattern when
+/// it can prove an equivalent optimized kernel.
+fn encode_int8_matmul(
+    builder: &mut IrBuilder,
+    analysis: &TosaAnalysis<'_>,
+    operator_id: virtio_accel_tosa::OperatorId,
+    inputs: &[ValueId],
+    outputs: &[ValueId],
+) -> Result<(), LoweringError> {
+    if inputs.len() != 4 || outputs.len() != 1 {
+        return Err(LoweringError::UnsupportedGraph);
+    }
+    let output = tensor(analysis, outputs[0])?;
+    if tensor(analysis, inputs[0])?.dtype() != DType::INT8
+        || tensor(analysis, inputs[1])?.dtype() != DType::INT8
+        || output.dtype() != DType::INT32
+    {
+        return Err(LoweringError::UnsupportedGraph);
+    }
+    let read_zero_point = |value| {
+        let bytes = analysis
+            .serialized_constant(value)
+            .ok_or(LoweringError::UnsupportedGraph)?;
+        if bytes.len() != 1 || tensor(analysis, value)?.dtype() != DType::INT8 {
+            return Err(LoweringError::UnsupportedGraph);
+        }
+        Ok(i32::from(bytes[0] as i8))
+    };
+    let zero_points = [read_zero_point(inputs[2])?, read_zero_point(inputs[3])?];
+    let stem = format!("tosa_{}_matmul", operator_id.get());
+    let mut adjusted = Vec::with_capacity(2);
+    for index in 0..2 {
+        let dims = static_dims(tensor(analysis, inputs[index])?)?;
+        let source = builder.source(inputs[index])?;
+        let widened = builder.emit_layer(
+            "Convert",
+            "opset1",
+            &format!("{stem}_widen_{index}"),
+            "destination_type=\"i32\"",
+            &[(source, dims.as_slice())],
+            &[(OvElement::I32, dims.as_slice())],
+        )[0];
+        let zero_point = builder.emit_const(
+            &format!("{stem}_zero_point_{index}"),
+            OvElement::I32,
+            &[],
+            &zero_points[index].to_le_bytes(),
+        )?;
+        let shifted = builder.emit_layer(
+            "Subtract",
+            "opset1",
+            &format!("{stem}_shift_{index}"),
+            "auto_broadcast=\"numpy\"",
+            &[(widened, dims.as_slice()), (zero_point, &[])],
+            &[(OvElement::I32, dims.as_slice())],
+        )[0];
+        adjusted.push((shifted, dims));
+    }
+    let output_dims = static_dims(output)?;
+    let result = builder.emit_layer(
+        "MatMul",
+        "opset1",
+        &stem,
+        "transpose_a=\"false\" transpose_b=\"false\"",
+        &[
+            (adjusted[0].0, adjusted[0].1.as_slice()),
+            (adjusted[1].0, adjusted[1].1.as_slice()),
+        ],
+        &[(OvElement::I32, output_dims.as_slice())],
+    )[0];
+    builder.set_source(outputs[0], result);
+    Ok(())
+}
+
 /// TOSA `ARGMAX` lowers to `TopK` (k = 1, stable lowest-index ties) plus a `Squeeze` that drops
 /// the kept axis; only the TopK indices output is consumed and the values port dangles, which
 /// the runtime accepts (pinned by a native unit test).
@@ -987,7 +1084,7 @@ fn encode_tosa_constant(
 ) -> Result<(), LoweringError> {
     let tensor = tensor(analysis, output)?;
     let dtype = tensor.dtype();
-    if !matches!(dtype, DType::FP16 | DType::FP32 | DType::BOOL) {
+    if !matches!(dtype, DType::FP16 | DType::FP32 | DType::INT8 | DType::BOOL) {
         return Err(LoweringError::UnsupportedType(dtype));
     }
     let element = OvElement::for_dtype(dtype)?;
@@ -1045,10 +1142,16 @@ fn validate_operator_types(
         }
     };
     let is_float = |dtype| matches!(dtype, DType::FP16 | DType::FP32);
+    let is_float_or_int8 = |dtype| matches!(dtype, DType::FP16 | DType::FP32 | DType::INT8);
     let is_bool = |dtype| dtype == DType::BOOL;
     let is_int32 = |dtype| dtype == DType::INT32;
 
     match op {
+        Op::IDENTITY => {
+            for value in inputs.iter().chain(outputs) {
+                require(*value, is_float_or_int8)?;
+            }
+        }
         Op::LOGICAL_AND | Op::LOGICAL_OR | Op::LOGICAL_XOR | Op::LOGICAL_NOT => {
             for value in inputs.iter().chain(outputs) {
                 require(*value, is_bool)?;
@@ -1139,7 +1242,8 @@ mod tests {
     use super::*;
     use virtio_accel_conformance::numerics::{
         IDENTITY_EDGES_FP16, IDENTITY_EDGES_FP32, IDENTITY_FP8E4M3, IDENTITY_FP8E5M2,
-        IDENTITY_INT4, IDENTITY_INT8, MATMUL_FP16, MATMUL_FP32, MAX_POOL2D_FP16, MAX_POOL2D_FP32,
+        IDENTITY_INT4, IDENTITY_INT8, MATMUL_FP16, MATMUL_FP32, MATMUL_INT8, MAX_POOL2D_FP16,
+        MAX_POOL2D_FP32,
     };
 
     const IDENTITY_FP32_LOCAL: &[u8] = include_bytes!("../tests/data/identity-fp32-v1.0.0.tosa");
@@ -1188,7 +1292,7 @@ mod tests {
             Version::TOSA_1_0,
             ProfileSet::INTEGER,
             Level::Level8K,
-            ExtensionSet::NONE,
+            ExtensionSet::INT4,
         );
         assert_eq!(
             lower_tosa(IDENTITY_FP32_LOCAL, integer_target).unwrap_err(),
@@ -1197,19 +1301,18 @@ mod tests {
     }
 
     #[test]
-    fn reports_low_precision_types_as_unsupported_in_the_ir_lowering() {
-        for dtype in [DType::INT8, DType::INT4, DType::FP8E4M3, DType::FP8E5M2] {
+    fn reports_the_exact_integer_boundary_independently_of_other_low_precision_types() {
+        for dtype in [DType::INT4, DType::FP8E4M3, DType::FP8E5M2] {
             assert!(!supports_tosa_dtype(dtype), "{dtype:?}");
         }
-        for dtype in [DType::FP16, DType::FP32, DType::INT32] {
+        for dtype in [DType::FP16, DType::FP32, DType::INT8, DType::INT32] {
             assert!(supports_tosa_dtype(dtype), "{dtype:?}");
         }
     }
 
     #[test]
-    fn rejects_shared_quantized_artifacts_at_the_declared_target_boundary() {
+    fn rejects_unimplemented_low_precision_extensions_at_the_declared_target_boundary() {
         for (case, extensions, profiles) in [
-            (IDENTITY_INT8, ExtensionSet::NONE, ProfileSet::INTEGER),
             (IDENTITY_INT4, ExtensionSet::INT4, ProfileSet::INTEGER),
             (
                 IDENTITY_FP8E4M3,
@@ -1230,6 +1333,40 @@ mod tests {
                 case.name
             );
         }
+    }
+
+    #[test]
+    fn lowers_int8_identity_with_direct_byte_boundaries() {
+        let lowered = lower_tosa(IDENTITY_INT8.artifact, OPENVINO_TOSA_INTEGER_TARGET).unwrap();
+        let xml = xml_str(&lowered);
+        assert!(xml.contains("element_type=\"i8\""));
+        assert!(xml.contains("precision=\"I8\""));
+        assert!(xml.contains("destination_type=\"i8\""));
+        assert_eq!(lowered.features[0].element, OvElement::I8);
+        assert_eq!(lowered.features[0].byte_len, 8);
+        assert_eq!(lowered.features[1].byte_len, 8);
+    }
+
+    #[test]
+    fn lowers_int8_matmul_with_explicit_zero_point_legalization() {
+        let lowered = lower_tosa(MATMUL_INT8.artifact, OPENVINO_TOSA_INTEGER_TARGET).unwrap();
+        let xml = xml_str(&lowered);
+        assert_eq!(xml.matches("type=\"Parameter\"").count(), 2);
+        assert_eq!(xml.matches("type=\"Convert\"").count(), 2);
+        assert_eq!(xml.matches("type=\"Subtract\"").count(), 2);
+        assert_eq!(xml.matches("type=\"MatMul\"").count(), 1);
+        assert!(xml.contains("destination_type=\"i32\""));
+        assert!(xml.contains("element_type=\"i8\""));
+        assert!(xml.contains("element_type=\"i32\""));
+        assert_eq!(lowered.features[0].element, OvElement::I8);
+        assert_eq!(lowered.features[1].element, OvElement::I8);
+        assert_eq!(lowered.features[2].element, OvElement::I32);
+        assert_eq!(lowered.features[2].byte_len, 16);
+        let zero_points = [
+            i32::from_le_bytes(lowered.weights[0..4].try_into().unwrap()),
+            i32::from_le_bytes(lowered.weights[64..68].try_into().unwrap()),
+        ];
+        assert_eq!(zero_points, MATMUL_INT8.zero_points.map(i32::from));
     }
 
     #[test]

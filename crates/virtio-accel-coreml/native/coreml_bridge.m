@@ -131,6 +131,10 @@ int va_coreml_has_neural_engine(void) {
     }
 }
 
+int va_coreml_supports_int8(void) {
+    return va_macos_at_least(26, 0, 0) ? 1 : 0;
+}
+
 static NSString *va_string(const uint8_t *bytes, size_t length) {
     if (bytes == NULL || length == 0 || length > NSIntegerMax) {
         return nil;
@@ -138,6 +142,8 @@ static NSString *va_string(const uint8_t *bytes, size_t length) {
     return [[NSString alloc] initWithBytes:bytes length:length encoding:NSUTF8StringEncoding];
 }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
 static BOOL va_data_type_size(MLMultiArrayDataType type, uint64_t *size) {
     switch (type) {
     case MLMultiArrayDataTypeDouble:
@@ -150,10 +156,14 @@ static BOOL va_data_type_size(MLMultiArrayDataType type, uint64_t *size) {
     case MLMultiArrayDataTypeFloat16:
         *size = 2;
         return YES;
+    case MLMultiArrayDataTypeInt8:
+        *size = 1;
+        return YES;
     default:
         return NO;
     }
 }
+#pragma clang diagnostic pop
 
 static VAFeatureSpec *va_feature_spec(MLFeatureDescription *description,
                                       uint32_t slot,
