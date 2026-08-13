@@ -94,11 +94,14 @@ tier of an existing crate.
 
 Project-authored code in portable crates, reference crates, and fuzz harness support code forbids or
 denies unsafe code at the crate root. This is an intentional v1 invariant, not incidental linting.
-There are two reviewed, confined exceptions. The host-native `virtio-accel-coreml` adapter's Rust
+There are three reviewed, confined exceptions. The host-native `virtio-accel-coreml` adapter's Rust
 FFI and aligned-allocation code is documented in `crates/virtio-accel-coreml/SAFETY.md`; non-macOS
-builds still forbid unsafe code. `virtio-accel-tosa` denies unsafe code globally but locally permits
-its private, checked-in official FlatBuffers bindings after bounded verification; the boundary and
-regeneration procedure are documented in `crates/virtio-accel-tosa/SAFETY.md`.
+builds still forbid unsafe code. The host-native `virtio-accel-openvino` adapter's OpenVINO C API
+FFI and aligned-allocation code is documented in `crates/virtio-accel-openvino/SAFETY.md`; builds
+without a detected OpenVINO runtime still forbid unsafe code. `virtio-accel-tosa` denies unsafe
+code globally but locally permits its private, checked-in official FlatBuffers bindings after
+bounded verification; the boundary and regeneration procedure are documented in
+`crates/virtio-accel-tosa/SAFETY.md`.
 
 A future unsafe exception requires all of the following in one reviewed change:
 
@@ -132,7 +135,7 @@ declares its own `description` and `readme`, and carries its own byte-identical 
 root license files do not reach the sub-crate tarballs; the copies exist for that reason and are
 copies rather than symlinks because CI runs `windows-latest`.
 
-`ci/check-release-policy.py` enforces all of this against an explicit twelve-crate allowlist. A new
+`ci/check-release-policy.py` enforces all of this against an explicit thirteen-crate allowlist. A new
 package fails that check until it is added to the allowlist, which forces a decision about whether
 it is public rather than letting it default either way. The check also validates the crates.io
 keyword and category limits, which neither `cargo package` nor `cargo publish --dry-run` catches
@@ -142,7 +145,7 @@ The `fuzz/` harness is a separate workspace at version `0.0.0` and stays `publis
 
 ## Publication, yank, and rollback
 
-Twelve packages are published to crates.io. Publication is ordered: a crate cannot be published before
+Thirteen packages are published to crates.io. Publication is ordered: a crate cannot be published before
 every crate it depends on, and that includes development dependencies, because a published crate's
 versioned dev-dependencies must resolve from the registry for `cargo test` to run on the packaged
 source.
@@ -160,7 +163,8 @@ source.
 | 9 | `virtio-accel-device` | `core`, `proto`, `transport` | `mock` |
 | 10 | `virtio-accel-conformance` | `core` | `mock`, `tosa` |
 | 11 | `virtio-accel-coreml` | `core`, `tosa` | `conformance` |
-| 12 | `virtio-accel` | the six runtime crates | `conformance`, `mock`, `cleanroom` |
+| 12 | `virtio-accel-openvino` | `core`, `tosa` | `conformance` |
+| 13 | `virtio-accel` | the six runtime crates | `conformance`, `mock`, `cleanroom` |
 
 This order is executable, not just documentary: `ci/publish-dry-run.py` walks it against an isolated
 local registry, adding each crate only after it has been built, tested, and documented from its own

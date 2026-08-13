@@ -32,6 +32,7 @@ members = [
     "crates/virtio-accel-device",
     "crates/virtio-accel-guest",
     "crates/virtio-accel-mock",
+    "crates/virtio-accel-openvino",
     "crates/virtio-accel-proto",
     "crates/virtio-accel-split-queue",
     "crates/virtio-accel-tosa",
