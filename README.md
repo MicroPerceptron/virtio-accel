@@ -20,28 +20,52 @@ and other program-driven accelerators.
 This is no longer a specification-only repository: the frozen protocol review input is developed
 alongside runnable guest/device machinery, conformance infrastructure, TOSA ingestion and analysis,
 and host backends. Host integrations remain isolated in adapter crates and never become dependencies
-of the portable facade. The project claims no Virtio device ID.
+of the portable facade. The project claims no Virtio device ID (_yet_).
 
 This project is pre-standardization and experimental. Protocol 1.0 is frozen as a versioned review
 input for independent implementation — it is stable enough to build against and to disagree with in
 writing, not an approved Virtio specification.
 
+## Backend support
+
+“Supported” below means that the backend admits the declared program and dtype and exercises it
+end-to-end; support in the TOSA parser or shared numerical corpus alone does not imply hardware
+execution. “Not implemented” describes this repository, not necessarily the underlying hardware.
+
+| Backend                                     | Status                 | Program admission                     | FP32            | FP16            | FP8 E4M3/E5M2   | INT8            | Packed INT4     | Program-visible buffers     |
+| ------------------------------------------- | ---------------------- | ------------------------------------- | --------------- | --------------- | --------------- | --------------- | --------------- | --------------------------- |
+| Apple Core ML / ANE (`virtio-accel-coreml`) | Implemented; macOS 14+ | Static TOSA 1.0 floating-point subset | Supported       | Supported       | Not implemented | Not implemented | Not implemented | Direct host/shared bindings |
+| Intel Level Zero / OpenVINO                 | Planned                | Not implemented                       | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented             |
+| AMD XDNA                                    | Planned                | Not implemented                       | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented             |
+| Qualcomm Hexagon                            | Planned                | Not implemented                       | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented             |
+
+The Core ML row describes model-boundary support; restricted INT32 outputs are also available for
+operators such as `ARGMAX`. Core ML chooses ANE or CPU placement per operation. Its INT4 facilities
+are compressed-weight storage rather than TOSA INT4 tensor execution, and this backend does not
+silently dequantize unsupported FP8, INT8, or INT4 graphs. See the
+[`virtio-accel-coreml` support boundary](crates/virtio-accel-coreml/README.md#low-precision-boundary).
+
+Independently of backend execution, `virtio-accel-tosa` validates the TOSA 1.0 profiles and
+extensions for all five dtype columns, and `virtio-accel-conformance` ships shared fixtures and
+oracles for them. The byte-oriented `virtio-accel-mock` backend remains test infrastructure rather
+than a typed hardware implementation.
+
 ## Workspace
 
-| Crate | Tier | Role |
-| --- | --- | --- |
-| `virtio-accel` | `core + alloc` | Facade re-exporting the portable layers |
-| `virtio-accel-proto` | `core` | Pointer-free, little-endian protocol 1.0 wire structures |
-| `virtio-accel-transport` | `core` | Dependency-free descriptor-chain, queue, reset, and notification ports |
-| `virtio-accel-core` | `core` | Backend lifecycle, memory, program, queue, and event contracts |
-| `virtio-accel-tosa` | `core + alloc` | Bounded zero-copy TOSA 1.0 validation, lowering analysis, specialization, and packed low-precision utilities |
-| `virtio-accel-coreml` | macOS `std` | TOSA-to-Core ML lowering, direct buffers, and asynchronous ANE-capable prediction |
-| `virtio-accel-split-queue` | `core + alloc` | Bounded in-memory split-ring reference model |
-| `virtio-accel-guest` | `core + alloc` | Typed reference client with bounded request tracking |
-| `virtio-accel-device` | `core + alloc` | Device-owned state, including bounded generational IDs |
-| `virtio-accel-mock` | `std` | In-memory backend with deterministic test-only artifacts and scripted faults |
-| `virtio-accel-conformance` | `std` | Transport-free semantic suite and shared FP32/FP16/FP8/INT8/INT4 numerical TOSA corpus |
-| `virtio-accel-cleanroom` | `core` | Independent conformance codec, written without the shared protocol types |
+| Crate                      | Tier           | Role                                                                                                         |
+| -------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------ |
+| `virtio-accel`             | `core + alloc` | Facade re-exporting the portable layers                                                                      |
+| `virtio-accel-proto`       | `core`         | Pointer-free, little-endian protocol 1.0 wire structures                                                     |
+| `virtio-accel-transport`   | `core`         | Dependency-free descriptor-chain, queue, reset, and notification ports                                       |
+| `virtio-accel-core`        | `core`         | Backend lifecycle, memory, program, queue, and event contracts                                               |
+| `virtio-accel-tosa`        | `core + alloc` | Bounded zero-copy TOSA 1.0 validation, lowering analysis, specialization, and packed low-precision utilities |
+| `virtio-accel-coreml`      | macOS `std`    | TOSA-to-Core ML lowering, direct buffers, and asynchronous ANE-capable prediction                            |
+| `virtio-accel-split-queue` | `core + alloc` | Bounded in-memory split-ring reference model                                                                 |
+| `virtio-accel-guest`       | `core + alloc` | Typed reference client with bounded request tracking                                                         |
+| `virtio-accel-device`      | `core + alloc` | Device-owned state, including bounded generational IDs                                                       |
+| `virtio-accel-mock`        | `std`          | In-memory backend with deterministic test-only artifacts and scripted faults                                 |
+| `virtio-accel-conformance` | `std`          | Transport-free semantic suite and shared FP32/FP16/FP8/INT8/INT4 numerical TOSA corpus                       |
+| `virtio-accel-cleanroom`   | `core`         | Independent conformance codec, written without the shared protocol types                                     |
 
 Dependencies point downward only:
 
@@ -68,30 +92,6 @@ other provider adapters --------------------> virtio-accel-core
 The transport crate exposes reset-scoped chain identities, flattened direction/length metadata, and
 owned publication/completion tokens. Neither it nor the device-state layer leaks guest addresses,
 ring pointers, or concrete descriptor types into the command engine or provider backend.
-
-## Backend support
-
-“Supported” below means that the backend admits the declared program and dtype and exercises it
-end-to-end; support in the TOSA parser or shared numerical corpus alone does not imply hardware
-execution. “Not implemented” describes this repository, not necessarily the underlying hardware.
-
-| Backend | Status | Program admission | FP32 | FP16 | FP8 E4M3/E5M2 | INT8 | Packed INT4 | Program-visible buffers |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Apple Core ML / ANE (`virtio-accel-coreml`) | Implemented; macOS 14+ | Static TOSA 1.0 floating-point subset | Supported | Supported | Not implemented | Not implemented | Not implemented | Direct host/shared bindings |
-| Intel Level Zero / OpenVINO | Planned | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented |
-| AMD XDNA | Planned | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented |
-| Qualcomm Hexagon | Planned | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented |
-
-The Core ML row describes model-boundary support; restricted INT32 outputs are also available for
-operators such as `ARGMAX`. Core ML chooses ANE or CPU placement per operation. Its INT4 facilities
-are compressed-weight storage rather than TOSA INT4 tensor execution, and this backend does not
-silently dequantize unsupported FP8, INT8, or INT4 graphs. See the
-[`virtio-accel-coreml` support boundary](crates/virtio-accel-coreml/README.md#low-precision-boundary).
-
-Independently of backend execution, `virtio-accel-tosa` validates the TOSA 1.0 profiles and
-extensions for all five dtype columns, and `virtio-accel-conformance` ships shared fixtures and
-oracles for them. The byte-oriented `virtio-accel-mock` backend remains test infrastructure rather
-than a typed hardware implementation.
 
 ## Install
 
@@ -215,7 +215,7 @@ execution queues, submissions, and events. Two properties shape most of the API:
 
 - **Unknown values stay raw.** Unrecognized opcodes, statuses, and event states remain integers
   until validated, so decoding untrusted bytes never constructs an invalid Rust enum.
-- **Failure still returns an event.** A successful submit returns an event; an *indeterminate*
+- **Failure still returns an event.** A successful submit returns an event; an _indeterminate_
   failure must also return one, because the operation's resources are still owned by the device.
   Guest-visible object IDs are opaque, kind-tagged, generational, and never reused after generation
   exhaustion.
@@ -247,23 +247,23 @@ optional resource-accounting and progress adapters, and the fault-injection harn
 
 ## Documentation
 
-| Document | Covers |
-| --- | --- |
-| [specification.md](docs/specification.md) | Normative terminology, object model, compatibility rules, mandatory baseline |
-| [wire-abi.md](docs/wire-abi.md) | Exact byte layouts and the coordinated change procedure |
-| [virtqueue.md](docs/virtqueue.md) | Command-chain rules |
-| [architecture.md](docs/architecture.md) | Implementation invariants |
-| [threat-model.md](docs/threat-model.md) | Trust boundaries and finite resource policy |
-| [portability.md](docs/portability.md) | Enforced target matrix and crate tiers |
-| [performance.md](docs/performance.md) | v1 performance and copy budgets |
-| [public-api.md](docs/public-api.md) | Public rustdoc policy |
-| [release-policy.md](docs/release-policy.md) | Release governance and evolution rules |
-| [backend-implementer-guide.md](docs/backend-implementer-guide.md) | Running the semantic suite against a new backend |
-| [releases/v1.0.md](docs/releases/v1.0.md) | Protocol 1.0 release note |
-| [conformance/v1.0](conformance/v1.0/README.md) | Golden artifacts, canonical frames, and the [freeze audit](conformance/v1.0/freeze-audit.md) |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Development gates, protocol change classification, and scope boundaries |
-| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Expected conduct in project spaces |
-| [SECURITY.md](SECURITY.md) | Reporting a vulnerability |
+| Document                                                          | Covers                                                                                       |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| [specification.md](docs/specification.md)                         | Normative terminology, object model, compatibility rules, mandatory baseline                 |
+| [wire-abi.md](docs/wire-abi.md)                                   | Exact byte layouts and the coordinated change procedure                                      |
+| [virtqueue.md](docs/virtqueue.md)                                 | Command-chain rules                                                                          |
+| [architecture.md](docs/architecture.md)                           | Implementation invariants                                                                    |
+| [threat-model.md](docs/threat-model.md)                           | Trust boundaries and finite resource policy                                                  |
+| [portability.md](docs/portability.md)                             | Enforced target matrix and crate tiers                                                       |
+| [performance.md](docs/performance.md)                             | v1 performance and copy budgets                                                              |
+| [public-api.md](docs/public-api.md)                               | Public rustdoc policy                                                                        |
+| [release-policy.md](docs/release-policy.md)                       | Release governance and evolution rules                                                       |
+| [backend-implementer-guide.md](docs/backend-implementer-guide.md) | Running the semantic suite against a new backend                                             |
+| [releases/v1.0.md](docs/releases/v1.0.md)                         | Protocol 1.0 release note                                                                    |
+| [conformance/v1.0](conformance/v1.0/README.md)                    | Golden artifacts, canonical frames, and the [freeze audit](conformance/v1.0/freeze-audit.md) |
+| [CONTRIBUTING.md](CONTRIBUTING.md)                                | Development gates, protocol change classification, and scope boundaries                      |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)                          | Expected conduct in project spaces                                                           |
+| [SECURITY.md](SECURITY.md)                                        | Reporting a vulnerability                                                                    |
 
 ## Portability
 
@@ -272,12 +272,12 @@ adapter keeps its unsafe FFI isolated to macOS; the TOSA crate confines official
 FlatBuffers accessors to a private module behind bounded verification. CI enforces each portability
 tier, including compile-only checks of the adapter's unsupported-platform surface.
 
-| Tier | Allowed runtime surface |
-| --- | --- |
-| `core` | `core` only; no allocation |
+| Tier           | Allowed runtime surface                                                      |
+| -------------- | ---------------------------------------------------------------------------- |
+| `core`         | `core` only; no allocation                                                   |
 | `core + alloc` | `core + alloc`; no OS, filesystem, sockets, threads, or host synchronization |
-| `std` | Portable `std`; no host-OS or vendor-specific API |
-| macOS `std` | Host-native Core ML/Foundation adapter; never a portable default dependency |
+| `std`          | Portable `std`; no host-OS or vendor-specific API                            |
+| macOS `std`    | Host-native Core ML/Foundation adapter; never a portable default dependency  |
 
 Concrete VMM, kernel, OS, and vendor adapters do not change the portable v1 protocol and must not
 become default dependencies of a portable crate. Cargo features must be additive: disabling default
