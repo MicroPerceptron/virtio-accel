@@ -436,7 +436,7 @@ fn segmented_transfers_and_bounds<A: Accelerator>(
 ) -> CaseCheck {
     ensure_target_fits(backend, target)?;
     let context = create_context(backend)?;
-    let desc = target_buffer_desc(target, target.binding().domain())?;
+    let desc = fixture_buffer_desc(target.binding(), target.binding().domain())?;
     let allocation = backend
         .allocate_buffer(&context, desc)
         .map_err(|error| format!("target buffer allocation failed: {error:?}"))?;
@@ -579,6 +579,7 @@ fn submission_binding_validation<A: Accelerator, H: ConformanceHooks<A>>(
     hooks: &H,
 ) -> CaseCheck {
     let resources = StandardResources::create(backend, target)?;
+    let primary = target.primary_index();
     let operation = (|| {
         expect_submit_rejected(
             backend.submit(&resources.queue, &resources.program, &[], Timeout::Infinite),
@@ -586,17 +587,15 @@ fn submission_binding_validation<A: Accelerator, H: ConformanceHooks<A>>(
             "empty binding list",
         )?;
 
-        let binding = valid_binding(target, &resources.buffer)?;
-        if device_info(backend)?.limits.max_bindings_per_submission >= 2 {
-            let duplicate = [
-                BindingRef {
-                    slot: binding.slot,
-                    buffer: binding.buffer,
-                    range: binding.range,
-                    access: binding.access,
-                },
-                binding,
-            ];
+        let binding_count = target.bindings().len();
+        if device_info(backend)?.limits.max_bindings_per_submission as usize > binding_count {
+            let mut duplicate = valid_bindings(target, &resources.buffers)?;
+            duplicate.push(BindingRef {
+                slot: duplicate[primary].slot,
+                buffer: duplicate[primary].buffer,
+                range: duplicate[primary].range,
+                access: duplicate[primary].access,
+            });
             expect_submit_rejected(
                 backend.submit(
                     &resources.queue,
@@ -609,12 +608,8 @@ fn submission_binding_validation<A: Accelerator, H: ConformanceHooks<A>>(
             )?;
         }
 
-        let out_of_bounds = [BindingRef {
-            slot: target.binding().slot(),
-            buffer: &resources.buffer,
-            range: BufferRange::new(target.binding().bytes(), 1).unwrap(),
-            access: target.binding().access(),
-        }];
+        let mut out_of_bounds = valid_bindings(target, &resources.buffers)?;
+        out_of_bounds[primary].range = BufferRange::new(target.binding().bytes(), 1).unwrap();
         expect_submit_rejected(
             backend.submit(
                 &resources.queue,
@@ -626,12 +621,8 @@ fn submission_binding_validation<A: Accelerator, H: ConformanceHooks<A>>(
             "binding range outside the buffer",
         )?;
 
-        let wrong_access = [BindingRef {
-            slot: target.binding().slot(),
-            buffer: &resources.buffer,
-            range: BufferRange::new(0, target.binding().bytes()).unwrap(),
-            access: different_access(target.binding().access()),
-        }];
+        let mut wrong_access = valid_bindings(target, &resources.buffers)?;
+        wrong_access[primary].access = different_access(target.binding().access());
         expect_submit_rejected(
             backend.submit(
                 &resources.queue,
@@ -643,7 +634,7 @@ fn submission_binding_validation<A: Accelerator, H: ConformanceHooks<A>>(
             "program-incompatible binding access",
         )?;
 
-        let valid = [valid_binding(target, &resources.buffer)?];
+        let valid = valid_bindings(target, &resources.buffers)?;
         let event = backend
             .submit(
                 &resources.queue,
@@ -657,7 +648,7 @@ fn submission_binding_validation<A: Accelerator, H: ConformanceHooks<A>>(
                     failure_error(&failure)
                 )
             })?;
-        complete_event(backend, target, hooks, &resources.buffer, event)
+        complete_event(backend, target, hooks, &resources.buffers, event)
     })();
     merge(operation, resources.release(backend))
 }
@@ -669,7 +660,7 @@ fn submission_path_diagnostics<A: Accelerator, H: ConformanceHooks<A>>(
     before: SubmissionPathDiagnostics,
 ) -> CaseCheck {
     let resources = StandardResources::create(&backend, target)?;
-    let bindings = [valid_binding(target, &resources.buffer)?];
+    let bindings = valid_bindings(target, &resources.buffers)?;
     let event = backend
         .submit(
             &resources.queue,
@@ -700,7 +691,7 @@ fn submission_path_diagnostics<A: Accelerator, H: ConformanceHooks<A>>(
         Ok(())
     };
 
-    let completed = complete_event(&backend, target, hooks, &resources.buffer, event);
+    let completed = complete_event(&backend, target, hooks, &resources.buffers, event);
     merge(merge(diagnostics, completed), resources.release(&backend))
 }
 
@@ -712,32 +703,28 @@ fn context_isolation<A: Accelerator, H: ConformanceHooks<A>>(
     ensure_target_fits(backend, target)?;
     let first = create_context(backend)?;
     let second = create_context(backend)?;
-    let desc = target_buffer_desc(target, target.binding().domain())?;
-    let (mut buffer, _) = backend
-        .allocate_buffer(&second, desc)
-        .map_err(|error| format!("second-context buffer allocation failed: {error:?}"))?
-        .into_parts();
-    let initial = SliceSource(target.binding().initial());
-    backend
-        .write_buffer(&mut buffer, 0, &initial)
-        .map_err(|error| format!("second-context initialization failed: {error:?}"))?;
-    let program = load_target(backend, &first, target)?;
-    let queue = backend
-        .create_queue(&first, QueueDesc::default())
-        .map_err(|error| format!("first-context queue creation failed: {error:?}"))?;
-    let bindings = [valid_binding(target, &buffer)?];
-    let operation = expect_submit_rejected(
-        backend.submit(&queue, &program, &bindings, Timeout::Infinite),
-        BackendError::InvalidArgument,
-        "cross-context buffer admission",
-    );
-    let released = merge(
+    let buffers = create_fixture_buffers(backend, &second, target)
+        .map_err(|error| format!("second-context {error}"))?;
+    let operation = (|| {
+        let program = load_target(backend, &first, target)?;
+        let queue = backend
+            .create_queue(&first, QueueDesc::default())
+            .map_err(|error| format!("first-context queue creation failed: {error:?}"))?;
+        let bindings = valid_bindings(target, &buffers)?;
+        let operation = expect_submit_rejected(
+            backend.submit(&queue, &program, &bindings, Timeout::Infinite),
+            BackendError::InvalidArgument,
+            "cross-context buffer admission",
+        );
         merge(
-            release_queue(backend, queue),
-            release_program(backend, program),
-        ),
-        release_buffer(backend, buffer),
-    );
+            operation,
+            merge(
+                release_queue(backend, queue),
+                release_program(backend, program),
+            ),
+        )
+    })();
+    let released = release_buffers(backend, buffers);
     merge(
         merge(operation, released),
         merge(
@@ -753,7 +740,7 @@ fn pending_release_and_terminal_stability<A: Accelerator, H: ConformanceHooks<A>
     hooks: &H,
 ) -> CaseCheck {
     let resources = StandardResources::create(backend, target)?;
-    let bindings = [valid_binding(target, &resources.buffer)?];
+    let bindings = valid_bindings(target, &resources.buffers)?;
     let event = backend
         .submit(
             &resources.queue,
@@ -785,7 +772,7 @@ fn pending_release_and_terminal_stability<A: Accelerator, H: ConformanceHooks<A>
         }
         Err(error) => return Err(format!("initial event poll failed: {error:?}")),
     };
-    let operation = complete_event(backend, target, hooks, &resources.buffer, event);
+    let operation = complete_event(backend, target, hooks, &resources.buffers, event);
     merge(operation, resources.release(backend))
 }
 
@@ -795,10 +782,10 @@ fn finite_timeout_preserves_admission<A: Accelerator, H: ConformanceHooks<A>>(
     hooks: &H,
 ) -> CaseCheck {
     let resources = StandardResources::create(backend, target)?;
-    let bindings = [valid_binding(target, &resources.buffer)?];
+    let bindings = valid_bindings(target, &resources.buffers)?;
     let timeout = Timeout::AfterNs(NonZeroU64::new(1).unwrap());
     let operation = match backend.submit(&resources.queue, &resources.program, &bindings, timeout) {
-        Ok(event) => settle_timed_event(backend, target, hooks, &resources.buffer, event),
+        Ok(event) => settle_timed_event(backend, target, hooks, &resources.buffers, event),
         Err(SubmitFailure::Rejected(BackendError::DeadlineExpired)) => Ok(()),
         Err(SubmitFailure::Rejected(error)) => {
             Err(format!("finite timeout was rejected as {error:?}"))
@@ -811,7 +798,7 @@ fn finite_timeout_preserves_admission<A: Accelerator, H: ConformanceHooks<A>>(
             };
             merge(
                 truth,
-                settle_timed_event(backend, target, hooks, &resources.buffer, event),
+                settle_timed_event(backend, target, hooks, &resources.buffers, event),
             )
         }
     };
@@ -824,7 +811,7 @@ fn cancellation_races<A: Accelerator, H: ConformanceHooks<A>>(
     hooks: &H,
 ) -> CaseCheck {
     let resources = StandardResources::create(backend, target)?;
-    let first_bindings = [valid_binding(target, &resources.buffer)?];
+    let first_bindings = valid_bindings(target, &resources.buffers)?;
     let first = backend
         .submit(
             &resources.queue,
@@ -853,7 +840,7 @@ fn cancellation_races<A: Accelerator, H: ConformanceHooks<A>>(
         )?;
         release_event(backend, first)?;
 
-        let second_bindings = [valid_binding(target, &resources.buffer)?];
+        let second_bindings = valid_bindings(target, &resources.buffers)?;
         let second = backend
             .submit(
                 &resources.queue,
@@ -883,7 +870,7 @@ fn cancellation_races<A: Accelerator, H: ConformanceHooks<A>>(
 
 struct StandardResources<A: Accelerator> {
     context: A::Context,
-    buffer: A::Buffer,
+    buffers: Vec<A::Buffer>,
     program: A::Program,
     queue: A::Queue,
 }
@@ -892,25 +879,14 @@ impl<A: Accelerator> StandardResources<A> {
     fn create(backend: &A, target: &TargetDescription) -> Result<Self, String> {
         ensure_target_fits(backend, target)?;
         let context = create_context(backend)?;
-        let desc = target_buffer_desc(target, target.binding().domain())?;
-        let allocation = backend
-            .allocate_buffer(&context, desc)
-            .map_err(|error| format!("target buffer allocation failed: {error:?}"))?;
-        device_info(backend)?
-            .validate_buffer_info(desc, allocation.info())
-            .map_err(|error| format!("target allocation metadata is dishonest: {error:?}"))?;
-        let (mut buffer, _) = allocation.into_parts();
-        let initial = SliceSource(target.binding().initial());
-        backend
-            .write_buffer(&mut buffer, 0, &initial)
-            .map_err(|error| format!("target buffer initialization failed: {error:?}"))?;
+        let buffers = create_fixture_buffers(backend, &context, target)?;
         let program = load_target(backend, &context, target)?;
         let queue = backend
             .create_queue(&context, QueueDesc::default())
             .map_err(|error| format!("target queue creation failed: {error:?}"))?;
         Ok(Self {
             context,
-            buffer,
+            buffers,
             program,
             queue,
         })
@@ -919,33 +895,82 @@ impl<A: Accelerator> StandardResources<A> {
     fn release(self, backend: &A) -> CaseCheck {
         let mut result = release_queue(backend, self.queue);
         result = merge(result, release_program(backend, self.program));
-        result = merge(result, release_buffer(backend, self.buffer));
+        result = merge(result, release_buffers(backend, self.buffers));
         merge(result, release_context(backend, self.context))
     }
+}
+
+/// Allocate and initialize one buffer per binding fixture, in fixture order.
+fn create_fixture_buffers<A: Accelerator>(
+    backend: &A,
+    context: &A::Context,
+    target: &TargetDescription,
+) -> Result<Vec<A::Buffer>, String> {
+    let info = device_info(backend)?;
+    let mut buffers = Vec::with_capacity(target.bindings().len());
+    for fixture in target.bindings() {
+        let desc = fixture_buffer_desc(fixture, fixture.domain())?;
+        let allocation = backend.allocate_buffer(context, desc).map_err(|error| {
+            format!(
+                "target buffer allocation for slot {} failed: {error:?}",
+                fixture.slot()
+            )
+        })?;
+        info.validate_buffer_info(desc, allocation.info())
+            .map_err(|error| format!("target allocation metadata is dishonest: {error:?}"))?;
+        let (mut buffer, _) = allocation.into_parts();
+        let initial = SliceSource(fixture.initial());
+        backend
+            .write_buffer(&mut buffer, 0, &initial)
+            .map_err(|error| {
+                format!(
+                    "target buffer initialization for slot {} failed: {error:?}",
+                    fixture.slot()
+                )
+            })?;
+        buffers.push(buffer);
+    }
+    Ok(buffers)
+}
+
+/// Verify every fixture's expected bytes after a successful completion.
+fn verify_expected_bytes<A: Accelerator>(
+    backend: &A,
+    target: &TargetDescription,
+    buffers: &[A::Buffer],
+) -> CaseCheck {
+    for (fixture, buffer) in target.bindings().iter().zip(buffers) {
+        let mut output = vec![0; fixture.expected().len()];
+        let mut sink = SliceSink(output.as_mut_slice());
+        backend.read_buffer(buffer, 0, &mut sink).map_err(|error| {
+            format!(
+                "completed output read for slot {} failed: {error:?}",
+                fixture.slot()
+            )
+        })?;
+        if output != fixture.expected() {
+            return Err(format!(
+                "completed output mismatch for slot {}: expected {:?}, got {output:?}",
+                fixture.slot(),
+                fixture.expected()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn complete_event<A: Accelerator, H: ConformanceHooks<A>>(
     backend: &A,
     target: &TargetDescription,
     hooks: &H,
-    buffer: &A::Buffer,
+    buffers: &[A::Buffer],
     event: A::Event,
 ) -> CaseCheck {
     hooks
         .complete_event(backend, &event)
         .map_err(|error| format!("completion hook failed: {error:?}"))?;
     expect_stable_state(backend, &event, EventState::Complete)?;
-    let mut output = vec![0; target.binding().expected().len()];
-    let mut sink = SliceSink(output.as_mut_slice());
-    backend
-        .read_buffer(buffer, 0, &mut sink)
-        .map_err(|error| format!("completed output read failed: {error:?}"))?;
-    if output != target.binding().expected() {
-        return Err(format!(
-            "completed output mismatch: expected {:?}, got {output:?}",
-            target.binding().expected()
-        ));
-    }
+    verify_expected_bytes(backend, target, buffers)?;
     release_event(backend, event)
 }
 
@@ -953,7 +978,7 @@ fn settle_timed_event<A: Accelerator, H: ConformanceHooks<A>>(
     backend: &A,
     target: &TargetDescription,
     hooks: &H,
-    buffer: &A::Buffer,
+    buffers: &[A::Buffer],
     event: A::Event,
 ) -> CaseCheck {
     let initial = backend
@@ -971,17 +996,7 @@ fn settle_timed_event<A: Accelerator, H: ConformanceHooks<A>>(
     let observed = match terminal {
         EventState::Complete => {
             expect_stable_state(backend, &event, EventState::Complete)?;
-            let mut output = vec![0; target.binding().expected().len()];
-            let mut sink = SliceSink(output.as_mut_slice());
-            backend
-                .read_buffer(buffer, 0, &mut sink)
-                .map_err(|error| format!("timed output read failed: {error:?}"))?;
-            if output != target.binding().expected() {
-                return Err(format!(
-                    "timed completed output mismatch: expected {:?}, got {output:?}",
-                    target.binding().expected()
-                ));
-            }
+            verify_expected_bytes(backend, target, buffers)?;
             Ok(())
         }
         EventState::Failed(BackendError::DeadlineExpired) => expect_stable_state(
@@ -1019,17 +1034,23 @@ fn expect_stable_state<A: Accelerator>(
 
 fn ensure_target_fits<A: Accelerator>(backend: &A, target: &TargetDescription) -> CaseCheck {
     let info = device_info(backend)?;
-    if !info
-        .capabilities
-        .supports_memory_domain(target.binding().domain())
-    {
-        return Err(format!(
-            "target requires unadvertised {:?} memory",
-            target.binding().domain()
-        ));
+    for fixture in target.bindings() {
+        if !info.capabilities.supports_memory_domain(fixture.domain()) {
+            return Err(format!(
+                "target slot {} requires unadvertised {:?} memory",
+                fixture.slot(),
+                fixture.domain()
+            ));
+        }
+        if fixture.bytes() > info.limits.max_buffer_bytes {
+            return Err(format!(
+                "target slot {} exceeds max_buffer_bytes",
+                fixture.slot()
+            ));
+        }
     }
-    if target.binding().bytes() > info.limits.max_buffer_bytes {
-        return Err("target binding exceeds max_buffer_bytes".into());
+    if target.bindings().len() as u64 > u64::from(info.limits.max_bindings_per_submission) {
+        return Err("target requires more bindings than max_bindings_per_submission".into());
     }
     if target.program().payload().len() as u64 > info.limits.max_artifact_bytes {
         return Err("target artifact exceeds max_artifact_bytes".into());
@@ -1049,13 +1070,13 @@ fn create_context<A: Accelerator>(backend: &A) -> Result<A::Context, String> {
         .map_err(|error| format!("context creation failed: {error:?}"))
 }
 
-fn target_buffer_desc(
-    target: &TargetDescription,
+fn fixture_buffer_desc(
+    fixture: &crate::BindingFixture,
     domain: MemoryDomain,
 ) -> Result<BufferDesc, String> {
     BufferDesc::new(
-        target.binding().bytes(),
-        target.binding().alignment(),
+        fixture.bytes(),
+        fixture.alignment(),
         domain,
         BufferUsage::TRANSFER_SOURCE
             | BufferUsage::TRANSFER_DESTINATION
@@ -1083,17 +1104,34 @@ fn load_target<A: Accelerator>(
         .map_err(|error| format!("target program load failed: {error:?}"))
 }
 
-fn valid_binding<'a, B>(
+/// Build the full, valid binding list for the target's fixtures over `buffers`.
+///
+/// `buffers` must be the fixture-ordered allocation produced by [`create_fixture_buffers`].
+fn valid_bindings<'a, B>(
     target: &TargetDescription,
-    buffer: &'a B,
-) -> Result<BindingRef<'a, B>, String> {
-    Ok(BindingRef {
-        slot: target.binding().slot(),
-        buffer,
-        range: BufferRange::new(0, target.binding().bytes())
-            .map_err(|error| format!("invalid target binding range: {error:?}"))?,
-        access: target.binding().access(),
-    })
+    buffers: &'a [B],
+) -> Result<Vec<BindingRef<'a, B>>, String> {
+    if buffers.len() != target.bindings().len() {
+        return Err(format!(
+            "fixture buffer count {} does not match binding count {}",
+            buffers.len(),
+            target.bindings().len()
+        ));
+    }
+    target
+        .bindings()
+        .iter()
+        .zip(buffers)
+        .map(|(fixture, buffer)| {
+            Ok(BindingRef {
+                slot: fixture.slot(),
+                buffer,
+                range: BufferRange::new(0, fixture.bytes())
+                    .map_err(|error| format!("invalid target binding range: {error:?}"))?,
+                access: fixture.access(),
+            })
+        })
+        .collect()
 }
 
 const fn different_access(access: AccessMode) -> AccessMode {
@@ -1149,6 +1187,13 @@ fn release_context<A: Accelerator>(backend: &A, context: A::Context) -> CaseChec
 
 fn release_buffer<A: Accelerator>(backend: &A, buffer: A::Buffer) -> CaseCheck {
     retry_release("buffer", buffer, |resource| backend.free_buffer(resource))
+}
+
+fn release_buffers<A: Accelerator>(backend: &A, buffers: Vec<A::Buffer>) -> CaseCheck {
+    buffers
+        .into_iter()
+        .map(|buffer| release_buffer(backend, buffer))
+        .fold(Ok(()), merge)
 }
 
 fn release_program<A: Accelerator>(backend: &A, program: A::Program) -> CaseCheck {

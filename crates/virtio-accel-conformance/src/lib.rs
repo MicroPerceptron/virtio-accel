@@ -115,6 +115,40 @@ impl BindingFixture {
         })
     }
 
+    /// Describe one nonempty read-only binding whose bytes must be unchanged after completion.
+    ///
+    /// Read-only fixtures model program inputs of lowered artifacts whose input and output slots
+    /// are disjoint. The executing cases verify the bytes byte-for-byte after completion, so a
+    /// program that clobbers its inputs fails the suite.
+    pub fn read_only(
+        slot: u32,
+        domain: MemoryDomain,
+        alignment: u64,
+        initial: impl Into<Vec<u8>>,
+    ) -> Result<Self, TargetDescriptionError> {
+        let initial = initial.into();
+        if initial.is_empty() {
+            return Err(TargetDescriptionError::EmptyBinding);
+        }
+        if alignment == 0 || !alignment.is_power_of_two() {
+            return Err(TargetDescriptionError::InvalidAlignment);
+        }
+        let expected = initial.clone();
+        Ok(Self {
+            slot,
+            access: AccessMode::Read,
+            domain,
+            alignment,
+            initial,
+            expected,
+        })
+    }
+
+    /// Whether the program may write through this binding, making its output observable.
+    pub const fn is_writable(&self) -> bool {
+        !matches!(self.access, AccessMode::Read)
+    }
+
     pub const fn slot(&self) -> u32 {
         self.slot
     }
@@ -148,20 +182,78 @@ impl BindingFixture {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TargetDescription {
     program: ProgramFixture,
-    binding: BindingFixture,
+    bindings: Vec<BindingFixture>,
+    primary: usize,
 }
 
 impl TargetDescription {
-    pub const fn new(program: ProgramFixture, binding: BindingFixture) -> Self {
-        Self { program, binding }
+    /// Describe a program driven by exactly one writable, observable binding.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `binding` is read-only. Read-only fixtures only make sense alongside a
+    /// writable one; use [`Self::with_bindings`] for programs with disjoint input and output
+    /// slots.
+    pub fn new(program: ProgramFixture, binding: BindingFixture) -> Self {
+        assert!(
+            binding.is_writable(),
+            "a single-binding target must be writable; use with_bindings for read-only inputs"
+        );
+        Self {
+            program,
+            bindings: vec![binding],
+            primary: 0,
+        }
+    }
+
+    /// Describe a program driven by one buffer per binding fixture.
+    ///
+    /// Slots must be unique and at least one fixture must be writable; the first writable
+    /// fixture becomes the primary binding that negative submission subcases perturb and that
+    /// buffer-transfer cases exercise. Executing cases bind every fixture in declared order and
+    /// verify every fixture's expected bytes after completion.
+    pub fn with_bindings(
+        program: ProgramFixture,
+        bindings: Vec<BindingFixture>,
+    ) -> Result<Self, TargetDescriptionError> {
+        if bindings.is_empty() {
+            return Err(TargetDescriptionError::NoBindings);
+        }
+        for (index, binding) in bindings.iter().enumerate() {
+            if bindings[..index]
+                .iter()
+                .any(|prior| prior.slot == binding.slot)
+            {
+                return Err(TargetDescriptionError::DuplicateBindingSlot);
+            }
+        }
+        let Some(primary) = bindings.iter().position(BindingFixture::is_writable) else {
+            return Err(TargetDescriptionError::NoObservableBinding);
+        };
+        Ok(Self {
+            program,
+            bindings,
+            primary,
+        })
     }
 
     pub const fn program(&self) -> &ProgramFixture {
         &self.program
     }
 
-    pub const fn binding(&self) -> &BindingFixture {
-        &self.binding
+    /// The primary binding: the first writable, observable fixture.
+    pub fn binding(&self) -> &BindingFixture {
+        &self.bindings[self.primary]
+    }
+
+    /// Every binding fixture in submission order.
+    pub fn bindings(&self) -> &[BindingFixture] {
+        &self.bindings
+    }
+
+    /// Index of the primary binding within [`Self::bindings`].
+    pub const fn primary_index(&self) -> usize {
+        self.primary
     }
 }
 
@@ -175,6 +267,9 @@ pub enum TargetDescriptionError {
     UnobservableOutput,
     ReadOnlyBinding,
     InvalidAlignment,
+    NoBindings,
+    DuplicateBindingSlot,
+    NoObservableBinding,
 }
 
 impl fmt::Display for TargetDescriptionError {
