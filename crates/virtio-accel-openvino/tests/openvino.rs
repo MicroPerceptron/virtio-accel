@@ -710,9 +710,20 @@ fn measures_warm_submission_and_completion_latency() {
         let event = backend
             .submit(&queue, &program, &bindings, Timeout::Infinite)
             .unwrap_or_else(|_| panic!("warm submission rejected"));
-        assert_eq!(wait_for_terminal(&backend, &event), EventState::Complete);
+        let deadline = started + Duration::from_secs(15);
+        loop {
+            match backend.poll_event(&event).unwrap() {
+                EventState::Pending => {
+                    assert!(Instant::now() < deadline, "inference never completed");
+                    std::thread::yield_now();
+                }
+                EventState::Complete => break,
+                state => panic!("unexpected terminal state {state:?}"),
+            }
+        }
+        let elapsed = started.elapsed();
         backend.destroy_event(event).unwrap();
-        started.elapsed()
+        elapsed
     };
 
     for _ in 0..20 {
