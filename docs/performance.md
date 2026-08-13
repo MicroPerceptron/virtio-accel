@@ -14,7 +14,7 @@ evidence, but they are not stable enough for ordinary pull-request gating across
 | Config and scalar request decode | `O(1)` | none | fixed scalar bytes only |
 | Non-`SUBMIT` request decode | `O(1)` plus descriptor validation | none | transfer and artifact tails stay borrowed |
 | `SUBMIT` decode | `O(b log b)` | one bounded metadata vector after binding-count validation | binding metadata only |
-| Segmented byte-port access | `O(s + n)` | none | exact caller-requested range |
+| Segmented byte-port access | `O(log s + k + n)` after construction-time indexing | none per access | exact caller-requested range |
 | Object lookup | `O(1)` | none | none |
 | Command dispatch | request-specific | bounded object-table reservation before mutation | response publication, except explicit transfers |
 | Submission admission | `O(b log b)` plus lookups; canonical binding revalidation is `O(b)` | bounded event dependency and binding metadata | no hidden buffer staging |
@@ -25,9 +25,9 @@ evidence, but they are not stable enough for ordinary pull-request gating across
 | TOSA dynamic specialization | `O(d)` plus exact-key cache lookup | caller-bounded key and LRU entries | dynamic CTC bytes only; ordinary tensor inputs are not scanned |
 
 `b` is a validated binding count, `s` is segment count (or the largest TOSA symbol table in the
-TOSA row), `n` is explicitly requested bytes, `f` is verified FlatBuffer structure, and `g` is the
-number of graph objects and edges, and `c` is compile-time-constant data inspected by the semantic
-pass.
+TOSA row), `k` is the number of descriptor segments touched by one logical byte access, `n` is
+explicitly requested bytes, `f` is verified FlatBuffer structure, `g` is the number of graph objects
+and edges, and `c` is compile-time-constant data inspected by the semantic pass.
 
 ## Copy accounting
 
@@ -52,6 +52,11 @@ The decoder's slot sort is also the canonical handoff to core admission. Core an
 recognize strictly increasing slot order in `O(b)` without allocation. Their public APIs continue to
 accept arbitrary binding order through an allocation-free fallback, so this optimization does not
 make ordering semantic.
+
+Split-queue chain construction records bounded logical descriptor spans alongside the flattened
+regions. Each later byte access binary-searches the first touched span instead of rescanning from
+descriptor zero. This metadata is allocated only while the driver owns and constructs the bounded
+chain; queue publication, command decoding, completion, and reset remain allocation-free.
 
 Device admission validates each resolved buffer descriptor in place instead of retaining a parallel
 descriptor vector. The provider-facing binding vector and event-owned buffer dependency vector remain
