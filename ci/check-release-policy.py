@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
-import ast
 import pathlib
+import re
 import sys
 import tomllib
+
+from publication import PUBLISH_ORDER
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -104,6 +106,8 @@ REQUIRED_LINKS = {
     ),
     ROOT / "conformance" / "v1.0" / "README.md": ("freeze-audit.md",),
 }
+
+PUBLISH_WORKFLOW = ROOT / ".github" / "workflows" / "publish.yml"
 
 
 def fail(message: str) -> None:
@@ -241,32 +245,63 @@ def check_publication_order_agrees() -> None:
     They live in different files for good reasons -- one is an order, the other is a policy -- but a
     crate added to only one of them would either never be published or never be verified.
     """
-    source = ROOT / "ci" / "publish-dry-run.py"
-    tree = ast.parse(source.read_text())
-    order = next(
-        (
-            ast.literal_eval(node.value)
-            for node in tree.body
-            if isinstance(node, ast.Assign)
-            and any(
-                isinstance(target, ast.Name) and target.id == "PUBLISH_ORDER"
-                for target in node.targets
-            )
-        ),
-        None,
-    )
-    if order is None:
-        fail(f"{rel(source)} does not define PUBLISH_ORDER")
-    order = list(order)
+    order = list(PUBLISH_ORDER)
     if len(order) != len(set(order)):
-        fail("ci/publish-dry-run.py PUBLISH_ORDER contains a duplicate")
+        fail("ci/publication.py PUBLISH_ORDER contains a duplicate")
     if set(order) != set(PUBLISHED_PACKAGES.values()):
         only_order = sorted(set(order) - set(PUBLISHED_PACKAGES.values()))
         only_allowlist = sorted(set(PUBLISHED_PACKAGES.values()) - set(order))
         fail(
-            "ci/publish-dry-run.py PUBLISH_ORDER and the published-package allowlist disagree; "
+            "ci/publication.py PUBLISH_ORDER and the published-package allowlist disagree; "
             f"only in the order: {only_order}; only in the allowlist: {only_allowlist}"
         )
+
+
+def check_publish_workflow() -> None:
+    """Keep the token-bearing workflow narrow and coupled to the repository gates."""
+    if not PUBLISH_WORKFLOW.is_file():
+        fail(f"missing {rel(PUBLISH_WORKFLOW)}")
+    text = PUBLISH_WORKFLOW.read_text()
+    required = (
+        '"on":\n  release:\n    types:\n      - published',
+        "permissions:\n  contents: read",
+        "group: crates-io-release",
+        "cancel-in-progress: false",
+        "persist-credentials: false",
+        "ref: ${{ github.event.release.tag_name }}",
+        "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}",
+        'git merge-base --is-ancestor HEAD "origin/$DEFAULT_BRANCH"',
+        "python3 ci/check-release-policy.py",
+        "python3 ci/publish.py --tag \"$GITHUB_REF_NAME\" --check-only",
+        "python3 ci/publish-dry-run.py",
+        "CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_KEY }}",
+        "python3 ci/publish.py --tag \"$GITHUB_REF_NAME\"",
+    )
+    for fragment in required:
+        if fragment not in text:
+            fail(f"{rel(PUBLISH_WORKFLOW)} is missing required release guard {fragment!r}")
+
+    for forbidden_trigger in ("\n  pull_request:", "\n  push:", "\n  workflow_dispatch:"):
+        if forbidden_trigger in text:
+            fail(
+                f"{rel(PUBLISH_WORKFLOW)} must run only for published GitHub releases; found "
+                f"{forbidden_trigger.strip()!r}"
+            )
+    if text.count("secrets.CRATES_IO_KEY") != 1:
+        fail(f"{rel(PUBLISH_WORKFLOW)} must expose CRATES_IO_KEY to exactly one step")
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("uses:") and not re.search(r"@[0-9a-f]{40}(?:\s|$)", stripped):
+            fail(f"{rel(PUBLISH_WORKFLOW)} action is not pinned to a full commit: {stripped}")
+
+    publisher = (ROOT / "ci" / "publish.py").read_text()
+    for fragment in ('"--no-verify"', '"--registry",\n            "crates-io"'):
+        if fragment not in publisher:
+            fail(
+                "ci/publish.py must use the token only after token-free verification and must "
+                f"pin crates.io explicitly; missing {fragment!r}"
+            )
 
 
 def check_fuzz_stays_unpublished() -> None:
@@ -281,6 +316,7 @@ def main() -> int:
     check_workspace_metadata()
     check_published_set()
     check_publication_order_agrees()
+    check_publish_workflow()
     for manifest in sorted(PACKAGE_MANIFESTS):
         check_manifest(manifest)
     check_fuzz_stays_unpublished()

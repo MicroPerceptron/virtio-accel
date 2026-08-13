@@ -50,6 +50,9 @@ jobs:
       - name: Check release policy invariants
         run: python3 ci/check-release-policy.py
 
+      - name: Test the publication driver
+        run: python3 -m unittest discover -s ci -p 'test_*.py'
+
       - name: Check C wire header
         run: python3 ci/check-c-header.py
 

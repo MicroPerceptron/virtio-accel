@@ -171,6 +171,23 @@ local registry, adding each crate only after it has been built, tested, and docu
 extracted tarball. A crate can therefore only ever resolve its predecessors, so a wrong order fails
 with an unresolvable dependency instead of passing quietly. The same script is a required CI job.
 
+All thirteen packages share the workspace version and are published together. A GitHub release tag
+must be exactly `v<workspace-version>` and must point at the commit being released. Publishing a
+GitHub release triggers `.github/workflows/publish.yml`, which checks out that tag, runs the release
+policy checks and publication-driver tests, repeats the full ordered local-registry dry run on the
+tagged source, and only then gives `ci/publish.py` the crates.io token from the `CRATES_IO_KEY`
+repository secret. The job has read-only GitHub permissions and serializes releases so two
+publication sequences cannot overlap. The tagged commit must be reachable from the repository's
+default branch; a release cannot use an unmerged tag to run token-bearing repository code.
+
+The production publisher uses the same order from `ci/publication.py`. Before each upload, it builds
+the actual `.crate` archive and queries crates.io. An existing version is skipped only when the
+registry checksum exactly matches the local archive. This makes a rerun safe after a partial publish
+or an upload whose result was ambiguous, while refusing to bless a tag whose immutable crates.io
+version contains different bytes. The upload itself names the `crates-io` registry explicitly and
+uses Cargo's `--no-verify` mode: all compilation and tests have already completed in the prior step,
+so package build scripts never execute in the step that holds the crates.io token.
+
 `cargo package`'s own verify step is not sufficient and must not be treated as sufficient: it builds
 only the library target. That is how four cross-package `include_str!` sites reached outside their
 package directories unnoticed, leaving assertions that could never have compiled from a published
@@ -181,13 +198,15 @@ tarball. Any check on packaged output must run the tests inside the packaged sou
 crates.io publication is not transactional across crates. If crate N fails after 1..N-1 succeeded,
 those earlier versions are live and permanent.
 
-1. Stop. Do not publish the remaining crates, and do not attempt to reuse the version number.
-2. Diagnose against the local registry, not against crates.io. Reproduce with
+1. Stop. Do not publish the remaining crates by hand.
+2. Inspect crates.io before rerunning. The automated job may be rerun unchanged only when every
+   version that appeared has the exact checksum of the tagged source; it will enforce this check.
+3. Diagnose against the local registry, not against crates.io. Reproduce with
    `ci/publish-dry-run.py`.
-3. Fix forward. Bump the patch version of the crate that failed and of any crate that must depend on
-   the fixed version, then re-run the ordered publication from the first crate whose version
-   changed. Earlier crates that published correctly are left alone.
-4. Yank only if a published version is actively harmful — see below. A version that is merely
+4. If any source or packaging metadata must change, fix forward: bump the lockstep workspace patch
+   version, create the matching tag, and publish a new GitHub release. Versions already accepted by
+   crates.io are immutable and cannot be replaced.
+5. Yank only if a published version is actively harmful — see below. A version that is merely
    stranded, because its dependents were never published, is not harmful; it is unreachable.
 
 ### Yank versus patch
