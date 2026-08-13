@@ -13,7 +13,7 @@ mod artifact;
 mod lower;
 
 pub use artifact::{ArtifactBuildError, CoreMlArtifact, FeatureRole};
-pub use lower::{COREML_TOSA_TARGET, LoweringError, supports_tosa_operator};
+pub use lower::{COREML_TOSA_TARGET, LoweringError, supports_tosa_dtype, supports_tosa_operator};
 
 use virtio_accel_core::{ArtifactFormat, TargetIdentity};
 

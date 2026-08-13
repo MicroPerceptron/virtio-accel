@@ -53,6 +53,81 @@ const fn is_binary16_nan(bits: u16) -> bool {
     bits & 0x7c00 == 0x7c00 && bits & 0x03ff != 0
 }
 
+/// Packed scalar encoding used by a low-precision TOSA acceptance case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackedDType {
+    /// Signed two's-complement values packed low nibble first.
+    Int4,
+    /// Signed two's-complement bytes.
+    Int8,
+    /// TOSA FP8 E4M3 bytes.
+    Fp8E4M3,
+    /// TOSA FP8 E5M2 bytes.
+    Fp8E5M2,
+}
+
+impl PackedDType {
+    /// Number of bytes needed for `elements` densely packed values.
+    pub const fn storage_bytes(self, elements: usize) -> Option<usize> {
+        match self {
+            Self::Int4 => Some(elements / 2 + elements % 2),
+            Self::Int8 | Self::Fp8E4M3 | Self::Fp8E5M2 => Some(elements),
+        }
+    }
+}
+
+/// One immutable packed low-precision tensor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PackedTensor {
+    /// Static row-major logical shape.
+    pub shape: &'static [usize],
+    /// Densely packed elements in TOSA byte order.
+    pub bytes: &'static [u8],
+}
+
+/// A stable TOSA graph and packed low-precision oracle shared by host backends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TosaPackedCase {
+    /// Diagnostic case name.
+    pub name: &'static str,
+    /// Tensor scalar encoding.
+    pub dtype: PackedDType,
+    /// TOSA 1.0 FlatBuffer payload.
+    pub artifact: &'static [u8],
+    /// Block inputs in declared slot order.
+    pub inputs: &'static [PackedTensor],
+    /// Block outputs in declared slot order.
+    pub outputs: &'static [PackedTensor],
+}
+
+impl TosaPackedCase {
+    /// Compare one backend output with this case's selected storage oracle.
+    ///
+    /// Integer values must match bit-for-bit. FP8 values do too, except that NaN sign and payload
+    /// may be canonicalized by an accelerator.
+    pub fn output_matches(&self, output: usize, actual: &[u8]) -> bool {
+        let Some(expected) = self.outputs.get(output).map(|tensor| tensor.bytes) else {
+            return false;
+        };
+        expected.len() == actual.len()
+            && expected.iter().zip(actual).all(|(expected, actual)| {
+                if packed_is_nan(self.dtype, *expected) {
+                    packed_is_nan(self.dtype, *actual)
+                } else {
+                    expected == actual
+                }
+            })
+    }
+}
+
+const fn packed_is_nan(dtype: PackedDType, bits: u8) -> bool {
+    match dtype {
+        PackedDType::Fp8E4M3 => bits & 0x7f == 0x7f,
+        PackedDType::Fp8E5M2 => bits & 0x7c == 0x7c && bits & 0x03 != 0,
+        PackedDType::Int4 | PackedDType::Int8 => false,
+    }
+}
+
 /// One immutable FP32 tensor in a numerical acceptance case.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Float32Tensor {
@@ -247,9 +322,73 @@ pub const IDENTITY_EDGES_FP16: TosaFloat16Case = TosaFloat16Case {
     outputs: IDENTITY_EDGE_OUTPUTS_FP16,
 };
 
+const IDENTITY_INT8_BYTES: &[u8] = &[0x80, 0x81, 0xff, 0x00, 0x01, 0x7e, 0x7f, 0x2a];
+const IDENTITY_INT8_TENSORS: &[PackedTensor] = &[PackedTensor {
+    shape: &[8],
+    bytes: IDENTITY_INT8_BYTES,
+}];
+
+/// INT8 identity spanning negative, zero, and positive values.
+pub const IDENTITY_INT8: TosaPackedCase = TosaPackedCase {
+    name: "identity-int8",
+    dtype: PackedDType::Int8,
+    artifact: include_bytes!("data/identity-int8-v1.0.0.tosa"),
+    inputs: IDENTITY_INT8_TENSORS,
+    outputs: IDENTITY_INT8_TENSORS,
+};
+
+// Logical values [-7, -3, -1, 0, 1, 3, 6, 7], packed low nibble first.
+const IDENTITY_INT4_BYTES: &[u8] = &[0xd9, 0x0f, 0x31, 0x76];
+const IDENTITY_INT4_TENSORS: &[PackedTensor] = &[PackedTensor {
+    shape: &[8],
+    bytes: IDENTITY_INT4_BYTES,
+}];
+
+/// Packed INT4 identity spanning the TOSA-defined finite range.
+pub const IDENTITY_INT4: TosaPackedCase = TosaPackedCase {
+    name: "identity-int4",
+    dtype: PackedDType::Int4,
+    artifact: include_bytes!("data/identity-int4-v1.0.0.tosa"),
+    inputs: IDENTITY_INT4_TENSORS,
+    outputs: IDENTITY_INT4_TENSORS,
+};
+
+const IDENTITY_FP8E4M3_BYTES: &[u8] = &[0x00, 0x80, 0x01, 0x81, 0x38, 0xb8, 0x7e, 0x7f];
+const IDENTITY_FP8E4M3_TENSORS: &[PackedTensor] = &[PackedTensor {
+    shape: &[8],
+    bytes: IDENTITY_FP8E4M3_BYTES,
+}];
+
+/// FP8 E4M3 identity over signed zeros, subnormals, ordinary values, finite maximum, and NaN.
+pub const IDENTITY_FP8E4M3: TosaPackedCase = TosaPackedCase {
+    name: "identity-fp8e4m3",
+    dtype: PackedDType::Fp8E4M3,
+    artifact: include_bytes!("data/identity-fp8e4m3-v1.0.0.tosa"),
+    inputs: IDENTITY_FP8E4M3_TENSORS,
+    outputs: IDENTITY_FP8E4M3_TENSORS,
+};
+
+const IDENTITY_FP8E5M2_BYTES: &[u8] = &[0x00, 0x80, 0x01, 0x81, 0x3c, 0x7b, 0x7c, 0x7d];
+const IDENTITY_FP8E5M2_TENSORS: &[PackedTensor] = &[PackedTensor {
+    shape: &[8],
+    bytes: IDENTITY_FP8E5M2_BYTES,
+}];
+
+/// FP8 E5M2 identity over signed zeros, subnormals, one, finite maximum, infinity, and NaN.
+pub const IDENTITY_FP8E5M2: TosaPackedCase = TosaPackedCase {
+    name: "identity-fp8e5m2",
+    dtype: PackedDType::Fp8E5M2,
+    artifact: include_bytes!("data/identity-fp8e5m2-v1.0.0.tosa"),
+    inputs: IDENTITY_FP8E5M2_TENSORS,
+    outputs: IDENTITY_FP8E5M2_TENSORS,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use virtio_accel_tosa::{
+        DType, ExtensionSet, Level, ProfileSet, Target, Version, low_precision_storage_bytes, parse,
+    };
 
     #[test]
     fn matmul_oracle_checks_shape_values_and_signed_zero() {
@@ -306,5 +445,77 @@ mod tests {
                 0x4600, 0x4800, 0x4b00, 0x4c00, 0x56a0, 0x56c0, 0x5720, 0x5740
             ]
         ));
+    }
+
+    #[test]
+    fn packed_oracles_preserve_storage_and_int4_layout() {
+        for case in [
+            IDENTITY_INT4,
+            IDENTITY_INT8,
+            IDENTITY_FP8E4M3,
+            IDENTITY_FP8E5M2,
+        ] {
+            let tensor = case.inputs[0];
+            let elements = tensor.shape.iter().product();
+            assert_eq!(case.dtype.storage_bytes(elements), Some(tensor.bytes.len()));
+            assert!(case.output_matches(0, tensor.bytes));
+            assert!(!case.output_matches(1, tensor.bytes));
+        }
+        assert_eq!(IDENTITY_INT4.inputs[0].bytes, &[0xd9, 0x0f, 0x31, 0x76]);
+
+        let mut canonicalized_e4m3_nan = IDENTITY_FP8E4M3.outputs[0].bytes.to_vec();
+        canonicalized_e4m3_nan[7] = 0xff;
+        assert!(IDENTITY_FP8E4M3.output_matches(0, &canonicalized_e4m3_nan));
+        let mut canonicalized_e5m2_nan = IDENTITY_FP8E5M2.outputs[0].bytes.to_vec();
+        canonicalized_e5m2_nan[7] = 0x7f;
+        assert!(IDENTITY_FP8E5M2.output_matches(0, &canonicalized_e5m2_nan));
+    }
+
+    #[test]
+    fn packed_artifacts_are_valid_for_their_declared_tosa_profiles_and_extensions() {
+        let integer = Target::new(
+            Version::TOSA_1_0,
+            ProfileSet::INTEGER,
+            Level::Level8K,
+            ExtensionSet::NONE,
+        );
+        let floating = |extension| {
+            Target::new(
+                Version::TOSA_1_0,
+                ProfileSet::FLOATING_POINT,
+                Level::Level8K,
+                extension,
+            )
+        };
+        for (case, target, dtype) in [
+            (IDENTITY_INT8, integer, DType::INT8),
+            (
+                IDENTITY_INT4,
+                Target::new(
+                    Version::TOSA_1_0,
+                    ProfileSet::INTEGER,
+                    Level::Level8K,
+                    ExtensionSet::INT4,
+                ),
+                DType::INT4,
+            ),
+            (
+                IDENTITY_FP8E4M3,
+                floating(ExtensionSet::FP8E4M3),
+                DType::FP8E4M3,
+            ),
+            (
+                IDENTITY_FP8E5M2,
+                floating(ExtensionSet::FP8E5M2),
+                DType::FP8E5M2,
+            ),
+        ] {
+            parse(case.artifact).unwrap().validate_for(target).unwrap();
+            let elements = case.inputs[0].shape.iter().product();
+            assert_eq!(
+                low_precision_storage_bytes(dtype, elements),
+                Some(case.inputs[0].bytes.len())
+            );
+        }
     }
 }

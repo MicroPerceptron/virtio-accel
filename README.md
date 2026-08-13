@@ -34,13 +34,13 @@ writing, not an approved Virtio specification.
 | `virtio-accel-proto` | `core` | Pointer-free, little-endian protocol 1.0 wire structures |
 | `virtio-accel-transport` | `core` | Dependency-free descriptor-chain, queue, reset, and notification ports |
 | `virtio-accel-core` | `core` | Backend lifecycle, memory, program, queue, and event contracts |
-| `virtio-accel-tosa` | `core + alloc` | Bounded zero-copy TOSA 1.0 validation, lowering analysis, and specialization utilities |
+| `virtio-accel-tosa` | `core + alloc` | Bounded zero-copy TOSA 1.0 validation, lowering analysis, specialization, and packed low-precision utilities |
 | `virtio-accel-coreml` | macOS `std` | TOSA-to-Core ML lowering, direct buffers, and asynchronous ANE-capable prediction |
 | `virtio-accel-split-queue` | `core + alloc` | Bounded in-memory split-ring reference model |
 | `virtio-accel-guest` | `core + alloc` | Typed reference client with bounded request tracking |
 | `virtio-accel-device` | `core + alloc` | Device-owned state, including bounded generational IDs |
 | `virtio-accel-mock` | `std` | In-memory backend with deterministic test-only artifacts and scripted faults |
-| `virtio-accel-conformance` | `std` | Transport-free semantic suite and shared FP16/FP32 numerical TOSA corpus |
+| `virtio-accel-conformance` | `std` | Transport-free semantic suite and shared FP32/FP16/FP8/INT8/INT4 numerical TOSA corpus |
 | `virtio-accel-cleanroom` | `core` | Independent conformance codec, written without the shared protocol types |
 
 Dependencies point downward only:

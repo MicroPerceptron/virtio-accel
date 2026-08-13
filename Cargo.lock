@@ -171,6 +171,7 @@ version = "0.1.1"
 dependencies = [
  "virtio-accel-core",
  "virtio-accel-mock",
+ "virtio-accel-tosa",
 ]
 
 [[package]]

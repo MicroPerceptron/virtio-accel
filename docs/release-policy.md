@@ -158,7 +158,7 @@ source.
 | 7 | `virtio-accel-guest` | `proto`, `transport` | `split-queue` |
 | 8 | `virtio-accel-mock` | `core` | — |
 | 9 | `virtio-accel-device` | `core`, `proto`, `transport` | `mock` |
-| 10 | `virtio-accel-conformance` | `core` | `mock` |
+| 10 | `virtio-accel-conformance` | `core` | `mock`, `tosa` |
 | 11 | `virtio-accel-coreml` | `core`, `tosa` | `conformance` |
 | 12 | `virtio-accel` | the six runtime crates | `conformance`, `mock`, `cleanroom` |
 
