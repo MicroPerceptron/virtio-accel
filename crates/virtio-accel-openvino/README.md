@@ -19,7 +19,7 @@ metadata. Builds without the runtime still compile and unit-test the portable TO
 ## Production TOSA artifacts
 
 The production path accepts `virtio-accel-tosa` artifacts (`ArtifactFormat` `"TOSA"`) declaring
-the floating-point profile of TOSA 1.0 at level 8K with no extensions, and requires the maximal
+the floating-point or integer profile of TOSA 1.0 at level 8K with no extensions, and requires the maximal
 `resident_bytes` charge (`REQUIRED_RESIDENT_BYTES`): OpenVINO publishes no finite compiled-model
 residency bound, so the provider promise stays truthful.
 
@@ -27,9 +27,9 @@ Loading validates and analyzes the FlatBuffer with `virtio-accel-tosa`, lowers t
 in-memory OpenVINO IR (version 11) document plus weights blob inside this crate, reads it with
 `ov_core_read_model_from_memory_buffer`, and compiles it for this instance's device. Program
 admission accepts exactly one static region and basic block with no runtime obligations; static,
-positive shapes; FP16 and FP32 tensor boundaries plus restricted INT32 outputs for operators such
-as `ARGMAX`; and the operator set reported by `supports_tosa_operator` (the same static
-floating-point subset as the Core ML backend). Everything else is rejected while loading, with
+positive shapes; FP16, FP32, or INT8 tensor boundaries plus restricted INT32 outputs; and the
+operator set reported by `supports_tosa_operator`. The integer target currently admits exact INT8
+identity and INT8 MATMUL with INT32 output. Everything else is rejected while loading, with
 `Unsupported`, `Incompatible`, or `InvalidArgument` mapped exactly as the backend implementer
 guide specifies.
 
@@ -38,11 +38,12 @@ declared order.
 
 ### Low-precision boundary
 
-`supports_tosa_dtype` reports FP16, FP32, and INT32 independently of operator coverage. INT8,
-packed INT4, FP8E4M3, and FP8E5M2 artifacts are rejected before native compilation: executing
-quantized TOSA tensor semantics on OpenVINO requires a quantization-aware lowering tier with
-explicit calibration and rescale handling, not a silent dequantization to floating point. This
-backend never dequantizes unsupported low-precision graphs.
+`supports_tosa_dtype` reports FP16, FP32, INT8, and INT32 independently of operator coverage. The
+integer-profile lowerer keeps direct signed-byte boundaries, widens operands to INT32, explicitly
+subtracts TOSA zero points, and uses INT32 MATMUL. The shared identity and nonzero-zero-point
+MATMUL fixtures require bit-exact results. Packed INT4, FP8E4M3, FP8E5M2, RESCALE, and other INT8
+operators remain unsupported and are rejected before native compilation. This backend never
+dequantizes unsupported low-precision graphs.
 
 ## Direct buffers and events
 

@@ -318,6 +318,12 @@ batched matrix multiplication, and NHWC max pooling are the first shared cases. 
 case it advertises and rejects unsupported profiles, extensions, and dtypes at program admission;
 provider-specific graphs cannot stand in for the shared bytes.
 
+The exact integer oracle is implemented in portable Rust from the TOSA scaling and accumulation
+rules. The first production integer tier uses direct INT8 boundaries for identity and widens INT8
+MATMUL operands to INT32 before explicit zero-point subtraction and INT32 accumulation. Core ML
+encodes this as an ML Program on macOS 26+; OpenVINO encodes the same semantics as IR Convert,
+Subtract, and MatMul nodes. Neither path converts through floating point.
+
 ## Production lowering boundaries
 
 The first production artifact path is now TOSA-to-Core ML. The facade, guest, transport, and device

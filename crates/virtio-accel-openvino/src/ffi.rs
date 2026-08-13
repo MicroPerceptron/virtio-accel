@@ -32,6 +32,7 @@ pub(crate) type ov_element_type_e = c_uint;
 pub(crate) const ELEMENT_BOOLEAN: ov_element_type_e = 1;
 pub(crate) const ELEMENT_F16: ov_element_type_e = 3;
 pub(crate) const ELEMENT_F32: ov_element_type_e = 4;
+pub(crate) const ELEMENT_I8: ov_element_type_e = 7;
 pub(crate) const ELEMENT_I32: ov_element_type_e = 9;
 pub(crate) const ELEMENT_I64: ov_element_type_e = 10;
 pub(crate) const ELEMENT_U8: ov_element_type_e = 16;

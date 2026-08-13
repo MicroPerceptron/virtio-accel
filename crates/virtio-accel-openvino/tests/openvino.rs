@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use virtio_accel_conformance::numerics::{
     IDENTITY_EDGES_FP16, IDENTITY_EDGES_FP32, IDENTITY_FP8E4M3, IDENTITY_FP8E5M2, IDENTITY_INT4,
-    IDENTITY_INT8, MATMUL_FP16, MATMUL_FP32, MAX_POOL2D_FP16, MAX_POOL2D_FP32,
+    IDENTITY_INT8, MATMUL_FP16, MATMUL_FP32, MATMUL_INT8, MAX_POOL2D_FP16, MAX_POOL2D_FP32,
 };
 use virtio_accel_conformance::{
     BindingFixture, CaseStatus, ConformanceHooks, ProgramFixture, SubmissionPathDiagnostics,
@@ -21,9 +21,10 @@ use virtio_accel_core::{
     SubmitFailure, Timeout,
 };
 use virtio_accel_openvino::{
-    InitError, OPENVINO_TOSA_TARGET, OpenVinoAccelerator, OpenVinoEvent, REQUIRED_RESIDENT_BYTES,
+    InitError, OPENVINO_TOSA_INTEGER_TARGET, OPENVINO_TOSA_TARGET, OpenVinoAccelerator,
+    OpenVinoEvent, REQUIRED_RESIDENT_BYTES,
 };
-use virtio_accel_tosa::parse;
+use virtio_accel_tosa::{Target, parse};
 
 const IDENTITY_FP32_LOCAL: &[u8] = include_bytes!("data/identity-fp32-v1.0.0.tosa");
 
@@ -103,10 +104,17 @@ fn load_tosa(
     context: &<OpenVinoAccelerator as Accelerator>::Context,
     artifact: &[u8],
 ) -> LoadOutcome<OpenVinoAccelerator> {
+    load_tosa_for_target(backend, context, artifact, OPENVINO_TOSA_TARGET)
+}
+
+fn load_tosa_for_target(
+    backend: &OpenVinoAccelerator,
+    context: &<OpenVinoAccelerator as Accelerator>::Context,
+    artifact: &[u8],
+    target: Target,
+) -> LoadOutcome<OpenVinoAccelerator> {
     let model = parse(artifact).unwrap();
-    let artifact = model
-        .artifact_ref(OPENVINO_TOSA_TARGET, REQUIRED_RESIDENT_BYTES)
-        .unwrap();
+    let artifact = model.artifact_ref(target, REQUIRED_RESIDENT_BYTES).unwrap();
     match backend.load_program(context, artifact) {
         Ok(program) => LoadOutcome::Loaded(program),
         Err(error) => LoadOutcome::Rejected(error),
@@ -123,9 +131,19 @@ fn run_tosa_bytes(
     inputs: &[&[u8]],
     output_bytes: usize,
 ) -> Option<Vec<u8>> {
+    run_tosa_bytes_for_target(device, artifact, OPENVINO_TOSA_TARGET, inputs, output_bytes)
+}
+
+fn run_tosa_bytes_for_target(
+    device: &str,
+    artifact: &[u8],
+    target: Target,
+    inputs: &[&[u8]],
+    output_bytes: usize,
+) -> Option<Vec<u8>> {
     let backend = OpenVinoAccelerator::with_device(device).unwrap();
     let context = backend.create_context(ContextDesc::default()).unwrap();
-    let program = match load_tosa(&backend, &context, artifact) {
+    let program = match load_tosa_for_target(&backend, &context, artifact, target) {
         LoadOutcome::Loaded(program) => program,
         LoadOutcome::Rejected(error) => {
             assert!(
@@ -348,6 +366,50 @@ fn executes_the_shared_fp16_corpus_on_every_available_device() {
                 case.name
             );
         }
+    }
+}
+
+#[test]
+fn executes_the_shared_int8_corpus_on_every_available_device() {
+    for device in devices() {
+        let identity_input = IDENTITY_INT8.inputs[0].bytes;
+        if let Some(actual) = run_tosa_bytes_for_target(
+            &device,
+            IDENTITY_INT8.artifact,
+            OPENVINO_TOSA_INTEGER_TARGET,
+            &[identity_input],
+            IDENTITY_INT8.outputs[0].bytes.len(),
+        ) {
+            assert!(
+                IDENTITY_INT8.output_matches(0, &actual),
+                "{device}: {} produced {actual:?}",
+                IDENTITY_INT8.name
+            );
+        }
+
+        let inputs = MATMUL_INT8
+            .inputs
+            .iter()
+            .map(|tensor| tensor.bytes)
+            .collect::<Vec<_>>();
+        let Some(actual) = run_tosa_bytes_for_target(
+            &device,
+            MATMUL_INT8.artifact,
+            OPENVINO_TOSA_INTEGER_TARGET,
+            &inputs,
+            MATMUL_INT8.outputs[0].values.len().checked_mul(4).unwrap(),
+        ) else {
+            continue;
+        };
+        let actual = actual
+            .chunks_exact(4)
+            .map(|bytes| i32::from_ne_bytes(bytes.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert!(
+            MATMUL_INT8.output_matches(0, &actual),
+            "{device}: {} produced {actual:?}",
+            MATMUL_INT8.name
+        );
     }
 }
 

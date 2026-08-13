@@ -86,6 +86,7 @@ type NativeReleaseContext = unsafe extern "C" fn(*mut c_void);
 
 unsafe extern "C" {
     fn va_coreml_has_neural_engine() -> std::ffi::c_int;
+    fn va_coreml_supports_int8() -> std::ffi::c_int;
     fn va_coreml_model_load(
         path: *const u8,
         path_len: usize,
@@ -727,6 +728,14 @@ impl Accelerator for CoreMlAccelerator {
         if artifact.format == virtio_accel_tosa::ARTIFACT_FORMAT {
             let target = virtio_accel_tosa::Target::from_identity(artifact.target)
                 .map_err(|_| BackendError::Incompatible)?;
+            if target == crate::COREML_TOSA_INTEGER_TARGET {
+                // SAFETY: this query takes no pointers and reports the Foundation runtime's
+                // operating-system version check. INT8 model boundaries are unavailable before
+                // macOS 26 even though this binary weak-links the newer SDK declarations.
+                if unsafe { va_coreml_supports_int8() } != 1 {
+                    return Err(BackendError::Unsupported);
+                }
+            }
             let mut owned = Vec::new();
             let bytes = match artifact.payload.as_contiguous() {
                 Some(bytes) => bytes,

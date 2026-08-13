@@ -36,23 +36,24 @@ execution. “Not implemented” describes this repository, not necessarily the 
 
 | Backend                                     | Status                 | Program admission                     | FP32            | FP16            | FP8 E4M3/E5M2   | INT8            | Packed INT4     | Program-visible buffers     |
 | ------------------------------------------- | ---------------------- | ------------------------------------- | --------------- | --------------- | --------------- | --------------- | --------------- | --------------------------- |
-| Apple Core ML / ANE (`virtio-accel-coreml`) | Implemented; macOS 14+ | Static TOSA 1.0 floating-point subset | Supported       | Supported       | Not implemented | Not implemented | Not implemented | Direct host/shared bindings |
-| Intel OpenVINO (`virtio-accel-openvino`)    | Implemented; OpenVINO 2026.x | Static TOSA 1.0 floating-point subset | Supported       | Supported       | Not implemented | Not implemented | Not implemented | Direct host/shared bindings |
+| Apple Core ML / ANE (`virtio-accel-coreml`) | Implemented; macOS 14+ | Static TOSA 1.0 FP; INT8 tier on macOS 26+ | Supported       | Supported       | Not implemented | Identity + MATMUL | Not implemented | Direct host/shared bindings |
+| Intel OpenVINO (`virtio-accel-openvino`)    | Implemented; OpenVINO 2026.x | Static TOSA 1.0 FP + INT8 tier | Supported       | Supported       | Not implemented | Identity + MATMUL | Not implemented | Direct host/shared bindings |
 | AMD XDNA                                    | Planned                | Not implemented                       | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented             |
 | Qualcomm Hexagon                            | Planned                | Not implemented                       | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented             |
 
-The Core ML row describes model-boundary support; restricted INT32 outputs are also available for
-operators such as `ARGMAX`. Core ML chooses ANE or CPU placement per operation. Its INT4 facilities
-are compressed-weight storage rather than TOSA INT4 tensor execution, and this backend does not
-silently dequantize unsupported FP8, INT8, or INT4 graphs. See the
+The Core ML row describes model-boundary support; restricted INT32 outputs are also available.
+Core ML chooses ANE or CPU placement per operation. Direct INT8 boundaries require macOS 26+, and
+the exact integer tier currently covers identity and zero-point-aware MATMUL only. Its INT4
+facilities are compressed-weight storage rather than TOSA INT4 tensor execution, and this backend
+does not silently dequantize unsupported FP8, INT8, or INT4 graphs. See the
 [`virtio-accel-coreml` support boundary](crates/virtio-accel-coreml/README.md#low-precision-boundary).
 
-The OpenVINO row also describes model-boundary support with restricted INT32 outputs for operators
-such as `ARGMAX`. The backend compiles per enumerated device (NPU, then GPU, then CPU by default)
+The OpenVINO row also describes model-boundary support with restricted INT32 outputs. Its integer
+tier uses direct INT8 boundaries and explicit INT32 zero-point legalization for MATMUL. The backend compiles per enumerated device (NPU, then GPU, then CPU by default)
 with OpenVINO's accuracy-preserving execution mode, and accepts completion only when the runtime
 executed into the caller's own output allocation. NPU and GPU devices enumerate when the Intel
 Level Zero NPU driver or GPU compute runtime is installed; the CPU plugin is exercised in CI. Like
-the Core ML backend it rejects unsupported FP8, INT8, and packed INT4 graphs while loading instead
+the Core ML backend it rejects unsupported FP8, unsupported INT8 operators, and packed INT4 graphs while loading instead
 of silently dequantizing. See the
 [`virtio-accel-openvino` support boundary](crates/virtio-accel-openvino/README.md#low-precision-boundary).
 
