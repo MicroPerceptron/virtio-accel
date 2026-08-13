@@ -53,6 +53,7 @@ PUBLISH_ORDER = (
     "virtio-accel-device",
     "virtio-accel-conformance",
     "virtio-accel-coreml",
+    "virtio-accel-openvino",
     "virtio-accel",
 )
 

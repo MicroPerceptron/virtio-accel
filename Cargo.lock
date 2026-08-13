@@ -47,6 +47,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "pkg-config"
+version = "0.3.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -219,6 +225,16 @@ name = "virtio-accel-mock"
 version = "0.1.2"
 dependencies = [
  "virtio-accel-core",
+]
+
+[[package]]
+name = "virtio-accel-openvino"
+version = "0.1.2"
+dependencies = [
+ "pkg-config",
+ "virtio-accel-conformance",
+ "virtio-accel-core",
+ "virtio-accel-tosa",
 ]
 
 [[package]]
