@@ -50,7 +50,7 @@
     {
       "id": "transport.segmented_region_access",
       "path": "hot",
-      "complexity": "O(log s + k + n), where s is segment count, k is touched segments, and n is requested bytes",
+      "complexity": "O(s + n) portable worst case; indexed split queue O(log s + k + n), where s is segment count, k is touched segments, and n is requested bytes",
       "allocation_profile": "zero allocations per access; bounded logical span metadata is created with caller-owned chain storage before publication",
       "copy_profile": "exact requested byte range only",
       "permitted_copy_boundary": "explicit ByteSource::read_at or ByteSink::write_at caller request",

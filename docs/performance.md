@@ -14,7 +14,7 @@ evidence, but they are not stable enough for ordinary pull-request gating across
 | Config and scalar request decode | `O(1)` | none | fixed scalar bytes only |
 | Non-`SUBMIT` request decode | `O(1)` plus descriptor validation | none | transfer and artifact tails stay borrowed |
 | `SUBMIT` decode | `O(b log b)` | one bounded metadata vector after binding-count validation | binding metadata only |
-| Segmented byte-port access | `O(log s + k + n)` after construction-time indexing | none per access | exact caller-requested range |
+| Segmented byte-port access | portable worst case `O(s + n)`; indexed split queue `O(log s + k + n)` | none per access | exact caller-requested range |
 | Object lookup | `O(1)` | none | none |
 | Command dispatch | request-specific | bounded object-table reservation before mutation | response publication, except explicit transfers |
 | Submission admission | `O(b log b)` plus lookups; canonical binding revalidation is `O(b)` | bounded event dependency and binding metadata | no hidden buffer staging |
