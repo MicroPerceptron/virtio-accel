@@ -53,7 +53,10 @@ mod ffi;
 #[cfg(va_openvino)]
 mod native;
 #[cfg(va_openvino)]
-pub use native::OpenVinoAccelerator;
+pub use native::{
+    OpenVinoAccelerator, OpenVinoBuffer, OpenVinoContext, OpenVinoEvent, OpenVinoProgram,
+    OpenVinoQueue,
+};
 
 /// Placeholder that keeps workspace consumers portable when no OpenVINO runtime was detected.
 #[cfg(not(va_openvino))]
