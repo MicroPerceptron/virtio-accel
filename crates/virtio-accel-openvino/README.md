@@ -59,6 +59,13 @@ submissions and host transfers with `Busy`, and are released before a terminal s
 published. Finite submission timeouts are enforced best-effort at poll time through
 `ov_infer_request_cancel`, surfacing as `DeadlineExpired`. Event cancellation is not advertised.
 
+Warm submissions reuse the queue's pointer-slot storage and one cleared high-water allocation for
+event backing metadata and bound-tensor metadata. The spare vectors contain capacity only: event
+completion drops all backing guards before recycling their vector, and event destruction frees the
+native request and tensor handles before recycling tensor metadata. Infer requests are never
+pooled because OpenVINO retains the tensor objects bound to a request and exposes no C reset API
+that can prove those guest-memory references detached.
+
 ## Devices
 
 One OpenVINO core is created per process and shared by every backend instance, because plugin
