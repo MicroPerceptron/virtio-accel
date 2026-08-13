@@ -663,7 +663,13 @@ fn openvino_backend_passes_the_standard_semantic_suite() {
 #[test]
 #[ignore = "manual native performance evidence"]
 fn measures_warm_submission_and_completion_latency() {
-    let Some(backend) = backend() else { return };
+    for device in devices() {
+        measure_warm_latency_on(&device);
+    }
+}
+
+fn measure_warm_latency_on(device: &str) {
+    let backend = OpenVinoAccelerator::with_device(device).unwrap();
     let context = backend.create_context(ContextDesc::default()).unwrap();
     let program = match load_tosa(&backend, &context, IDENTITY_FP32_LOCAL) {
         LoadOutcome::Loaded(program) => program,
