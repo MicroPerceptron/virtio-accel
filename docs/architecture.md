@@ -333,15 +333,15 @@ graph IR. A host backend may lower its supported subset directly, reject unsuppo
 program load, and add capability coverage without making its native SDK or model representation a
 dependency of the portable stack.
 
-The planned Intel Level Zero/OpenVINO provider should consume `virtio-accel-tosa`'s compact
-analysis directly. Dense value/operator IDs, topological order, liveness, runtime conditions, and
-specialization keys are provider-neutral; only capability selection, operator lowering, native
-memory import, and synchronization around the provider-owned compiled-program cache remain
-backend-specific. Its first validation pass on the Intel host should run the backend conformance
-suite and shared low-precision numerical TOSA corpus, add provider-specific differential checks, and record
-cold/warm specialization, throughput, and copy/allocation counters. This keeps the Core ML and
-Intel paths on one bounded TOSA contract without requiring either provider to adopt the other's
-native graph representation.
+The Intel OpenVINO provider consumes the same verified model and analysis. The adapter lowers one
+static TOSA graph to an in-memory OpenVINO IR document plus weights blob, compiles it for one
+enumerated NPU, GPU, or CPU device with the accuracy-preserving execution hint, and binds exact
+provider allocations as host-pointer tensors from load through asynchronous inference; completion
+is accepted only when the runtime reports the caller's own allocation as its output storage. Its
+validation runs the backend conformance suite and the shared numerical TOSA corpus on every
+enumerated device and reports the direct-binding and explicit-transfer counters through the
+conformance diagnostics hook. This keeps the Core ML and Intel paths on one bounded TOSA contract
+without requiring either provider to adopt the other's native graph representation.
 
 The portable command engine depends on `virtio-accel-proto`, `virtio-accel-core`, and the
 transport-neutral region metadata re-exported by `virtio-accel-device`. Its baseline processor:
