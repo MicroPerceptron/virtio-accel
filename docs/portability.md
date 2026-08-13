@@ -12,6 +12,7 @@ Rust 2024 edition selected by the workspace. Every package inherits the same `ru
 |---|---|---|
 | `style-and-api` | Current stable on Ubuntu | Formatting, complete normative-requirement ledger, release-policy invariants, Clippy with warnings denied, and warning-free public docs |
 | `native-test` | Current stable on Ubuntu, macOS, and Windows | All workspace unit, integration, target, feature, and documentation tests, runnable examples, and release-profile checking |
+| `openvino-host-test` | Current stable on Ubuntu with a pinned Intel OpenVINO runtime | The real (probed) OpenVINO backend: lint, unit, integration, semantic-conformance, and example runs against the CPU plugin |
 | `msrv` | Rust 1.85.0 on Ubuntu | Every workspace target and test continues to compile at the declared MSRV |
 | `portable-target` | Stable `aarch64-unknown-none`, `riscv64gc-unknown-none-elf`, and `wasm32-unknown-unknown` | `cleanroom`, `proto`, `transport`, and `core` remain `no_std`; guest, split-queue, device, and facade layers require at most `alloc`; Wasm also checks the std reference crates |
 | `feature-sets-and-dependencies` | Stable on Ubuntu | Every Cargo feature combination plus dependency and `std`/`alloc` leakage guards for the portable codecs, queue ports, and core |
@@ -37,14 +38,24 @@ directly, and they must keep working on any platform the portable crates support
 | `core-only` | `virtio-accel-cleanroom`, `virtio-accel-proto`, `virtio-accel-transport`, `virtio-accel-core` | `core`; the clean-room codec and transport ports have no normal/build dependencies, while proc-macros used by other crates may execute with `std` on the build host |
 | `alloc-portable` | `virtio-accel-guest`, `virtio-accel-split-queue`, `virtio-accel-device`, `virtio-accel-tosa`, `virtio-accel` | `core + alloc`; no OS, filesystem, sockets, threads, or host synchronization |
 | `std-reference` | `virtio-accel-mock`, `virtio-accel-conformance` | Portable `std`; no host-OS or vendor-specific API |
-| `host-native` | `virtio-accel-coreml` | Core ML/Foundation on macOS 14+; a compile-only unsupported-platform placeholder elsewhere |
+| `host-native` | `virtio-accel-coreml`, `virtio-accel-openvino` | Core ML/Foundation on macOS 14+, or the OpenVINO C runtime (`libopenvino_c` 2026.x) when detected at build time; a compile-only unsupported-platform or unsupported-runtime placeholder elsewhere |
 
-The Core ML crate is not a dependency of the facade or any portable layer. Its Objective-C bridge
-and TOSA-to-Core ML model compilation are built only when the Cargo target is macOS. The Linux,
-Windows, and Wasm workspace jobs compile the placeholder API and backend-local lowering utilities,
-while the macOS native job executes its real model and semantic-conformance tests. An accessible
-Apple Neural Engine is required to construct the real backend; macOS runners without one skip
-execution after checking that availability through Core ML.
+Neither host-native crate is a dependency of the facade or any portable layer. The Core ML crate's
+Objective-C bridge and TOSA-to-Core ML model compilation are built only when the Cargo target is
+macOS. The Linux, Windows, and Wasm workspace jobs compile the placeholder API and backend-local
+lowering utilities, while the macOS native job executes its real model and semantic-conformance
+tests. An accessible Apple Neural Engine is required to construct the real backend; macOS runners
+without one skip execution after checking that availability through Core ML.
+
+The OpenVINO crate's boundary is a build environment rather than a target operating system: its
+build script probes pkg-config for `openvino` and compiles the native FFI modules only on success.
+`VIRTIO_ACCEL_OPENVINO=1` turns a missing runtime into a loud build failure, `=0` forces the
+placeholder, and `VIRTIO_ACCEL_OPENVINO_LIB_DIR` links installations that ship no pkg-config
+metadata. The default `native-test` runners have no OpenVINO and compile the placeholder plus the
+portable TOSA-to-IR encoder; the dedicated `openvino-host-test` job installs a pinned runtime and
+exercises the real backend against the CPU plugin. NPU and GPU devices additionally require the
+Intel Level Zero NPU driver or the Intel OpenCL/Level Zero GPU runtime on the host; hosts without
+an inference device skip execution after enumeration.
 
 Concrete VMM, kernel, OS, and vendor adapters are outside the portable-v1 milestone and must not
 become default dependencies of a portable crate.
@@ -99,6 +110,7 @@ cargo test --workspace --doc --all-features
 cargo run --example backend_conformance
 cargo run --example reference_execution
 cargo run -p virtio-accel-coreml --example tosa_coreml
+cargo run -p virtio-accel-openvino --example tosa_openvino
 cargo +1.85.0 check --workspace --all-targets --all-features
 cargo hack check --workspace --feature-powerset --no-dev-deps
 bash ci/check-portable-dependencies.sh

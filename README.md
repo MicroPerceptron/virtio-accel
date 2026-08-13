@@ -12,10 +12,12 @@ An experimental virtual-accelerator protocol plus production-oriented Rust imple
 
 `virtio-accel` defines a protocol and ships executable `no_std` guest, device, transport, queue, and
 TOSA layers for exposing an accelerator to a guest: contexts, buffers, programs, execution queues,
-submissions, and events. The workspace also contains a real macOS Core ML backend that lowers
-device-neutral TOSA into Core ML and submits ANE-capable predictions with direct buffer bindings.
-The first target is NPU execution, while the object model deliberately leaves room for GPUs, DSPs,
-and other program-driven accelerators.
+submissions, and events. The workspace also contains two real host backends: a macOS Core ML
+backend that lowers device-neutral TOSA into Core ML and submits ANE-capable predictions with
+direct buffer bindings, and an Intel OpenVINO backend that lowers the same TOSA artifacts to
+in-memory OpenVINO IR and executes them on NPU, GPU, or CPU inference devices with direct
+host-pointer tensors. The first target is NPU execution, while the object model deliberately
+leaves room for GPUs, DSPs, and other program-driven accelerators.
 
 This is no longer a specification-only repository: the frozen protocol review input is developed
 alongside runnable guest/device machinery, conformance infrastructure, TOSA ingestion and analysis,
@@ -35,7 +37,7 @@ execution. “Not implemented” describes this repository, not necessarily the 
 | Backend                                     | Status                 | Program admission                     | FP32            | FP16            | FP8 E4M3/E5M2   | INT8            | Packed INT4     | Program-visible buffers     |
 | ------------------------------------------- | ---------------------- | ------------------------------------- | --------------- | --------------- | --------------- | --------------- | --------------- | --------------------------- |
 | Apple Core ML / ANE (`virtio-accel-coreml`) | Implemented; macOS 14+ | Static TOSA 1.0 floating-point subset | Supported       | Supported       | Not implemented | Not implemented | Not implemented | Direct host/shared bindings |
-| Intel Level Zero / OpenVINO                 | Planned                | Not implemented                       | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented             |
+| Intel OpenVINO (`virtio-accel-openvino`)    | Implemented; OpenVINO 2026.x | Static TOSA 1.0 floating-point subset | Supported       | Supported       | Not implemented | Not implemented | Not implemented | Direct host/shared bindings |
 | AMD XDNA                                    | Planned                | Not implemented                       | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented             |
 | Qualcomm Hexagon                            | Planned                | Not implemented                       | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented             |
 
@@ -44,6 +46,15 @@ operators such as `ARGMAX`. Core ML chooses ANE or CPU placement per operation. 
 are compressed-weight storage rather than TOSA INT4 tensor execution, and this backend does not
 silently dequantize unsupported FP8, INT8, or INT4 graphs. See the
 [`virtio-accel-coreml` support boundary](crates/virtio-accel-coreml/README.md#low-precision-boundary).
+
+The OpenVINO row also describes model-boundary support with restricted INT32 outputs for operators
+such as `ARGMAX`. The backend compiles per enumerated device (NPU, then GPU, then CPU by default)
+with OpenVINO's accuracy-preserving execution mode, and accepts completion only when the runtime
+executed into the caller's own output allocation. NPU and GPU devices enumerate when the Intel
+Level Zero NPU driver or GPU compute runtime is installed; the CPU plugin is exercised in CI. Like
+the Core ML backend it rejects unsupported FP8, INT8, and packed INT4 graphs while loading instead
+of silently dequantizing. See the
+[`virtio-accel-openvino` support boundary](crates/virtio-accel-openvino/README.md#low-precision-boundary).
 
 Independently of backend execution, `virtio-accel-tosa` validates the TOSA 1.0 profiles and
 extensions for all five dtype columns, and `virtio-accel-conformance` ships shared fixtures and
@@ -60,6 +71,7 @@ than a typed hardware implementation.
 | `virtio-accel-core`        | `core`         | Backend lifecycle, memory, program, queue, and event contracts                                               |
 | `virtio-accel-tosa`        | `core + alloc` | Bounded zero-copy TOSA 1.0 validation, lowering analysis, specialization, and packed low-precision utilities |
 | `virtio-accel-coreml`      | macOS `std`    | TOSA-to-Core ML lowering, direct buffers, and asynchronous ANE-capable prediction                            |
+| `virtio-accel-openvino`    | Linux `std` (probed) | TOSA-to-OpenVINO IR lowering, direct host-pointer tensors, and asynchronous NPU/GPU/CPU inference      |
 | `virtio-accel-split-queue` | `core + alloc` | Bounded in-memory split-ring reference model                                                                 |
 | `virtio-accel-guest`       | `core + alloc` | Typed reference client with bounded request tracking                                                         |
 | `virtio-accel-device`      | `core + alloc` | Device-owned state, including bounded generational IDs                                                       |
@@ -86,6 +98,9 @@ virtio-accel-tosa ---------------------------> virtio-accel-core
 virtio-accel-coreml ----------+--------------> virtio-accel-core
                               |
                               +--------------> virtio-accel-tosa
+virtio-accel-openvino --------+--------------> virtio-accel-core
+                              |
+                              +--------------> virtio-accel-tosa
 other provider adapters --------------------> virtio-accel-core
 ```
 
@@ -108,8 +123,9 @@ virtio-accel-mock = "0.1"
 ```
 
 On an ANE-capable Mac, add `virtio-accel-coreml = "0.1"` separately for the host-native backend.
-Its production program format is TOSA 1.0; validation, analysis, and Core ML model generation all
-happen inside that adapter. It is intentionally not re-exported by the portable facade.
+On a Linux host with an OpenVINO 2026.x runtime, add `virtio-accel-openvino = "0.1"` instead. Both
+adapters accept the production TOSA 1.0 program format; validation, analysis, and native model
+generation all happen inside the adapter. Neither is re-exported by the portable facade.
 
 Add `virtio-accel-tosa = "0.1"` separately to validate TOSA 1.0 artifacts, inspect safe borrowed
 graph and typed-attribute views, enforce complete stable-op semantics for a declared target, and
@@ -129,6 +145,17 @@ cargo run -p virtio-accel-coreml --example tosa_coreml
 
 ```text
 TOSA -> Core ML -> ANE-capable result: 3.25
+```
+
+On a Linux host with an OpenVINO 2026.x runtime, the equivalent backend-local example executes the
+same graph on the preferred available Intel inference device (NPU, then GPU, then CPU):
+
+```sh
+cargo run -p virtio-accel-openvino --example tosa_openvino
+```
+
+```text
+TOSA -> OpenVINO -> CPU result: 3.25
 ```
 
 The portable facade, device engine, transport, and guest layers see only the TOSA artifact format,
@@ -295,6 +322,7 @@ cargo test --workspace --all-targets --all-features
 cargo run --example backend_conformance
 cargo run --example reference_execution
 cargo run -p virtio-accel-coreml --example tosa_coreml # macOS 14+ with ANE
+cargo run -p virtio-accel-openvino --example tosa_openvino # Linux with OpenVINO 2026.x
 python3 ci/publish-dry-run.py
 ```
 

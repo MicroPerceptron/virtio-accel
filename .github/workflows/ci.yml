@@ -95,8 +95,53 @@ jobs:
       - name: Run TOSA-to-Core ML example
         run: cargo run -p virtio-accel-coreml --example tosa_coreml
 
+      - name: Run TOSA-to-OpenVINO example
+        run: cargo run -p virtio-accel-openvino --example tosa_openvino
+
       - name: Check release profile
         run: cargo check --workspace --release --all-features
+
+  openvino-host-test:
+    name: openvino-host-test (ubuntu, CPU plugin)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # The probe must find the runtime; a silent placeholder fallback would test nothing.
+      VIRTIO_ACCEL_OPENVINO: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: stable
+
+      - name: Install the pinned OpenVINO runtime from Intel's APT repository
+        run: |
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
+            | sudo gpg --dearmor -o /usr/share/keyrings/intel-openvino.gpg
+          echo "deb [signed-by=/usr/share/keyrings/intel-openvino.gpg] https://apt.repos.intel.com/openvino ubuntu24 main" \
+            | sudo tee /etc/apt/sources.list.d/intel-openvino.list
+          sudo apt-get update
+          sudo apt-get install -y openvino-libraries-dev-2026.3.0
+
+      - name: Locate the installed pkg-config metadata
+        run: |
+          pc_file="$(find /opt/intel /usr/lib /usr/share -name 'openvino.pc' 2>/dev/null | head -n1)"
+          test -n "$pc_file"
+          echo "PKG_CONFIG_PATH=$(dirname "$pc_file")" >> "$GITHUB_ENV"
+
+      - name: Lint the probed backend
+        run: cargo clippy -p virtio-accel-openvino --all-targets -- -D warnings
+
+      - name: Test against the real runtime
+        run: cargo test -p virtio-accel-openvino --all-targets
+
+      - name: Run the example against the real runtime
+        run: cargo run -p virtio-accel-openvino --example tosa_openvino
 
   msrv:
     name: msrv (1.85.0)

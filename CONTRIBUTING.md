@@ -33,6 +33,7 @@ cargo test --workspace --all-targets --all-features
 cargo run --example backend_conformance
 cargo run --example reference_execution
 cargo run -p virtio-accel-coreml --example tosa_coreml
+cargo run -p virtio-accel-openvino --example tosa_openvino
 python3 ci/publish-dry-run.py
 ```
 
