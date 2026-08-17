@@ -711,17 +711,22 @@ impl Accelerator for HexagonAccelerator {
             .tensors
             .iter()
             .map(|tensor| {
-                let role = lowered
-                    .features
-                    .iter()
-                    .find(|feature| feature.value == tensor.value)
-                    .map_or(ffi::TENSOR_NATIVE, |feature| match feature.role {
-                        FeatureRole::Input => ffi::TENSOR_INPUT,
-                        FeatureRole::Output => ffi::TENSOR_OUTPUT,
-                    });
+                let (role, io_index) = lowered.boundary(tensor.value).map_or(
+                    (ffi::TENSOR_NATIVE, ffi::NO_IO_INDEX),
+                    |(feature_role, io_index)| {
+                        (
+                            match feature_role {
+                                FeatureRole::Input => ffi::TENSOR_INPUT,
+                                FeatureRole::Output => ffi::TENSOR_OUTPUT,
+                            },
+                            io_index,
+                        )
+                    },
+                );
                 ffi::TensorDesc {
                     value: tensor.value,
                     role,
+                    io_index,
                     dimensions: tensor.dims.as_ptr(),
                     rank: tensor.dims.len() as u32,
                 }

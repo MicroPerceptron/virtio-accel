@@ -44,16 +44,18 @@ fn main() {
         return;
     };
 
-    let header = [
-        root.join("include/QNN/QnnInterface.h"),
-        root.join("include/QnnInterface.h"),
-    ]
-    .into_iter()
-    .find(|candidate| candidate.is_file());
-    let Some(header) = header else {
+    let required_headers = ["QnnInterface.h", "QnnOpDef.h", "HTP/QnnHtpCommon.h"];
+    let include_dir = [root.join("include/QNN"), root.join("include")]
+        .into_iter()
+        .find(|directory| {
+            required_headers
+                .iter()
+                .all(|header| directory.join(header).is_file())
+        });
+    let Some(include_dir) = include_dir else {
         assert!(
             !forced,
-            "{FORCE_ENV}=1 but {root:?} contains no public QnnInterface.h"
+            "{FORCE_ENV}=1 but {root:?} contains no complete public QNN/HTP header set"
         );
         return;
     };
@@ -69,13 +71,18 @@ fn main() {
         return;
     }
 
-    println!("cargo:rerun-if-changed={}", header.display());
+    for header in required_headers {
+        println!(
+            "cargo:rerun-if-changed={}",
+            include_dir.join(header).display()
+        );
+    }
     println!("cargo:rerun-if-changed=native/qnn_bridge.cpp");
     println!("cargo:rerun-if-changed=native/qnn_bridge.h");
     cc::Build::new()
         .cpp(true)
         .file("native/qnn_bridge.cpp")
-        .include(root.join("include/QNN"))
+        .include(include_dir)
         .flag_if_supported("/std:c++17")
         .flag_if_supported("/EHsc")
         .flag_if_supported("-std=c++17")

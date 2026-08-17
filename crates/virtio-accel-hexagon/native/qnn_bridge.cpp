@@ -616,6 +616,37 @@ va_qnn_graph_create(VaQnnRuntime *runtime,
       return status;
     }
 
+    size_t input_count = 0;
+    size_t output_count = 0;
+    for (uint32_t index = 0; index < tensor_count; ++index) {
+      const VaQnnTensorDesc &description = tensor_descriptions[index];
+      switch (description.role) {
+      case VA_QNN_TENSOR_NATIVE:
+        if (description.io_index != UINT32_MAX) {
+          runtime->api.contextFree(graph->context, nullptr);
+          graph->context = nullptr;
+          set_message(message, message_size,
+                      "native QNN tensor has a model I/O index");
+          return VA_QNN_ERROR_INVALID_ARGUMENT;
+        }
+        break;
+      case VA_QNN_TENSOR_INPUT:
+        ++input_count;
+        break;
+      case VA_QNN_TENSOR_OUTPUT:
+        ++output_count;
+        break;
+      default:
+        runtime->api.contextFree(graph->context, nullptr);
+        graph->context = nullptr;
+        set_message(message, message_size, "invalid QNN tensor role");
+        return VA_QNN_ERROR_INVALID_ARGUMENT;
+      }
+    }
+    const size_t unbound = std::numeric_limits<size_t>::max();
+    graph->inputs.assign(input_count, unbound);
+    graph->outputs.assign(output_count, unbound);
+
     size_t retained_tensor_count = tensor_count;
     for (uint32_t index = 0; index < node_count; ++index) {
       const VaQnnNodeDesc &description = node_descriptions[index];
@@ -677,9 +708,25 @@ va_qnn_graph_create(VaQnnRuntime *runtime,
       }
       graph->by_value.emplace(description.value, index);
       if (description.role == VA_QNN_TENSOR_INPUT) {
-        graph->inputs.push_back(index);
+        if (description.io_index >= graph->inputs.size() ||
+            graph->inputs[description.io_index] != unbound) {
+          runtime->api.contextFree(graph->context, nullptr);
+          graph->context = nullptr;
+          set_message(message, message_size,
+                      "duplicate or invalid QNN input index");
+          return VA_QNN_ERROR_INVALID_ARGUMENT;
+        }
+        graph->inputs[description.io_index] = index;
       } else if (description.role == VA_QNN_TENSOR_OUTPUT) {
-        graph->outputs.push_back(index);
+        if (description.io_index >= graph->outputs.size() ||
+            graph->outputs[description.io_index] != unbound) {
+          runtime->api.contextFree(graph->context, nullptr);
+          graph->context = nullptr;
+          set_message(message, message_size,
+                      "duplicate or invalid QNN output index");
+          return VA_QNN_ERROR_INVALID_ARGUMENT;
+        }
+        graph->outputs[description.io_index] = index;
       }
     }
 

@@ -51,6 +51,7 @@ typedef struct VaQnnRuntimeInfo {
 typedef struct VaQnnTensorDesc {
   uint32_t value;
   uint32_t role;
+  uint32_t io_index;
   const uint32_t *dimensions;
   uint32_t rank;
 } VaQnnTensorDesc;

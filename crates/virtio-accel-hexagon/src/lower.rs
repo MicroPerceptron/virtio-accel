@@ -110,6 +110,15 @@ pub(crate) struct LoweredModel {
     pub features: Vec<LoweredFeature>,
 }
 
+impl LoweredModel {
+    pub(crate) fn boundary(&self, value: u32) -> Option<(FeatureRole, u32)> {
+        self.features
+            .iter()
+            .find(|feature| feature.value == value)
+            .map(|feature| (feature.role, feature.io_index))
+    }
+}
+
 pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, LoweringError> {
     if target != HEXAGON_TOSA_TARGET {
         return Err(LoweringError::UnsupportedGraph);
@@ -405,6 +414,62 @@ mod tests {
         assert_eq!(lowered.features[1].slot, 1);
         assert_eq!(lowered.features[2].slot, 2);
         assert_eq!(lowered.features[2].role, FeatureRole::Output);
+    }
+
+    #[test]
+    fn boundary_indices_do_not_depend_on_tensor_declaration_order() {
+        let lowered = LoweredModel {
+            tensors: vec![
+                LoweredTensor {
+                    value: 20,
+                    dims: vec![1],
+                },
+                LoweredTensor {
+                    value: 10,
+                    dims: vec![1],
+                },
+                LoweredTensor {
+                    value: 30,
+                    dims: vec![1],
+                },
+            ],
+            nodes: vec![LoweredNode::MatMul {
+                left: 10,
+                right: 20,
+                output: 30,
+            }],
+            features: vec![
+                LoweredFeature {
+                    slot: 0,
+                    role: FeatureRole::Input,
+                    io_index: 0,
+                    value: 10,
+                    dims: vec![1],
+                    byte_len: 2,
+                },
+                LoweredFeature {
+                    slot: 1,
+                    role: FeatureRole::Input,
+                    io_index: 1,
+                    value: 20,
+                    dims: vec![1],
+                    byte_len: 2,
+                },
+                LoweredFeature {
+                    slot: 2,
+                    role: FeatureRole::Output,
+                    io_index: 0,
+                    value: 30,
+                    dims: vec![1],
+                    byte_len: 2,
+                },
+            ],
+        };
+
+        assert_eq!(lowered.tensors[0].value, 20);
+        assert_eq!(lowered.boundary(20), Some((FeatureRole::Input, 1)));
+        assert_eq!(lowered.boundary(10), Some((FeatureRole::Input, 0)));
+        assert_eq!(lowered.boundary(30), Some((FeatureRole::Output, 0)));
     }
 
     #[test]

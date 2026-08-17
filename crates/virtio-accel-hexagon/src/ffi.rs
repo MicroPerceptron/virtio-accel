@@ -12,6 +12,7 @@ pub(crate) const ERROR_OUT_OF_MEMORY: u64 = u64::MAX - 4;
 pub(crate) const TENSOR_NATIVE: u32 = 0;
 pub(crate) const TENSOR_INPUT: u32 = 1;
 pub(crate) const TENSOR_OUTPUT: u32 = 2;
+pub(crate) const NO_IO_INDEX: u32 = u32::MAX;
 
 pub(crate) const NODE_RESHAPE: u32 = 1;
 pub(crate) const NODE_MATMUL: u32 = 2;
@@ -71,6 +72,7 @@ impl Default for RuntimeInfo {
 pub(crate) struct TensorDesc {
     pub value: u32,
     pub role: u32,
+    pub io_index: u32,
     pub dimensions: *const u32,
     pub rank: u32,
 }
