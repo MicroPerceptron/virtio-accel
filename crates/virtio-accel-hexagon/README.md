@@ -1,66 +1,87 @@
 # virtio-accel-hexagon
 
-An in-progress Qualcomm Hexagon NPU host backend for `virtio-accel`. The portable portion already
-validates device-neutral TOSA 1.0 artifacts and creates an owned, fixed-slot graph plan for the
-initial FP16 identity, non-square batched MATMUL, and NHWC MAX_POOL2D tier.
+Qualcomm Hexagon NPU host backend for `virtio-accel`. On Windows ARM64, a complete QAIRT/QNN SDK
+enables direct QNN HTP graph execution. Other builds retain the portable TOSA admission tests and
+an explicit `RuntimeUnavailable` placeholder. This crate is not a dependency of the facade or any
+portable crate.
 
-**Current status:** portable lowering and build/runtime detection are implemented. Native QNN HTP
-graph construction and execution remain unavailable until the full public QAIRT/QNN C development
-package is supplied. The smaller public QAIRT AppBuilder/Genie bundle does not include the QNN C
-headers or Windows ARM64 `QnnHtp` application import library and is not treated as sufficient.
+## Validated baseline
 
-**Portability tier:** `host-native` when completed; an explicit compile-only unavailable-runtime
-placeholder on SDK-free hosts. This crate is not a dependency of the facade or any portable crate.
+The initial hardware baseline is:
 
-## Initial support boundary
+- Snapdragon X126100, Hexagon HTP v73;
+- Windows 11 ARM64, Qualcomm NPU driver `30.0.222.0`;
+- QAIRT `2.49.0.260730`;
+- QNN core API `2.38.0`, HTP backend API `5.49.0`.
 
-The first target is Windows 11 ARM64 on Snapdragon X Series using QAIRT/QNN's HTP backend. The
-portable admission layer currently accepts:
+The backend accepts static, positive-shape FP16 TOSA 1.0 graphs containing identity, non-square
+batched MATMUL, and zero-padded NHWC MAX_POOL2D. MAX_POOL2D is expressed as QNN Gather plus
+ElementWiseMaximum nodes because this QAIRT Windows HTP build rejects its documented native
+PoolMax2d tensor parameters at graph finalization. All resulting nodes still execute through the
+HTP backend; there is no CPU or GPU fallback.
 
-- TOSA 1.0, floating-point profile, level 8K, no extensions;
-- static, positive-shape FP16 tensor boundaries;
-- one region and one basic block with no runtime obligations;
-- identity;
-- non-square batched MATMUL with serialized FP16 zero points equal to positive or negative zero;
-- NHWC MAX_POOL2D with propagating NaNs, a two-dimensional positive kernel/stride, and zero padding.
+FP32, quantized types, dynamic shapes, additional operators, profiles, extensions, layouts, and
+attributes are rejected during program admission. The initial execution lane permits one native
+submission at a time. Finite submission timeouts and cancellation are not advertised because the
+validated QNN HTP interface does not provide a working bounded asynchronous execution primitive.
 
-FP32 is rejected until HTP hardware evidence proves that the selected runtime preserves FP32
-semantics without relaxed or forced FP16 computation. INT8, INT4, FP8, dynamic shapes, additional
-operators, profiles, extensions, layouts, and attributes are also rejected during program
-admission. The backend must never substitute CPU or GPU execution.
+## Install and configure QAIRT
 
-## SDK detection
+Download the complete Qualcomm AI Runtime Community SDK, not an AppBuilder/Genie-only bundle. The
+SDK root must contain both:
 
-The build script recognizes the following variables:
+```text
+include\QNN\QnnInterface.h
+lib\aarch64-windows-msvc\QnnHtp.lib
+```
 
-- `VIRTIO_ACCEL_HEXAGON=0` forces the portable placeholder;
-- `VIRTIO_ACCEL_HEXAGON=1` requires a complete supported SDK and fails loudly otherwise;
-- `VIRTIO_ACCEL_QNN_SDK_ROOT` selects the QAIRT/QNN SDK root;
-- `QNN_SDK_ROOT` is accepted as the conventional fallback root;
-- `VIRTIO_ACCEL_QNN_LIB_DIR` overrides the Windows ARM64 QNN import-library directory.
+For the validated archive, extraction to `C:\Qualcomm\AIStack\QAIRT\2.49.0.260730` gives the
+following PowerShell setup:
 
-Autodetection requires Windows ARM64, a public `QnnInterface.h`, and a `QnnHtp` import library. A
-driver-only or inference-only installation does not enable native modules.
+```powershell
+$sdk = 'C:\Qualcomm\AIStack\QAIRT\2.49.0.260730'
+$env:VIRTIO_ACCEL_HEXAGON = '1'
+$env:VIRTIO_ACCEL_QNN_SDK_ROOT = $sdk
+$env:ADSP_LIBRARY_PATH = "$sdk\lib\hexagon-v73\unsigned"
+```
 
-## Running
+`ADSP_LIBRARY_PATH` lets the Windows HTP stub locate the matching v73 DSP libraries. Do not commit
+or redistribute Qualcomm SDK files from this repository.
 
-```sh
-cargo test -p virtio-accel-hexagon
+The build probe also supports:
+
+- `VIRTIO_ACCEL_HEXAGON=0` to force the portable placeholder;
+- `QNN_SDK_ROOT` as a conventional SDK-root fallback;
+- `VIRTIO_ACCEL_QNN_LIB_DIR` to override the Windows ARM64 import-library directory.
+
+Forced-on mode fails immediately when the target is not Windows ARM64 or the SDK is incomplete.
+
+## Manual hardware test
+
+From the repository root in the configured PowerShell session:
+
+```powershell
+cargo check -p virtio-accel-hexagon
+cargo test -p virtio-accel-hexagon --all-targets -- --test-threads=1
 cargo run -p virtio-accel-hexagon --example tosa_hexagon
 ```
 
-Without the full QNN development runtime, the example reports why native execution is unavailable
-and exits successfully.
+The integration tests initialize the pinned HTP provider, validate device identity, execute the
+shared FP16 identity, batched non-square MATMUL, and NHWC MAX_POOL2D corpora, compare every result
+with its numerical oracle, reject duplicate slots, wrong access, short bindings, and finite
+timeouts, check stable terminal polling/output visibility, and verify that a live event keeps its
+graph busy. The example prints the actual provider/build/API versions and ends with:
 
-## Hardware baseline discovered during bring-up
+```text
+TOSA FP16 identity -> QNN HTP v73: passed
+```
 
-The initial development host is a Snapdragon X126100 Windows ARM64 system. Windows enumerates
-`Snapdragon(R) X - X126100 - Qualcomm(R) Hexagon(TM) NPU` in the `ComputeAccelerator` class with
-Qualcomm driver `30.0.222.0` dated 2026-04-01. The driver package includes the V73 HTP stub/skel and
-prepare components, but not the public application-facing QNN C development surface.
+To verify SDK-free portability in a fresh shell:
 
-No runtime/device row in the repository support matrix should change from `Planned` until the
-native path passes semantic conformance and the advertised numerical corpus on that NPU.
+```powershell
+$env:VIRTIO_ACCEL_HEXAGON = '0'
+cargo test -p virtio-accel-hexagon --all-targets
+```
 
 ## License
 

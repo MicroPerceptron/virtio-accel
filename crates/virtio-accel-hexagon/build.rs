@@ -70,12 +70,21 @@ fn main() {
     }
 
     println!("cargo:rerun-if-changed={}", header.display());
+    println!("cargo:rerun-if-changed=native/qnn_bridge.cpp");
+    println!("cargo:rerun-if-changed=native/qnn_bridge.h");
+    cc::Build::new()
+        .cpp(true)
+        .file("native/qnn_bridge.cpp")
+        .include(root.join("include/QNN"))
+        .flag_if_supported("/std:c++17")
+        .flag_if_supported("/EHsc")
+        .flag_if_supported("-std=c++17")
+        .warnings(true)
+        .compile("virtio_accel_qnn_bridge");
     println!(
         "cargo:rustc-env=VIRTIO_ACCEL_QNN_SDK_ROOT={}",
         root.display()
     );
-    println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    println!("cargo:rustc-link-lib=dylib=QnnHtp");
     println!("cargo::rustc-cfg=va_hexagon");
 }
 

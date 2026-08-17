@@ -154,8 +154,8 @@ destruction.
 
 ## Qualcomm Hexagon evidence status
 
-`virtio-accel-hexagon` has no native performance claim yet. Its SDK-free tests prove deterministic
-FP16 graph planning and exact binding byte counts only. Admission latency, QNN descriptor reuse,
-provider staging counters, and submit-to-complete timing must not be recorded as Hexagon evidence
-until the audited HTP path runs on the pinned Snapdragon/QAIRT/driver combination and passes the
-semantic and numerical suites.
+`virtio-accel-hexagon` makes no throughput or latency claim yet. The pinned Snapdragon/QAIRT/driver
+tests prove HTP execution and exact FP16 numerical results for identity, MATMUL, and MAX_POOL2D, but
+do not yet provide a statistically controlled performance run. Any future admission or
+submit-to-complete measurements must record the provider build, driver, power mode, graph, warmup,
+and sample distribution.

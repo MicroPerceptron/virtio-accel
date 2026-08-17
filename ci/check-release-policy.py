@@ -83,6 +83,11 @@ UNSAFE_AUDITS = {
         "cfg_attr(not(va_openvino), forbid(unsafe_code))",
         ("OpenVINO C API", "AlignedAllocation", "poll-latch"),
     ),
+    ROOT / "crates" / "virtio-accel-hexagon" / "src" / "lib.rs": (
+        ROOT / "crates" / "virtio-accel-hexagon" / "SAFETY.md",
+        "cfg_attr(not(va_hexagon), forbid(unsafe_code))",
+        ("public QNN C interface", "AlignedAllocation", "`poll_event`"),
+    ),
     ROOT / "crates" / "virtio-accel-tosa" / "src" / "lib.rs": (
         ROOT / "crates" / "virtio-accel-tosa" / "SAFETY.md",
         "#![deny(unsafe_code)]",

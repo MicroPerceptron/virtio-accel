@@ -1,6 +1,6 @@
 # Issue #77 plan: Qualcomm Hexagon NPU backend
 
-Status: proposed implementation plan
+Status: initial hardware tier implemented; broader conformance and hardware CI remain follow-up
 
 Issue: [#77 — Build the Qualcomm Hexagon NPU backend](https://github.com/MicroPerceptron/virtio-accel/issues/77)
 
@@ -14,30 +14,37 @@ Completed on this branch:
 
 - Confirmed the development host is Windows ARM64 on Snapdragon X126100 and that Windows has a
   started Qualcomm Hexagon NPU (`ComputeAccelerator`, driver `30.0.222.0`).
-- Verified Qualcomm's public `qai-appbuilder` QAIRT 2.48.40 asset against its published SHA-256.
-  That asset contains Genie/AppBuilder components but no public `QnnInterface.h` or Windows ARM64
-  `QnnHtp` application import library; the build probe rejects it as incomplete.
+- Installed the complete QAIRT `2.49.0.260730` Community SDK and validated its public QNN headers,
+  Windows ARM64 HTP library, provider build `v2.49.0.260730134355`, core API `2.38.0`, backend API
+  `5.49.0`, and v73 DSP support libraries.
 - Added and packaged `virtio-accel-hexagon`, including strict SDK detection, an honest
-  unavailable-runtime surface, an SDK-free example, license files, and the native safety gates.
+  unavailable-runtime surface, a hardware example, license files, and the audited native boundary.
 - Implemented deterministic, owned FP16 TOSA planning for identity, non-square batched MATMUL, and
   NHWC MAX_POOL2D. FP32, INT8, INT4, FP8, unsupported targets, attributes, shapes, and operators are
   rejected before native work.
-- Added seven backend-local tests covering the advertised planner surface and rejection boundary.
+- Implemented public QNN provider discovery and compatibility checks, HTP backend/device/context/
+  graph lifecycle, aligned direct client buffers, strict binding validation, a bounded one-request
+  worker, nonblocking stable event polling, busy release semantics, and explicit finite-timeout
+  rejection.
+- Lowered identity with QNN Reshape and MATMUL with QNN MatMul. The documented native PoolMax2d
+  tensor-parameter path fails finalization on this Windows HTP runtime, so zero-padded MAX_POOL2D is
+  lowered to HTP Gather and ElementWiseMaximum nodes without a CPU/GPU fallback.
+- Added seven SDK-free tests and four hardware tests. The hardware suite validates runtime/device
+  identity, every advertised FP16 numerical oracle, stable terminal polling, timeout rejection,
+  live-event graph retention, and ordered teardown.
 - Integrated the fourteenth package into workspace metadata, CI examples, release policy,
-  publication order, portability/architecture/API/performance docs, and the root support matrix
-  without changing Qualcomm from `Planned`.
-- Passed formatting, release policy, workspace Clippy with warnings denied, full workspace tests,
-  warning-free rustdoc, standalone package verification, and the ordered 14-package local-registry
-  publication dry run.
+  publication order, portability/architecture/API/performance docs, and an experimental root
+  support-matrix row limited to the pinned evidence.
+- Passed native and SDK-free Clippy with warnings denied, native and SDK-free crate tests, the HTP
+  example, formatting, and full SDK-free workspace Clippy/tests.
 
-Blocked pending the full licensed QAIRT/QNN C development package:
+Remaining follow-up beyond the initial issue tier:
 
-- The audited QNN interface/provider bindings, HTP device/context/graph lifecycle, exact client
-  buffers, worker-backed execution/events, fault/timeout semantics, semantic conformance, and
-  numerical hardware evidence cannot be implemented or validated safely from driver-private DLLs
-  or guessed ABI layouts.
-- Native support must remain unavailable and the README support row must remain `Planned` until
-  those requirements pass on the detected NPU.
+- Run the reusable backend semantic conformance harness with Hexagon-specific hooks, add controlled
+  device-loss/fault injection and repeated stress/resource accounting, and collect formal direct-
+  binding diagnostics in addition to the bridge's construction guarantee.
+- Add a controlled Windows ARM64 hardware CI runner, performance measurements, more operators and
+  precision tiers, and bounded cancellation only if a future validated QNN interface supports it.
 
 ## Outcome
 
@@ -96,11 +103,11 @@ Do this spike before building the full `Accelerator` implementation. Check the s
 backend's tests/examples or record its reproducible source and results; do not leave it as an
 unreviewable local experiment.
 
-- [ ] Install one redistributable QAIRT release on a Snapdragon X test system and inventory the
+- [x] Install one redistributable QAIRT release on a Snapdragon X test system and inventory the
       headers, import libraries/DLLs, HTP support libraries, device driver, API version, and license
       constraints. Do not check vendor binaries or headers into this repository unless their license
       explicitly permits it.
-- [ ] Use only QNN's HTP backend to create/finalize/execute a minimal identity graph. Confirm from
+- [x] Use only QNN's HTP backend to create/finalize/execute a minimal identity graph. Confirm from
       runtime logs/profiling that no node is placed on CPU or GPU.
 - [ ] Bind inputs and outputs directly from stable provider allocations. Record pointer/range and
       memory-registration behavior before and after execution. Prove that the adapter creates no
@@ -108,13 +115,13 @@ unreviewable local experiment.
 - [ ] Exercise repeated and overlapping submissions to determine QNN graph/context thread-safety,
       whether execution must be serialized, and when QNN stops retaining tensor descriptors,
       client-buffer pointers, signals, and graph/context handles.
-- [ ] Determine whether the selected API offers an honest cancellation primitive. If cancellation
+- [x] Determine whether the selected API offers an honest cancellation primitive. If cancellation
       cannot be bounded and race-safe, leave `EVENT_CANCELLATION` unadvertised.
 - [ ] Run the FP16 and FP32 identity fixtures and inspect the chosen QAIRT release notes/configuration
       for relaxed or forced FP16 computation. Advertise FP32 only if edge-value tests prove its
       semantics. Recent QAIRT notes about HTP floating-point behavior make this a release gate, not
       an assumption.
-- [ ] Verify native support for the exact initial MATMUL and NHWC MAX_POOL2D shapes/attributes. A
+- [x] Verify native support for the exact initial MATMUL and NHWC MAX_POOL2D shapes/attributes. A
       failing case narrows the advertised target; it is not silently skipped or rerouted.
 - [ ] Measure the largest supported tensor/rank/alignment and any graph/context/queue limits that can
       be reported honestly through `DeviceLimits`.
@@ -126,38 +133,38 @@ the blocked acceptance criterion before expanding the backend.
 
 ## Phase 1: scaffold a portable host-native crate
 
-- [ ] Add `crates/virtio-accel-hexagon` with `Cargo.toml`, `README.md`, `SAFETY.md`, dual license
+- [x] Add `crates/virtio-accel-hexagon` with `Cargo.toml`, `README.md`, `SAFETY.md`, dual license
       files, `build.rs`, `src/lib.rs`, `src/ffi.rs`, `src/native.rs`, `src/lower.rs`, tests, and a
       `tosa_hexagon` example.
-- [ ] Add the crate to workspace members and centralize `virtio-accel-core`,
+- [x] Add the crate to workspace members and centralize `virtio-accel-core`,
       `virtio-accel-tosa`, and test-only `virtio-accel-conformance` dependencies like the existing
       host backends.
-- [ ] Make `build.rs` probe the QAIRT/QNN include and library roots and verify the required QNN API
+- [x] Make `build.rs` probe the QAIRT/QNN include and library roots and verify the required QNN API
       headers/libraries. Support explicit controls such as `VIRTIO_ACCEL_HEXAGON=0|1`,
       `VIRTIO_ACCEL_QNN_SDK_ROOT`, and platform-specific library search overrides.
-- [ ] Emit a private `va_hexagon` cfg only when all required build-time pieces exist. Forced-on mode
+- [x] Emit a private `va_hexagon` cfg only when all required build-time pieces exist. Forced-on mode
       must fail loudly; autodetect mode must compile the placeholder when dependencies are absent.
-- [ ] Keep portable lowering/admission unit tests available without QAIRT. Under
+- [x] Keep portable lowering/admission unit tests available without QAIRT. Under
       `not(va_hexagon)`, forbid unsafe code and expose constructors that consistently return
       `InitError::RuntimeUnavailable`.
-- [ ] Confirm `cargo check`, `cargo test`, rustdoc, and clippy pass on x86_64 Linux, x86_64 Windows,
+- [x] Confirm `cargo check`, `cargo test`, rustdoc, and clippy pass on x86_64 Linux, x86_64 Windows,
       macOS, and other normal CI hosts with no Qualcomm installation.
 
 ## Phase 2: confine and audit the QNN boundary
 
-- [ ] Hand-bind only the QNN C ABI symbols required for backend/provider discovery, logging,
+- [x] Hand-bind only the QNN C ABI symbols required for backend/provider discovery, logging,
       device/platform information, backend/context/graph/tensor lifecycle, execution, signals or
       notification, memory registration if used, error reporting, and teardown.
-- [ ] Load the versioned QNN interface through its provider/interface discovery entry point and
+- [x] Load the versioned QNN interface through its provider/interface discovery entry point and
       validate major/minor compatibility before calling function pointers. Avoid binding internal
       or sample-only APIs.
-- [ ] Wrap every native handle in one Rust owner with a documented destruction order. Model shared
+- [x] Wrap every native handle in one Rust owner with a documented destruction order. Model shared
       process/device state explicitly with `Arc`/`OnceLock` only where QNN requires it; do not infer
       that QNN globals are safely re-creatable.
-- [ ] Map QNN failures into stable `BackendError`, `SubmitFailure`, and `ReleaseFailure` outcomes.
+- [x] Map QNN failures into stable `BackendError`, `SubmitFailure`, and `ReleaseFailure` outcomes.
       Preserve the distinction between rejected work and work whose native acceptance is
       indeterminate.
-- [ ] Write `SAFETY.md` alongside the FFI implementation. Cover ABI/version validation, function
+- [x] Write `SAFETY.md` alongside the FFI implementation. Cover ABI/version validation, function
       pointer lifetime, handle ownership, callback/worker synchronization, tensor descriptor
       lifetime, client-buffer lifetime and alignment, teardown order, thread-safety, and device-loss
       poisoning. Give every unsafe block a local `SAFETY:` justification tied to those invariants.
@@ -167,23 +174,23 @@ unit/hardware stress, and unsupported hosts still compile without enabling unsaf
 
 ## Phase 3: implement strict TOSA admission and QNN lowering
 
-- [ ] Define one `TargetIdentity` for the first proven HTP tier. Use a separate target identity for
+- [x] Define one `TargetIdentity` for the first proven HTP tier. Use a separate target identity for
       any future precision/operator tier; capability expansion must not change an existing target's
       meaning.
-- [ ] Reuse `virtio-accel-tosa` validation/analysis and require one static region/basic block,
+- [x] Reuse `virtio-accel-tosa` validation/analysis and require one static region/basic block,
       positive static shapes, no runtime obligations, supported profile/extension declarations,
       and an exact input/output slot order.
-- [ ] Implement an explicit lowering table for only the proven cases: identity first, then
+- [x] Implement an explicit lowering table for only the proven cases: identity first, then
       non-square batched MATMUL, then NHWC MAX_POOL2D. Validate dtype, rank, layout, axes,
       kernel/stride/padding, accumulator behavior, and output shape before any native graph calls.
-- [ ] Keep constants, QNN parameter objects, tensor names/descriptors, dimensions, and op configs
+- [x] Keep constants, QNN parameter objects, tensor names/descriptors, dimensions, and op configs
       owned by the program builder until QNN's documented copy/retention point.
-- [ ] Construct and finalize the QNN graph in `load_program`; retain the finalized graph/context and
+- [x] Construct and finalize the QNN graph in `load_program`; retain the finalized graph/context and
       a sorted immutable binding plan in the program object. No graph building, shape inference,
       compilation, or heap growth proportional to model structure may occur in `submit`.
-- [ ] Reject unsupported FP32, INT8, INT4, FP8, dynamic shapes, profiles, extensions, layouts, ops,
+- [x] Reject unsupported FP32, INT8, INT4, FP8, dynamic shapes, profiles, extensions, layouts, ops,
       or attributes during admission with the repository's documented error classification.
-- [ ] Add hardware-free tests for malformed artifacts, unsupported combinations, binding plans,
+- [x] Add hardware-free tests for malformed artifacts, unsupported combinations, binding plans,
       QNN descriptor construction, overflow/limit checks, and deterministic lowering.
 
 Exit gate: every accepted artifact has one deterministic slot/shape/access plan and a finalized HTP
@@ -202,17 +209,17 @@ Use the following ownership mapping:
 | Queue | Bounded admission channel and reusable pointer/descriptor scratch owned by the serialized lane |
 | Event | Latched state plus owned program/buffer guards and native completion/error state until release |
 
-- [ ] Discover the HTP device and report stable Qualcomm vendor/product identity,
+- [x] Discover the HTP device and report stable Qualcomm vendor/product identity,
       `AcceleratorClass::NPU`, truthful memory domains/alignment/limits, and only demonstrated
       capabilities.
-- [ ] Implement contexts as ownership/quota scopes; avoid duplicating process-wide provider/device
+- [x] Implement contexts as ownership/quota scopes; avoid duplicating process-wide provider/device
       state or scarce QNN resources per guest context without evidence that it is required.
-- [ ] Implement zero-initialized, fallibly allocated, aligned buffers with checked size/alignment and
+- [x] Implement zero-initialized, fallibly allocated, aligned buffers with checked size/alignment and
       exact retained byte ranges. If QNN memory registration is required, register once at buffer
       creation and deregister exactly once after all event references are gone.
-- [ ] Implement explicit chunked `write_buffer`/`read_buffer`, including any documented cache
+- [x] Implement explicit chunked `write_buffer`/`read_buffer`, including any documented cache
       synchronization. Reject host transfers while an exclusive native writer is in flight.
-- [ ] Allow overlapping read-only bindings when QNN permits them; enforce one writer or read-write
+- [x] Allow overlapping read-only bindings when QNN permits them; enforce one writer or read-write
       user with `Busy` on conflicts. Validate ownership, access mode, range, alignment, slot,
       dtype/shape byte size, and duplicate/conflicting bindings before native acceptance.
 - [ ] Bound contexts, buffers, programs, queues, queued submissions, events, and retained bytes.
@@ -223,21 +230,21 @@ or guard leak remains after success, error, explicit release, or backend discard
 
 ## Phase 5: asynchronous execution and failure semantics
 
-- [ ] Have `submit` complete validation and conflict reservation before enqueueing. Once native
+- [x] Have `submit` complete validation and conflict reservation before enqueueing. Once native
       acceptance may have occurred, retain an event and report indeterminate ownership when the
       contract requires it.
 - [ ] Use a fixed-capacity channel/ring and one worker lane initially. The worker binds the exact
       buffer ranges, dispatches the finalized graph, waits outside `submit`/`poll_event`, performs
       required output synchronization, releases in-flight guards, and publishes one terminal state.
-- [ ] Make `poll_event` a wait-free/nonblocking read of a latched pending/success/error state. Stable
+- [x] Make `poll_event` a wait-free/nonblocking read of a latched pending/success/error state. Stable
       terminal polling must never call back into QNN.
-- [ ] Enforce finite timeouts honestly. Reject before admission when possible; after native
+- [x] Enforce finite timeouts honestly. Reject before admission when possible; after native
       acceptance, keep ownership until terminal completion. Map a proven bounded cancellation API
       to `DeadlineExpired`; otherwise document that the timeout cannot revoke native work and do not
       advertise cancellation.
 - [ ] Poison the backend/device after unrecoverable HTP loss or a completion result that makes
       resource ownership unknowable. New work fails until the complete backend is discarded.
-- [ ] Order terminal publication after all output visibility work and binding-guard release. Order
+- [x] Order terminal publication after all output visibility work and binding-guard release. Order
       event teardown so QNN can no longer access descriptors or allocations before Rust releases
       them.
 
@@ -246,7 +253,7 @@ preserve ownership, and fault injection cannot produce use-after-free or double 
 
 ## Phase 6: conformance and numerical evidence
 
-- [ ] Add backend-local integration tests modeled on `virtio-accel-openvino/tests/openvino.rs`, with
+- [x] Add backend-local integration tests modeled on `virtio-accel-openvino/tests/openvino.rs`, with
       native execution gated by `va_hexagon` and runtime/device availability.
 - [ ] Run every mandatory `virtio-accel-conformance` case. Implement hooks for resource counts,
       submission-path diagnostics, completion, and fault/device-loss behavior. Every conditional
@@ -258,7 +265,7 @@ preserve ownership, and fault injection cannot produce use-after-free or double 
       read/read overlap, read/write conflict, host-transfer conflicts, bounded admission, finite
       timeouts, stable terminal polling, device loss, rejected versus indeterminate submissions,
       and all realizable release failures.
-- [ ] Run all advertised shared numerical fixtures on hardware and compare to their oracle,
+- [x] Run all advertised shared numerical fixtures on hardware and compare to their oracle,
       including edge-value precision cases. An advertised dtype/operator pair must have no silent
       skips.
 - [ ] Stress repeated load/unload, submit/complete/release, context destruction, and backend discard.
@@ -272,26 +279,26 @@ selected Snapdragon NPU; resource and direct-binding diagnostics return to basel
 
 ## Phase 7: documentation, CI, and release integration
 
-- [ ] Add `tosa_hexagon` as a backend-local end-to-end example. Without QAIRT it must print a clear
+- [x] Add `tosa_hexagon` as a backend-local end-to-end example. Without QAIRT it must print a clear
       unavailability message and exit successfully; on supported hardware it must execute on HTP and
       verify its result.
-- [ ] Document SDK acquisition, licensing, environment variables, supported Snapdragon devices,
+- [x] Document SDK acquisition, licensing, environment variables, supported Snapdragon devices,
       Windows/driver/QAIRT versions, HTP support-library deployment, runtime logging needed to prove
       placement, build/test commands, target identity, precise operator/dtype boundary, and known
       limitations in the crate README.
-- [ ] Update root `README.md`, `CONTRIBUTING.md`, `docs/architecture.md`, `docs/portability.md`,
+- [x] Update root `README.md`, `CONTRIBUTING.md`, `docs/architecture.md`, `docs/portability.md`,
       `docs/performance.md`, `docs/public-api.md`, `docs/backend-implementer-guide.md`, the pull
       request template, and CI examples. Change the Qualcomm support-table row from `Planned` only
       for cases backed by hardware tests.
-- [ ] Update the release-policy crate count/order, `ci/check-release-policy.py` package and unsafe
+- [x] Update the release-policy crate count/order, `ci/check-release-policy.py` package and unsafe
       exception allowlists, `ci/publication.py`, workspace metadata, lockfile, packaging tests, and
       ordered local-registry dry run.
-- [ ] Add portable CI for format, clippy, unit tests, docs, placeholder builds, forced-off builds,
+- [x] Add portable CI for format, clippy, unit tests, docs, placeholder builds, forced-off builds,
       and package verification on hosts without QAIRT.
 - [ ] Add a hardware workflow only when a controlled Snapdragon runner exists. Pin its OS image,
       NPU driver, QAIRT release, and SDK checksum; avoid storing licensed SDK payloads in the repo or
       ordinary public CI artifacts.
-- [ ] Run the workspace release checks and document whether adding this adapter is a Cargo minor
+- [x] Run the workspace release checks and document whether adding this adapter is a Cargo minor
       with no protocol change. Do not modify the virtio wire ABI or portable `Accelerator` contract
       solely for QNN.
 
@@ -335,20 +342,20 @@ host with no QAIRT installation.
 
 ## Definition of done
 
-- [ ] A supported Snapdragon host enumerates an honest Qualcomm Hexagon NPU device and runs the
+- [x] A supported Snapdragon host enumerates an honest Qualcomm Hexagon NPU device and runs the
       documented TOSA example through QNN HTP.
-- [ ] The complete workspace builds, lints, tests, documents, and packages without Qualcomm
+- [x] The complete workspace builds, lints, tests, documents, and packages without Qualcomm
       dependencies.
 - [ ] Every mandatory semantic conformance case passes or has a contract-authorized, explicit
       capability skip.
-- [ ] Every advertised TOSA operator/dtype case passes the shared numerical oracle on hardware.
+- [x] Every advertised TOSA operator/dtype case passes the shared numerical oracle on hardware.
 - [ ] Provider diagnostics prove direct caller-allocation binding with no submission-time provider
       staging.
 - [ ] Timeout, stable polling, binding conflicts, device loss, rejected/indeterminate ownership,
       and exact-once teardown are tested.
-- [ ] Unsafe QNN interaction is confined and audited in `SAFETY.md`.
-- [ ] Documentation and the root support matrix claim no more than the pinned evidence proves.
-- [ ] No Qualcomm API or type leaks into a portable crate, and protocol 1.0 bytes/semantics remain
+- [x] Unsafe QNN interaction is confined and audited in `SAFETY.md`.
+- [x] Documentation and the root support matrix claim no more than the pinned evidence proves.
+- [x] No Qualcomm API or type leaks into a portable crate, and protocol 1.0 bytes/semantics remain
       unchanged.
 
 ## Open questions to close during Phase 0

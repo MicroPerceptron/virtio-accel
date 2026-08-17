@@ -349,13 +349,12 @@ enumerated device and reports the direct-binding and explicit-transfer counters 
 conformance diagnostics hook. This keeps the Core ML and Intel paths on one bounded TOSA contract
 without requiring either provider to adopt the other's native graph representation.
 
-The Qualcomm adapter uses the same seam but is not yet a production lowering boundary. Its safe,
-SDK-free planner admits only static FP16 identity, MATMUL, and NHWC MAX_POOL2D graphs, owns the
-resulting tensor/slot/operation metadata, and rejects FP32 or low-precision tiers before native
-work. The root support matrix remains `Planned` until a complete QAIRT/QNN C development package is
-available to implement and audit direct HTP graph construction, exact caller-buffer binding,
-worker-backed completion, and hardware conformance. Driver-only and AppBuilder/Genie installations
-are intentionally insufficient to enable that boundary.
+The Qualcomm adapter uses the same seam. Its safe planner admits only static FP16 identity, MATMUL,
+and NHWC MAX_POOL2D graphs, owns the resulting tensor/slot/operation metadata, and rejects FP32 or
+low-precision tiers before native work. With a complete QAIRT/QNN C development package on Windows
+ARM64, its audited boundary creates and finalizes QNN HTP graphs, binds exact caller buffers, and
+publishes completion from a bounded worker. Driver-only and AppBuilder/Genie installations are
+intentionally insufficient to enable that boundary.
 
 The portable command engine depends on `virtio-accel-proto`, `virtio-accel-core`, and the
 transport-neutral region metadata re-exported by `virtio-accel-device`. Its baseline processor:
