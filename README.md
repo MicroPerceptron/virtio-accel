@@ -12,11 +12,12 @@ An experimental virtual-accelerator protocol plus production-oriented Rust imple
 
 `virtio-accel` defines a protocol and ships executable `no_std` guest, device, transport, queue, and
 TOSA layers for exposing an accelerator to a guest: contexts, buffers, programs, execution queues,
-submissions, and events. The workspace also contains two real host backends: a macOS Core ML
+submissions, and events. The workspace also contains three real host backends: a macOS Core ML
 backend that lowers device-neutral TOSA into Core ML and submits ANE-capable predictions with
 direct buffer bindings, and an Intel OpenVINO backend that lowers the same TOSA artifacts to
 in-memory OpenVINO IR and executes them on NPU, GPU, or CPU inference devices with direct
-host-pointer tensors. The first target is NPU execution, while the object model deliberately
+host-pointer tensors, and a Qualcomm backend that lowers a strict FP16 TOSA subset to QNN and
+executes it on Hexagon HTP with direct client buffers. The first target is NPU execution, while the object model deliberately
 leaves room for GPUs, DSPs, and other program-driven accelerators.
 
 This is no longer a specification-only repository: the frozen protocol review input is developed
@@ -39,7 +40,7 @@ execution. “Not implemented” describes this repository, not necessarily the 
 | Apple Core ML / ANE (`virtio-accel-coreml`) | Implemented; macOS 14+ | Static TOSA 1.0 FP; INT8 tier on macOS 26+ | Supported       | Supported       | Not implemented | Identity + MATMUL | Not implemented | Direct host/shared bindings |
 | Intel OpenVINO (`virtio-accel-openvino`)    | Implemented; OpenVINO 2026.x | Static TOSA 1.0 FP + INT8 tier | Supported       | Supported       | Not implemented | Identity + MATMUL | Not implemented | Direct host/shared bindings |
 | AMD XDNA                                    | Planned                | Not implemented                       | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented             |
-| Qualcomm Hexagon                            | Planned                | Not implemented                       | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented             |
+| Qualcomm Hexagon (`virtio-accel-hexagon`)  | Experimental; QAIRT 2.49 on Windows ARM64 | Static TOSA 1.0 FP16 subset | Not implemented | Identity + MATMUL + MAX_POOL2D | Not implemented | Not implemented | Not implemented | Direct host/shared bindings |
 
 The Core ML row describes model-boundary support; restricted INT32 outputs are also available.
 Core ML chooses ANE or CPU placement per operation. Direct INT8 boundaries require macOS 26+, and
@@ -57,6 +58,12 @@ the Core ML backend it rejects unsupported FP8, unsupported INT8 operators, and 
 of silently dequantizing. See the
 [`virtio-accel-openvino` support boundary](crates/virtio-accel-openvino/README.md#low-precision-boundary).
 
+The Hexagon row is limited to the pinned Snapdragon X126100/QAIRT 2.49 hardware evidence. The
+adapter rejects FP32 and every unadvertised low-precision tier, recognizes only FP16 identity,
+MATMUL, and MAX_POOL2D, and reports `RuntimeUnavailable` when a complete SDK is not selected at
+build time. See the
+[`virtio-accel-hexagon` support boundary](crates/virtio-accel-hexagon/README.md#validated-baseline).
+
 Independently of backend execution, `virtio-accel-tosa` validates the TOSA 1.0 profiles and
 extensions for all five dtype columns, and `virtio-accel-conformance` ships shared fixtures and
 oracles for them. The byte-oriented `virtio-accel-mock` backend remains test infrastructure rather
@@ -73,6 +80,7 @@ than a typed hardware implementation.
 | `virtio-accel-tosa`        | `core + alloc` | Bounded zero-copy TOSA 1.0 validation, lowering analysis, specialization, and packed low-precision utilities |
 | `virtio-accel-coreml`      | macOS `std`    | TOSA-to-Core ML lowering, direct buffers, and asynchronous ANE-capable prediction                            |
 | `virtio-accel-openvino`    | Linux `std` (probed) | TOSA-to-OpenVINO IR lowering, direct host-pointer tensors, and asynchronous NPU/GPU/CPU inference      |
+| `virtio-accel-hexagon`     | Windows ARM64 `std` (probed) | Strict FP16 TOSA-to-QNN lowering, direct buffers, and asynchronous Hexagon HTP execution |
 | `virtio-accel-split-queue` | `core + alloc` | Bounded in-memory split-ring reference model                                                                 |
 | `virtio-accel-guest`       | `core + alloc` | Typed reference client with bounded request tracking                                                         |
 | `virtio-accel-device`      | `core + alloc` | Device-owned state, including bounded generational IDs                                                       |
@@ -102,6 +110,9 @@ virtio-accel-coreml ----------+--------------> virtio-accel-core
 virtio-accel-openvino --------+--------------> virtio-accel-core
                               |
                               +--------------> virtio-accel-tosa
+virtio-accel-hexagon ---------+--------------> virtio-accel-core
+                              |
+                              +--------------> virtio-accel-tosa
 other provider adapters --------------------> virtio-accel-core
 ```
 
@@ -127,6 +138,10 @@ On an ANE-capable Mac, add `virtio-accel-coreml = "0.1"` separately for the host
 On a Linux host with an OpenVINO 2026.x runtime, add `virtio-accel-openvino = "0.1"` instead. Both
 adapters accept the production TOSA 1.0 program format; validation, analysis, and native model
 generation all happen inside the adapter. Neither is re-exported by the portable facade.
+
+`virtio-accel-hexagon = "0.2"` exposes the separate Qualcomm adapter. A complete QAIRT/QNN SDK on
+Windows ARM64 enables its HTP backend; SDK-free builds validate its strict FP16 graph planner and
+constructors return `RuntimeUnavailable`.
 
 Add `virtio-accel-tosa = "0.1"` separately to validate TOSA 1.0 artifacts, inspect safe borrowed
 graph and typed-attribute views, enforce complete stable-op semantics for a declared target, and
@@ -157,6 +172,15 @@ cargo run -p virtio-accel-openvino --example tosa_openvino
 
 ```text
 TOSA -> OpenVINO -> CPU result: 3.25
+```
+
+With the documented QAIRT environment, the Qualcomm adapter's example executes FP16 identity on
+HTP and verifies the shared numerical oracle. SDK-free builds fail explicitly without a CPU/GPU
+fallback:
+
+```sh
+cargo run -p virtio-accel-hexagon --example tosa_hexagon
+cargo run -p virtio-accel-hexagon --example mock_classifier
 ```
 
 The portable facade, device engine, transport, and guest layers see only the TOSA artifact format,
@@ -312,6 +336,7 @@ tier, including compile-only checks of the adapter's unsupported-platform surfac
 | `core + alloc` | `core + alloc`; no OS, filesystem, sockets, threads, or host synchronization |
 | `std`          | Portable `std`; no host-OS or vendor-specific API                            |
 | macOS `std`    | Host-native Core ML/Foundation adapter; never a portable default dependency  |
+| Windows ARM64 `std` | SDK-probed Qualcomm QNN adapter with a pinned experimental HTP execution tier |
 
 Concrete VMM, kernel, OS, and vendor adapters do not change the portable v1 protocol and must not
 become default dependencies of a portable crate. Cargo features must be additive: disabling default
@@ -330,6 +355,8 @@ cargo run --example backend_conformance
 cargo run --example reference_execution
 cargo run -p virtio-accel-coreml --example tosa_coreml # macOS 14+ with ANE
 cargo run -p virtio-accel-openvino --example tosa_openvino # Linux with OpenVINO 2026.x
+cargo run -p virtio-accel-hexagon --example tosa_hexagon # Windows ARM64 with the documented QAIRT setup
+cargo run -p virtio-accel-hexagon --example mock_classifier # FP16 linear classifier on Hexagon HTP
 python3 ci/publish-dry-run.py
 ```
 

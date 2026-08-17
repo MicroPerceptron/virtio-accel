@@ -151,3 +151,11 @@ Wall-clock results must be recorded on a pinned OpenVINO runtime and identified 
 timing claim is made; the deterministic regression tests instead pin capacity reuse, pointer
 scrubbing, guard release at terminal observation, and tensor-metadata release after request
 destruction.
+
+## Qualcomm Hexagon evidence status
+
+`virtio-accel-hexagon` makes no throughput or latency claim yet. The pinned Snapdragon/QAIRT/driver
+tests prove HTP execution and exact FP16 numerical results for identity, MATMUL, and MAX_POOL2D, but
+do not yet provide a statistically controlled performance run. Any future admission or
+submit-to-complete measurements must record the provider build, driver, power mode, graph, warmup,
+and sample distribution.

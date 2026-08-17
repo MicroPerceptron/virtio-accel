@@ -38,7 +38,7 @@ directly, and they must keep working on any platform the portable crates support
 | `core-only` | `virtio-accel-cleanroom`, `virtio-accel-proto`, `virtio-accel-transport`, `virtio-accel-core` | `core`; the clean-room codec and transport ports have no normal/build dependencies, while proc-macros used by other crates may execute with `std` on the build host |
 | `alloc-portable` | `virtio-accel-guest`, `virtio-accel-split-queue`, `virtio-accel-device`, `virtio-accel-tosa`, `virtio-accel` | `core + alloc`; no OS, filesystem, sockets, threads, or host synchronization |
 | `std-reference` | `virtio-accel-mock`, `virtio-accel-conformance` | Portable `std`; no host-OS or vendor-specific API |
-| `host-native` | `virtio-accel-coreml`, `virtio-accel-openvino` | Core ML/Foundation on macOS 14+, or the OpenVINO C runtime (`libopenvino_c` 2026.x) when detected at build time; a compile-only unsupported-platform or unsupported-runtime placeholder elsewhere |
+| `host-native` | `virtio-accel-coreml`, `virtio-accel-openvino`, `virtio-accel-hexagon` | Core ML/Foundation on macOS 14+, the OpenVINO C runtime (`libopenvino_c` 2026.x), or the complete QAIRT/QNN C SDK on Windows ARM64 when detected at build time; a compile-only unsupported-platform or unsupported-runtime placeholder elsewhere |
 
 Neither host-native crate is a dependency of the facade or any portable layer. The Core ML crate's
 Objective-C bridge and TOSA-to-Core ML model compilation are built only when the Cargo target is
@@ -56,6 +56,16 @@ portable TOSA-to-IR encoder; the dedicated `openvino-host-test` job installs a p
 exercises the real backend against the CPU plugin. NPU and GPU devices additionally require the
 Intel Level Zero NPU driver or the Intel OpenCL/Level Zero GPU runtime on the host; hosts without
 an inference device skip execution after enumeration.
+
+The Hexagon crate exercises its SDK-free placeholder and strict FP16 TOSA graph planner in portable
+CI. Its build script distinguishes a complete public QAIRT/QNN development
+installation from driver-only and AppBuilder/Genie bundles by requiring `QnnInterface.h` and the
+Windows ARM64 `QnnHtp` import library. `VIRTIO_ACCEL_HEXAGON=0` forces the placeholder;
+`VIRTIO_ACCEL_HEXAGON=1` makes missing requirements a build failure;
+`VIRTIO_ACCEL_QNN_SDK_ROOT`/`QNN_SDK_ROOT` and `VIRTIO_ACCEL_QNN_LIB_DIR` select the SDK. On the
+pinned Windows ARM64 hardware tier, backend-local tests execute identity, MATMUL, and MAX_POOL2D
+through QNN HTP. A public hardware CI lane remains unavailable, so the README publishes the exact
+manual replacement commands.
 
 Concrete VMM, kernel, OS, and vendor adapters are outside the portable-v1 milestone and must not
 become default dependencies of a portable crate.
@@ -111,6 +121,8 @@ cargo run --example backend_conformance
 cargo run --example reference_execution
 cargo run -p virtio-accel-coreml --example tosa_coreml
 cargo run -p virtio-accel-openvino --example tosa_openvino
+cargo run -p virtio-accel-hexagon --example tosa_hexagon
+cargo run -p virtio-accel-hexagon --example mock_classifier
 cargo +1.85.0 check --workspace --all-targets --all-features
 cargo hack check --workspace --feature-powerset --no-dev-deps
 bash ci/check-portable-dependencies.sh

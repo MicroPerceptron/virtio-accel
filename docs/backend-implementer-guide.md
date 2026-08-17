@@ -209,6 +209,10 @@ submit, poll, transfer, and teardown sequence against the mock backend. On macOS
 `cargo run -p virtio-accel-coreml --example tosa_coreml` for the production artifact path from a
 device-neutral TOSA graph through Core ML execution and the same backend lifecycle.
 
+`cargo run -p virtio-accel-hexagon --example tosa_hexagon` exercises the QNN HTP lifecycle and
+direct bindings on a configured Windows ARM64 QAIRT host. Without that build environment, it retains
+the explicit unavailable-runtime surface.
+
 ## Common traps
 
 - Advertising a capability because a slow fallback exists, while the fallback violates direct

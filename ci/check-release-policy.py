@@ -30,6 +30,7 @@ PUBLISHED_PACKAGES = {
     "crates/virtio-accel-coreml": "virtio-accel-coreml",
     "crates/virtio-accel-device": "virtio-accel-device",
     "crates/virtio-accel-guest": "virtio-accel-guest",
+    "crates/virtio-accel-hexagon": "virtio-accel-hexagon",
     "crates/virtio-accel-mock": "virtio-accel-mock",
     "crates/virtio-accel-openvino": "virtio-accel-openvino",
     "crates/virtio-accel-proto": "virtio-accel-proto",
@@ -82,6 +83,11 @@ UNSAFE_AUDITS = {
         "cfg_attr(not(va_openvino), forbid(unsafe_code))",
         ("OpenVINO C API", "AlignedAllocation", "poll-latch"),
     ),
+    ROOT / "crates" / "virtio-accel-hexagon" / "src" / "lib.rs": (
+        ROOT / "crates" / "virtio-accel-hexagon" / "SAFETY.md",
+        "cfg_attr(not(va_hexagon), forbid(unsafe_code))",
+        ("public QNN C interface", "AlignedAllocation", "`poll_event`"),
+    ),
     ROOT / "crates" / "virtio-accel-tosa" / "src" / "lib.rs": (
         ROOT / "crates" / "virtio-accel-tosa" / "SAFETY.md",
         "#![deny(unsafe_code)]",
@@ -116,12 +122,14 @@ def fail(message: str) -> None:
 
 
 def rel(path: pathlib.Path) -> str:
-    return str(path.relative_to(ROOT))
+    # Policy keys and package paths use Cargo's portable forward-slash spelling. Normalizing here
+    # also lets contributors run the release gate directly on Windows.
+    return path.relative_to(ROOT).as_posix()
 
 
 def check_workspace_metadata() -> None:
     """The workspace is the single source of truth for every inherited publish field."""
-    data = tomllib.loads((ROOT / "Cargo.toml").read_text())
+    data = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
     workspace_package = data.get("workspace", {}).get("package", {})
 
     for key, expected in INHERITED_PACKAGE_KEYS.items():
@@ -154,7 +162,7 @@ def check_workspace_metadata() -> None:
 
 
 def check_manifest(path: pathlib.Path) -> None:
-    data = tomllib.loads(path.read_text())
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
     package = data.get("package")
     if not isinstance(package, dict):
         fail(f"{rel(path)} has no [package] table")
@@ -214,7 +222,7 @@ def check_published_set() -> None:
 def check_crate_root(path: pathlib.Path) -> None:
     if not path.exists():
         fail(f"missing crate root {rel(path)}")
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     if "#![forbid(unsafe_code)]" in text:
         return
     audit_spec = UNSAFE_AUDITS.get(path)
@@ -225,7 +233,7 @@ def check_crate_root(path: pathlib.Path) -> None:
         fail(f"{rel(path)} unsafe exception is missing {rel(audit)}")
     if root_marker not in text:
         fail(f"{rel(path)} unsafe exception must keep its confinement marker {root_marker!r}")
-    audit_text = audit.read_text()
+    audit_text = audit.read_text(encoding="utf-8")
     for required in required_markers:
         if required not in audit_text:
             fail(f"{rel(audit)} must document the {required!r} unsafe invariant")
@@ -233,7 +241,7 @@ def check_crate_root(path: pathlib.Path) -> None:
 
 def check_links() -> None:
     for path, required in REQUIRED_LINKS.items():
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         for needle in required:
             if needle not in text:
                 fail(f"{rel(path)} must link {needle}")
@@ -261,7 +269,7 @@ def check_publish_workflow() -> None:
     """Keep the token-bearing workflow narrow and coupled to the repository gates."""
     if not PUBLISH_WORKFLOW.is_file():
         fail(f"missing {rel(PUBLISH_WORKFLOW)}")
-    text = PUBLISH_WORKFLOW.read_text()
+    text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
     required = (
         '"on":\n  release:\n    types:\n      - published',
         "permissions:\n  contents: read",
@@ -295,7 +303,7 @@ def check_publish_workflow() -> None:
         if stripped.startswith("uses:") and not re.search(r"@[0-9a-f]{40}(?:\s|$)", stripped):
             fail(f"{rel(PUBLISH_WORKFLOW)} action is not pinned to a full commit: {stripped}")
 
-    publisher = (ROOT / "ci" / "publish.py").read_text()
+    publisher = (ROOT / "ci" / "publish.py").read_text(encoding="utf-8")
     for fragment in ('"--no-verify"', '"--registry",\n            "crates-io"'):
         if fragment not in publisher:
             fail(
@@ -307,7 +315,7 @@ def check_publish_workflow() -> None:
 def check_fuzz_stays_unpublished() -> None:
     """The fuzz harness is a separate workspace and is deliberately not published."""
     manifest = ROOT / "fuzz" / "Cargo.toml"
-    package = tomllib.loads(manifest.read_text()).get("package", {})
+    package = tomllib.loads(manifest.read_text(encoding="utf-8")).get("package", {})
     if package.get("publish") is not False:
         fail(f"{rel(manifest)} package.publish must remain false")
 

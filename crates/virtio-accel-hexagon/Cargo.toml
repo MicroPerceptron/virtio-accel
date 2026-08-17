@@ -1,5 +1,5 @@
 [package]
-name = "virtio-accel-coreml"
+name = "virtio-accel-hexagon"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,7 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "macOS Core ML and Apple Neural Engine backend for virtio-accel"
+description = "Qualcomm Hexagon NPU host backend for virtio-accel"
 readme = "README.md"
 
 [dependencies]
