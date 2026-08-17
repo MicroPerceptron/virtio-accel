@@ -26,6 +26,11 @@ pub(crate) const PRECISION_F32: u32 = 2;
 pub(crate) const NODE_RESHAPE: u32 = 1;
 pub(crate) const NODE_MATMUL: u32 = 2;
 pub(crate) const NODE_MAX_POOL_2D: u32 = 3;
+pub(crate) const NODE_ADD: u32 = 4;
+pub(crate) const NODE_SUBTRACT: u32 = 5;
+pub(crate) const NODE_MAXIMUM: u32 = 6;
+pub(crate) const NODE_MINIMUM: u32 = 7;
+pub(crate) const NODE_MULTIPLY: u32 = 8;
 
 pub(crate) const EVENT_PENDING: u32 = 0;
 pub(crate) const EVENT_COMPLETE: u32 = 1;
@@ -90,15 +95,16 @@ pub(crate) struct TensorDesc {
     pub offset: i32,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub(crate) struct NodeDesc {
     pub kind: u32,
-    pub input0: u32,
-    pub input1: u32,
-    pub output: u32,
-    pub kernel: [u32; 2],
-    pub stride: [u32; 2],
+    pub inputs: *const u32,
+    pub input_count: u32,
+    pub outputs: *const u32,
+    pub output_count: u32,
+    pub parameters: *const i32,
+    pub parameter_count: u32,
 }
 
 #[derive(Clone, Copy)]

@@ -16,6 +16,11 @@ enum VaQnnNodeKind {
   VA_QNN_NODE_RESHAPE = 1,
   VA_QNN_NODE_MATMUL = 2,
   VA_QNN_NODE_MAX_POOL_2D = 3,
+  VA_QNN_NODE_ADD = 4,
+  VA_QNN_NODE_SUBTRACT = 5,
+  VA_QNN_NODE_MAXIMUM = 6,
+  VA_QNN_NODE_MINIMUM = 7,
+  VA_QNN_NODE_MULTIPLY = 8,
 };
 
 enum VaQnnTensorRole {
@@ -75,11 +80,12 @@ typedef struct VaQnnTensorDesc {
 
 typedef struct VaQnnNodeDesc {
   uint32_t kind;
-  uint32_t input0;
-  uint32_t input1;
-  uint32_t output;
-  uint32_t kernel[2];
-  uint32_t stride[2];
+  const uint32_t *inputs;
+  uint32_t input_count;
+  const uint32_t *outputs;
+  uint32_t output_count;
+  const int32_t *parameters;
+  uint32_t parameter_count;
 } VaQnnNodeDesc;
 
 typedef struct VaQnnBinding {

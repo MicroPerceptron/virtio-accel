@@ -736,6 +736,206 @@ fn max_pool2d_float_bytes(dtype: wire::DType) -> Vec<u8> {
     builder.finished_data().to_vec()
 }
 
+fn binary_fp16_bytes(op: wire::Op) -> Vec<u8> {
+    let mut builder = flatbuffers::FlatBufferBuilder::new();
+    let region_name = builder.create_string("main");
+    let block_name = builder.create_string("entry");
+    let left_name = builder.create_string("left");
+    let right_name = builder.create_string("right");
+    let output_name = builder.create_string("output");
+    let shift_name = builder.create_string("shift");
+
+    let left_shape = builder.create_vector(&[2_i32, 1]);
+    let right_shape = builder.create_vector(&[1_i32, 3]);
+    let output_shape = builder.create_vector(&[2_i32, 3]);
+    let left = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(left_name),
+            shape: Some(left_shape),
+            type_: wire::DType::FP16,
+            ..Default::default()
+        },
+    );
+    let right = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(right_name),
+            shape: Some(right_shape),
+            type_: wire::DType::FP16,
+            ..Default::default()
+        },
+    );
+    let output = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(output_name),
+            shape: Some(output_shape),
+            type_: wire::DType::FP16,
+            ..Default::default()
+        },
+    );
+    let shift = if op == wire::Op::MUL {
+        let shape = builder.create_vector(&[1_i32]);
+        let data = builder.create_vector(&[0_u8]);
+        Some(wire::TosaTensor::create(
+            &mut builder,
+            &wire::TosaTensorArgs {
+                name: Some(shift_name),
+                shape: Some(shape),
+                type_: wire::DType::INT8,
+                data: Some(data),
+                ..Default::default()
+            },
+        ))
+    } else {
+        None
+    };
+
+    let (attribute_type, attribute) = match op {
+        wire::Op::ADD => {
+            let value = wire::AddAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::AddAttribute, value.as_union_value())
+        }
+        wire::Op::SUB => {
+            let value = wire::SubAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::SubAttribute, value.as_union_value())
+        }
+        wire::Op::MUL => {
+            let value = wire::MulAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::MulAttribute, value.as_union_value())
+        }
+        wire::Op::POW => {
+            let value = wire::PowAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::PowAttribute, value.as_union_value())
+        }
+        wire::Op::MAXIMUM => {
+            let value = wire::MaximumAttribute::create(
+                &mut builder,
+                &wire::MaximumAttributeArgs {
+                    nan_mode: wire::NanPropagationMode::PROPAGATE,
+                },
+            );
+            (wire::Attribute::MaximumAttribute, value.as_union_value())
+        }
+        wire::Op::MINIMUM => {
+            let value = wire::MinimumAttribute::create(
+                &mut builder,
+                &wire::MinimumAttributeArgs {
+                    nan_mode: wire::NanPropagationMode::PROPAGATE,
+                },
+            );
+            (wire::Attribute::MinimumAttribute, value.as_union_value())
+        }
+        _ => panic!("unsupported binary fixture op"),
+    };
+    let inputs = if op == wire::Op::MUL {
+        builder.create_vector(&[left_name, right_name, shift_name])
+    } else {
+        builder.create_vector(&[left_name, right_name])
+    };
+    let outputs = builder.create_vector(&[output_name]);
+    let operator = wire::TosaOperator::create(
+        &mut builder,
+        &wire::TosaOperatorArgs {
+            op,
+            attribute_type,
+            attribute: Some(attribute),
+            inputs: Some(inputs),
+            outputs: Some(outputs),
+            location: None,
+        },
+    );
+    let (tensors, operators) = if let Some(shift) = shift {
+        let const_attribute = wire::ConstAttribute::create(&mut builder, &Default::default());
+        let const_outputs = builder.create_vector(&[shift_name]);
+        let constant = wire::TosaOperator::create(
+            &mut builder,
+            &wire::TosaOperatorArgs {
+                op: wire::Op::CONST,
+                attribute_type: wire::Attribute::ConstAttribute,
+                attribute: Some(const_attribute.as_union_value()),
+                inputs: None,
+                outputs: Some(const_outputs),
+                location: None,
+            },
+        );
+        (
+            builder.create_vector(&[left, right, shift, output]),
+            builder.create_vector(&[constant, operator]),
+        )
+    } else {
+        (
+            builder.create_vector(&[left, right, output]),
+            builder.create_vector(&[operator]),
+        )
+    };
+    let block_inputs = builder.create_vector(&[left_name, right_name]);
+    let block_outputs = builder.create_vector(&[output_name]);
+    let block = wire::TosaBasicBlock::create(
+        &mut builder,
+        &wire::TosaBasicBlockArgs {
+            name: Some(block_name),
+            operators: Some(operators),
+            tensors: Some(tensors),
+            inputs: Some(block_inputs),
+            outputs: Some(block_outputs),
+            shapes: None,
+        },
+    );
+    let blocks = builder.create_vector(&[block]);
+    let region = wire::TosaRegion::create(
+        &mut builder,
+        &wire::TosaRegionArgs {
+            name: Some(region_name),
+            blocks: Some(blocks),
+        },
+    );
+    let regions = builder.create_vector(&[region]);
+    let version = wire::Version::create(
+        &mut builder,
+        &wire::VersionArgs {
+            _major: 1,
+            _minor: 0,
+            _patch: 0,
+            _draft: false,
+        },
+    );
+    let graph = wire::TosaGraph::create(
+        &mut builder,
+        &wire::TosaGraphArgs {
+            version: Some(version),
+            regions: Some(regions),
+            software_version: None,
+        },
+    );
+    wire::finish_tosa_graph_buffer(&mut builder, graph);
+    builder.finished_data().to_vec()
+}
+
+#[test]
+fn binary_fp16_fixtures_are_semantically_valid() {
+    let target = Target::new(
+        Version::TOSA_1_0,
+        ProfileSet::FLOATING_POINT,
+        Level::Level8K,
+        ExtensionSet::NONE,
+    );
+    for op in [
+        wire::Op::ADD,
+        wire::Op::SUB,
+        wire::Op::MUL,
+        wire::Op::POW,
+        wire::Op::MAXIMUM,
+        wire::Op::MINIMUM,
+    ] {
+        parse(&binary_fp16_bytes(op))
+            .unwrap()
+            .validate_for(target)
+            .unwrap();
+    }
+}
+
 #[test]
 fn matmul_fixture_is_semantically_valid() {
     for dtype in [wire::DType::FP16, wire::DType::FP32] {
@@ -819,6 +1019,48 @@ fn regenerate_max_pool2d_fp16_fixture() {
     let destination = std::env::var_os("VIRTIO_ACCEL_TOSA_FIXTURE_OUT")
         .expect("set VIRTIO_ACCEL_TOSA_FIXTURE_OUT to the exact output path");
     std::fs::write(destination, max_pool2d_float_bytes(wire::DType::FP16)).unwrap();
+}
+
+fn regenerate_binary_fp16_fixture(op: wire::Op) {
+    let destination = std::env::var_os("VIRTIO_ACCEL_TOSA_FIXTURE_OUT")
+        .expect("set VIRTIO_ACCEL_TOSA_FIXTURE_OUT to the exact output path");
+    std::fs::write(destination, binary_fp16_bytes(op)).unwrap();
+}
+
+#[test]
+#[ignore = "writes a requested checked-in test fixture"]
+fn regenerate_add_fp16_fixture() {
+    regenerate_binary_fp16_fixture(wire::Op::ADD);
+}
+
+#[test]
+#[ignore = "writes a requested checked-in test fixture"]
+fn regenerate_sub_fp16_fixture() {
+    regenerate_binary_fp16_fixture(wire::Op::SUB);
+}
+
+#[test]
+#[ignore = "writes a requested checked-in test fixture"]
+fn regenerate_mul_fp16_fixture() {
+    regenerate_binary_fp16_fixture(wire::Op::MUL);
+}
+
+#[test]
+#[ignore = "writes a requested checked-in test fixture"]
+fn regenerate_pow_fp16_fixture() {
+    regenerate_binary_fp16_fixture(wire::Op::POW);
+}
+
+#[test]
+#[ignore = "writes a requested checked-in test fixture"]
+fn regenerate_maximum_fp16_fixture() {
+    regenerate_binary_fp16_fixture(wire::Op::MAXIMUM);
+}
+
+#[test]
+#[ignore = "writes a requested checked-in test fixture"]
+fn regenerate_minimum_fp16_fixture() {
+    regenerate_binary_fp16_fixture(wire::Op::MINIMUM);
 }
 
 #[test]

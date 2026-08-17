@@ -16,8 +16,8 @@ The initial hardware baseline is:
 
 The backend accepts two explicit TOSA 1.0 targets:
 
-- the floating-point target supports FP16 identity, non-square batched MATMUL, and zero-padded
-  NHWC MAX_POOL2D; and
+- the floating-point target supports FP16 identity, broadcast ADD/SUB/MUL/MAXIMUM/MINIMUM,
+  non-square batched MATMUL, and zero-padded NHWC MAX_POOL2D; and
 - the integer target supports bit-exact INT8 identity and nonzero-zero-point INT8 MATMUL with an
   INT32 accumulator/output.
 
@@ -80,7 +80,7 @@ cargo run -p virtio-accel-hexagon --example mock_classifier
 
 The integration tests initialize the pinned HTP provider, validate device identity, execute the
 shared FP16 identity, batched non-square MATMUL, mock linear classifier, NHWC MAX_POOL2D, INT8
-identity, and nonzero-zero-point INT8 MATMUL cases, and compare every result with its numerical
+identity, broadcast binary arithmetic, and nonzero-zero-point INT8 MATMUL cases, and compare every result with its numerical
 oracle. They also run the reusable backend semantic suite, including segmented transfers and
 artifacts, allocation metadata, context isolation, binding validation, terminal stability,
 pre-admission deadlines, and direct-binding diagnostics with zero hidden staging. The examples

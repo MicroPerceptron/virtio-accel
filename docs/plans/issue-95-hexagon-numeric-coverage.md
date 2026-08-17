@@ -27,6 +27,11 @@ The first implementation slice is complete on the pinned Snapdragon X126100 / QA
   on HTP with zero hidden staging; and
 - retained all existing FP16 hardware oracles.
 
+The second implementation slice replaces the fixed three-input node ABI with bounded owned input,
+output, and integer-parameter slices. Broadcast FP16 `ADD`, `SUB`, `MUL`, `MAXIMUM`, and `MINIMUM`
+now pass checked-in portable and HTP oracles. `POW` remains rejected because TOSA requires a runtime
+domain condition that the current static admission path cannot yet discharge.
+
 The issue remains open for the shared operator-surface expansion and controlled performance sweep.
 Those cells will not be advertised until each has a TOSA oracle and HTP evidence.
 
@@ -127,10 +132,10 @@ every proposed cell. FP32, INT8, and each FP8 format have an explicit supported 
       scale-offset quantization metadata are implemented for the current numeric tiers.
 - [x] Preserve separate target admission: floating/no-extension and integer/no-extension; reject
       unavailable FP8E4M3 and FP8E5M2 targets before graph construction.
-- [ ] Replace the fixed `NodeDesc { input0, input1, output, kernel, stride }` ABI with bounded,
+- [x] Replace the fixed `NodeDesc { input0, input1, output, kernel, stride }` ABI with bounded,
       owned input/output/parameter slices that can represent variable arity, axes, permutations,
       scalar attributes, and generated parameter tensors without borrowed-lifetime ambiguity.
-- [ ] Make the C++ bridge copy all descriptors and parameter storage before returning. Validate
+- [x] Make the C++ bridge copy all descriptors and parameter storage before returning. Validate
       dtype, role, I/O index, tensor references, arity, rank, parameter lengths, and all size
       conversions before calling QNN.
 - [x] Set each QNN tensor's real datatype and encoding instead of hard-coding FP16. Retain exact
@@ -192,7 +197,8 @@ resource-limit tests before updating `supports_tosa_operator`.
 
 - [ ] Data movement and constants: `CONST`, `CONST_SHAPE`, `RESHAPE`, `TRANSPOSE`, `REVERSE`, and
       `CONCAT`, preserving exact axis/permutation/shape behavior and constant storage.
-- [ ] Binary arithmetic and broadcasting: `ADD`, `SUB`, `MUL`, `POW`, `MAXIMUM`, and `MINIMUM`.
+- [ ] Binary arithmetic and broadcasting: `ADD`, `SUB`, `MUL`, `MAXIMUM`, and `MINIMUM` are
+      hardware-proven; `POW` remains blocked on its runtime domain condition.
 - [ ] Comparisons, selection, and logical operations: `EQUAL`, `GREATER`, `GREATER_EQUAL`, `SELECT`,
       `LOGICAL_AND`, `LOGICAL_OR`, `LOGICAL_XOR`, and `LOGICAL_NOT`, including BOOL tensors that are
       internal or model-visible only where the TOSA/backend contract permits them.

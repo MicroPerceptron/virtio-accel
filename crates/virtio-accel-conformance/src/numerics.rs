@@ -313,6 +313,80 @@ pub const MATMUL_FP16: TosaFloat16Case = TosaFloat16Case {
     outputs: MATMUL_OUTPUTS_FP16,
 };
 
+const BINARY_LEFT_FP16_BITS: &[u16] = &[0x4000, 0x4400];
+const BINARY_RIGHT_FP16_BITS: &[u16] = &[0x3c00, 0x4000, 0x4200];
+const BINARY_INPUTS_FP16: &[Float16Tensor] = &[
+    Float16Tensor {
+        shape: &[2, 1],
+        bits: BINARY_LEFT_FP16_BITS,
+    },
+    Float16Tensor {
+        shape: &[1, 3],
+        bits: BINARY_RIGHT_FP16_BITS,
+    },
+];
+const ADD_OUTPUT_FP16_BITS: &[u16] = &[0x4200, 0x4400, 0x4500, 0x4500, 0x4600, 0x4700];
+const SUB_OUTPUT_FP16_BITS: &[u16] = &[0x3c00, 0x0000, 0xbc00, 0x4200, 0x4000, 0x3c00];
+const MUL_OUTPUT_FP16_BITS: &[u16] = &[0x4000, 0x4400, 0x4600, 0x4400, 0x4800, 0x4a00];
+const POW_OUTPUT_FP16_BITS: &[u16] = &[0x4000, 0x4400, 0x4600, 0x4400, 0x4c00, 0x5400];
+const MAXIMUM_OUTPUT_FP16_BITS: &[u16] = &[0x4000, 0x4000, 0x4200, 0x4400, 0x4400, 0x4400];
+const MINIMUM_OUTPUT_FP16_BITS: &[u16] = &[0x3c00, 0x4000, 0x4000, 0x3c00, 0x4000, 0x4200];
+
+const fn binary_output(bits: &'static [u16]) -> [Float16Tensor; 1] {
+    [Float16Tensor {
+        shape: &[2, 3],
+        bits,
+    }]
+}
+
+/// Binary16 broadcast addition over `[2, 1]` and `[1, 3]` inputs.
+pub const ADD_FP16: TosaFloat16Case = TosaFloat16Case {
+    name: "add-fp16",
+    artifact: include_bytes!("data/add-fp16-v1.0.0.tosa"),
+    inputs: BINARY_INPUTS_FP16,
+    outputs: &binary_output(ADD_OUTPUT_FP16_BITS),
+};
+
+/// Binary16 broadcast subtraction over `[2, 1]` and `[1, 3]` inputs.
+pub const SUB_FP16: TosaFloat16Case = TosaFloat16Case {
+    name: "sub-fp16",
+    artifact: include_bytes!("data/sub-fp16-v1.0.0.tosa"),
+    inputs: BINARY_INPUTS_FP16,
+    outputs: &binary_output(SUB_OUTPUT_FP16_BITS),
+};
+
+/// Binary16 broadcast multiplication with a compile-time zero shift.
+pub const MUL_FP16: TosaFloat16Case = TosaFloat16Case {
+    name: "mul-fp16",
+    artifact: include_bytes!("data/mul-fp16-v1.0.0.tosa"),
+    inputs: BINARY_INPUTS_FP16,
+    outputs: &binary_output(MUL_OUTPUT_FP16_BITS),
+};
+
+/// Binary16 broadcast power over `[2, 1]` and `[1, 3]` inputs.
+pub const POW_FP16: TosaFloat16Case = TosaFloat16Case {
+    name: "pow-fp16",
+    artifact: include_bytes!("data/pow-fp16-v1.0.0.tosa"),
+    inputs: BINARY_INPUTS_FP16,
+    outputs: &binary_output(POW_OUTPUT_FP16_BITS),
+};
+
+/// Binary16 broadcast maximum over `[2, 1]` and `[1, 3]` inputs.
+pub const MAXIMUM_FP16: TosaFloat16Case = TosaFloat16Case {
+    name: "maximum-fp16",
+    artifact: include_bytes!("data/maximum-fp16-v1.0.0.tosa"),
+    inputs: BINARY_INPUTS_FP16,
+    outputs: &binary_output(MAXIMUM_OUTPUT_FP16_BITS),
+};
+
+/// Binary16 broadcast minimum over `[2, 1]` and `[1, 3]` inputs.
+pub const MINIMUM_FP16: TosaFloat16Case = TosaFloat16Case {
+    name: "minimum-fp16",
+    artifact: include_bytes!("data/minimum-fp16-v1.0.0.tosa"),
+    inputs: BINARY_INPUTS_FP16,
+    outputs: &binary_output(MINIMUM_OUTPUT_FP16_BITS),
+};
+
 const MOCK_CLASSIFIER_FEATURES_FP16_BITS: &[u16] = &[
     0x3c00, 0x4000, 0x4200, // [1.0, 2.0, 3.0]
     0xbc00, 0x3800, 0x4000, // [-1.0, 0.5, 2.0]

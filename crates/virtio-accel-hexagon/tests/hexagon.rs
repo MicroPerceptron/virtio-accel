@@ -2,8 +2,9 @@
 
 use std::time::{Duration, Instant};
 use virtio_accel_conformance::numerics::{
-    IDENTITY_EDGES_FP16, IDENTITY_INT8, MATMUL_FP16, MATMUL_INT8, MAX_POOL2D_FP16,
-    MOCK_LINEAR_CLASSIFIER_FP16, TosaFloat16Case, TosaInt8MatmulCase, TosaPackedCase,
+    ADD_FP16, IDENTITY_EDGES_FP16, IDENTITY_INT8, MATMUL_FP16, MATMUL_INT8, MAX_POOL2D_FP16,
+    MAXIMUM_FP16, MINIMUM_FP16, MOCK_LINEAR_CLASSIFIER_FP16, MUL_FP16, SUB_FP16, TosaFloat16Case,
+    TosaInt8MatmulCase, TosaPackedCase,
 };
 use virtio_accel_conformance::{
     BindingFixture, ConformanceHooks, ProgramFixture, SubmissionPathDiagnostics, TargetDescription,
@@ -304,6 +305,13 @@ fn executes_mock_linear_classifier_on_htp() {
 #[test]
 fn executes_nhwc_fp16_max_pool_on_htp() {
     run_case(MAX_POOL2D_FP16);
+}
+
+#[test]
+fn executes_broadcast_fp16_binary_family_on_htp() {
+    for case in [ADD_FP16, SUB_FP16, MUL_FP16, MAXIMUM_FP16, MINIMUM_FP16] {
+        run_case(case);
+    }
 }
 
 #[test]

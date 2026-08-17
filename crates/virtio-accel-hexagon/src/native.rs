@@ -1,7 +1,7 @@
 //! Native QNN HTP backend compiled against the detected QAIRT headers.
 
 use crate::ffi;
-use crate::lower::{Element, FeatureRole, LoweredNode, lower_tosa};
+use crate::lower::{Element, FeatureRole, NodeKind, lower_tosa};
 use crate::{InitError, REQUIRED_RESIDENT_BYTES};
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::cell::{Cell, RefCell};
@@ -783,37 +783,23 @@ impl Accelerator for HexagonAccelerator {
         let node_descriptions = lowered
             .nodes
             .iter()
-            .map(|node| match node {
-                LoweredNode::Identity { input, output } => ffi::NodeDesc {
-                    kind: ffi::NODE_RESHAPE,
-                    input0: *input,
-                    output: *output,
-                    ..ffi::NodeDesc::default()
+            .map(|node| ffi::NodeDesc {
+                kind: match node.kind {
+                    NodeKind::Identity => ffi::NODE_RESHAPE,
+                    NodeKind::MatMul => ffi::NODE_MATMUL,
+                    NodeKind::MaxPool2d => ffi::NODE_MAX_POOL_2D,
+                    NodeKind::Add => ffi::NODE_ADD,
+                    NodeKind::Subtract => ffi::NODE_SUBTRACT,
+                    NodeKind::Multiply => ffi::NODE_MULTIPLY,
+                    NodeKind::Maximum => ffi::NODE_MAXIMUM,
+                    NodeKind::Minimum => ffi::NODE_MINIMUM,
                 },
-                LoweredNode::MatMul {
-                    left,
-                    right,
-                    output,
-                } => ffi::NodeDesc {
-                    kind: ffi::NODE_MATMUL,
-                    input0: *left,
-                    input1: *right,
-                    output: *output,
-                    ..ffi::NodeDesc::default()
-                },
-                LoweredNode::MaxPool2d {
-                    input,
-                    output,
-                    kernel,
-                    stride,
-                } => ffi::NodeDesc {
-                    kind: ffi::NODE_MAX_POOL_2D,
-                    input0: *input,
-                    output: *output,
-                    kernel: *kernel,
-                    stride: *stride,
-                    ..ffi::NodeDesc::default()
-                },
+                inputs: node.inputs.as_ptr(),
+                input_count: node.inputs.len() as u32,
+                outputs: node.outputs.as_ptr(),
+                output_count: node.outputs.len() as u32,
+                parameters: node.parameters.as_ptr(),
+                parameter_count: node.parameters.len() as u32,
             })
             .collect::<Vec<_>>();
         let mut graph = ptr::null_mut();

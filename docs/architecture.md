@@ -349,8 +349,8 @@ enumerated device and reports the direct-binding and explicit-transfer counters 
 conformance diagnostics hook. This keeps the Core ML and Intel paths on one bounded TOSA contract
 without requiring either provider to adopt the other's native graph representation.
 
-The Qualcomm adapter uses the same seam. Its safe planner admits static FP16 identity, MATMUL, and
-NHWC MAX_POOL2D graphs plus a separate exact integer target for INT8 identity and zero-point-aware
+The Qualcomm adapter uses the same seam. Its safe planner admits static FP16 identity, broadcast
+ADD/SUB/MUL/MAXIMUM/MINIMUM, MATMUL, and NHWC MAX_POOL2D graphs plus a separate exact integer target for INT8 identity and zero-point-aware
 INT8 MATMUL with INT32 output. Typed tensor plans carry scalar size and QNN scale-offset metadata
 through an owned ABI, so submission range checks use exact one-, two-, or four-byte element storage.
 FP32 remains rejected because a pinned v73 probe returned FP16-rounded results, and ambiguous generic
