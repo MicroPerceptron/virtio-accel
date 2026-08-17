@@ -24,6 +24,19 @@ enum VaQnnTensorRole {
   VA_QNN_TENSOR_OUTPUT = 2,
 };
 
+enum VaQnnElement {
+  VA_QNN_ELEMENT_F16 = 1,
+  VA_QNN_ELEMENT_F32 = 2,
+  VA_QNN_ELEMENT_I8 = 3,
+  VA_QNN_ELEMENT_I32 = 4,
+};
+
+enum VaQnnPrecision {
+  VA_QNN_PRECISION_DEFAULT = 0,
+  VA_QNN_PRECISION_F16 = 1,
+  VA_QNN_PRECISION_F32 = 2,
+};
+
 enum VaQnnEventState {
   VA_QNN_EVENT_PENDING = 0,
   VA_QNN_EVENT_COMPLETE = 1,
@@ -52,8 +65,12 @@ typedef struct VaQnnTensorDesc {
   uint32_t value;
   uint32_t role;
   uint32_t io_index;
-  const uint32_t *dimensions;
+  uint32_t element;
+  uint32_t quantized;
   uint32_t rank;
+  const uint32_t *dimensions;
+  float scale;
+  int32_t offset;
 } VaQnnTensorDesc;
 
 typedef struct VaQnnNodeDesc {
@@ -78,7 +95,8 @@ uint64_t va_qnn_runtime_free(VaQnnRuntime *runtime);
 uint64_t va_qnn_graph_create(VaQnnRuntime *runtime,
                              const VaQnnTensorDesc *tensors,
                              uint32_t tensor_count, const VaQnnNodeDesc *nodes,
-                             uint32_t node_count, VaQnnGraph **graph,
+                             uint32_t node_count, uint32_t precision,
+                             VaQnnGraph **graph,
                              char *message, size_t message_size);
 uint64_t va_qnn_graph_free(VaQnnGraph *graph);
 

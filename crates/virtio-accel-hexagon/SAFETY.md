@@ -22,10 +22,13 @@ successful ownership transfer.
 
 ## Descriptors and buffers
 
-`VaQnnGraph` owns tensor names, dimensions, constants, node parameters, and operation configs until
-the graph context is destroyed. Its tensor vector is capacity-checked and reserved before raw
-pointers into those records are retained. Pool-window index and tensor-count arithmetic is checked
-before graph construction.
+Rust passes bounded tensor descriptors containing an explicit element tag, rank/dimensions, and
+optional scale-offset quantization metadata. The synchronous graph-creation call validates every
+tag, dimension pointer, rank, tensor role, I/O index, and referenced value before QNN sees it.
+`VaQnnGraph` then owns tensor names, dimensions, generated constants, node parameters, and operation
+configs until the graph context is destroyed. Its tensor vector is capacity-checked and reserved
+before raw pointers into those records are retained. Pool-window index and tensor-count arithmetic
+is checked before graph construction.
 
 Every `HexagonBuffer` owns one zero-initialized `AlignedAllocation` with at least 4096-byte
 alignment.
@@ -45,12 +48,13 @@ reads atomic state only and never calls QNN. The worker writes the QNN result, c
 in-flight gate, and then publishes a terminal event with release ordering. Event destruction joins
 the terminal worker before releasing its descriptors, graph, or allocation guards.
 
-Finite deadlines are rejected before admission. Cancellation is not advertised. Consequently no
+Finite deadlines return `DeadlineExpired` before admission. Cancellation is not advertised. Consequently no
 timeout or cancellation path can release memory while HTP may still access it.
 
 ## Audited unsafe operations
 
 Every Rust unsafe block has a local `SAFETY:` comment covering its pointer validity, allocation
-layout, ownership, and call duration. The native integration tests exercise numerical execution,
-stable terminal polling, pre-admission timeout rejection, live-event graph retention, and ordered
-teardown on the pinned HTP runtime. Unsupported hosts compile without either native module.
+layout, ownership, and call duration. The native integration tests exercise FP16 and exact
+INT8/INT32 numerical execution, the reusable lifecycle suite, direct-binding diagnostics, stable
+terminal polling, pre-admission timeout rejection, live-event graph retention, and ordered teardown
+on the pinned HTP runtime. Unsupported hosts compile without either native module.

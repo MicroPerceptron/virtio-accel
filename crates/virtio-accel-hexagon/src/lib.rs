@@ -9,7 +9,10 @@
 
 mod lower;
 
-pub use lower::{HEXAGON_TOSA_TARGET, LoweringError, supports_tosa_dtype, supports_tosa_operator};
+pub use lower::{
+    HEXAGON_TOSA_INTEGER_TARGET, HEXAGON_TOSA_TARGET, LoweringError, supports_tosa_dtype,
+    supports_tosa_operator,
+};
 
 /// Native QNN runtime and ABI version validated by the initial backend tier.
 pub const TESTED_QAIRT_RELEASE: &str = "2.49.0.260730";

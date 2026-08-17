@@ -4,6 +4,7 @@
 #include "qnn_bridge.h"
 
 #include <HTP/QnnHtpCommon.h>
+#include <HTP/QnnHtpGraph.h>
 #include <QnnInterface.h>
 #include <QnnOpDef.h>
 
@@ -135,6 +136,23 @@ Qnn_TensorType_t tensor_type(uint32_t role) {
     return QNN_TENSOR_TYPE_APP_READ;
   default:
     return QNN_TENSOR_TYPE_NATIVE;
+  }
+}
+
+Qnn_DataType_t tensor_data_type(const VaQnnTensorDesc &description) {
+  switch (description.element) {
+  case VA_QNN_ELEMENT_F16:
+    return QNN_DATATYPE_FLOAT_16;
+  case VA_QNN_ELEMENT_F32:
+    return QNN_DATATYPE_FLOAT_32;
+  case VA_QNN_ELEMENT_I8:
+    return description.quantized != 0 ? QNN_DATATYPE_SFIXED_POINT_8
+                                      : QNN_DATATYPE_INT_8;
+  case VA_QNN_ELEMENT_I32:
+    return description.quantized != 0 ? QNN_DATATYPE_SFIXED_POINT_32
+                                      : QNN_DATATYPE_INT_32;
+  default:
+    return QNN_DATATYPE_UNDEFINED;
   }
 }
 
@@ -331,8 +349,8 @@ uint64_t add_max_pool(VaQnnGraph &graph, const VaQnnNodeDesc &description,
     uint64_t status = create_internal_tensor(
         graph, prefix + "row_view_" + std::to_string(kernel_row),
         {input.dimensions[0], output_height, input_width, input.dimensions[3]},
-        QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_16, {}, &row_view, message,
-        message_size);
+        QNN_TENSOR_TYPE_NATIVE, input.tensor.v2.dataType, {}, &row_view,
+        message, message_size);
     if (status != QNN_SUCCESS)
       return status;
     row_views.push_back(row_view);
@@ -352,7 +370,7 @@ uint64_t add_max_pool(VaQnnGraph &graph, const VaQnnNodeDesc &description,
           std::to_string(kernel_row) + "_" + std::to_string(kernel_column);
       uint64_t status = create_internal_tensor(
           graph, prefix + "window_" + suffix, output.dimensions,
-          QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_16, {}, &window, message,
+          QNN_TENSOR_TYPE_NATIVE, input.tensor.v2.dataType, {}, &window, message,
           message_size);
       if (status != QNN_SUCCESS)
         return status;
@@ -379,7 +397,7 @@ uint64_t add_max_pool(VaQnnGraph &graph, const VaQnnNodeDesc &description,
     if (window_index + 1 != windows.size()) {
       uint64_t status = create_internal_tensor(
           graph, prefix + "maximum_" + std::to_string(window_index),
-          output.dimensions, QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_16, {},
+          output.dimensions, QNN_TENSOR_TYPE_NATIVE, input.tensor.v2.dataType, {},
           &maximum, message, message_size);
       if (status != QNN_SUCCESS)
         return status;
@@ -591,7 +609,8 @@ va_qnn_graph_create(VaQnnRuntime *runtime,
                     const VaQnnTensorDesc *tensor_descriptions,
                     uint32_t tensor_count,
                     const VaQnnNodeDesc *node_descriptions, uint32_t node_count,
-                    VaQnnGraph **output, char *message, size_t message_size) {
+                    uint32_t precision, VaQnnGraph **output, char *message,
+                    size_t message_size) {
   if (runtime == nullptr || tensor_descriptions == nullptr ||
       tensor_count == 0 || node_descriptions == nullptr || node_count == 0 ||
       output == nullptr) {
@@ -607,8 +626,27 @@ va_qnn_graph_create(VaQnnRuntime *runtime,
       set_message(message, message_size, "QNN context creation failed");
       return status;
     }
+    QnnHtpGraph_CustomConfig_t htp_config = QNN_HTP_GRAPH_CUSTOM_CONFIG_INIT;
+    QnnGraph_Config_t graph_config = QNN_GRAPH_CONFIG_INIT;
+    const QnnGraph_Config_t *graph_configs[] = {&graph_config, nullptr};
+    const QnnGraph_Config_t **selected_configs = nullptr;
+    if (precision == VA_QNN_PRECISION_F16 ||
+        precision == VA_QNN_PRECISION_F32) {
+      htp_config.option = QNN_HTP_GRAPH_CONFIG_OPTION_PRECISION;
+      htp_config.precision = precision == VA_QNN_PRECISION_F32
+                                 ? QNN_PRECISION_FLOAT32
+                                 : QNN_PRECISION_FLOAT16;
+      graph_config.option = QNN_GRAPH_CONFIG_OPTION_CUSTOM;
+      graph_config.customConfig = &htp_config;
+      selected_configs = graph_configs;
+    } else if (precision != VA_QNN_PRECISION_DEFAULT) {
+      runtime->api.contextFree(graph->context, nullptr);
+      graph->context = nullptr;
+      set_message(message, message_size, "invalid QNN graph precision");
+      return VA_QNN_ERROR_INVALID_ARGUMENT;
+    }
     status = runtime->api.graphCreate(graph->context, "virtio_accel_graph",
-                                      nullptr, &graph->graph);
+                                      selected_configs, &graph->graph);
     if (status != QNN_SUCCESS) {
       runtime->api.contextFree(graph->context, nullptr);
       graph->context = nullptr;
@@ -676,7 +714,11 @@ va_qnn_graph_create(VaQnnRuntime *runtime,
     graph->by_value.reserve(tensor_count);
     for (uint32_t index = 0; index < tensor_count; ++index) {
       const VaQnnTensorDesc &description = tensor_descriptions[index];
+      const Qnn_DataType_t data_type = tensor_data_type(description);
       if ((description.rank != 0 && description.dimensions == nullptr) ||
+          data_type == QNN_DATATYPE_UNDEFINED ||
+          description.quantized > 1 ||
+          (description.quantized != 0 && !(description.scale > 0.0f)) ||
           graph->by_value.find(description.value) != graph->by_value.end()) {
         runtime->api.contextFree(graph->context, nullptr);
         set_message(message, message_size,
@@ -691,7 +733,17 @@ va_qnn_graph_create(VaQnnRuntime *runtime,
       storage.tensor.v2.name = storage.name.c_str();
       storage.tensor.v2.type = tensor_type(description.role);
       storage.tensor.v2.dataFormat = QNN_TENSOR_DATA_FORMAT_FLAT_BUFFER;
-      storage.tensor.v2.dataType = QNN_DATATYPE_FLOAT_16;
+      storage.tensor.v2.dataType = data_type;
+      if (description.quantized != 0) {
+        storage.tensor.v2.quantizeParams.encodingDefinition =
+            QNN_DEFINITION_DEFINED;
+        storage.tensor.v2.quantizeParams.quantizationEncoding =
+            QNN_QUANTIZATION_ENCODING_SCALE_OFFSET;
+        storage.tensor.v2.quantizeParams.scaleOffsetEncoding.scale =
+            description.scale;
+        storage.tensor.v2.quantizeParams.scaleOffsetEncoding.offset =
+            description.offset;
+      }
       storage.tensor.v2.rank = description.rank;
       storage.tensor.v2.dimensions = storage.dimensions.data();
       storage.tensor.v2.memType = QNN_TENSORMEMTYPE_RAW;

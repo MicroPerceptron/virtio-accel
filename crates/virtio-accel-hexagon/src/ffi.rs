@@ -14,6 +14,15 @@ pub(crate) const TENSOR_INPUT: u32 = 1;
 pub(crate) const TENSOR_OUTPUT: u32 = 2;
 pub(crate) const NO_IO_INDEX: u32 = u32::MAX;
 
+pub(crate) const ELEMENT_F16: u32 = 1;
+pub(crate) const ELEMENT_F32: u32 = 2;
+pub(crate) const ELEMENT_I8: u32 = 3;
+pub(crate) const ELEMENT_I32: u32 = 4;
+
+pub(crate) const PRECISION_DEFAULT: u32 = 0;
+pub(crate) const PRECISION_F16: u32 = 1;
+pub(crate) const PRECISION_F32: u32 = 2;
+
 pub(crate) const NODE_RESHAPE: u32 = 1;
 pub(crate) const NODE_MATMUL: u32 = 2;
 pub(crate) const NODE_MAX_POOL_2D: u32 = 3;
@@ -73,8 +82,12 @@ pub(crate) struct TensorDesc {
     pub value: u32,
     pub role: u32,
     pub io_index: u32,
-    pub dimensions: *const u32,
+    pub element: u32,
+    pub quantized: u32,
     pub rank: u32,
+    pub dimensions: *const u32,
+    pub scale: f32,
+    pub offset: i32,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -111,6 +124,7 @@ unsafe extern "C" {
         tensor_count: u32,
         nodes: *const NodeDesc,
         node_count: u32,
+        precision: u32,
         graph: *mut *mut Graph,
         message: *mut c_char,
         message_size: usize,

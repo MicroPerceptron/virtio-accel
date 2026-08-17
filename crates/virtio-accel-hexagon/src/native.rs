@@ -1,7 +1,7 @@
 //! Native QNN HTP backend compiled against the detected QAIRT headers.
 
 use crate::ffi;
-use crate::lower::{FeatureRole, LoweredNode, lower_tosa};
+use crate::lower::{Element, FeatureRole, LoweredNode, lower_tosa};
 use crate::{InitError, REQUIRED_RESIDENT_BYTES};
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::cell::{Cell, RefCell};
@@ -26,6 +26,24 @@ const TRANSFER_CHUNK_BYTES: usize = 64 * 1024;
 const EXCLUSIVE_NATIVE_ACCESS: u64 = u64::MAX;
 const MAX_SHARED_NATIVE_USERS: u64 = u64::MAX - 1;
 const MESSAGE_BYTES: usize = 512;
+
+const fn ffi_element(element: Element) -> u32 {
+    match element {
+        Element::F16 => ffi::ELEMENT_F16,
+        Element::F32 => ffi::ELEMENT_F32,
+        Element::I8 => ffi::ELEMENT_I8,
+        Element::I32 => ffi::ELEMENT_I32,
+    }
+}
+
+const fn ffi_precision(element: Option<Element>) -> u32 {
+    match element {
+        None => ffi::PRECISION_DEFAULT,
+        Some(Element::F16) => ffi::PRECISION_F16,
+        Some(Element::F32) => ffi::PRECISION_F32,
+        Some(Element::I8 | Element::I32) => ffi::PRECISION_DEFAULT,
+    }
+}
 
 fn status_error(status: u64) -> BackendError {
     match status {
@@ -409,6 +427,8 @@ impl Drop for HexagonEvent {
 pub struct HexagonAccelerator {
     runtime: Rc<RuntimeHandle>,
     next_id: AtomicU64,
+    direct_binding_admissions: Cell<u64>,
+    explicit_transfer_bytes: Cell<u64>,
     info: DeviceInfo,
     _not_send_sync: PhantomData<Rc<()>>,
 }
@@ -428,6 +448,8 @@ impl HexagonAccelerator {
         Ok(Self {
             runtime,
             next_id: AtomicU64::new(0),
+            direct_binding_admissions: Cell::new(0),
+            explicit_transfer_bytes: Cell::new(0),
             info: DeviceInfo {
                 identity: DeviceIdentity {
                     uuid: *b"qualcomm-htp-v73",
@@ -467,6 +489,24 @@ impl HexagonAccelerator {
 
     pub fn runtime_info(&self) -> &QnnRuntimeInfo {
         &self.runtime.info
+    }
+
+    /// Number of caller-owned tensor bindings admitted directly to QNN.
+    pub fn direct_binding_admissions(&self) -> u64 {
+        self.direct_binding_admissions.get()
+    }
+
+    /// Bytes copied only through explicit `read_buffer` and `write_buffer` calls.
+    pub fn explicit_transfer_bytes(&self) -> u64 {
+        self.explicit_transfer_bytes.get()
+    }
+
+    fn record_explicit_transfer(&self, bytes: usize) {
+        self.explicit_transfer_bytes.set(
+            self.explicit_transfer_bytes
+                .get()
+                .saturating_add(bytes as u64),
+        );
     }
 
     fn next_id(&self) -> Result<u64, BackendError> {
@@ -595,6 +635,7 @@ impl Accelerator for HexagonAccelerator {
                     length,
                 )
             };
+            self.record_explicit_transfer(length);
             return Ok(());
         }
         let mut scratch = [0; TRANSFER_CHUNK_BYTES];
@@ -612,6 +653,7 @@ impl Accelerator for HexagonAccelerator {
             };
             copied += chunk;
         }
+        self.record_explicit_transfer(length);
         Ok(())
     }
 
@@ -641,6 +683,7 @@ impl Accelerator for HexagonAccelerator {
                     length,
                 )
             };
+            self.record_explicit_transfer(length);
             return Ok(());
         }
         let mut scratch = [0; TRANSFER_CHUNK_BYTES];
@@ -658,6 +701,7 @@ impl Accelerator for HexagonAccelerator {
             data.write_at(copied as u64, &scratch[..chunk])?;
             copied += chunk;
         }
+        self.record_explicit_transfer(length);
         Ok(())
     }
 
@@ -727,8 +771,12 @@ impl Accelerator for HexagonAccelerator {
                     value: tensor.value,
                     role,
                     io_index,
-                    dimensions: tensor.dims.as_ptr(),
+                    element: ffi_element(tensor.element),
+                    quantized: u32::from(tensor.quantization.is_some()),
                     rank: tensor.dims.len() as u32,
+                    dimensions: tensor.dims.as_ptr(),
+                    scale: tensor.quantization.map_or(0.0, |value| value.scale),
+                    offset: tensor.quantization.map_or(0, |value| value.offset),
                 }
             })
             .collect::<Vec<_>>();
@@ -779,6 +827,7 @@ impl Accelerator for HexagonAccelerator {
                 tensor_descriptions.len() as u32,
                 node_descriptions.as_ptr(),
                 node_descriptions.len() as u32,
+                ffi_precision(lowered.precision),
                 &mut graph,
                 message.as_mut_ptr(),
                 message.len(),
@@ -836,14 +885,25 @@ impl Accelerator for HexagonAccelerator {
         timeout: Timeout,
     ) -> Result<Self::Event, SubmitFailure<Self::Event>> {
         if !matches!(timeout, Timeout::Infinite) {
-            return Err(SubmitFailure::Rejected(BackendError::Unsupported));
+            return Err(SubmitFailure::Rejected(BackendError::DeadlineExpired));
         }
         if queue.context_id != program.context_id {
             return Err(SubmitFailure::Rejected(BackendError::InvalidArgument));
         }
-        if bindings.len() != program.slots.len()
+        if bindings.is_empty()
             || bindings.len() > self.info.limits.max_bindings_per_submission as usize
         {
+            return Err(SubmitFailure::Rejected(BackendError::ResourceLimit));
+        }
+        for (index, binding) in bindings.iter().enumerate() {
+            if bindings[..index]
+                .iter()
+                .any(|prior| prior.slot == binding.slot)
+            {
+                return Err(SubmitFailure::Rejected(BackendError::InvalidArgument));
+            }
+        }
+        if bindings.len() != program.slots.len() {
             return Err(SubmitFailure::Rejected(BackendError::Incompatible));
         }
         let mut pointers = vec![ptr::null_mut(); program.slots.len()];
@@ -852,9 +912,6 @@ impl Accelerator for HexagonAccelerator {
         for binding in bindings {
             if binding.buffer.context_id != queue.context_id {
                 return Err(SubmitFailure::Rejected(BackendError::InvalidArgument));
-            }
-            if !binding.buffer.desc.allows_access(binding.access) {
-                return Err(SubmitFailure::Rejected(BackendError::PermissionDenied));
             }
             let index = program
                 .slots
@@ -869,12 +926,18 @@ impl Accelerator for HexagonAccelerator {
                 FeatureRole::Input => AccessMode::Read,
                 FeatureRole::Output => AccessMode::Write,
             };
-            if binding.access != expected_access || binding.range.bytes() != plan.byte_len {
+            if binding.access != expected_access {
                 return Err(SubmitFailure::Rejected(BackendError::Incompatible));
             }
             let (start, _) =
                 Self::checked_range(binding.buffer, binding.range.offset, binding.range.bytes())
                     .map_err(SubmitFailure::Rejected)?;
+            if binding.range.bytes() != plan.byte_len {
+                return Err(SubmitFailure::Rejected(BackendError::Incompatible));
+            }
+            if !binding.buffer.desc.allows_access(binding.access) {
+                return Err(SubmitFailure::Rejected(BackendError::PermissionDenied));
+            }
             pointers[index] = binding.buffer.allocation.pointer_at(start).cast();
             backings.push(EventBacking::new(
                 Rc::clone(&binding.buffer.allocation),
@@ -935,6 +998,11 @@ impl Accelerator for HexagonAccelerator {
         check_status(status).map_err(SubmitFailure::Rejected)?;
         let event =
             NonNull::new(event).ok_or_else(|| SubmitFailure::Rejected(BackendError::DeviceLost))?;
+        self.direct_binding_admissions.set(
+            self.direct_binding_admissions
+                .get()
+                .saturating_add(bindings.len() as u64),
+        );
         Ok(HexagonEvent {
             raw: Cell::new(Some(event)),
             backings: RefCell::new(backings),
