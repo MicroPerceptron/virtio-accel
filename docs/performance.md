@@ -151,3 +151,11 @@ Wall-clock results must be recorded on a pinned OpenVINO runtime and identified 
 timing claim is made; the deterministic regression tests instead pin capacity reuse, pointer
 scrubbing, guard release at terminal observation, and tensor-metadata release after request
 destruction.
+
+## Qualcomm Hexagon evidence status
+
+`virtio-accel-hexagon` has no native performance claim yet. Its SDK-free tests prove deterministic
+FP16 graph planning and exact binding byte counts only. Admission latency, QNN descriptor reuse,
+provider staging counters, and submit-to-complete timing must not be recorded as Hexagon evidence
+until the audited HTP path runs on the pinned Snapdragon/QAIRT/driver combination and passes the
+semantic and numerical suites.

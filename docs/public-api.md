@@ -47,12 +47,13 @@ through `ModelValidator`; generated FlatBuffers tables and unchecked roots remai
 
 ## Runnable entry points
 
-Four examples are part of the default CI workflow:
+Five examples are part of the default CI workflow:
 
 - `cargo run --example backend_conformance`
 - `cargo run --example reference_execution`
 - `cargo run -p virtio-accel-coreml --example tosa_coreml`
 - `cargo run -p virtio-accel-openvino --example tosa_openvino`
+- `cargo run -p virtio-accel-hexagon --example tosa_hexagon`
 
 `backend_conformance` shows how a backend author wires a provider to the reusable conformance
 suite. `reference_execution` runs a complete context/buffer/program/queue/submit/poll/read/release
@@ -62,6 +63,9 @@ execution; non-macOS hosts compile the placeholder, and macOS hosts without an A
 `tosa_openvino` proves the same production path through backend-local OpenVINO IR lowering on the
 preferred available Intel inference device; hosts without an OpenVINO runtime compile the
 placeholder, and hosts without an inference device skip execution.
+`tosa_hexagon` currently proves the SDK-free behavior only: the strict portable planner is tested
+separately, and the example reports `RuntimeUnavailable` without falling back to CPU or GPU. It must
+become a real end-to-end HTP example before Qualcomm leaves `Planned` status.
 
 ## Baseline, reserved, and post-v1 work
 
@@ -70,8 +74,9 @@ normative documents. Reserved feature bits, opcodes, flags, and fields are not o
 they are invalid until a later policy assigns semantics. Platform integrations such as KVM,
 vhost-user, VFIO, Windows, macOS, or vendor SDK adapters do not change protocol 1.0 and must not
 leak into portable default dependencies. `virtio-accel-coreml` and `virtio-accel-openvino` are the
-first concrete host backends: each depends inward on `virtio-accel-core` and `virtio-accel-tosa`,
-while the facade and portable runtime crates depend on neither.
+first concrete host backends. `virtio-accel-hexagon` is a separately packaged, still-planned
+adapter scaffold. Each depends inward on `virtio-accel-core` and `virtio-accel-tosa`, while the
+facade and portable runtime crates depend on none of them.
 
 The compatibility and release classification rules are in
 [`release-policy.md`](release-policy.md). The protocol 1.0 frozen surface is summarized in

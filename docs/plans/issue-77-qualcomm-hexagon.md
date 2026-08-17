@@ -8,6 +8,37 @@ Planning branch: `codex/issue-77-qualcomm-hexagon-plan`
 
 Last reviewed: 2026-08-17
 
+## Implementation checkpoint (2026-08-17)
+
+Completed on this branch:
+
+- Confirmed the development host is Windows ARM64 on Snapdragon X126100 and that Windows has a
+  started Qualcomm Hexagon NPU (`ComputeAccelerator`, driver `30.0.222.0`).
+- Verified Qualcomm's public `qai-appbuilder` QAIRT 2.48.40 asset against its published SHA-256.
+  That asset contains Genie/AppBuilder components but no public `QnnInterface.h` or Windows ARM64
+  `QnnHtp` application import library; the build probe rejects it as incomplete.
+- Added and packaged `virtio-accel-hexagon`, including strict SDK detection, an honest
+  unavailable-runtime surface, an SDK-free example, license files, and the native safety gates.
+- Implemented deterministic, owned FP16 TOSA planning for identity, non-square batched MATMUL, and
+  NHWC MAX_POOL2D. FP32, INT8, INT4, FP8, unsupported targets, attributes, shapes, and operators are
+  rejected before native work.
+- Added seven backend-local tests covering the advertised planner surface and rejection boundary.
+- Integrated the fourteenth package into workspace metadata, CI examples, release policy,
+  publication order, portability/architecture/API/performance docs, and the root support matrix
+  without changing Qualcomm from `Planned`.
+- Passed formatting, release policy, workspace Clippy with warnings denied, full workspace tests,
+  warning-free rustdoc, standalone package verification, and the ordered 14-package local-registry
+  publication dry run.
+
+Blocked pending the full licensed QAIRT/QNN C development package:
+
+- The audited QNN interface/provider bindings, HTP device/context/graph lifecycle, exact client
+  buffers, worker-backed execution/events, fault/timeout semantics, semantic conformance, and
+  numerical hardware evidence cannot be implemented or validated safely from driver-private DLLs
+  or guessed ABI layouts.
+- Native support must remain unavailable and the README support row must remain `Planned` until
+  those requirements pass on the detected NPU.
+
 ## Outcome
 
 Add a separately packaged `virtio-accel-hexagon` host-native crate that implements

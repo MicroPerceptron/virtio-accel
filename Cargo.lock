@@ -221,6 +221,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "virtio-accel-hexagon"
+version = "0.2.1"
+dependencies = [
+ "virtio-accel-conformance",
+ "virtio-accel-core",
+ "virtio-accel-tosa",
+]
+
+[[package]]
 name = "virtio-accel-mock"
 version = "0.2.1"
 dependencies = [

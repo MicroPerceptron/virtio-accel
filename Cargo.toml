@@ -32,6 +32,7 @@ members = [
     "crates/virtio-accel-coreml",
     "crates/virtio-accel-device",
     "crates/virtio-accel-guest",
+    "crates/virtio-accel-hexagon",
     "crates/virtio-accel-mock",
     "crates/virtio-accel-openvino",
     "crates/virtio-accel-proto",
@@ -63,6 +64,7 @@ virtio-accel-cleanroom = { path = "conformance/rust-clean-room", version = "0.2.
 virtio-accel-conformance = { path = "crates/virtio-accel-conformance", version = "0.2.1" }
 virtio-accel-device = { path = "crates/virtio-accel-device", version = "0.2.1" }
 virtio-accel-guest = { path = "crates/virtio-accel-guest", version = "0.2.1" }
+virtio-accel-hexagon = { path = "crates/virtio-accel-hexagon", version = "0.2.1" }
 virtio-accel-mock = { path = "crates/virtio-accel-mock", version = "0.2.1" }
 virtio-accel-proto = { path = "crates/virtio-accel-proto", version = "0.2.1" }
 virtio-accel-split-queue = { path = "crates/virtio-accel-split-queue", version = "0.2.1" }
