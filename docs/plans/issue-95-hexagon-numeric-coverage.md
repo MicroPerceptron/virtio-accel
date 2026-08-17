@@ -1,8 +1,10 @@
 # Issue #95 plan: broaden Qualcomm Hexagon numeric and operator coverage
 
-Status: in progress; exact INT8/INT32 tier implemented and hardware-validated
+Status: Issue #95 implementation complete; operator parity and performance follow-up tracked in #96
 
 Issue: [#95 — Qualcomm - Broaden numeric types coverage](https://github.com/MicroPerceptron/virtio-accel/issues/95)
+
+Follow-up: [#96 — Qualcomm Hexagon: reach shared TOSA operator parity](https://github.com/MicroPerceptron/virtio-accel/issues/96)
 
 Planning branch: `codex/issue-95-hexagon-numeric-coverage`
 
@@ -32,8 +34,8 @@ output, and integer-parameter slices. Broadcast FP16 `ADD`, `SUB`, `MUL`, `MAXIM
 now pass checked-in portable and HTP oracles. `POW` remains rejected because TOSA requires a runtime
 domain condition that the current static admission path cannot yet discharge.
 
-The issue remains open for the shared operator-surface expansion and controlled performance sweep.
-Those cells will not be advertised until each has a TOSA oracle and HTP evidence.
+The shared operator-surface expansion and controlled performance sweep have moved to follow-up
+issue #96. Those cells will not be advertised until each has a TOSA oracle and HTP evidence.
 
 ## Outcome
 
