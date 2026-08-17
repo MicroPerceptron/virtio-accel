@@ -68,6 +68,14 @@ pub const fn supports_tosa_operator(op: Op) -> bool {
     )
 }
 
+fn supports_operator_for_target(op: Op, integer: bool) -> bool {
+    if integer {
+        matches!(op, Op::CONST | Op::IDENTITY | Op::MATMUL)
+    } else {
+        op == Op::CONST || supports_tosa_operator(op)
+    }
+}
+
 /// Whether the first hardware tier may expose `dtype` at a model boundary.
 ///
 /// FP32 remains deliberately rejected because current HTP floating-point execution may use FP16
@@ -256,6 +264,9 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, L
     for operator_id in analysis.execution_order(block) {
         let operator = analysis.operator(*operator_id);
         let op = operator.op();
+        if !supports_operator_for_target(op, integer) {
+            return Err(LoweringError::UnsupportedOperator(op));
+        }
         let op_inputs = analysis.operator_inputs(*operator_id);
         let op_outputs = analysis.operator_outputs(*operator_id);
         match op {
@@ -721,6 +732,23 @@ mod tests {
                     .quantization
                     .is_some_and(|quantization| quantization.offset != 0)
         }));
+    }
+
+    #[test]
+    fn integer_target_operator_surface_is_exact() {
+        for op in [Op::CONST, Op::IDENTITY, Op::MATMUL] {
+            assert!(supports_operator_for_target(op, true), "{op:?}");
+        }
+        for op in [
+            Op::MAX_POOL2D,
+            Op::ADD,
+            Op::SUB,
+            Op::MUL,
+            Op::MAXIMUM,
+            Op::MINIMUM,
+        ] {
+            assert!(!supports_operator_for_target(op, true), "{op:?}");
+        }
     }
 
     #[test]
