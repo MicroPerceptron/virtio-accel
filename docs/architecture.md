@@ -349,10 +349,16 @@ enumerated device and reports the direct-binding and explicit-transfer counters 
 conformance diagnostics hook. This keeps the Core ML and Intel paths on one bounded TOSA contract
 without requiring either provider to adopt the other's native graph representation.
 
-The Qualcomm adapter uses the same seam. Its safe planner admits static FP16 identity, broadcast
-ADD/SUB/MUL/MAXIMUM/MINIMUM, MATMUL, and NHWC MAX_POOL2D graphs plus a separate exact integer target for INT8 identity and zero-point-aware
-INT8 MATMUL with INT32 output. Typed tensor plans carry scalar size and QNN scale-offset metadata
-through an owned ABI, so submission range checks use exact one-, two-, or four-byte element storage.
+The Qualcomm adapter uses the same seam. Its safe planner admits 41 of the 42 floating-point
+operators shared by Core ML and OpenVINO, including owned constants/data movement, FP16 unary and
+binary computation, BOOL comparison/selection/logical tensors, and INT32 indexing results. `ERF` is
+the explicit exception because QAIRT 2.49 exposes no public QNN ERF operation. A separate exact
+integer target supports INT8 identity and zero-point-aware INT8 MATMUL with INT32 output. Typed
+tensor plans carry scalar size, owned constant bytes, and QNN scale-offset metadata through an owned
+ABI, so submission range checks use exact one-, two-, or four-byte element storage. QNN static
+parameters, descriptor arity, axis/permutation vectors, constant byte lengths, and generated-tensor
+counts are checked before provider calls. Unsupported native pool, reverse, and product-reduction
+forms decompose into HTP Gather and elementwise nodes rather than falling back to a host runtime.
 FP32 remains rejected because a pinned v73 probe returned FP16-rounded results, and ambiguous generic
 FLOAT8 cannot be advertised as either TOSA format. With a complete QAIRT/QNN C development package
 on Windows ARM64, the audited boundary creates and finalizes QNN HTP graphs, binds exact caller

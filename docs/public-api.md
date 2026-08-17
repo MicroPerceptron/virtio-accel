@@ -65,9 +65,11 @@ execution; non-macOS hosts compile the placeholder, and macOS hosts without an A
 preferred available Intel inference device; hosts without an OpenVINO runtime compile the
 placeholder, and hosts without an inference device skip execution.
 `tosa_hexagon` executes the shared FP16 identity graph through QNN HTP when the complete QAIRT SDK
-is selected on Windows ARM64. SDK-free hosts retain the compile-only `RuntimeUnavailable` surface
-without falling back to CPU or GPU. `mock_classifier` uses the same native lifecycle to compute two
-sets of class logits from three FP16 features and a direct-bound 3x2 weight matrix.
+is selected on Windows ARM64. The backend advertises 41 of the 42 Core ML/OpenVINO TOSA operators;
+the exact restrictions are in the [Hexagon operator matrix](hexagon-operator-matrix.md). SDK-free
+hosts retain the compile-only `RuntimeUnavailable` surface without falling back to CPU or GPU.
+`mock_classifier` uses the same native lifecycle to compute two sets of class logits from three FP16
+features and a direct-bound 3x2 weight matrix.
 
 ## Baseline, reserved, and post-v1 work
 
