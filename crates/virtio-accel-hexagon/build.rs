@@ -44,7 +44,12 @@ fn main() {
         return;
     };
 
-    let required_headers = ["QnnInterface.h", "QnnOpDef.h", "HTP/QnnHtpCommon.h"];
+    let required_headers = [
+        "QnnInterface.h",
+        "QnnOpDef.h",
+        "HTP/QnnHtpCommon.h",
+        "HTP/QnnHtpGraph.h",
+    ];
     let include_dir = [root.join("include/QNN"), root.join("include")]
         .into_iter()
         .find(|directory| {

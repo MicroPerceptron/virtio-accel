@@ -14,16 +14,27 @@ The initial hardware baseline is:
 - QAIRT `2.49.0.260730`;
 - QNN core API `2.38.0`, HTP backend API `5.49.0`.
 
-The backend accepts static, positive-shape FP16 TOSA 1.0 graphs containing identity, non-square
-batched MATMUL, and zero-padded NHWC MAX_POOL2D. MAX_POOL2D is expressed as QNN Gather plus
+The backend accepts two explicit TOSA 1.0 targets:
+
+- the floating-point target supports FP16 identity, broadcast ADD/SUB/MUL/MAXIMUM/MINIMUM,
+  non-square batched MATMUL, and zero-padded NHWC MAX_POOL2D; and
+- the integer target supports bit-exact INT8 identity and nonzero-zero-point INT8 MATMUL with an
+  INT32 accumulator/output.
+
+INT8 tensors remain direct one-byte client storage. The QNN scale-offset encoding represents each
+TOSA zero point without dequantizing through floating point. MAX_POOL2D is expressed as QNN Gather plus
 ElementWiseMaximum nodes because this QAIRT Windows HTP build rejects its documented native
 PoolMax2d tensor parameters at graph finalization. All resulting nodes still execute through the
 HTP backend; there is no CPU or GPU fallback.
 
-FP32, quantized types, dynamic shapes, additional operators, profiles, extensions, layouts, and
-attributes are rejected during program admission. The initial execution lane permits one native
-submission at a time. Finite submission timeouts and cancellation are not advertised because the
-validated QNN HTP interface does not provide a working bounded asynchronous execution primitive.
+FP32 is deliberately rejected. QAIRT accepts FLOAT_32 tensors and an FP32 graph-precision option,
+but a v73 precision probe using inputs that differ only below FP16 precision returned the FP16-rounded
+MATMUL result. Generic QNN FLOAT_8 also does not expose an unambiguous client-visible E4M3/E5M2
+selection on this stack, so both TOSA FP8 targets remain rejected. Dynamic shapes, additional
+operators, profiles, extensions, layouts, and attributes are also rejected during program
+admission. The execution lane permits one native submission at a time. Finite submission deadlines
+expire before admission and cancellation is not advertised because this QNN HTP interface does not
+provide a working bounded asynchronous execution primitive.
 
 ## Install and configure QAIRT
 
@@ -68,11 +79,12 @@ cargo run -p virtio-accel-hexagon --example mock_classifier
 ```
 
 The integration tests initialize the pinned HTP provider, validate device identity, execute the
-shared FP16 identity, batched non-square MATMUL, mock linear classifier, and NHWC MAX_POOL2D cases,
-compare every result with its numerical oracle, reject duplicate slots, wrong access, short
-bindings, and finite timeouts, check stable terminal polling/output visibility, and verify that a
-live event keeps its graph busy. The examples print the actual provider/build/API versions and end
-with results such as:
+shared FP16 identity, batched non-square MATMUL, mock linear classifier, NHWC MAX_POOL2D, INT8
+identity, broadcast binary arithmetic, and nonzero-zero-point INT8 MATMUL cases, and compare every result with its numerical
+oracle. They also run the reusable backend semantic suite, including segmented transfers and
+artifacts, allocation metadata, context isolation, binding validation, terminal stability,
+pre-admission deadlines, and direct-binding diagnostics with zero hidden staging. The examples
+print the actual provider/build/API versions and end with results such as:
 
 ```text
 TOSA FP16 identity -> QNN HTP v73: passed

@@ -25,6 +25,14 @@ pub const HEXAGON_TOSA_TARGET: Target = Target::new(
     ExtensionSet::NONE,
 );
 
+/// TOSA integer-profile target lowered with exact INT8 storage and INT32 accumulation.
+pub const HEXAGON_TOSA_INTEGER_TARGET: Target = Target::new(
+    Version::TOSA_1_0,
+    ProfileSet::INTEGER,
+    Level::Level8K,
+    ExtensionSet::NONE,
+);
+
 /// Failure while validating and planning a graph for QNN HTP.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoweringError {
@@ -47,7 +55,25 @@ impl std::error::Error for LoweringError {}
 
 /// Whether the first hardware tier has a QNN lowering for `op`.
 pub const fn supports_tosa_operator(op: Op) -> bool {
-    matches!(op, Op::IDENTITY | Op::MATMUL | Op::MAX_POOL2D)
+    matches!(
+        op,
+        Op::IDENTITY
+            | Op::MATMUL
+            | Op::MAX_POOL2D
+            | Op::ADD
+            | Op::SUB
+            | Op::MUL
+            | Op::MAXIMUM
+            | Op::MINIMUM
+    )
+}
+
+fn supports_operator_for_target(op: Op, integer: bool) -> bool {
+    if integer {
+        matches!(op, Op::CONST | Op::IDENTITY | Op::MATMUL)
+    } else {
+        op == Op::CONST || supports_tosa_operator(op)
+    }
 }
 
 /// Whether the first hardware tier may expose `dtype` at a model boundary.
@@ -55,7 +81,41 @@ pub const fn supports_tosa_operator(op: Op) -> bool {
 /// FP32 remains deliberately rejected because current HTP floating-point execution may use FP16
 /// math. Integer and packed low-precision tiers require separate targets and evidence.
 pub const fn supports_tosa_dtype(dtype: DType) -> bool {
-    matches!(dtype, DType::FP16)
+    matches!(dtype, DType::FP16 | DType::INT8 | DType::INT32)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Element {
+    F16,
+    F32,
+    I8,
+    I32,
+}
+
+impl Element {
+    pub(crate) const fn scalar_bytes(self) -> u64 {
+        match self {
+            Self::F16 => 2,
+            Self::F32 | Self::I32 => 4,
+            Self::I8 => 1,
+        }
+    }
+
+    fn for_dtype(dtype: DType) -> Result<Self, LoweringError> {
+        match dtype {
+            DType::FP16 => Ok(Self::F16),
+            DType::FP32 => Ok(Self::F32),
+            DType::INT8 => Ok(Self::I8),
+            DType::INT32 => Ok(Self::I32),
+            _ => Err(LoweringError::UnsupportedType(dtype)),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Quantization {
+    pub scale: f32,
+    pub offset: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,38 +136,43 @@ pub(crate) struct LoweredFeature {
 }
 
 /// One owned tensor descriptor used while constructing the QNN graph.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct LoweredTensor {
     pub value: u32,
+    pub element: Element,
+    pub quantization: Option<Quantization>,
     pub dims: Vec<u32>,
 }
 
-/// One operation from the accepted initial QNN lowering subset.
+/// QNN operation selected by portable TOSA lowering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NodeKind {
+    Identity,
+    MatMul,
+    MaxPool2d,
+    Add,
+    Subtract,
+    Multiply,
+    Maximum,
+    Minimum,
+}
+
+/// One owned operation descriptor. Parameter meaning is fixed by `kind` and validated natively.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum LoweredNode {
-    Identity {
-        input: u32,
-        output: u32,
-    },
-    MatMul {
-        left: u32,
-        right: u32,
-        output: u32,
-    },
-    MaxPool2d {
-        input: u32,
-        output: u32,
-        kernel: [u32; 2],
-        stride: [u32; 2],
-    },
+pub(crate) struct LoweredNode {
+    pub kind: NodeKind,
+    pub inputs: Vec<u32>,
+    pub outputs: Vec<u32>,
+    pub parameters: Vec<i32>,
 }
 
 /// Fully owned graph plan produced before entering the native QNN boundary.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct LoweredModel {
     pub tensors: Vec<LoweredTensor>,
     pub nodes: Vec<LoweredNode>,
     pub features: Vec<LoweredFeature>,
+    pub precision: Option<Element>,
 }
 
 impl LoweredModel {
@@ -120,9 +185,13 @@ impl LoweredModel {
 }
 
 pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, LoweringError> {
-    if target != HEXAGON_TOSA_TARGET {
+    let integer = if target == HEXAGON_TOSA_TARGET {
+        false
+    } else if target == HEXAGON_TOSA_INTEGER_TARGET {
+        true
+    } else {
         return Err(LoweringError::UnsupportedGraph);
-    }
+    };
     let model = parse(bytes).map_err(LoweringError::Parse)?;
     let analysis = model.analyze_for(target).map_err(LoweringError::Analysis)?;
     if analysis.regions().len() != 1
@@ -132,7 +201,7 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, L
         return Err(LoweringError::UnsupportedGraph);
     }
 
-    validate_fp16_only(&analysis)?;
+    validate_types(&analysis, integer)?;
     let block = analysis.blocks()[0].id();
     let inputs = analysis.block_inputs(block);
     let outputs = analysis.block_outputs(block);
@@ -152,8 +221,14 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, L
         let AnalyzedValueKind::Tensor(tensor) = value.kind() else {
             return Err(LoweringError::UnsupportedGraph);
         };
+        let element = Element::for_dtype(tensor.dtype())?;
         tensors.push(LoweredTensor {
             value: value.id().get(),
+            element,
+            quantization: matches!(element, Element::I8 | Element::I32).then_some(Quantization {
+                scale: 1.0,
+                offset: 0,
+            }),
             dims: static_dims(tensor, true)?,
         });
     }
@@ -182,49 +257,58 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, L
     }
 
     let mut nodes = Vec::new();
+    let mut quantization_offsets = Vec::new();
     nodes
         .try_reserve_exact(analysis.execution_order(block).len())
         .map_err(|_| LoweringError::ResourceLimit)?;
     for operator_id in analysis.execution_order(block) {
         let operator = analysis.operator(*operator_id);
         let op = operator.op();
+        if !supports_operator_for_target(op, integer) {
+            return Err(LoweringError::UnsupportedOperator(op));
+        }
         let op_inputs = analysis.operator_inputs(*operator_id);
         let op_outputs = analysis.operator_outputs(*operator_id);
         match op {
             Op::CONST => {
-                if op_outputs.len() != 1
-                    || !constant_is_matmul_zero_point(&analysis, op_outputs[0])
-                    || !serialized_fp16_is_zero(
-                        analysis
-                            .serialized_constant(op_outputs[0])
-                            .ok_or(LoweringError::InvalidConstant)?,
-                    )
-                {
+                if op_outputs.len() != 1 || !constant_is_parameter_only(&analysis, op_outputs[0]) {
                     return Err(LoweringError::UnsupportedGraph);
                 }
             }
             Op::IDENTITY => {
                 require_arity(op_inputs, 1, op_outputs, 1)?;
-                nodes.push(LoweredNode::Identity {
-                    input: op_inputs[0].get(),
-                    output: op_outputs[0].get(),
+                nodes.push(LoweredNode {
+                    kind: NodeKind::Identity,
+                    inputs: vec![op_inputs[0].get()],
+                    outputs: vec![op_outputs[0].get()],
+                    parameters: Vec::new(),
                 });
             }
             Op::MATMUL => {
                 require_arity(op_inputs, 4, op_outputs, 1)?;
-                for zero_point in &op_inputs[2..4] {
-                    if !serialized_fp16_is_zero(
-                        analysis
-                            .serialized_constant(*zero_point)
-                            .ok_or(LoweringError::InvalidConstant)?,
-                    ) {
-                        return Err(LoweringError::UnsupportedGraph);
-                    }
+                let left_zero_point = scalar_zero_point(&analysis, op_inputs[2])?;
+                let right_zero_point = scalar_zero_point(&analysis, op_inputs[3])?;
+                if integer {
+                    set_quantization_offset(
+                        &mut tensors,
+                        &mut quantization_offsets,
+                        op_inputs[0],
+                        left_zero_point,
+                    )?;
+                    set_quantization_offset(
+                        &mut tensors,
+                        &mut quantization_offsets,
+                        op_inputs[1],
+                        right_zero_point,
+                    )?;
+                } else if left_zero_point != 0 || right_zero_point != 0 {
+                    return Err(LoweringError::UnsupportedGraph);
                 }
-                nodes.push(LoweredNode::MatMul {
-                    left: op_inputs[0].get(),
-                    right: op_inputs[1].get(),
-                    output: op_outputs[0].get(),
+                nodes.push(LoweredNode {
+                    kind: NodeKind::MatMul,
+                    inputs: vec![op_inputs[0].get(), op_inputs[1].get()],
+                    outputs: vec![op_outputs[0].get()],
+                    parameters: Vec::new(),
                 });
             }
             Op::MAX_POOL2D => {
@@ -252,11 +336,55 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, L
                 if input_dims.len() != 4 || output_dims.len() != 4 {
                     return Err(LoweringError::UnsupportedGraph);
                 }
-                nodes.push(LoweredNode::MaxPool2d {
-                    input: op_inputs[0].get(),
-                    output: op_outputs[0].get(),
-                    kernel,
-                    stride,
+                nodes.push(LoweredNode {
+                    kind: NodeKind::MaxPool2d,
+                    inputs: vec![op_inputs[0].get()],
+                    outputs: vec![op_outputs[0].get()],
+                    parameters: vec![
+                        kernel[0] as i32,
+                        kernel[1] as i32,
+                        stride[0] as i32,
+                        stride[1] as i32,
+                    ],
+                });
+            }
+            Op::ADD | Op::SUB | Op::MAXIMUM | Op::MINIMUM => {
+                require_arity(op_inputs, 2, op_outputs, 1)?;
+                match operator.source().attributes() {
+                    OpAttributes::Maximum { nan_mode } | OpAttributes::Minimum { nan_mode }
+                        if nan_mode != NanPropagationMode::PROPAGATE =>
+                    {
+                        return Err(LoweringError::UnsupportedGraph);
+                    }
+                    _ => {}
+                }
+                let kind = match op {
+                    Op::ADD => NodeKind::Add,
+                    Op::SUB => NodeKind::Subtract,
+                    Op::MAXIMUM => NodeKind::Maximum,
+                    Op::MINIMUM => NodeKind::Minimum,
+                    _ => unreachable!(),
+                };
+                nodes.push(LoweredNode {
+                    kind,
+                    inputs: op_inputs.iter().map(|value| value.get()).collect(),
+                    outputs: vec![op_outputs[0].get()],
+                    parameters: Vec::new(),
+                });
+            }
+            Op::MUL => {
+                require_arity(op_inputs, 3, op_outputs, 1)?;
+                let shift = analysis
+                    .serialized_constant(op_inputs[2])
+                    .ok_or(LoweringError::InvalidConstant)?;
+                if shift.iter().any(|byte| *byte != 0) {
+                    return Err(LoweringError::UnsupportedGraph);
+                }
+                nodes.push(LoweredNode {
+                    kind: NodeKind::Multiply,
+                    inputs: op_inputs[..2].iter().map(|value| value.get()).collect(),
+                    outputs: vec![op_outputs[0].get()],
+                    parameters: Vec::new(),
                 });
             }
             _ => return Err(LoweringError::UnsupportedOperator(op)),
@@ -270,15 +398,31 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, L
         tensors,
         nodes,
         features,
+        precision: if integer {
+            None
+        } else if analysis.values().iter().any(|value| {
+            matches!(value.kind(), AnalyzedValueKind::Tensor(tensor) if tensor.dtype() == DType::FP32)
+        }) {
+            Some(Element::F32)
+        } else {
+            Some(Element::F16)
+        },
     })
 }
 
-fn validate_fp16_only(analysis: &TosaAnalysis<'_>) -> Result<(), LoweringError> {
+fn validate_types(analysis: &TosaAnalysis<'_>, integer: bool) -> Result<(), LoweringError> {
     for value in analysis.values() {
         let AnalyzedValueKind::Tensor(tensor) = value.kind() else {
             return Err(LoweringError::UnsupportedGraph);
         };
-        if !supports_tosa_dtype(tensor.dtype()) {
+        let supported = if integer {
+            matches!(tensor.dtype(), DType::INT8 | DType::INT32)
+        } else {
+            tensor.dtype() == DType::FP16
+                || (tensor.dtype() == DType::INT8
+                    && constant_is_parameter_only(analysis, value.id()))
+        };
+        if !supported {
             return Err(LoweringError::UnsupportedType(tensor.dtype()));
         }
     }
@@ -293,7 +437,8 @@ fn lower_feature(
     role: FeatureRole,
 ) -> Result<LoweredFeature, LoweringError> {
     let dims = tensor_dims(analysis, value, false)?;
-    let mut byte_len = 2u64;
+    let element = Element::for_dtype(tensor(analysis, value)?.dtype())?;
+    let mut byte_len = element.scalar_bytes();
     for dim in &dims {
         byte_len = byte_len
             .checked_mul(u64::from(*dim))
@@ -359,11 +504,77 @@ fn fixed_positive_pair(values: impl Iterator<Item = i32>) -> Result<[u32; 2], Lo
     ])
 }
 
-fn serialized_fp16_is_zero(bytes: &[u8]) -> bool {
-    bytes.len() == 2 && u16::from_le_bytes(bytes.try_into().expect("length checked")) & 0x7fff == 0
+fn tensor<'a>(
+    analysis: &'a TosaAnalysis<'a>,
+    value: ValueId,
+) -> Result<virtio_accel_tosa::Tensor<'a>, LoweringError> {
+    let AnalyzedValueKind::Tensor(tensor) = analysis.value(value).kind() else {
+        return Err(LoweringError::UnsupportedGraph);
+    };
+    Ok(tensor)
 }
 
-fn constant_is_matmul_zero_point(analysis: &TosaAnalysis<'_>, value: ValueId) -> bool {
+fn scalar_zero_point(analysis: &TosaAnalysis<'_>, value: ValueId) -> Result<i32, LoweringError> {
+    let tensor = tensor(analysis, value)?;
+    if tensor.rank().is_none() || tensor.dimensions().any(|dimension| dimension != 1) {
+        return Err(LoweringError::InvalidConstant);
+    }
+    let bytes = analysis
+        .serialized_constant(value)
+        .ok_or(LoweringError::InvalidConstant)?;
+    match tensor.dtype() {
+        DType::FP16 if bytes.len() == 2 => {
+            let bits = u16::from_le_bytes(bytes.try_into().expect("length checked"));
+            (bits & 0x7fff == 0)
+                .then_some(0)
+                .ok_or(LoweringError::UnsupportedGraph)
+        }
+        DType::FP32 if bytes.len() == 4 => {
+            let value = f32::from_le_bytes(bytes.try_into().expect("length checked"));
+            (value == 0.0)
+                .then_some(0)
+                .ok_or(LoweringError::UnsupportedGraph)
+        }
+        DType::INT8 if bytes.len() == 1 => Ok(i32::from(bytes[0] as i8)),
+        _ => Err(LoweringError::InvalidConstant),
+    }
+}
+
+fn set_quantization_offset(
+    tensors: &mut [LoweredTensor],
+    assigned: &mut Vec<(u32, i32)>,
+    value: ValueId,
+    zero_point: i32,
+) -> Result<(), LoweringError> {
+    let tensor = tensors
+        .iter_mut()
+        .find(|tensor| tensor.value == value.get())
+        .ok_or(LoweringError::UnsupportedGraph)?;
+    let quantization = tensor
+        .quantization
+        .as_mut()
+        .ok_or(LoweringError::UnsupportedGraph)?;
+    let offset = zero_point
+        .checked_neg()
+        .ok_or(LoweringError::UnsupportedGraph)?;
+    if let Some((_, prior)) = assigned
+        .iter()
+        .find(|(assigned_value, _)| *assigned_value == value.get())
+    {
+        if *prior != offset {
+            return Err(LoweringError::UnsupportedGraph);
+        }
+    } else {
+        assigned
+            .try_reserve(1)
+            .map_err(|_| LoweringError::ResourceLimit)?;
+        assigned.push((value.get(), offset));
+    }
+    quantization.offset = offset;
+    Ok(())
+}
+
+fn constant_is_parameter_only(analysis: &TosaAnalysis<'_>, value: ValueId) -> bool {
     let mut consumed = false;
     for operator in analysis.operators() {
         for (index, input) in analysis.operator_inputs(operator.id()).iter().enumerate() {
@@ -371,7 +582,7 @@ fn constant_is_matmul_zero_point(analysis: &TosaAnalysis<'_>, value: ValueId) ->
                 continue;
             }
             consumed = true;
-            if operator.op() != Op::MATMUL || !matches!(index, 2 | 3) {
+            if !matches!((operator.op(), index), (Op::MATMUL, 2 | 3) | (Op::MUL, 2)) {
                 return false;
             }
         }
@@ -383,8 +594,9 @@ fn constant_is_matmul_zero_point(analysis: &TosaAnalysis<'_>, value: ValueId) ->
 mod tests {
     use super::*;
     use virtio_accel_conformance::numerics::{
-        IDENTITY_EDGES_FP16, IDENTITY_EDGES_FP32, IDENTITY_FP8E4M3, IDENTITY_FP8E5M2,
-        IDENTITY_INT4, IDENTITY_INT8, MATMUL_FP16, MAX_POOL2D_FP16,
+        ADD_FP16, IDENTITY_EDGES_FP16, IDENTITY_EDGES_FP32, IDENTITY_FP8E4M3, IDENTITY_FP8E5M2,
+        IDENTITY_INT4, IDENTITY_INT8, MATMUL_FP16, MATMUL_FP32, MATMUL_INT8, MAX_POOL2D_FP16,
+        MAX_POOL2D_FP32, MAXIMUM_FP16, MINIMUM_FP16, MUL_FP16, SUB_FP16,
     };
 
     #[test]
@@ -406,10 +618,7 @@ mod tests {
     #[test]
     fn matmul_discards_only_validated_zero_point_parameters() {
         let lowered = lower_tosa(MATMUL_FP16.artifact, HEXAGON_TOSA_TARGET).unwrap();
-        assert!(matches!(
-            lowered.nodes.as_slice(),
-            [LoweredNode::MatMul { .. }]
-        ));
+        assert_eq!(lowered.nodes[0].kind, NodeKind::MatMul);
         assert_eq!(lowered.features[0].slot, 0);
         assert_eq!(lowered.features[1].slot, 1);
         assert_eq!(lowered.features[2].slot, 2);
@@ -422,21 +631,28 @@ mod tests {
             tensors: vec![
                 LoweredTensor {
                     value: 20,
+                    element: Element::F16,
+                    quantization: None,
                     dims: vec![1],
                 },
                 LoweredTensor {
                     value: 10,
+                    element: Element::F16,
+                    quantization: None,
                     dims: vec![1],
                 },
                 LoweredTensor {
                     value: 30,
+                    element: Element::F16,
+                    quantization: None,
                     dims: vec![1],
                 },
             ],
-            nodes: vec![LoweredNode::MatMul {
-                left: 10,
-                right: 20,
-                output: 30,
+            nodes: vec![LoweredNode {
+                kind: NodeKind::MatMul,
+                inputs: vec![10, 20],
+                outputs: vec![30],
+                parameters: Vec::new(),
             }],
             features: vec![
                 LoweredFeature {
@@ -464,6 +680,7 @@ mod tests {
                     byte_len: 2,
                 },
             ],
+            precision: Some(Element::F16),
         };
 
         assert_eq!(lowered.tensors[0].value, 20);
@@ -475,38 +692,68 @@ mod tests {
     #[test]
     fn max_pool_keeps_nhwc_shapes_and_attributes() {
         let lowered = lower_tosa(MAX_POOL2D_FP16.artifact, HEXAGON_TOSA_TARGET).unwrap();
-        assert!(matches!(
-            lowered.nodes.as_slice(),
-            [LoweredNode::MaxPool2d {
-                kernel: [2, 2],
-                stride: [2, 2],
-                ..
-            }]
-        ));
+        assert_eq!(lowered.nodes[0].kind, NodeKind::MaxPool2d);
+        assert_eq!(lowered.nodes[0].parameters, [2, 2, 2, 2]);
         assert_eq!(lowered.features[0].dims.len(), 4);
         assert_eq!(lowered.features[1].dims.len(), 4);
     }
 
     #[test]
-    fn rejects_fp32_until_htp_precision_is_proven() {
-        assert_eq!(
-            lower_tosa(IDENTITY_EDGES_FP32.artifact, HEXAGON_TOSA_TARGET).unwrap_err(),
-            LoweringError::UnsupportedType(DType::FP32)
+    fn rejects_fp32_after_htp_precision_probe_detected_fp16_math() {
+        for case in [IDENTITY_EDGES_FP32, MATMUL_FP32, MAX_POOL2D_FP32] {
+            assert_eq!(
+                lower_tosa(case.artifact, HEXAGON_TOSA_TARGET).unwrap_err(),
+                LoweringError::UnsupportedType(DType::FP32),
+                "{}",
+                case.name,
+            );
+        }
+    }
+
+    #[test]
+    fn plans_exact_integer_identity_and_matmul_tier() {
+        let identity = lower_tosa(IDENTITY_INT8.artifact, HEXAGON_TOSA_INTEGER_TARGET).unwrap();
+        assert_eq!(identity.precision, None);
+        assert!(
+            identity
+                .features
+                .iter()
+                .all(|feature| feature.byte_len == 8)
         );
+
+        let matmul = lower_tosa(MATMUL_INT8.artifact, HEXAGON_TOSA_INTEGER_TARGET).unwrap();
+        assert_eq!(matmul.nodes[0].kind, NodeKind::MatMul);
+        assert_eq!(matmul.features[0].byte_len, 6);
+        assert_eq!(matmul.features[1].byte_len, 6);
+        assert_eq!(matmul.features[2].byte_len, 16);
+        assert!(matmul.tensors.iter().any(|tensor| {
+            tensor.element == Element::I8
+                && tensor
+                    .quantization
+                    .is_some_and(|quantization| quantization.offset != 0)
+        }));
+    }
+
+    #[test]
+    fn integer_target_operator_surface_is_exact() {
+        for op in [Op::CONST, Op::IDENTITY, Op::MATMUL] {
+            assert!(supports_operator_for_target(op, true), "{op:?}");
+        }
+        for op in [
+            Op::MAX_POOL2D,
+            Op::ADD,
+            Op::SUB,
+            Op::MUL,
+            Op::MAXIMUM,
+            Op::MINIMUM,
+        ] {
+            assert!(!supports_operator_for_target(op, true), "{op:?}");
+        }
     }
 
     #[test]
     fn rejects_unadvertised_low_precision_profiles_and_extensions() {
         for (case, target) in [
-            (
-                IDENTITY_INT8,
-                Target::new(
-                    Version::TOSA_1_0,
-                    ProfileSet::INTEGER,
-                    Level::Level8K,
-                    ExtensionSet::NONE,
-                ),
-            ),
             (
                 IDENTITY_INT4,
                 Target::new(
@@ -545,19 +792,48 @@ mod tests {
     }
 
     #[test]
+    fn rejects_crossed_floating_and_integer_targets() {
+        assert!(lower_tosa(IDENTITY_INT8.artifact, HEXAGON_TOSA_TARGET).is_err());
+        assert!(lower_tosa(IDENTITY_EDGES_FP16.artifact, HEXAGON_TOSA_INTEGER_TARGET).is_err());
+    }
+
+    #[test]
+    fn plans_broadcast_binary_fp16_family() {
+        for (case, kind) in [
+            (ADD_FP16, NodeKind::Add),
+            (SUB_FP16, NodeKind::Subtract),
+            (MUL_FP16, NodeKind::Multiply),
+            (MAXIMUM_FP16, NodeKind::Maximum),
+            (MINIMUM_FP16, NodeKind::Minimum),
+        ] {
+            let lowered = lower_tosa(case.artifact, HEXAGON_TOSA_TARGET)
+                .unwrap_or_else(|error| panic!("{}: {error:?}", case.name));
+            assert_eq!(lowered.nodes.len(), 1, "{}", case.name);
+            assert_eq!(lowered.nodes[0].kind, kind, "{}", case.name);
+            assert_eq!(lowered.nodes[0].inputs.len(), 2, "{}", case.name);
+            assert_eq!(lowered.nodes[0].outputs.len(), 1, "{}", case.name);
+        }
+    }
+
+    #[test]
     fn advertised_operator_and_dtype_surface_is_exact() {
-        for op in [Op::IDENTITY, Op::MATMUL, Op::MAX_POOL2D] {
+        for op in [
+            Op::IDENTITY,
+            Op::MATMUL,
+            Op::MAX_POOL2D,
+            Op::ADD,
+            Op::SUB,
+            Op::MUL,
+            Op::MAXIMUM,
+            Op::MINIMUM,
+        ] {
             assert!(supports_tosa_operator(op));
         }
-        assert!(!supports_tosa_operator(Op::ADD));
-        assert!(supports_tosa_dtype(DType::FP16));
-        for dtype in [
-            DType::FP32,
-            DType::INT8,
-            DType::INT4,
-            DType::FP8E4M3,
-            DType::FP8E5M2,
-        ] {
+        assert!(!supports_tosa_operator(Op::POW));
+        for dtype in [DType::FP16, DType::INT8, DType::INT32] {
+            assert!(supports_tosa_dtype(dtype), "{dtype:?}");
+        }
+        for dtype in [DType::FP32, DType::INT4, DType::FP8E4M3, DType::FP8E5M2] {
             assert!(!supports_tosa_dtype(dtype), "{dtype:?}");
         }
     }

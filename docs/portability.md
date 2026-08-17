@@ -57,15 +57,16 @@ exercises the real backend against the CPU plugin. NPU and GPU devices additiona
 Intel Level Zero NPU driver or the Intel OpenCL/Level Zero GPU runtime on the host; hosts without
 an inference device skip execution after enumeration.
 
-The Hexagon crate exercises its SDK-free placeholder and strict FP16 TOSA graph planner in portable
+The Hexagon crate exercises its SDK-free placeholder and strict FP16/INT8 TOSA graph planner in portable
 CI. Its build script distinguishes a complete public QAIRT/QNN development
 installation from driver-only and AppBuilder/Genie bundles by requiring `QnnInterface.h` and the
 Windows ARM64 `QnnHtp` import library. `VIRTIO_ACCEL_HEXAGON=0` forces the placeholder;
 `VIRTIO_ACCEL_HEXAGON=1` makes missing requirements a build failure;
 `VIRTIO_ACCEL_QNN_SDK_ROOT`/`QNN_SDK_ROOT` and `VIRTIO_ACCEL_QNN_LIB_DIR` select the SDK. On the
-pinned Windows ARM64 hardware tier, backend-local tests execute identity, MATMUL, and MAX_POOL2D
-through QNN HTP. A public hardware CI lane remains unavailable, so the README publishes the exact
-manual replacement commands.
+pinned Windows ARM64 hardware tier, backend-local tests execute FP16 identity, MATMUL, MAX_POOL2D,
+INT8 identity, and zero-point-aware INT8 MATMUL through QNN HTP, followed by the reusable semantic
+suite. A public hardware CI lane remains unavailable, so the README publishes the exact manual
+replacement commands.
 
 Concrete VMM, kernel, OS, and vendor adapters are outside the portable-v1 milestone and must not
 become default dependencies of a portable crate.

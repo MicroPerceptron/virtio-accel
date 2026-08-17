@@ -4,6 +4,7 @@
 #include "qnn_bridge.h"
 
 #include <HTP/QnnHtpCommon.h>
+#include <HTP/QnnHtpGraph.h>
 #include <QnnInterface.h>
 #include <QnnOpDef.h>
 
@@ -138,6 +139,23 @@ Qnn_TensorType_t tensor_type(uint32_t role) {
   }
 }
 
+Qnn_DataType_t tensor_data_type(const VaQnnTensorDesc &description) {
+  switch (description.element) {
+  case VA_QNN_ELEMENT_F16:
+    return QNN_DATATYPE_FLOAT_16;
+  case VA_QNN_ELEMENT_F32:
+    return QNN_DATATYPE_FLOAT_32;
+  case VA_QNN_ELEMENT_I8:
+    return description.quantized != 0 ? QNN_DATATYPE_SFIXED_POINT_8
+                                      : QNN_DATATYPE_INT_8;
+  case VA_QNN_ELEMENT_I32:
+    return description.quantized != 0 ? QNN_DATATYPE_SFIXED_POINT_32
+                                      : QNN_DATATYPE_INT_32;
+  default:
+    return QNN_DATATYPE_UNDEFINED;
+  }
+}
+
 uint64_t append_scalar_bool(NodeStorage &node, const char *name,
                             uint8_t value) {
   Qnn_Param_t parameter = QNN_PARAM_INIT;
@@ -244,23 +262,29 @@ uint64_t add_max_pool(VaQnnGraph &graph, const VaQnnNodeDesc &description,
   // parameters during graph finalization in QAIRT 2.49. Lowering the same
   // zero-padding semantics to Gather and ElementWiseMaximum keeps every
   // operation on HTP and avoids a host fallback.
-  if (input.dimensions.size() != 4 || output.dimensions.size() != 4 ||
-      description.kernel[0] == 0 || description.kernel[1] == 0 ||
-      description.stride[0] == 0 || description.stride[1] == 0) {
+  if (description.parameter_count != 4 || description.parameters == nullptr ||
+      description.parameters[0] <= 0 || description.parameters[1] <= 0 ||
+      description.parameters[2] <= 0 || description.parameters[3] <= 0 ||
+      input.dimensions.size() != 4 || output.dimensions.size() != 4) {
     set_message(message, message_size, "invalid max-pool shape or attributes");
     return VA_QNN_ERROR_INVALID_ARGUMENT;
   }
+  const uint32_t kernel[] = {
+      static_cast<uint32_t>(description.parameters[0]),
+      static_cast<uint32_t>(description.parameters[1])};
+  const uint32_t stride[] = {
+      static_cast<uint32_t>(description.parameters[2]),
+      static_cast<uint32_t>(description.parameters[3])};
   const uint32_t input_height = input.dimensions[1];
   const uint32_t input_width = input.dimensions[2];
   const uint32_t output_height = output.dimensions[1];
   const uint32_t output_width = output.dimensions[2];
   if (input.dimensions[0] != output.dimensions[0] ||
       input.dimensions[3] != output.dimensions[3] ||
-      description.kernel[0] > input_height ||
-      description.kernel[1] > input_width ||
-      (input_height - description.kernel[0]) / description.stride[0] + 1 !=
+      kernel[0] > input_height || kernel[1] > input_width ||
+      (input_height - kernel[0]) / stride[0] + 1 !=
           output_height ||
-      (input_width - description.kernel[1]) / description.stride[1] + 1 !=
+      (input_width - kernel[1]) / stride[1] + 1 !=
           output_width) {
     set_message(message, message_size,
                 "max-pool output shape does not match its attributes");
@@ -272,19 +296,17 @@ uint64_t add_max_pool(VaQnnGraph &graph, const VaQnnNodeDesc &description,
   std::vector<TensorStorage *> column_indices;
   std::vector<TensorStorage *> row_views;
   std::vector<TensorStorage *> windows;
-  row_indices.reserve(description.kernel[0]);
-  column_indices.reserve(description.kernel[1]);
-  row_views.reserve(description.kernel[0]);
-  windows.reserve(static_cast<size_t>(description.kernel[0]) *
-                  description.kernel[1]);
+  row_indices.reserve(kernel[0]);
+  column_indices.reserve(kernel[1]);
+  row_views.reserve(kernel[0]);
+  windows.reserve(static_cast<size_t>(kernel[0]) * kernel[1]);
 
-  for (uint32_t kernel_row = 0; kernel_row < description.kernel[0];
-       ++kernel_row) {
+  for (uint32_t kernel_row = 0; kernel_row < kernel[0]; ++kernel_row) {
     std::vector<uint32_t> values;
     values.reserve(output_height);
     for (uint32_t row = 0; row < output_height; ++row) {
       const uint64_t position =
-          kernel_row + static_cast<uint64_t>(row) * description.stride[0];
+          kernel_row + static_cast<uint64_t>(row) * stride[0];
       if (position >= input_height) {
         set_message(message, message_size,
                     "max-pool row index exceeds the input");
@@ -301,13 +323,13 @@ uint64_t add_max_pool(VaQnnGraph &graph, const VaQnnNodeDesc &description,
       return status;
     row_indices.push_back(tensor);
   }
-  for (uint32_t kernel_column = 0; kernel_column < description.kernel[1];
+  for (uint32_t kernel_column = 0; kernel_column < kernel[1];
        ++kernel_column) {
     std::vector<uint32_t> values;
     values.reserve(output_width);
     for (uint32_t column = 0; column < output_width; ++column) {
       const uint64_t position =
-          kernel_column + static_cast<uint64_t>(column) * description.stride[1];
+          kernel_column + static_cast<uint64_t>(column) * stride[1];
       if (position >= input_width) {
         set_message(message, message_size,
                     "max-pool column index exceeds the input");
@@ -325,14 +347,13 @@ uint64_t add_max_pool(VaQnnGraph &graph, const VaQnnNodeDesc &description,
     column_indices.push_back(tensor);
   }
 
-  for (uint32_t kernel_row = 0; kernel_row < description.kernel[0];
-       ++kernel_row) {
+  for (uint32_t kernel_row = 0; kernel_row < kernel[0]; ++kernel_row) {
     TensorStorage *row_view = nullptr;
     uint64_t status = create_internal_tensor(
         graph, prefix + "row_view_" + std::to_string(kernel_row),
         {input.dimensions[0], output_height, input_width, input.dimensions[3]},
-        QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_16, {}, &row_view, message,
-        message_size);
+        QNN_TENSOR_TYPE_NATIVE, input.tensor.v2.dataType, {}, &row_view,
+        message, message_size);
     if (status != QNN_SUCCESS)
       return status;
     row_views.push_back(row_view);
@@ -343,16 +364,15 @@ uint64_t add_max_pool(VaQnnGraph &graph, const VaQnnNodeDesc &description,
       return status;
   }
 
-  for (uint32_t kernel_row = 0; kernel_row < description.kernel[0];
-       ++kernel_row) {
-    for (uint32_t kernel_column = 0; kernel_column < description.kernel[1];
+  for (uint32_t kernel_row = 0; kernel_row < kernel[0]; ++kernel_row) {
+    for (uint32_t kernel_column = 0; kernel_column < kernel[1];
          ++kernel_column) {
       TensorStorage *window = nullptr;
       const std::string suffix =
           std::to_string(kernel_row) + "_" + std::to_string(kernel_column);
       uint64_t status = create_internal_tensor(
           graph, prefix + "window_" + suffix, output.dimensions,
-          QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_16, {}, &window, message,
+          QNN_TENSOR_TYPE_NATIVE, input.tensor.v2.dataType, {}, &window, message,
           message_size);
       if (status != QNN_SUCCESS)
         return status;
@@ -379,7 +399,7 @@ uint64_t add_max_pool(VaQnnGraph &graph, const VaQnnNodeDesc &description,
     if (window_index + 1 != windows.size()) {
       uint64_t status = create_internal_tensor(
           graph, prefix + "maximum_" + std::to_string(window_index),
-          output.dimensions, QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_16, {},
+          output.dimensions, QNN_TENSOR_TYPE_NATIVE, input.tensor.v2.dataType, {},
           &maximum, message, message_size);
       if (status != QNN_SUCCESS)
         return status;
@@ -402,47 +422,97 @@ uint64_t add_node(VaQnnGraph &graph, const VaQnnNodeDesc &description,
                                          : &graph.tensors[found->second];
   };
 
-  TensorStorage *input0 = find_tensor(description.input0);
-  TensorStorage *output = find_tensor(description.output);
-  if (input0 == nullptr || output == nullptr) {
-    set_message(message, message_size, "node references an unknown tensor");
-    return VA_QNN_ERROR_INVALID_ARGUMENT;
+  auto node = std::make_unique<NodeStorage>();
+  node->name = "virtio_accel_node_" + std::to_string(index);
+  node->inputs.reserve(description.input_count);
+  node->outputs.reserve(description.output_count);
+  for (uint32_t input_index = 0; input_index < description.input_count;
+       ++input_index) {
+    TensorStorage *tensor = find_tensor(description.inputs[input_index]);
+    if (tensor == nullptr) {
+      set_message(message, message_size, "node references an unknown input");
+      return VA_QNN_ERROR_INVALID_ARGUMENT;
+    }
+    node->inputs.push_back(tensor->tensor);
+  }
+  for (uint32_t output_index = 0; output_index < description.output_count;
+       ++output_index) {
+    TensorStorage *tensor = find_tensor(description.outputs[output_index]);
+    if (tensor == nullptr) {
+      set_message(message, message_size, "node references an unknown output");
+      return VA_QNN_ERROR_INVALID_ARGUMENT;
+    }
+    node->outputs.push_back(tensor->tensor);
   }
 
+  auto require_arity = [&](uint32_t inputs, uint32_t outputs,
+                           uint32_t parameters) -> bool {
+    return description.input_count == inputs &&
+           description.output_count == outputs &&
+           description.parameter_count == parameters;
+  };
+
   if (description.kind == VA_QNN_NODE_MAX_POOL_2D) {
-    return add_max_pool(graph, description, index, *input0, *output, message,
+    if (!require_arity(1, 1, 4)) {
+      set_message(message, message_size, "invalid max-pool descriptor arity");
+      return VA_QNN_ERROR_INVALID_ARGUMENT;
+    }
+    TensorStorage *input = find_tensor(description.inputs[0]);
+    TensorStorage *output = find_tensor(description.outputs[0]);
+    return add_max_pool(graph, description, index, *input, *output, message,
                         message_size);
   }
 
-  auto node = std::make_unique<NodeStorage>();
-  node->name = "virtio_accel_node_" + std::to_string(index);
-  node->inputs.push_back(input0->tensor);
-  node->outputs.push_back(output->tensor);
+  if (description.parameter_count != 0) {
+    set_message(message, message_size, "unexpected QNN node parameters");
+    return VA_QNN_ERROR_INVALID_ARGUMENT;
+  }
 
   switch (description.kind) {
   case VA_QNN_NODE_RESHAPE:
+    if (!require_arity(1, 1, 0))
+      break;
     node->type = QNN_OP_RESHAPE;
-    break;
-  case VA_QNN_NODE_MATMUL: {
-    TensorStorage *input1 = find_tensor(description.input1);
-    if (input1 == nullptr) {
-      set_message(message, message_size,
-                  "matmul references an unknown right tensor");
-      return VA_QNN_ERROR_INVALID_ARGUMENT;
-    }
+    return commit_node(graph, std::move(node), message, message_size);
+  case VA_QNN_NODE_MATMUL:
+    if (!require_arity(2, 1, 0))
+      break;
     node->type = QNN_OP_MAT_MUL;
-    node->inputs.push_back(input1->tensor);
     node->params.reserve(2);
     append_scalar_bool(*node, QNN_OP_MAT_MUL_PARAM_TRANSPOSE_IN0, 0);
     append_scalar_bool(*node, QNN_OP_MAT_MUL_PARAM_TRANSPOSE_IN1, 0);
-    break;
-  }
+    return commit_node(graph, std::move(node), message, message_size);
+  case VA_QNN_NODE_ADD:
+    if (!require_arity(2, 1, 0))
+      break;
+    node->type = QNN_OP_ELEMENT_WISE_ADD;
+    return commit_node(graph, std::move(node), message, message_size);
+  case VA_QNN_NODE_SUBTRACT:
+    if (!require_arity(2, 1, 0))
+      break;
+    node->type = QNN_OP_ELEMENT_WISE_SUBTRACT;
+    return commit_node(graph, std::move(node), message, message_size);
+  case VA_QNN_NODE_MAXIMUM:
+    if (!require_arity(2, 1, 0))
+      break;
+    node->type = QNN_OP_ELEMENT_WISE_MAXIMUM;
+    return commit_node(graph, std::move(node), message, message_size);
+  case VA_QNN_NODE_MINIMUM:
+    if (!require_arity(2, 1, 0))
+      break;
+    node->type = QNN_OP_ELEMENT_WISE_MINIMUM;
+    return commit_node(graph, std::move(node), message, message_size);
+  case VA_QNN_NODE_MULTIPLY:
+    if (!require_arity(2, 1, 0))
+      break;
+    node->type = QNN_OP_ELEMENT_WISE_MULTIPLY;
+    return commit_node(graph, std::move(node), message, message_size);
   default:
     set_message(message, message_size, "unknown QNN node kind");
     return VA_QNN_ERROR_INVALID_ARGUMENT;
   }
-
-  return commit_node(graph, std::move(node), message, message_size);
+  set_message(message, message_size, "invalid QNN node descriptor arity");
+  return VA_QNN_ERROR_INVALID_ARGUMENT;
 }
 
 } // namespace
@@ -591,7 +661,8 @@ va_qnn_graph_create(VaQnnRuntime *runtime,
                     const VaQnnTensorDesc *tensor_descriptions,
                     uint32_t tensor_count,
                     const VaQnnNodeDesc *node_descriptions, uint32_t node_count,
-                    VaQnnGraph **output, char *message, size_t message_size) {
+                    uint32_t precision, VaQnnGraph **output, char *message,
+                    size_t message_size) {
   if (runtime == nullptr || tensor_descriptions == nullptr ||
       tensor_count == 0 || node_descriptions == nullptr || node_count == 0 ||
       output == nullptr) {
@@ -607,8 +678,27 @@ va_qnn_graph_create(VaQnnRuntime *runtime,
       set_message(message, message_size, "QNN context creation failed");
       return status;
     }
+    QnnHtpGraph_CustomConfig_t htp_config = QNN_HTP_GRAPH_CUSTOM_CONFIG_INIT;
+    QnnGraph_Config_t graph_config = QNN_GRAPH_CONFIG_INIT;
+    const QnnGraph_Config_t *graph_configs[] = {&graph_config, nullptr};
+    const QnnGraph_Config_t **selected_configs = nullptr;
+    if (precision == VA_QNN_PRECISION_F16 ||
+        precision == VA_QNN_PRECISION_F32) {
+      htp_config.option = QNN_HTP_GRAPH_CONFIG_OPTION_PRECISION;
+      htp_config.precision = precision == VA_QNN_PRECISION_F32
+                                 ? QNN_PRECISION_FLOAT32
+                                 : QNN_PRECISION_FLOAT16;
+      graph_config.option = QNN_GRAPH_CONFIG_OPTION_CUSTOM;
+      graph_config.customConfig = &htp_config;
+      selected_configs = graph_configs;
+    } else if (precision != VA_QNN_PRECISION_DEFAULT) {
+      runtime->api.contextFree(graph->context, nullptr);
+      graph->context = nullptr;
+      set_message(message, message_size, "invalid QNN graph precision");
+      return VA_QNN_ERROR_INVALID_ARGUMENT;
+    }
     status = runtime->api.graphCreate(graph->context, "virtio_accel_graph",
-                                      nullptr, &graph->graph);
+                                      selected_configs, &graph->graph);
     if (status != QNN_SUCCESS) {
       runtime->api.contextFree(graph->context, nullptr);
       graph->context = nullptr;
@@ -650,11 +740,29 @@ va_qnn_graph_create(VaQnnRuntime *runtime,
     size_t retained_tensor_count = tensor_count;
     for (uint32_t index = 0; index < node_count; ++index) {
       const VaQnnNodeDesc &description = node_descriptions[index];
+      if (description.input_count == 0 || description.input_count > 256 ||
+          description.output_count == 0 || description.output_count > 256 ||
+          description.parameter_count > 256 || description.inputs == nullptr ||
+          description.outputs == nullptr ||
+          (description.parameter_count != 0 &&
+           description.parameters == nullptr)) {
+        runtime->api.contextFree(graph->context, nullptr);
+        graph->context = nullptr;
+        set_message(message, message_size, "invalid QNN node descriptor slices");
+        return VA_QNN_ERROR_INVALID_ARGUMENT;
+      }
       if (description.kind != VA_QNN_NODE_MAX_POOL_2D)
         continue;
-      const size_t rows = description.kernel[0];
-      const size_t columns = description.kernel[1];
-      if (rows == 0 || columns == 0 || rows > 256 || columns > 256 ||
+      if (description.parameter_count != 4 ||
+          description.parameters[0] <= 0 || description.parameters[1] <= 0) {
+        runtime->api.contextFree(graph->context, nullptr);
+        graph->context = nullptr;
+        set_message(message, message_size, "invalid max-pool parameters");
+        return VA_QNN_ERROR_INVALID_ARGUMENT;
+      }
+      const size_t rows = static_cast<size_t>(description.parameters[0]);
+      const size_t columns = static_cast<size_t>(description.parameters[1]);
+      if (rows > 256 || columns > 256 ||
           rows > std::numeric_limits<size_t>::max() / columns) {
         runtime->api.contextFree(graph->context, nullptr);
         graph->context = nullptr;
@@ -676,7 +784,11 @@ va_qnn_graph_create(VaQnnRuntime *runtime,
     graph->by_value.reserve(tensor_count);
     for (uint32_t index = 0; index < tensor_count; ++index) {
       const VaQnnTensorDesc &description = tensor_descriptions[index];
+      const Qnn_DataType_t data_type = tensor_data_type(description);
       if ((description.rank != 0 && description.dimensions == nullptr) ||
+          data_type == QNN_DATATYPE_UNDEFINED ||
+          description.quantized > 1 ||
+          (description.quantized != 0 && !(description.scale > 0.0f)) ||
           graph->by_value.find(description.value) != graph->by_value.end()) {
         runtime->api.contextFree(graph->context, nullptr);
         set_message(message, message_size,
@@ -691,7 +803,17 @@ va_qnn_graph_create(VaQnnRuntime *runtime,
       storage.tensor.v2.name = storage.name.c_str();
       storage.tensor.v2.type = tensor_type(description.role);
       storage.tensor.v2.dataFormat = QNN_TENSOR_DATA_FORMAT_FLAT_BUFFER;
-      storage.tensor.v2.dataType = QNN_DATATYPE_FLOAT_16;
+      storage.tensor.v2.dataType = data_type;
+      if (description.quantized != 0) {
+        storage.tensor.v2.quantizeParams.encodingDefinition =
+            QNN_DEFINITION_DEFINED;
+        storage.tensor.v2.quantizeParams.quantizationEncoding =
+            QNN_QUANTIZATION_ENCODING_SCALE_OFFSET;
+        storage.tensor.v2.quantizeParams.scaleOffsetEncoding.scale =
+            description.scale;
+        storage.tensor.v2.quantizeParams.scaleOffsetEncoding.offset =
+            description.offset;
+      }
       storage.tensor.v2.rank = description.rank;
       storage.tensor.v2.dimensions = storage.dimensions.data();
       storage.tensor.v2.memType = QNN_TENSORMEMTYPE_RAW;

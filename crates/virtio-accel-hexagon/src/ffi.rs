@@ -14,9 +14,23 @@ pub(crate) const TENSOR_INPUT: u32 = 1;
 pub(crate) const TENSOR_OUTPUT: u32 = 2;
 pub(crate) const NO_IO_INDEX: u32 = u32::MAX;
 
+pub(crate) const ELEMENT_F16: u32 = 1;
+pub(crate) const ELEMENT_F32: u32 = 2;
+pub(crate) const ELEMENT_I8: u32 = 3;
+pub(crate) const ELEMENT_I32: u32 = 4;
+
+pub(crate) const PRECISION_DEFAULT: u32 = 0;
+pub(crate) const PRECISION_F16: u32 = 1;
+pub(crate) const PRECISION_F32: u32 = 2;
+
 pub(crate) const NODE_RESHAPE: u32 = 1;
 pub(crate) const NODE_MATMUL: u32 = 2;
 pub(crate) const NODE_MAX_POOL_2D: u32 = 3;
+pub(crate) const NODE_ADD: u32 = 4;
+pub(crate) const NODE_SUBTRACT: u32 = 5;
+pub(crate) const NODE_MAXIMUM: u32 = 6;
+pub(crate) const NODE_MINIMUM: u32 = 7;
+pub(crate) const NODE_MULTIPLY: u32 = 8;
 
 pub(crate) const EVENT_PENDING: u32 = 0;
 pub(crate) const EVENT_COMPLETE: u32 = 1;
@@ -73,19 +87,24 @@ pub(crate) struct TensorDesc {
     pub value: u32,
     pub role: u32,
     pub io_index: u32,
-    pub dimensions: *const u32,
+    pub element: u32,
+    pub quantized: u32,
     pub rank: u32,
+    pub dimensions: *const u32,
+    pub scale: f32,
+    pub offset: i32,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub(crate) struct NodeDesc {
     pub kind: u32,
-    pub input0: u32,
-    pub input1: u32,
-    pub output: u32,
-    pub kernel: [u32; 2],
-    pub stride: [u32; 2],
+    pub inputs: *const u32,
+    pub input_count: u32,
+    pub outputs: *const u32,
+    pub output_count: u32,
+    pub parameters: *const i32,
+    pub parameter_count: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -111,6 +130,7 @@ unsafe extern "C" {
         tensor_count: u32,
         nodes: *const NodeDesc,
         node_count: u32,
+        precision: u32,
         graph: *mut *mut Graph,
         message: *mut c_char,
         message_size: usize,
