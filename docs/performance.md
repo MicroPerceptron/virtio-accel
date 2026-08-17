@@ -154,10 +154,24 @@ destruction.
 
 ## Qualcomm Hexagon evidence status
 
-`virtio-accel-hexagon` makes no throughput or latency claim yet. The pinned Snapdragon/QAIRT/driver
-tests prove HTP execution for FP16 identity, MATMUL, and MAX_POOL2D and bit-exact INT8 identity plus
-nonzero-zero-point MATMUL with INT32 output. The reusable semantic suite also observes cumulative
-direct-binding admissions and explicit transfer bytes and requires zero staged direct bindings and
-bytes. These are copy-path and correctness results, not a statistically controlled performance run.
-Any future admission or submit-to-complete measurements must record the provider build, driver,
-power mode, graph, dtype, warmup, and sample distribution.
+`virtio-accel-hexagon` includes an ignored release-mode measurement for fixed submission overhead:
+
+```powershell
+cargo test --release -p virtio-accel-hexagon --test hexagon `
+  measures_warm_submission_and_completion_latency -- --ignored --nocapture --test-threads=1
+```
+
+On August 17, 2026, a Snapdragon X126100 Hexagon HTP v73 with NPU driver `30.0.222.0`, Windows
+Balanced power mode, QAIRT `2.49.0.260730`, provider build `v2.49.0.260730134355`, QNN core API
+`2.38.0`, and HTP backend API `5.49.0` produced the following single-run results. Each graph was
+loaded once, warmed up for 20 submissions, and then measured for 200 sequential submissions.
+
+| Graph | Dtype | Admission median / p95 | Submit-to-complete median / p95 | Diagnostics |
+|---|---|---:|---:|---|
+| identity, 8 elements | FP16 | 27.6 / 61.5 µs | 2.8098 / 3.0682 ms | 440 direct bindings; 0 explicit submission bytes |
+| identity, 8 elements | INT8 | 23.1 / 58.9 µs | 2.8465 / 3.0333 ms | 440 direct bindings; 0 explicit submission bytes |
+
+The counts cover two exact caller-owned bindings for all 20 warmups and 200 samples. The input was
+initialized before counters were sampled; no read or write occurred during measured submission.
+These are fixed-overhead micro-model results, not throughput claims or representative large-model
+latency. Ordinary CI gates correctness and copy diagnostics rather than wall-clock values.

@@ -29,6 +29,7 @@ const MESSAGE_BYTES: usize = 512;
 
 const fn ffi_element(element: Element) -> u32 {
     match element {
+        Element::Bool => ffi::ELEMENT_BOOL,
         Element::F16 => ffi::ELEMENT_F16,
         Element::F32 => ffi::ELEMENT_F32,
         Element::I8 => ffi::ELEMENT_I8,
@@ -41,7 +42,7 @@ const fn ffi_precision(element: Option<Element>) -> u32 {
         None => ffi::PRECISION_DEFAULT,
         Some(Element::F16) => ffi::PRECISION_F16,
         Some(Element::F32) => ffi::PRECISION_F32,
-        Some(Element::I8 | Element::I32) => ffi::PRECISION_DEFAULT,
+        Some(Element::Bool | Element::I8 | Element::I32) => ffi::PRECISION_DEFAULT,
     }
 }
 
@@ -756,7 +757,14 @@ impl Accelerator for HexagonAccelerator {
             .iter()
             .map(|tensor| {
                 let (role, io_index) = lowered.boundary(tensor.value).map_or(
-                    (ffi::TENSOR_NATIVE, ffi::NO_IO_INDEX),
+                    (
+                        if tensor.data.is_some() {
+                            ffi::TENSOR_STATIC
+                        } else {
+                            ffi::TENSOR_NATIVE
+                        },
+                        ffi::NO_IO_INDEX,
+                    ),
                     |(feature_role, io_index)| {
                         (
                             match feature_role {
@@ -775,6 +783,11 @@ impl Accelerator for HexagonAccelerator {
                     quantized: u32::from(tensor.quantization.is_some()),
                     rank: tensor.dims.len() as u32,
                     dimensions: tensor.dims.as_ptr(),
+                    constant_data: tensor
+                        .data
+                        .as_ref()
+                        .map_or(ptr::null(), |data| data.as_ptr()),
+                    constant_size: tensor.data.as_ref().map_or(0, |data| data.len() as u64),
                     scale: tensor.quantization.map_or(0.0, |value| value.scale),
                     offset: tensor.quantization.map_or(0, |value| value.offset),
                 }
@@ -793,6 +806,36 @@ impl Accelerator for HexagonAccelerator {
                     NodeKind::Multiply => ffi::NODE_MULTIPLY,
                     NodeKind::Maximum => ffi::NODE_MAXIMUM,
                     NodeKind::Minimum => ffi::NODE_MINIMUM,
+                    NodeKind::Transpose => ffi::NODE_TRANSPOSE,
+                    NodeKind::Reverse => ffi::NODE_REVERSE,
+                    NodeKind::Concat => ffi::NODE_CONCAT,
+                    NodeKind::Power => ffi::NODE_POWER,
+                    NodeKind::Abs => ffi::NODE_ABS,
+                    NodeKind::Ceil => ffi::NODE_CEIL,
+                    NodeKind::Cos => ffi::NODE_COS,
+                    NodeKind::Exp => ffi::NODE_EXP,
+                    NodeKind::Floor => ffi::NODE_FLOOR,
+                    NodeKind::Log => ffi::NODE_LOG,
+                    NodeKind::Negate => ffi::NODE_NEGATE,
+                    NodeKind::Reciprocal => ffi::NODE_RECIPROCAL,
+                    NodeKind::Rsqrt => ffi::NODE_RSQRT,
+                    NodeKind::Sin => ffi::NODE_SIN,
+                    NodeKind::Sigmoid => ffi::NODE_SIGMOID,
+                    NodeKind::Tanh => ffi::NODE_TANH,
+                    NodeKind::Clamp => ffi::NODE_CLAMP,
+                    NodeKind::Equal => ffi::NODE_EQUAL,
+                    NodeKind::Greater => ffi::NODE_GREATER,
+                    NodeKind::GreaterEqual => ffi::NODE_GREATER_EQUAL,
+                    NodeKind::Select => ffi::NODE_SELECT,
+                    NodeKind::LogicalAnd => ffi::NODE_LOGICAL_AND,
+                    NodeKind::LogicalOr => ffi::NODE_LOGICAL_OR,
+                    NodeKind::LogicalXor => ffi::NODE_LOGICAL_XOR,
+                    NodeKind::LogicalNot => ffi::NODE_LOGICAL_NOT,
+                    NodeKind::ArgMax => ffi::NODE_ARGMAX,
+                    NodeKind::ReduceMax => ffi::NODE_REDUCE_MAX,
+                    NodeKind::ReduceMin => ffi::NODE_REDUCE_MIN,
+                    NodeKind::ReduceProduct => ffi::NODE_REDUCE_PRODUCT,
+                    NodeKind::ReduceSum => ffi::NODE_REDUCE_SUM,
                 },
                 inputs: node.inputs.as_ptr(),
                 input_count: node.inputs.len() as u32,

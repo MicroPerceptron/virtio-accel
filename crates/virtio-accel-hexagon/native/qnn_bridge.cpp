@@ -44,6 +44,7 @@ struct TensorStorage {
   std::string name;
   std::vector<uint32_t> dimensions;
   std::vector<uint32_t> constant_values;
+  std::vector<uint8_t> constant_data;
   Qnn_Tensor_t tensor = []() {
     Qnn_Tensor_t value{};
     value.version = QNN_TENSOR_VERSION_2;
@@ -134,6 +135,8 @@ Qnn_TensorType_t tensor_type(uint32_t role) {
     return QNN_TENSOR_TYPE_APP_WRITE;
   case VA_QNN_TENSOR_OUTPUT:
     return QNN_TENSOR_TYPE_APP_READ;
+  case VA_QNN_TENSOR_STATIC:
+    return QNN_TENSOR_TYPE_STATIC;
   default:
     return QNN_TENSOR_TYPE_NATIVE;
   }
@@ -141,6 +144,8 @@ Qnn_TensorType_t tensor_type(uint32_t role) {
 
 Qnn_DataType_t tensor_data_type(const VaQnnTensorDesc &description) {
   switch (description.element) {
+  case VA_QNN_ELEMENT_BOOL:
+    return QNN_DATATYPE_BOOL_8;
   case VA_QNN_ELEMENT_F16:
     return QNN_DATATYPE_FLOAT_16;
   case VA_QNN_ELEMENT_F32:
@@ -154,6 +159,37 @@ Qnn_DataType_t tensor_data_type(const VaQnnTensorDesc &description) {
   default:
     return QNN_DATATYPE_UNDEFINED;
   }
+}
+
+size_t tensor_storage_bytes(const VaQnnTensorDesc &description) {
+  size_t bytes = 0;
+  switch (description.element) {
+  case VA_QNN_ELEMENT_BOOL:
+  case VA_QNN_ELEMENT_I8:
+    bytes = 1;
+    break;
+  case VA_QNN_ELEMENT_F16:
+    bytes = 2;
+    break;
+  case VA_QNN_ELEMENT_F32:
+  case VA_QNN_ELEMENT_I32:
+    bytes = 4;
+    break;
+  default:
+    return 0;
+  }
+  if (description.rank != 0 && description.dimensions == nullptr) {
+    return 0;
+  }
+  for (uint32_t index = 0; index < description.rank; ++index) {
+    const size_t dimension = description.dimensions[index];
+    if (dimension == 0 ||
+        bytes > std::numeric_limits<size_t>::max() / dimension) {
+      return 0;
+    }
+    bytes *= dimension;
+  }
+  return bytes;
 }
 
 uint64_t append_scalar_bool(NodeStorage &node, const char *name,
@@ -173,6 +209,25 @@ void append_scalar_i32(NodeStorage &node, const char *name, int32_t value) {
   parameter.name = name;
   parameter.scalarParam.dataType = QNN_DATATYPE_INT_32;
   parameter.scalarParam.int32Value = value;
+  node.params.push_back(parameter);
+}
+
+void append_scalar_f32(NodeStorage &node, const char *name, int32_t bits) {
+  Qnn_Param_t parameter = QNN_PARAM_INIT;
+  parameter.paramType = QNN_PARAMTYPE_SCALAR;
+  parameter.name = name;
+  parameter.scalarParam.dataType = QNN_DATATYPE_FLOAT_32;
+  static_assert(sizeof(bits) == sizeof(parameter.scalarParam.floatValue));
+  std::memcpy(&parameter.scalarParam.floatValue, &bits, sizeof(bits));
+  node.params.push_back(parameter);
+}
+
+void append_tensor_param(NodeStorage &node, const char *name,
+                         const TensorStorage &tensor) {
+  Qnn_Param_t parameter = QNN_PARAM_INIT;
+  parameter.paramType = QNN_PARAMTYPE_TENSOR;
+  parameter.name = name;
+  parameter.tensorParam = tensor.tensor;
   node.params.push_back(parameter);
 }
 
@@ -252,6 +307,112 @@ uint64_t add_binary_maximum(VaQnnGraph &graph, const std::string &name,
   node->inputs = {left.tensor, right.tensor};
   node->outputs = {output.tensor};
   return commit_node(graph, std::move(node), message, message_size);
+}
+
+uint64_t add_reverse(VaQnnGraph &graph, const VaQnnNodeDesc &description,
+                     uint32_t index, TensorStorage &input,
+                     TensorStorage &output, char *message,
+                     size_t message_size) {
+  if (description.parameter_count != 1 || description.parameters == nullptr ||
+      description.parameters[0] < 0 ||
+      static_cast<size_t>(description.parameters[0]) >=
+          input.dimensions.size() ||
+      input.dimensions != output.dimensions) {
+    set_message(message, message_size, "invalid reverse axis or shape");
+    return VA_QNN_ERROR_INVALID_ARGUMENT;
+  }
+  const int32_t axis = description.parameters[0];
+  const uint32_t extent = input.dimensions[static_cast<size_t>(axis)];
+  std::vector<uint32_t> indices;
+  indices.reserve(extent);
+  for (uint32_t value = extent; value != 0; --value) {
+    indices.push_back(value - 1);
+  }
+  TensorStorage *index_tensor = nullptr;
+  const std::string prefix =
+      "virtio_accel_reverse_" + std::to_string(index) + "_";
+  uint64_t status = create_internal_tensor(
+      graph, prefix + "indices", {extent}, QNN_TENSOR_TYPE_STATIC,
+      QNN_DATATYPE_UINT_32, std::move(indices), &index_tensor, message,
+      message_size);
+  if (status != QNN_SUCCESS)
+    return status;
+  return add_gather(graph, prefix + "gather", input, *index_tensor, output,
+                    axis, message, message_size);
+}
+
+uint64_t add_reduce_product(VaQnnGraph &graph,
+                            const VaQnnNodeDesc &description, uint32_t index,
+                            TensorStorage &input, TensorStorage &output,
+                            char *message, size_t message_size) {
+  if (description.parameter_count != 1 || description.parameters == nullptr ||
+      description.parameters[0] < 0 ||
+      static_cast<size_t>(description.parameters[0]) >=
+          input.dimensions.size() ||
+      input.dimensions.size() != output.dimensions.size()) {
+    set_message(message, message_size, "invalid reduce-product axis or rank");
+    return VA_QNN_ERROR_INVALID_ARGUMENT;
+  }
+  const int32_t axis = description.parameters[0];
+  const uint32_t extent = input.dimensions[static_cast<size_t>(axis)];
+  std::vector<uint32_t> reduced_dimensions = input.dimensions;
+  reduced_dimensions[static_cast<size_t>(axis)] = 1;
+  if (extent == 0 || reduced_dimensions != output.dimensions) {
+    set_message(message, message_size, "invalid reduce-product output shape");
+    return VA_QNN_ERROR_INVALID_ARGUMENT;
+  }
+  const std::string prefix =
+      "virtio_accel_reduce_product_" + std::to_string(index) + "_";
+  std::vector<TensorStorage *> values;
+  values.reserve(extent);
+  for (uint32_t position = 0; position < extent; ++position) {
+    TensorStorage *indices = nullptr;
+    uint64_t status = create_internal_tensor(
+        graph, prefix + "index_" + std::to_string(position), {1},
+        QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_UINT_32, {position}, &indices,
+        message, message_size);
+    if (status != QNN_SUCCESS)
+      return status;
+    TensorStorage *value = &output;
+    if (extent != 1) {
+      status = create_internal_tensor(
+          graph, prefix + "value_" + std::to_string(position),
+          reduced_dimensions, QNN_TENSOR_TYPE_NATIVE, input.tensor.v2.dataType,
+          {}, &value, message, message_size);
+      if (status != QNN_SUCCESS)
+        return status;
+    }
+    status = add_gather(graph, prefix + "gather_" + std::to_string(position),
+                        input, *indices, *value, axis, message, message_size);
+    if (status != QNN_SUCCESS)
+      return status;
+    values.push_back(value);
+  }
+  if (extent == 1)
+    return QNN_SUCCESS;
+  TensorStorage *accumulator = values[0];
+  for (uint32_t position = 1; position < extent; ++position) {
+    TensorStorage *product = &output;
+    if (position + 1 != extent) {
+      uint64_t status = create_internal_tensor(
+          graph, prefix + "product_" + std::to_string(position),
+          reduced_dimensions, QNN_TENSOR_TYPE_NATIVE, input.tensor.v2.dataType,
+          {}, &product, message, message_size);
+      if (status != QNN_SUCCESS)
+        return status;
+    }
+    auto node = std::make_unique<NodeStorage>();
+    node->name = prefix + "multiply_" + std::to_string(position);
+    node->type = QNN_OP_ELEMENT_WISE_MULTIPLY;
+    node->inputs = {accumulator->tensor, values[position]->tensor};
+    node->outputs = {product->tensor};
+    const uint64_t status =
+        commit_node(graph, std::move(node), message, message_size);
+    if (status != QNN_SUCCESS)
+      return status;
+    accumulator = product;
+  }
+  return QNN_SUCCESS;
 }
 
 uint64_t add_max_pool(VaQnnGraph &graph, const VaQnnNodeDesc &description,
@@ -463,10 +624,52 @@ uint64_t add_node(VaQnnGraph &graph, const VaQnnNodeDesc &description,
                         message_size);
   }
 
-  if (description.parameter_count != 0) {
-    set_message(message, message_size, "unexpected QNN node parameters");
-    return VA_QNN_ERROR_INVALID_ARGUMENT;
+  if (description.kind == VA_QNN_NODE_REVERSE) {
+    if (!require_arity(1, 1, 1)) {
+      set_message(message, message_size, "invalid reverse descriptor arity");
+      return VA_QNN_ERROR_INVALID_ARGUMENT;
+    }
+    TensorStorage *input = find_tensor(description.inputs[0]);
+    TensorStorage *output = find_tensor(description.outputs[0]);
+    return add_reverse(graph, description, index, *input, *output, message,
+                       message_size);
   }
+
+  if (description.kind == VA_QNN_NODE_REDUCE_PRODUCT) {
+    if (!require_arity(1, 1, 1)) {
+      set_message(message, message_size,
+                  "invalid reduce-product descriptor arity");
+      return VA_QNN_ERROR_INVALID_ARGUMENT;
+    }
+    TensorStorage *input = find_tensor(description.inputs[0]);
+    TensorStorage *output = find_tensor(description.outputs[0]);
+    return add_reduce_product(graph, description, index, *input, *output,
+                              message, message_size);
+  }
+
+  auto append_u32_vector = [&](const char *name) -> uint64_t {
+    if (description.parameter_count == 0 || description.parameters == nullptr)
+      return VA_QNN_ERROR_INVALID_ARGUMENT;
+    std::vector<uint32_t> values;
+    values.reserve(description.parameter_count);
+    for (uint32_t parameter_index = 0;
+         parameter_index < description.parameter_count; ++parameter_index) {
+      if (description.parameters[parameter_index] < 0)
+        return VA_QNN_ERROR_INVALID_ARGUMENT;
+      values.push_back(
+          static_cast<uint32_t>(description.parameters[parameter_index]));
+    }
+    TensorStorage *parameter = nullptr;
+    const uint64_t status = create_internal_tensor(
+        graph,
+        "virtio_accel_param_" + std::to_string(index) + "_" + name,
+        {description.parameter_count}, QNN_TENSOR_TYPE_STATIC,
+        QNN_DATATYPE_UINT_32, std::move(values), &parameter, message,
+        message_size);
+    if (status == QNN_SUCCESS)
+      append_tensor_param(*node, name, *parameter);
+    return status;
+  };
 
   switch (description.kind) {
   case VA_QNN_NODE_RESHAPE:
@@ -507,6 +710,169 @@ uint64_t add_node(VaQnnGraph &graph, const VaQnnNodeDesc &description,
       break;
     node->type = QNN_OP_ELEMENT_WISE_MULTIPLY;
     return commit_node(graph, std::move(node), message, message_size);
+  case VA_QNN_NODE_TRANSPOSE:
+    if (description.input_count != 1 || description.output_count != 1 ||
+        description.parameter_count == 0)
+      break;
+    node->type = QNN_OP_TRANSPOSE;
+    if (const uint64_t status =
+            append_u32_vector(QNN_OP_TRANSPOSE_PARAM_PERM);
+        status != QNN_SUCCESS)
+      return status;
+    return commit_node(graph, std::move(node), message, message_size);
+  case VA_QNN_NODE_CONCAT:
+    if (description.input_count == 0 || description.output_count != 1 ||
+        description.parameter_count != 1)
+      break;
+    node->type = QNN_OP_CONCAT;
+    append_scalar_i32(*node, QNN_OP_CONCAT_PARAM_AXIS,
+                      description.parameters[0]);
+    return commit_node(graph, std::move(node), message, message_size);
+  case VA_QNN_NODE_POWER:
+    if (!require_arity(2, 1, 0))
+      break;
+    node->type = QNN_OP_ELEMENT_WISE_POWER;
+    return commit_node(graph, std::move(node), message, message_size);
+  case VA_QNN_NODE_ABS:
+  case VA_QNN_NODE_CEIL:
+  case VA_QNN_NODE_COS:
+  case VA_QNN_NODE_EXP:
+  case VA_QNN_NODE_FLOOR:
+  case VA_QNN_NODE_LOG:
+  case VA_QNN_NODE_NEGATE:
+  case VA_QNN_NODE_RSQRT:
+  case VA_QNN_NODE_SIN:
+  case VA_QNN_NODE_LOGICAL_NOT:
+    if (!require_arity(1, 1, 0))
+      break;
+    switch (description.kind) {
+    case VA_QNN_NODE_ABS:
+      node->type = QNN_OP_ELEMENT_WISE_ABS;
+      break;
+    case VA_QNN_NODE_CEIL:
+      node->type = QNN_OP_ELEMENT_WISE_CEIL;
+      break;
+    case VA_QNN_NODE_COS:
+      node->type = QNN_OP_ELEMENT_WISE_COS;
+      break;
+    case VA_QNN_NODE_EXP:
+      node->type = QNN_OP_ELEMENT_WISE_EXP;
+      break;
+    case VA_QNN_NODE_FLOOR:
+      node->type = QNN_OP_ELEMENT_WISE_FLOOR;
+      break;
+    case VA_QNN_NODE_LOG:
+      node->type = QNN_OP_ELEMENT_WISE_LOG;
+      break;
+    case VA_QNN_NODE_NEGATE:
+      node->type = QNN_OP_ELEMENT_WISE_NEG;
+      break;
+    case VA_QNN_NODE_RSQRT:
+      node->type = QNN_OP_ELEMENT_WISE_RSQRT;
+      break;
+    case VA_QNN_NODE_SIN:
+      node->type = QNN_OP_ELEMENT_WISE_SIN;
+      break;
+    default:
+      node->type = QNN_OP_ELEMENT_WISE_NOT;
+      break;
+    }
+    return commit_node(graph, std::move(node), message, message_size);
+  case VA_QNN_NODE_RECIPROCAL:
+    if (!require_arity(1, 1, 0))
+      break;
+    node->type = QNN_OP_ELEMENT_WISE_UNARY;
+    append_scalar_i32(*node, QNN_OP_ELEMENT_WISE_UNARY_PARAM_OPERATION,
+                      QNN_OP_ELEMENT_WISE_UNARY_OPERATION_RECIPROCAL);
+    return commit_node(graph, std::move(node), message, message_size);
+  case VA_QNN_NODE_SIGMOID:
+  case VA_QNN_NODE_TANH:
+    if (!require_arity(1, 1, 0))
+      break;
+    node->type = description.kind == VA_QNN_NODE_SIGMOID ? QNN_OP_SIGMOID
+                                                         : QNN_OP_TANH;
+    return commit_node(graph, std::move(node), message, message_size);
+  case VA_QNN_NODE_CLAMP:
+    if (!require_arity(1, 1, 2))
+      break;
+    node->type = QNN_OP_RELU_MIN_MAX;
+    append_scalar_f32(*node, QNN_OP_RELU_MIN_MAX_PARAM_MIN_VALUE,
+                      description.parameters[0]);
+    append_scalar_f32(*node, QNN_OP_RELU_MIN_MAX_PARAM_MAX_VALUE,
+                      description.parameters[1]);
+    return commit_node(graph, std::move(node), message, message_size);
+  case VA_QNN_NODE_EQUAL:
+  case VA_QNN_NODE_GREATER:
+  case VA_QNN_NODE_GREATER_EQUAL:
+  case VA_QNN_NODE_LOGICAL_AND:
+  case VA_QNN_NODE_LOGICAL_OR:
+  case VA_QNN_NODE_LOGICAL_XOR:
+    if (!require_arity(2, 1, 0))
+      break;
+    switch (description.kind) {
+    case VA_QNN_NODE_EQUAL:
+      node->type = QNN_OP_ELEMENT_WISE_EQUAL;
+      break;
+    case VA_QNN_NODE_GREATER:
+      node->type = QNN_OP_ELEMENT_WISE_GREATER;
+      break;
+    case VA_QNN_NODE_GREATER_EQUAL:
+      node->type = QNN_OP_ELEMENT_WISE_GREATER_EQUAL;
+      break;
+    case VA_QNN_NODE_LOGICAL_AND:
+      node->type = QNN_OP_ELEMENT_WISE_AND;
+      break;
+    case VA_QNN_NODE_LOGICAL_OR:
+      node->type = QNN_OP_ELEMENT_WISE_OR;
+      break;
+    default:
+      node->type = QNN_OP_ELEMENT_WISE_XOR;
+      break;
+    }
+    return commit_node(graph, std::move(node), message, message_size);
+  case VA_QNN_NODE_SELECT:
+    if (!require_arity(3, 1, 0))
+      break;
+    node->type = QNN_OP_ELEMENT_WISE_SELECT;
+    return commit_node(graph, std::move(node), message, message_size);
+  case VA_QNN_NODE_ARGMAX:
+    if (!require_arity(1, 1, 1))
+      break;
+    node->type = QNN_OP_ARGMAX;
+    append_scalar_i32(*node, QNN_OP_ARGMAX_PARAM_AXIS,
+                      description.parameters[0]);
+    append_scalar_bool(*node, QNN_OP_ARGMAX_PARAM_KEEP_DIMS, 0);
+    return commit_node(graph, std::move(node), message, message_size);
+  case VA_QNN_NODE_REDUCE_MAX:
+  case VA_QNN_NODE_REDUCE_MIN:
+  case VA_QNN_NODE_REDUCE_SUM: {
+    if (!require_arity(1, 1, 1))
+      break;
+    const char *axes_name = nullptr;
+    const char *keep_dims_name = nullptr;
+    switch (description.kind) {
+    case VA_QNN_NODE_REDUCE_MAX:
+      node->type = QNN_OP_REDUCE_MAX;
+      axes_name = QNN_OP_REDUCE_MAX_PARAM_AXES;
+      keep_dims_name = QNN_OP_REDUCE_MAX_PARAM_KEEP_DIMS;
+      break;
+    case VA_QNN_NODE_REDUCE_MIN:
+      node->type = QNN_OP_REDUCE_MIN;
+      axes_name = QNN_OP_REDUCE_MIN_PARAM_AXES;
+      keep_dims_name = QNN_OP_REDUCE_MIN_PARAM_KEEP_DIMS;
+      break;
+    default:
+      node->type = QNN_OP_REDUCE_SUM;
+      axes_name = QNN_OP_REDUCE_SUM_PARAM_AXES;
+      keep_dims_name = QNN_OP_REDUCE_SUM_PARAM_KEEP_DIMS;
+      break;
+    }
+    if (const uint64_t status = append_u32_vector(axes_name);
+        status != QNN_SUCCESS)
+      return status;
+    append_scalar_bool(*node, keep_dims_name, 1);
+    return commit_node(graph, std::move(node), message, message_size);
+  }
   default:
     set_message(message, message_size, "unknown QNN node kind");
     return VA_QNN_ERROR_INVALID_ARGUMENT;
@@ -726,6 +1092,15 @@ va_qnn_graph_create(VaQnnRuntime *runtime,
       case VA_QNN_TENSOR_OUTPUT:
         ++output_count;
         break;
+      case VA_QNN_TENSOR_STATIC:
+        if (description.io_index != UINT32_MAX) {
+          runtime->api.contextFree(graph->context, nullptr);
+          graph->context = nullptr;
+          set_message(message, message_size,
+                      "static QNN tensor has a model I/O index");
+          return VA_QNN_ERROR_INVALID_ARGUMENT;
+        }
+        break;
       default:
         runtime->api.contextFree(graph->context, nullptr);
         graph->context = nullptr;
@@ -750,6 +1125,54 @@ va_qnn_graph_create(VaQnnRuntime *runtime,
         graph->context = nullptr;
         set_message(message, message_size, "invalid QNN node descriptor slices");
         return VA_QNN_ERROR_INVALID_ARGUMENT;
+      }
+      if (description.kind == VA_QNN_NODE_TRANSPOSE ||
+          description.kind == VA_QNN_NODE_REVERSE ||
+          description.kind == VA_QNN_NODE_REDUCE_MAX ||
+          description.kind == VA_QNN_NODE_REDUCE_MIN ||
+          description.kind == VA_QNN_NODE_REDUCE_SUM) {
+        if (retained_tensor_count == std::numeric_limits<size_t>::max()) {
+          runtime->api.contextFree(graph->context, nullptr);
+          graph->context = nullptr;
+          return VA_QNN_ERROR_OUT_OF_MEMORY;
+        }
+        ++retained_tensor_count;
+      }
+      if (description.kind == VA_QNN_NODE_REDUCE_PRODUCT) {
+        const VaQnnTensorDesc *input = nullptr;
+        for (uint32_t tensor_index = 0; tensor_index < tensor_count;
+             ++tensor_index) {
+          if (tensor_descriptions[tensor_index].value ==
+              description.inputs[0]) {
+            input = &tensor_descriptions[tensor_index];
+            break;
+          }
+        }
+        if (input == nullptr || description.parameter_count != 1 ||
+            description.parameters[0] < 0 ||
+            static_cast<uint32_t>(description.parameters[0]) >= input->rank ||
+            input->dimensions == nullptr) {
+          runtime->api.contextFree(graph->context, nullptr);
+          graph->context = nullptr;
+          set_message(message, message_size,
+                      "invalid reduce-product reservation metadata");
+          return VA_QNN_ERROR_INVALID_ARGUMENT;
+        }
+        const size_t extent = input->dimensions[description.parameters[0]];
+        if (extent == 0 ||
+            extent > std::numeric_limits<size_t>::max() / 3) {
+          runtime->api.contextFree(graph->context, nullptr);
+          graph->context = nullptr;
+          return VA_QNN_ERROR_OUT_OF_MEMORY;
+        }
+        const size_t extra = extent * 3 - 2;
+        if (retained_tensor_count >
+            std::numeric_limits<size_t>::max() - extra) {
+          runtime->api.contextFree(graph->context, nullptr);
+          graph->context = nullptr;
+          return VA_QNN_ERROR_OUT_OF_MEMORY;
+        }
+        retained_tensor_count += extra;
       }
       if (description.kind != VA_QNN_NODE_MAX_POOL_2D)
         continue;
@@ -785,10 +1208,21 @@ va_qnn_graph_create(VaQnnRuntime *runtime,
     for (uint32_t index = 0; index < tensor_count; ++index) {
       const VaQnnTensorDesc &description = tensor_descriptions[index];
       const Qnn_DataType_t data_type = tensor_data_type(description);
+      const bool is_static = description.role == VA_QNN_TENSOR_STATIC;
+      const size_t expected_bytes = tensor_storage_bytes(description);
       if ((description.rank != 0 && description.dimensions == nullptr) ||
           data_type == QNN_DATATYPE_UNDEFINED ||
+          expected_bytes == 0 ||
           description.quantized > 1 ||
           (description.quantized != 0 && !(description.scale > 0.0f)) ||
+          (is_static &&
+           (description.constant_data == nullptr ||
+            description.constant_size == 0 ||
+            description.constant_size > std::numeric_limits<uint32_t>::max() ||
+            description.constant_size != expected_bytes)) ||
+          (!is_static &&
+           (description.constant_data != nullptr ||
+            description.constant_size != 0)) ||
           graph->by_value.find(description.value) != graph->by_value.end()) {
         runtime->api.contextFree(graph->context, nullptr);
         set_message(message, message_size,
@@ -798,8 +1232,15 @@ va_qnn_graph_create(VaQnnRuntime *runtime,
       TensorStorage storage;
       storage.value = description.value;
       storage.name = "virtio_accel_tensor_" + std::to_string(description.value);
-      storage.dimensions.assign(description.dimensions,
-                                description.dimensions + description.rank);
+      if (description.rank != 0) {
+        storage.dimensions.assign(description.dimensions,
+                                  description.dimensions + description.rank);
+      }
+      if (is_static) {
+        storage.constant_data.assign(
+            description.constant_data,
+            description.constant_data + description.constant_size);
+      }
       storage.tensor.v2.name = storage.name.c_str();
       storage.tensor.v2.type = tensor_type(description.role);
       storage.tensor.v2.dataFormat = QNN_TENSOR_DATA_FORMAT_FLAT_BUFFER;
@@ -815,12 +1256,22 @@ va_qnn_graph_create(VaQnnRuntime *runtime,
             description.offset;
       }
       storage.tensor.v2.rank = description.rank;
-      storage.tensor.v2.dimensions = storage.dimensions.data();
+      storage.tensor.v2.dimensions =
+          storage.dimensions.empty() ? nullptr : storage.dimensions.data();
       storage.tensor.v2.memType = QNN_TENSORMEMTYPE_RAW;
+      if (is_static) {
+        storage.tensor.v2.clientBuf.data = storage.constant_data.data();
+        storage.tensor.v2.clientBuf.dataSize =
+            static_cast<uint32_t>(storage.constant_data.size());
+      }
       graph->tensors.push_back(std::move(storage));
       TensorStorage &retained = graph->tensors.back();
       retained.tensor.v2.name = retained.name.c_str();
-      retained.tensor.v2.dimensions = retained.dimensions.data();
+      retained.tensor.v2.dimensions =
+          retained.dimensions.empty() ? nullptr : retained.dimensions.data();
+      if (is_static) {
+        retained.tensor.v2.clientBuf.data = retained.constant_data.data();
+      }
       status =
           runtime->api.tensorCreateGraphTensor(graph->graph, &retained.tensor);
       if (status != QNN_SUCCESS) {

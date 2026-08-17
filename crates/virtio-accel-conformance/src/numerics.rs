@@ -49,6 +49,92 @@ impl TosaFloat16Case {
     }
 }
 
+/// Raw tensor storage used by mixed-type Hexagon operator-parity cases.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RawTensor {
+    /// IEEE-754 binary16 elements represented by their exact bits.
+    Fp16(&'static [u16]),
+    /// TOSA BOOL storage, one zero-or-one byte per element.
+    Bool(&'static [u8]),
+    /// Signed INT32 elements.
+    Int32(&'static [i32]),
+}
+
+impl RawTensor {
+    /// Encode the tensor in the client-visible little-endian storage layout.
+    pub fn bytes(self) -> Vec<u8> {
+        match self {
+            Self::Fp16(values) => values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
+            Self::Bool(values) => values.to_vec(),
+            Self::Int32(values) => values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
+        }
+    }
+
+    /// Exact client-visible storage size.
+    pub fn byte_len(self) -> usize {
+        match self {
+            Self::Fp16(values) => values.len() * 2,
+            Self::Bool(values) => values.len(),
+            Self::Int32(values) => values.len() * 4,
+        }
+    }
+}
+
+/// One mixed-type TOSA operator case with a numerical output oracle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TosaRawCase {
+    /// Diagnostic case name.
+    pub name: &'static str,
+    /// TOSA 1.0 FlatBuffer payload.
+    pub artifact: &'static [u8],
+    /// Block inputs in declared slot order.
+    pub inputs: &'static [RawTensor],
+    /// Single block output.
+    pub output: RawTensor,
+    /// Maximum accepted binary16 ULP distance; ignored for exact BOOL/INT32 outputs.
+    pub fp16_max_ulps: u16,
+}
+
+impl TosaRawCase {
+    /// Compare raw client-visible bytes with the typed numerical oracle.
+    pub fn output_matches(self, actual: &[u8]) -> bool {
+        if actual.len() != self.output.byte_len() {
+            return false;
+        }
+        match self.output {
+            RawTensor::Bool(expected) => actual == expected,
+            RawTensor::Int32(expected) => actual
+                .chunks_exact(4)
+                .map(|bytes| i32::from_le_bytes(bytes.try_into().expect("four-byte chunk")))
+                .eq(expected.iter().copied()),
+            RawTensor::Fp16(expected) => {
+                actual
+                    .chunks_exact(2)
+                    .zip(expected)
+                    .all(|(bytes, expected)| {
+                        let actual = u16::from_le_bytes([bytes[0], bytes[1]]);
+                        if is_binary16_nan(*expected) {
+                            is_binary16_nan(actual)
+                        } else if self.fp16_max_ulps == 0
+                            || (*expected & 0x8000) != (actual & 0x8000)
+                            || (*expected & 0x7fff) == 0
+                        {
+                            actual == *expected
+                        } else {
+                            actual.abs_diff(*expected) <= self.fp16_max_ulps
+                        }
+                    })
+            }
+        }
+    }
+}
+
 const fn is_binary16_nan(bits: u16) -> bool {
     bits & 0x7c00 == 0x7c00 && bits & 0x03ff != 0
 }
@@ -328,7 +414,7 @@ const BINARY_INPUTS_FP16: &[Float16Tensor] = &[
 const ADD_OUTPUT_FP16_BITS: &[u16] = &[0x4200, 0x4400, 0x4500, 0x4500, 0x4600, 0x4700];
 const SUB_OUTPUT_FP16_BITS: &[u16] = &[0x3c00, 0x0000, 0xbc00, 0x4200, 0x4000, 0x3c00];
 const MUL_OUTPUT_FP16_BITS: &[u16] = &[0x4000, 0x4400, 0x4600, 0x4400, 0x4800, 0x4a00];
-const POW_OUTPUT_FP16_BITS: &[u16] = &[0x4000, 0x4400, 0x4600, 0x4400, 0x4c00, 0x5400];
+const POW_OUTPUT_FP16_BITS: &[u16] = &[0x4000, 0x4400, 0x4800, 0x4400, 0x4c00, 0x5400];
 const MAXIMUM_OUTPUT_FP16_BITS: &[u16] = &[0x4000, 0x4000, 0x4200, 0x4400, 0x4400, 0x4400];
 const MINIMUM_OUTPUT_FP16_BITS: &[u16] = &[0x3c00, 0x4000, 0x4000, 0x3c00, 0x4000, 0x4200];
 
@@ -386,6 +472,269 @@ pub const MINIMUM_FP16: TosaFloat16Case = TosaFloat16Case {
     inputs: BINARY_INPUTS_FP16,
     outputs: &binary_output(MINIMUM_OUTPUT_FP16_BITS),
 };
+
+const UNARY_INPUTS_RAW: &[RawTensor] = &[RawTensor::Fp16(&[0x3800, 0x3c00, 0x4000, 0x4400])];
+
+const fn unary_raw_case(
+    name: &'static str,
+    artifact: &'static [u8],
+    output: &'static [u16],
+    fp16_max_ulps: u16,
+) -> TosaRawCase {
+    TosaRawCase {
+        name,
+        artifact,
+        inputs: UNARY_INPUTS_RAW,
+        output: RawTensor::Fp16(output),
+        fp16_max_ulps,
+    }
+}
+
+/// FP16 unary and activation cases supported by the QNN HTP operator package.
+pub const HEXAGON_UNARY_FP16_CASES: &[TosaRawCase] = &[
+    unary_raw_case(
+        "abs-fp16",
+        include_bytes!("data/abs-fp16-v1.0.0.tosa"),
+        &[0x3800, 0x3c00, 0x4000, 0x4400],
+        0,
+    ),
+    unary_raw_case(
+        "ceil-fp16",
+        include_bytes!("data/ceil-fp16-v1.0.0.tosa"),
+        &[0x3c00, 0x3c00, 0x4000, 0x4400],
+        0,
+    ),
+    unary_raw_case(
+        "cos-fp16",
+        include_bytes!("data/cos-fp16-v1.0.0.tosa"),
+        &[0x3b05, 0x3853, 0xb6a9, 0xb93b],
+        8,
+    ),
+    unary_raw_case(
+        "exp-fp16",
+        include_bytes!("data/exp-fp16-v1.0.0.tosa"),
+        &[0x3e98, 0x4170, 0x4764, 0x52d3],
+        4,
+    ),
+    unary_raw_case(
+        "floor-fp16",
+        include_bytes!("data/floor-fp16-v1.0.0.tosa"),
+        &[0x0000, 0x3c00, 0x4000, 0x4400],
+        0,
+    ),
+    unary_raw_case(
+        "log-fp16",
+        include_bytes!("data/log-fp16-v1.0.0.tosa"),
+        &[0xb98c, 0x0000, 0x398c, 0x3d8c],
+        4,
+    ),
+    unary_raw_case(
+        "negate-fp16",
+        include_bytes!("data/negate-fp16-v1.0.0.tosa"),
+        &[0xb800, 0xbc00, 0xc000, 0xc400],
+        0,
+    ),
+    unary_raw_case(
+        "reciprocal-fp16",
+        include_bytes!("data/reciprocal-fp16-v1.0.0.tosa"),
+        &[0x4000, 0x3c00, 0x3800, 0x3400],
+        2,
+    ),
+    unary_raw_case(
+        "rsqrt-fp16",
+        include_bytes!("data/rsqrt-fp16-v1.0.0.tosa"),
+        &[0x3da8, 0x3c00, 0x39a8, 0x3800],
+        4,
+    ),
+    unary_raw_case(
+        "sin-fp16",
+        include_bytes!("data/sin-fp16-v1.0.0.tosa"),
+        &[0x37ac, 0x3abb, 0x3b46, 0xba0e],
+        8,
+    ),
+    unary_raw_case(
+        "sigmoid-fp16",
+        include_bytes!("data/sigmoid-fp16-v1.0.0.tosa"),
+        &[0x38fb, 0x39d9, 0x3b0c, 0x3bdb],
+        4,
+    ),
+    unary_raw_case(
+        "tanh-fp16",
+        include_bytes!("data/tanh-fp16-v1.0.0.tosa"),
+        &[0x3765, 0x3a18, 0x3bb6, 0x3bff],
+        4,
+    ),
+    unary_raw_case(
+        "clamp-fp16",
+        include_bytes!("data/clamp-fp16-v1.0.0.tosa"),
+        &[0x3800, 0x3c00, 0x3c00, 0x3c00],
+        0,
+    ),
+];
+
+const COMPARISON_INPUTS_RAW: &[RawTensor] = &[
+    RawTensor::Fp16(&[0x3c00, 0x4000, 0x4200, 0x4400]),
+    RawTensor::Fp16(&[0x3c00, 0x4200, 0x4000, 0x4400]),
+];
+const LOGICAL_INPUTS_RAW: &[RawTensor] = &[
+    RawTensor::Bool(&[0, 0, 1, 1]),
+    RawTensor::Bool(&[0, 1, 0, 1]),
+];
+const LOGICAL_NOT_INPUT_RAW: &[RawTensor] = &[RawTensor::Bool(&[0, 0, 1, 1])];
+const SELECT_INPUTS_RAW: &[RawTensor] = &[
+    RawTensor::Bool(&[0, 1, 0, 1]),
+    RawTensor::Fp16(&[0x3c00, 0x4000, 0x4200, 0x4400]),
+    RawTensor::Fp16(&[0x4500, 0x4600, 0x4700, 0x4800]),
+];
+
+/// Mixed BOOL/FP16 comparison, logical, and selection cases.
+pub const HEXAGON_LOGICAL_CASES: &[TosaRawCase] = &[
+    TosaRawCase {
+        name: "equal-fp16",
+        artifact: include_bytes!("data/equal-fp16-v1.0.0.tosa"),
+        inputs: COMPARISON_INPUTS_RAW,
+        output: RawTensor::Bool(&[1, 0, 0, 1]),
+        fp16_max_ulps: 0,
+    },
+    TosaRawCase {
+        name: "greater-fp16",
+        artifact: include_bytes!("data/greater-fp16-v1.0.0.tosa"),
+        inputs: COMPARISON_INPUTS_RAW,
+        output: RawTensor::Bool(&[0, 0, 1, 0]),
+        fp16_max_ulps: 0,
+    },
+    TosaRawCase {
+        name: "greater-equal-fp16",
+        artifact: include_bytes!("data/greater-equal-fp16-v1.0.0.tosa"),
+        inputs: COMPARISON_INPUTS_RAW,
+        output: RawTensor::Bool(&[1, 0, 1, 1]),
+        fp16_max_ulps: 0,
+    },
+    TosaRawCase {
+        name: "logical-and",
+        artifact: include_bytes!("data/logical-and-fp16-v1.0.0.tosa"),
+        inputs: LOGICAL_INPUTS_RAW,
+        output: RawTensor::Bool(&[0, 0, 0, 1]),
+        fp16_max_ulps: 0,
+    },
+    TosaRawCase {
+        name: "logical-or",
+        artifact: include_bytes!("data/logical-or-fp16-v1.0.0.tosa"),
+        inputs: LOGICAL_INPUTS_RAW,
+        output: RawTensor::Bool(&[0, 1, 1, 1]),
+        fp16_max_ulps: 0,
+    },
+    TosaRawCase {
+        name: "logical-xor",
+        artifact: include_bytes!("data/logical-xor-fp16-v1.0.0.tosa"),
+        inputs: LOGICAL_INPUTS_RAW,
+        output: RawTensor::Bool(&[0, 1, 1, 0]),
+        fp16_max_ulps: 0,
+    },
+    TosaRawCase {
+        name: "logical-not",
+        artifact: include_bytes!("data/logical-not-fp16-v1.0.0.tosa"),
+        inputs: LOGICAL_NOT_INPUT_RAW,
+        output: RawTensor::Bool(&[1, 1, 0, 0]),
+        fp16_max_ulps: 0,
+    },
+    TosaRawCase {
+        name: "select-fp16",
+        artifact: include_bytes!("data/select-fp16-v1.0.0.tosa"),
+        inputs: SELECT_INPUTS_RAW,
+        output: RawTensor::Fp16(&[0x4500, 0x4000, 0x4700, 0x4400]),
+        fp16_max_ulps: 0,
+    },
+];
+
+const REDUCTION_INPUTS_RAW: &[RawTensor] = &[RawTensor::Fp16(&[
+    0x3c00, 0x4200, 0x4000, 0xbc00, 0x4400, 0x4000,
+])];
+
+/// FP16 reductions and INT32 argmax over a two-row input.
+pub const HEXAGON_REDUCTION_CASES: &[TosaRawCase] = &[
+    TosaRawCase {
+        name: "argmax-fp16",
+        artifact: include_bytes!("data/argmax-fp16-v1.0.0.tosa"),
+        inputs: REDUCTION_INPUTS_RAW,
+        output: RawTensor::Int32(&[1, 1]),
+        fp16_max_ulps: 0,
+    },
+    TosaRawCase {
+        name: "reduce-max-fp16",
+        artifact: include_bytes!("data/reduce-max-fp16-v1.0.0.tosa"),
+        inputs: REDUCTION_INPUTS_RAW,
+        output: RawTensor::Fp16(&[0x4200, 0x4400]),
+        fp16_max_ulps: 0,
+    },
+    TosaRawCase {
+        name: "reduce-min-fp16",
+        artifact: include_bytes!("data/reduce-min-fp16-v1.0.0.tosa"),
+        inputs: REDUCTION_INPUTS_RAW,
+        output: RawTensor::Fp16(&[0x3c00, 0xbc00]),
+        fp16_max_ulps: 0,
+    },
+    TosaRawCase {
+        name: "reduce-product-fp16",
+        artifact: include_bytes!("data/reduce-product-fp16-v1.0.0.tosa"),
+        inputs: REDUCTION_INPUTS_RAW,
+        output: RawTensor::Fp16(&[0x4600, 0xc800]),
+        fp16_max_ulps: 1,
+    },
+    TosaRawCase {
+        name: "reduce-sum-fp16",
+        artifact: include_bytes!("data/reduce-sum-fp16-v1.0.0.tosa"),
+        inputs: REDUCTION_INPUTS_RAW,
+        output: RawTensor::Fp16(&[0x4600, 0x4500]),
+        fp16_max_ulps: 1,
+    },
+];
+
+/// Static constants and FP16 data-movement cases.
+pub const HEXAGON_MOVEMENT_CASES: &[TosaRawCase] = &[
+    TosaRawCase {
+        name: "const-add-fp16",
+        artifact: include_bytes!("data/const-fp16-v1.0.0.tosa"),
+        inputs: &[RawTensor::Fp16(&[0x4900, 0x4d00, 0x4f80, 0x5100])],
+        output: RawTensor::Fp16(&[0x4980, 0x4d80, 0x5020, 0x5180]),
+        fp16_max_ulps: 0,
+    },
+    TosaRawCase {
+        name: "reshape-const-shape-fp16",
+        artifact: include_bytes!("data/reshape-fp16-v1.0.0.tosa"),
+        inputs: &[RawTensor::Fp16(&[0x3c00, 0x4000, 0x4200, 0x4400])],
+        output: RawTensor::Fp16(&[0x3c00, 0x4000, 0x4200, 0x4400]),
+        fp16_max_ulps: 0,
+    },
+    TosaRawCase {
+        name: "transpose-fp16",
+        artifact: include_bytes!("data/transpose-fp16-v1.0.0.tosa"),
+        inputs: &[RawTensor::Fp16(&[
+            0x3c00, 0x4000, 0x4200, 0x4400, 0x4500, 0x4600,
+        ])],
+        output: RawTensor::Fp16(&[0x3c00, 0x4400, 0x4000, 0x4500, 0x4200, 0x4600]),
+        fp16_max_ulps: 0,
+    },
+    TosaRawCase {
+        name: "reverse-fp16",
+        artifact: include_bytes!("data/reverse-fp16-v1.0.0.tosa"),
+        inputs: &[RawTensor::Fp16(&[
+            0x3c00, 0x4000, 0x4200, 0x4400, 0x4500, 0x4600,
+        ])],
+        output: RawTensor::Fp16(&[0x4200, 0x4000, 0x3c00, 0x4600, 0x4500, 0x4400]),
+        fp16_max_ulps: 0,
+    },
+    TosaRawCase {
+        name: "concat-fp16",
+        artifact: include_bytes!("data/concat-fp16-v1.0.0.tosa"),
+        inputs: &[
+            RawTensor::Fp16(&[0x3c00, 0x4000]),
+            RawTensor::Fp16(&[0x4200, 0x4400]),
+        ],
+        output: RawTensor::Fp16(&[0x3c00, 0x4200, 0x4000, 0x4400]),
+        fp16_max_ulps: 0,
+    },
+];
 
 const MOCK_CLASSIFIER_FEATURES_FP16_BITS: &[u16] = &[
     0x3c00, 0x4000, 0x4200, // [1.0, 2.0, 3.0]

@@ -2,9 +2,10 @@
 
 use std::time::{Duration, Instant};
 use virtio_accel_conformance::numerics::{
-    ADD_FP16, IDENTITY_EDGES_FP16, IDENTITY_INT8, MATMUL_FP16, MATMUL_INT8, MAX_POOL2D_FP16,
-    MAXIMUM_FP16, MINIMUM_FP16, MOCK_LINEAR_CLASSIFIER_FP16, MUL_FP16, SUB_FP16, TosaFloat16Case,
-    TosaInt8MatmulCase, TosaPackedCase,
+    ADD_FP16, HEXAGON_LOGICAL_CASES, HEXAGON_MOVEMENT_CASES, HEXAGON_REDUCTION_CASES,
+    HEXAGON_UNARY_FP16_CASES, IDENTITY_EDGES_FP16, IDENTITY_INT8, MATMUL_FP16, MATMUL_INT8,
+    MAX_POOL2D_FP16, MAXIMUM_FP16, MINIMUM_FP16, MOCK_LINEAR_CLASSIFIER_FP16, MUL_FP16, POW_FP16,
+    SUB_FP16, TosaFloat16Case, TosaInt8MatmulCase, TosaPackedCase, TosaRawCase,
 };
 use virtio_accel_conformance::{
     BindingFixture, ConformanceHooks, ProgramFixture, SubmissionPathDiagnostics, TargetDescription,
@@ -119,6 +120,17 @@ fn run_int8_matmul(case: TosaInt8MatmulCase) {
                 .collect::<Vec<_>>();
             case.output_matches(0, &actual)
         },
+    );
+}
+
+fn run_raw_oracle_case(case: TosaRawCase) {
+    run_raw_case(
+        case.name,
+        case.artifact,
+        HEXAGON_TOSA_TARGET,
+        case.inputs.iter().map(|input| input.bytes()).collect(),
+        case.output.byte_len(),
+        |actual| case.output_matches(actual),
     );
 }
 
@@ -309,8 +321,43 @@ fn executes_nhwc_fp16_max_pool_on_htp() {
 
 #[test]
 fn executes_broadcast_fp16_binary_family_on_htp() {
-    for case in [ADD_FP16, SUB_FP16, MUL_FP16, MAXIMUM_FP16, MINIMUM_FP16] {
+    for case in [
+        ADD_FP16,
+        SUB_FP16,
+        MUL_FP16,
+        POW_FP16,
+        MAXIMUM_FP16,
+        MINIMUM_FP16,
+    ] {
         run_case(case);
+    }
+}
+
+#[test]
+fn executes_fp16_unary_and_activation_family_on_htp() {
+    for case in HEXAGON_UNARY_FP16_CASES {
+        run_raw_oracle_case(*case);
+    }
+}
+
+#[test]
+fn executes_comparison_selection_and_logical_family_on_htp() {
+    for case in HEXAGON_LOGICAL_CASES {
+        run_raw_oracle_case(*case);
+    }
+}
+
+#[test]
+fn executes_reduction_and_argmax_family_on_htp() {
+    for case in HEXAGON_REDUCTION_CASES {
+        run_raw_oracle_case(*case);
+    }
+}
+
+#[test]
+fn executes_constant_and_data_movement_family_on_htp() {
+    for case in HEXAGON_MOVEMENT_CASES {
+        run_raw_oracle_case(*case);
     }
 }
 
@@ -322,6 +369,150 @@ fn executes_int8_identity_on_htp() {
 #[test]
 fn executes_zero_point_aware_int8_matmul_on_htp() {
     run_int8_matmul(MATMUL_INT8);
+}
+
+#[test]
+#[ignore = "manual native performance evidence"]
+fn measures_warm_submission_and_completion_latency() {
+    measure_warm_latency(
+        "fp16-identity",
+        IDENTITY_EDGES_FP16.artifact,
+        HEXAGON_TOSA_TARGET,
+        fp16_bytes(IDENTITY_EDGES_FP16.inputs[0].bits),
+        IDENTITY_EDGES_FP16.outputs[0].bits.len() * 2,
+    );
+    measure_warm_latency(
+        "int8-identity",
+        IDENTITY_INT8.artifact,
+        HEXAGON_TOSA_INTEGER_TARGET,
+        IDENTITY_INT8.inputs[0].bytes.to_vec(),
+        IDENTITY_INT8.outputs[0].bytes.len(),
+    );
+}
+
+fn measure_warm_latency(
+    name: &str,
+    artifact: &[u8],
+    target: Target,
+    input_bytes: Vec<u8>,
+    output_len: usize,
+) {
+    const WARMUPS: usize = 20;
+    const SAMPLES: usize = 200;
+
+    let backend = HexagonAccelerator::new().expect("initialize QNN HTP");
+    let context = backend
+        .create_context(ContextDesc::default())
+        .expect("create context");
+    let model = parse(artifact).expect("parse benchmark TOSA");
+    let program = backend
+        .load_program(
+            &context,
+            model
+                .artifact_ref(target, REQUIRED_RESIDENT_BYTES)
+                .expect("artifact envelope"),
+        )
+        .expect("finalize benchmark graph on HTP");
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .expect("create queue");
+    let (mut input, _) = backend
+        .allocate_buffer(
+            &context,
+            BufferDesc::new(
+                input_bytes.len() as u64,
+                4096,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+            )
+            .expect("input descriptor"),
+        )
+        .expect("allocate input")
+        .into_parts();
+    backend
+        .write_buffer(&mut input, 0, &SliceSource(&input_bytes))
+        .expect("write input");
+    let (output, _) = backend
+        .allocate_buffer(
+            &context,
+            BufferDesc::new(
+                output_len as u64,
+                4096,
+                MemoryDomain::Shared,
+                BufferUsage::PROGRAM_OUTPUT,
+            )
+            .expect("output descriptor"),
+        )
+        .expect("allocate output")
+        .into_parts();
+
+    let direct_before = backend.direct_binding_admissions();
+    let transfers_before = backend.explicit_transfer_bytes();
+    let submit_once = || {
+        let bindings = [
+            BindingRef {
+                slot: 0,
+                buffer: &input,
+                range: BufferRange::new(0, input_bytes.len() as u64).expect("input range"),
+                access: AccessMode::Read,
+            },
+            BindingRef {
+                slot: 1,
+                buffer: &output,
+                range: BufferRange::new(0, output_len as u64).expect("output range"),
+                access: AccessMode::Write,
+            },
+        ];
+        let started = Instant::now();
+        let event = backend
+            .submit(&queue, &program, &bindings, Timeout::Infinite)
+            .unwrap_or_else(|_| panic!("{name} warm submission rejected"));
+        let admission = started.elapsed();
+        let deadline = started + Duration::from_secs(15);
+        loop {
+            match backend.poll_event(&event).expect("poll benchmark event") {
+                EventState::Pending => {
+                    assert!(Instant::now() < deadline, "{name} inference timed out");
+                    std::thread::yield_now();
+                }
+                EventState::Complete => break,
+                state => panic!("{name} reached unexpected terminal state {state:?}"),
+            }
+        }
+        let completion = started.elapsed();
+        backend
+            .destroy_event(event)
+            .expect("destroy benchmark event");
+        (admission, completion)
+    };
+
+    for _ in 0..WARMUPS {
+        submit_once();
+    }
+    let (mut admission, mut completion): (Vec<_>, Vec<_>) =
+        (0..SAMPLES).map(|_| submit_once()).unzip();
+    admission.sort_unstable();
+    completion.sort_unstable();
+    let runtime = backend.runtime_info();
+    eprintln!(
+        "{name}: provider={} build={} core={:?} backend={:?}; warmups={WARMUPS} samples={SAMPLES}; admission p50={:?} p95={:?}; submit-to-complete p50={:?} p95={:?}; direct_bindings={} explicit_transfer_bytes={}",
+        runtime.provider_name,
+        runtime.build_id,
+        runtime.core_version,
+        runtime.backend_version,
+        admission[SAMPLES / 2],
+        admission[SAMPLES * 95 / 100],
+        completion[SAMPLES / 2],
+        completion[SAMPLES * 95 / 100],
+        backend.direct_binding_admissions() - direct_before,
+        backend.explicit_transfer_bytes() - transfers_before,
+    );
+
+    backend.destroy_queue(queue).expect("destroy queue");
+    backend.unload_program(program).expect("unload program");
+    backend.free_buffer(input).expect("free input");
+    backend.free_buffer(output).expect("free output");
+    backend.destroy_context(context).expect("destroy context");
 }
 
 struct Hooks;

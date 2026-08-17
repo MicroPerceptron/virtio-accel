@@ -17,6 +17,8 @@ virtio-accel-tosa.workspace = true
 
 [dev-dependencies]
 virtio-accel-conformance.workspace = true
+virtio-accel-coreml = { path = "../virtio-accel-coreml", version = "0.2.1" }
+virtio-accel-openvino = { path = "../virtio-accel-openvino", version = "0.2.1" }
 
 [build-dependencies]
 cc.workspace = true

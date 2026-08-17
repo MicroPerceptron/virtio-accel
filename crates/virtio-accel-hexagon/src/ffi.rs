@@ -12,8 +12,10 @@ pub(crate) const ERROR_OUT_OF_MEMORY: u64 = u64::MAX - 4;
 pub(crate) const TENSOR_NATIVE: u32 = 0;
 pub(crate) const TENSOR_INPUT: u32 = 1;
 pub(crate) const TENSOR_OUTPUT: u32 = 2;
+pub(crate) const TENSOR_STATIC: u32 = 3;
 pub(crate) const NO_IO_INDEX: u32 = u32::MAX;
 
+pub(crate) const ELEMENT_BOOL: u32 = 0;
 pub(crate) const ELEMENT_F16: u32 = 1;
 pub(crate) const ELEMENT_F32: u32 = 2;
 pub(crate) const ELEMENT_I8: u32 = 3;
@@ -31,6 +33,36 @@ pub(crate) const NODE_SUBTRACT: u32 = 5;
 pub(crate) const NODE_MAXIMUM: u32 = 6;
 pub(crate) const NODE_MINIMUM: u32 = 7;
 pub(crate) const NODE_MULTIPLY: u32 = 8;
+pub(crate) const NODE_TRANSPOSE: u32 = 9;
+pub(crate) const NODE_REVERSE: u32 = 10;
+pub(crate) const NODE_CONCAT: u32 = 11;
+pub(crate) const NODE_POWER: u32 = 12;
+pub(crate) const NODE_ABS: u32 = 13;
+pub(crate) const NODE_CEIL: u32 = 14;
+pub(crate) const NODE_COS: u32 = 15;
+pub(crate) const NODE_EXP: u32 = 16;
+pub(crate) const NODE_FLOOR: u32 = 17;
+pub(crate) const NODE_LOG: u32 = 18;
+pub(crate) const NODE_NEGATE: u32 = 19;
+pub(crate) const NODE_RECIPROCAL: u32 = 20;
+pub(crate) const NODE_RSQRT: u32 = 21;
+pub(crate) const NODE_SIN: u32 = 22;
+pub(crate) const NODE_SIGMOID: u32 = 23;
+pub(crate) const NODE_TANH: u32 = 24;
+pub(crate) const NODE_CLAMP: u32 = 25;
+pub(crate) const NODE_EQUAL: u32 = 26;
+pub(crate) const NODE_GREATER: u32 = 27;
+pub(crate) const NODE_GREATER_EQUAL: u32 = 28;
+pub(crate) const NODE_SELECT: u32 = 29;
+pub(crate) const NODE_LOGICAL_AND: u32 = 30;
+pub(crate) const NODE_LOGICAL_OR: u32 = 31;
+pub(crate) const NODE_LOGICAL_XOR: u32 = 32;
+pub(crate) const NODE_LOGICAL_NOT: u32 = 33;
+pub(crate) const NODE_ARGMAX: u32 = 34;
+pub(crate) const NODE_REDUCE_MAX: u32 = 35;
+pub(crate) const NODE_REDUCE_MIN: u32 = 36;
+pub(crate) const NODE_REDUCE_PRODUCT: u32 = 37;
+pub(crate) const NODE_REDUCE_SUM: u32 = 38;
 
 pub(crate) const EVENT_PENDING: u32 = 0;
 pub(crate) const EVENT_COMPLETE: u32 = 1;
@@ -91,6 +123,8 @@ pub(crate) struct TensorDesc {
     pub quantized: u32,
     pub rank: u32,
     pub dimensions: *const u32,
+    pub constant_data: *const u8,
+    pub constant_size: u64,
     pub scale: f32,
     pub offset: i32,
 }

@@ -40,7 +40,7 @@ execution. “Not implemented” describes this repository, not necessarily the 
 | Apple Core ML / ANE (`virtio-accel-coreml`) | Implemented; macOS 14+ | Static TOSA 1.0 FP; INT8 tier on macOS 26+ | Supported       | Supported       | Not implemented | Identity + MATMUL | Not implemented | Direct host/shared bindings |
 | Intel OpenVINO (`virtio-accel-openvino`)    | Implemented; OpenVINO 2026.x | Static TOSA 1.0 FP + INT8 tier | Supported       | Supported       | Not implemented | Identity + MATMUL | Not implemented | Direct host/shared bindings |
 | AMD XDNA                                    | Planned                | Not implemented                       | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented             |
-| Qualcomm Hexagon (`virtio-accel-hexagon`)  | Experimental; QAIRT 2.49 on Windows ARM64 | Static TOSA 1.0 FP16 + INT8 tiers | Blocked by v73 precision evidence | Identity + binary arithmetic + MATMUL + MAX_POOL2D | Blocked: ambiguous encoding | Identity + MATMUL | Not implemented | Direct host/shared bindings |
+| Qualcomm Hexagon (`virtio-accel-hexagon`)  | Experimental; QAIRT 2.49 on Windows ARM64 | Static TOSA 1.0 FP16 + BOOL/INT32 auxiliaries; INT8 tier | Blocked by v73 precision evidence | 41/42 shared operators (`ERF` blocked) | Blocked: ambiguous encoding | Identity + MATMUL | Not implemented | Direct host/shared bindings |
 
 The Core ML row describes model-boundary support; restricted INT32 outputs are also available.
 Core ML chooses ANE or CPU placement per operation. Direct INT8 boundaries require macOS 26+, and
@@ -58,12 +58,15 @@ the Core ML backend it rejects unsupported FP8, unsupported INT8 operators, and 
 of silently dequantizing. See the
 [`virtio-accel-openvino` support boundary](crates/virtio-accel-openvino/README.md#low-precision-boundary).
 
-The Hexagon row is limited to the pinned Snapdragon X126100/QAIRT 2.49 hardware evidence. The
-adapter supports exact INT8 identity and zero-point-aware MATMUL with INT32 output in addition to
-its FP16 tier. It rejects FP32 because the v73 precision probe observed FP16-rounded MATMUL despite
+The Hexagon row is limited to the pinned Snapdragon X126100/QAIRT 2.49 hardware evidence. Its FP16
+tier covers 41 of the 42 operators shared by Core ML and OpenVINO, with `ERF` excluded because the
+public QAIRT operation definitions contain no ERF node. The adapter supports exact INT8 identity and
+zero-point-aware MATMUL with INT32 output in addition to its FP16 tier. It rejects FP32 because the
+v73 precision probe observed FP16-rounded MATMUL despite
 FLOAT_32 tensors, and rejects FP8 because QAIRT exposes no unambiguous E4M3/E5M2 selector for this
 client path. It reports `RuntimeUnavailable` when a complete SDK is not selected at build time. See the
-[`virtio-accel-hexagon` support boundary](crates/virtio-accel-hexagon/README.md#validated-baseline).
+[`virtio-accel-hexagon` support boundary](crates/virtio-accel-hexagon/README.md#validated-baseline)
+and [operator matrix](docs/hexagon-operator-matrix.md).
 
 Independently of backend execution, `virtio-accel-tosa` validates the TOSA 1.0 profiles and
 extensions for all five dtype columns, and `virtio-accel-conformance` ships shared fixtures and
