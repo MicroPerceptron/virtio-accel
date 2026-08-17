@@ -180,6 +180,7 @@ fallback:
 
 ```sh
 cargo run -p virtio-accel-hexagon --example tosa_hexagon
+cargo run -p virtio-accel-hexagon --example mock_classifier
 ```
 
 The portable facade, device engine, transport, and guest layers see only the TOSA artifact format,
@@ -355,6 +356,7 @@ cargo run --example reference_execution
 cargo run -p virtio-accel-coreml --example tosa_coreml # macOS 14+ with ANE
 cargo run -p virtio-accel-openvino --example tosa_openvino # Linux with OpenVINO 2026.x
 cargo run -p virtio-accel-hexagon --example tosa_hexagon # Windows ARM64 with the documented QAIRT setup
+cargo run -p virtio-accel-hexagon --example mock_classifier # FP16 linear classifier on Hexagon HTP
 python3 ci/publish-dry-run.py
 ```
 

@@ -107,6 +107,9 @@ jobs:
       - name: Run SDK-free TOSA-to-Hexagon example
         run: cargo run -p virtio-accel-hexagon --example tosa_hexagon
 
+      - name: Run SDK-free Hexagon mock-classifier example
+        run: cargo run -p virtio-accel-hexagon --example mock_classifier
+
       - name: Check release profile
         run: cargo check --workspace --release --all-features
 

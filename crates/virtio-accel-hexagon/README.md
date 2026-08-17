@@ -64,16 +64,19 @@ From the repository root in the configured PowerShell session:
 cargo check -p virtio-accel-hexagon
 cargo test -p virtio-accel-hexagon --all-targets -- --test-threads=1
 cargo run -p virtio-accel-hexagon --example tosa_hexagon
+cargo run -p virtio-accel-hexagon --example mock_classifier
 ```
 
 The integration tests initialize the pinned HTP provider, validate device identity, execute the
-shared FP16 identity, batched non-square MATMUL, and NHWC MAX_POOL2D corpora, compare every result
-with its numerical oracle, reject duplicate slots, wrong access, short bindings, and finite
-timeouts, check stable terminal polling/output visibility, and verify that a live event keeps its
-graph busy. The example prints the actual provider/build/API versions and ends with:
+shared FP16 identity, batched non-square MATMUL, mock linear classifier, and NHWC MAX_POOL2D cases,
+compare every result with its numerical oracle, reject duplicate slots, wrong access, short
+bindings, and finite timeouts, check stable terminal polling/output visibility, and verify that a
+live event keeps its graph busy. The examples print the actual provider/build/API versions and end
+with results such as:
 
 ```text
 TOSA FP16 identity -> QNN HTP v73: passed
+mock FP16 linear classifier -> QNN HTP v73: passed; output=[4400, bc00, 3c00, be00]
 ```
 
 To verify SDK-free portability in a fresh shell:

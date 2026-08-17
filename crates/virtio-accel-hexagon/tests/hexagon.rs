@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 use virtio_accel_conformance::numerics::{
-    IDENTITY_EDGES_FP16, MATMUL_FP16, MAX_POOL2D_FP16, TosaFloat16Case,
+    IDENTITY_EDGES_FP16, MATMUL_FP16, MAX_POOL2D_FP16, MOCK_LINEAR_CLASSIFIER_FP16, TosaFloat16Case,
 };
 use virtio_accel_core::{
     Accelerator, AccessMode, BackendError, BindingRef, BufferDesc, BufferRange, BufferUsage,
@@ -230,6 +230,11 @@ fn executes_fp16_identity_on_htp() {
 #[test]
 fn executes_batched_non_square_fp16_matmul_on_htp() {
     run_case(MATMUL_FP16);
+}
+
+#[test]
+fn executes_mock_linear_classifier_on_htp() {
+    run_case(MOCK_LINEAR_CLASSIFIER_FP16);
 }
 
 #[test]

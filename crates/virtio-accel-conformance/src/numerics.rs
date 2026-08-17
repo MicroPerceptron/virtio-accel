@@ -313,6 +313,42 @@ pub const MATMUL_FP16: TosaFloat16Case = TosaFloat16Case {
     outputs: MATMUL_OUTPUTS_FP16,
 };
 
+const MOCK_CLASSIFIER_FEATURES_FP16_BITS: &[u16] = &[
+    0x3c00, 0x4000, 0x4200, // [1.0, 2.0, 3.0]
+    0xbc00, 0x3800, 0x4000, // [-1.0, 0.5, 2.0]
+];
+const MOCK_CLASSIFIER_WEIGHTS_FP16_BITS: &[u16] = &[
+    0x3c00, 0x0000, // feature 0 -> [1.0, 0.0]
+    0x0000, 0x3c00, // feature 1 -> [0.0, 1.0]
+    0x3c00, 0xbc00, // feature 2 -> [1.0, -1.0]
+];
+const MOCK_CLASSIFIER_LOGITS_FP16_BITS: &[u16] = &[
+    0x4400, 0xbc00, // [4.0, -1.0]
+    0x3c00, 0xbe00, // [1.0, -1.5]
+];
+const MOCK_CLASSIFIER_INPUTS_FP16: &[Float16Tensor] = &[
+    Float16Tensor {
+        shape: &[1, 2, 3],
+        bits: MOCK_CLASSIFIER_FEATURES_FP16_BITS,
+    },
+    Float16Tensor {
+        shape: &[1, 3, 2],
+        bits: MOCK_CLASSIFIER_WEIGHTS_FP16_BITS,
+    },
+];
+const MOCK_CLASSIFIER_OUTPUTS_FP16: &[Float16Tensor] = &[Float16Tensor {
+    shape: &[1, 2, 2],
+    bits: MOCK_CLASSIFIER_LOGITS_FP16_BITS,
+}];
+
+/// Two-sample, three-feature FP16 linear classifier with a direct-bound 3x2 weight matrix.
+pub const MOCK_LINEAR_CLASSIFIER_FP16: TosaFloat16Case = TosaFloat16Case {
+    name: "mock-linear-classifier-fp16",
+    artifact: MATMUL_FP16.artifact,
+    inputs: MOCK_CLASSIFIER_INPUTS_FP16,
+    outputs: MOCK_CLASSIFIER_OUTPUTS_FP16,
+};
+
 const MAX_POOL2D_INPUT_FP16_BITS: &[u16] = &[
     0x3c00, 0x5650, 0x4000, 0x5660, 0x4200, 0x5670, 0x4400, 0x5680, 0x4500, 0x5690, 0x4600, 0x56a0,
     0x4700, 0x56b0, 0x4800, 0x56c0, 0x4880, 0x56d0, 0x4900, 0x56e0, 0x4980, 0x56f0, 0x4a00, 0x5700,
@@ -486,6 +522,7 @@ mod tests {
     #[test]
     fn fp16_oracle_is_exact_except_for_nan_payloads() {
         assert!(MATMUL_FP16.output_matches(0, MATMUL_OUTPUT_FP16_BITS));
+        assert!(MOCK_LINEAR_CLASSIFIER_FP16.output_matches(0, MOCK_CLASSIFIER_LOGITS_FP16_BITS));
         assert!(!MATMUL_FP16.output_matches(0, &[0x5340, 0x5400]));
         assert!(!MATMUL_FP16.output_matches(1, MATMUL_OUTPUT_FP16_BITS));
 

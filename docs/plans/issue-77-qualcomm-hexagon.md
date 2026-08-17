@@ -29,9 +29,10 @@ Completed on this branch:
 - Lowered identity with QNN Reshape and MATMUL with QNN MatMul. The documented native PoolMax2d
   tensor-parameter path fails finalization on this Windows HTP runtime, so zero-padded MAX_POOL2D is
   lowered to HTP Gather and ElementWiseMaximum nodes without a CPU/GPU fallback.
-- Added seven SDK-free tests and four hardware tests. The hardware suite validates runtime/device
-  identity, every advertised FP16 numerical oracle, stable terminal polling, timeout rejection,
-  live-event graph retention, and ordered teardown.
+- Added seven SDK-free tests and five hardware tests, including a two-sample FP16 linear classifier
+  with direct-bound learned weights. The hardware suite validates runtime/device identity, every
+  advertised FP16 numerical oracle, stable terminal polling, timeout rejection, live-event graph
+  retention, and ordered teardown.
 - Integrated the fourteenth package into workspace metadata, CI examples, release policy,
   publication order, portability/architecture/API/performance docs, and an experimental root
   support-matrix row limited to the pinned evidence.

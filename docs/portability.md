@@ -122,6 +122,7 @@ cargo run --example reference_execution
 cargo run -p virtio-accel-coreml --example tosa_coreml
 cargo run -p virtio-accel-openvino --example tosa_openvino
 cargo run -p virtio-accel-hexagon --example tosa_hexagon
+cargo run -p virtio-accel-hexagon --example mock_classifier
 cargo +1.85.0 check --workspace --all-targets --all-features
 cargo hack check --workspace --feature-powerset --no-dev-deps
 bash ci/check-portable-dependencies.sh

@@ -47,13 +47,14 @@ through `ModelValidator`; generated FlatBuffers tables and unchecked roots remai
 
 ## Runnable entry points
 
-Five examples are part of the default CI workflow:
+Six examples are part of the default CI workflow:
 
 - `cargo run --example backend_conformance`
 - `cargo run --example reference_execution`
 - `cargo run -p virtio-accel-coreml --example tosa_coreml`
 - `cargo run -p virtio-accel-openvino --example tosa_openvino`
 - `cargo run -p virtio-accel-hexagon --example tosa_hexagon`
+- `cargo run -p virtio-accel-hexagon --example mock_classifier`
 
 `backend_conformance` shows how a backend author wires a provider to the reusable conformance
 suite. `reference_execution` runs a complete context/buffer/program/queue/submit/poll/read/release
@@ -65,7 +66,8 @@ preferred available Intel inference device; hosts without an OpenVINO runtime co
 placeholder, and hosts without an inference device skip execution.
 `tosa_hexagon` executes the shared FP16 identity graph through QNN HTP when the complete QAIRT SDK
 is selected on Windows ARM64. SDK-free hosts retain the compile-only `RuntimeUnavailable` surface
-without falling back to CPU or GPU.
+without falling back to CPU or GPU. `mock_classifier` uses the same native lifecycle to compute two
+sets of class logits from three FP16 features and a direct-bound 3x2 weight matrix.
 
 ## Baseline, reserved, and post-v1 work
 

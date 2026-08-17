@@ -35,6 +35,7 @@ cargo run --example reference_execution
 cargo run -p virtio-accel-coreml --example tosa_coreml
 cargo run -p virtio-accel-openvino --example tosa_openvino
 cargo run -p virtio-accel-hexagon --example tosa_hexagon
+cargo run -p virtio-accel-hexagon --example mock_classifier
 python3 ci/publish-dry-run.py
 ```
 
