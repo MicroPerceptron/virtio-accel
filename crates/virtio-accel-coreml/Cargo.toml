@@ -19,4 +19,4 @@ virtio-accel-tosa.workspace = true
 virtio-accel-conformance.workspace = true
 
 [build-dependencies]
-cc = "1.2"
+cc.workspace = true
