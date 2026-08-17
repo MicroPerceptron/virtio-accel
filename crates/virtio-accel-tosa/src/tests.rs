@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 extern crate std;
 
@@ -911,6 +911,942 @@ fn binary_fp16_bytes(op: wire::Op) -> Vec<u8> {
     );
     wire::finish_tosa_graph_buffer(&mut builder, graph);
     builder.finished_data().to_vec()
+}
+
+macro_rules! finish_fixture {
+    ($builder:ident, $tensors:expr, $operators:expr, $inputs:expr, $outputs:expr, $shapes:expr) => {{
+        let region_name = $builder.create_string("main");
+        let block_name = $builder.create_string("entry");
+        let block = wire::TosaBasicBlock::create(
+            &mut $builder,
+            &wire::TosaBasicBlockArgs {
+                name: Some(block_name),
+                operators: Some($operators),
+                tensors: Some($tensors),
+                inputs: Some($inputs),
+                outputs: Some($outputs),
+                shapes: $shapes,
+            },
+        );
+        let blocks = $builder.create_vector(&[block]);
+        let region = wire::TosaRegion::create(
+            &mut $builder,
+            &wire::TosaRegionArgs {
+                name: Some(region_name),
+                blocks: Some(blocks),
+            },
+        );
+        let regions = $builder.create_vector(&[region]);
+        let version = wire::Version::create(
+            &mut $builder,
+            &wire::VersionArgs {
+                _major: 1,
+                _minor: 0,
+                _patch: 0,
+                _draft: false,
+            },
+        );
+        let graph = wire::TosaGraph::create(
+            &mut $builder,
+            &wire::TosaGraphArgs {
+                version: Some(version),
+                regions: Some(regions),
+                software_version: None,
+            },
+        );
+        wire::finish_tosa_graph_buffer(&mut $builder, graph);
+        $builder.finished_data().to_vec()
+    }};
+}
+
+fn unary_fp16_bytes(op: wire::Op) -> Vec<u8> {
+    let mut builder = flatbuffers::FlatBufferBuilder::new();
+    let input_name = builder.create_string("input");
+    let output_name = builder.create_string("output");
+    let zero_in_name = builder.create_string("zero_in");
+    let zero_out_name = builder.create_string("zero_out");
+    let shape = builder.create_vector(&[4_i32]);
+    let input = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(input_name),
+            shape: Some(shape),
+            type_: wire::DType::FP16,
+            ..Default::default()
+        },
+    );
+    let output = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(output_name),
+            shape: Some(shape),
+            type_: wire::DType::FP16,
+            ..Default::default()
+        },
+    );
+    let (attribute_type, attribute) = match op {
+        wire::Op::ABS => {
+            let value = wire::AbsAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::AbsAttribute, value.as_union_value())
+        }
+        wire::Op::CEIL => {
+            let value = wire::CeilAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::CeilAttribute, value.as_union_value())
+        }
+        wire::Op::COS => {
+            let value = wire::CosAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::CosAttribute, value.as_union_value())
+        }
+        wire::Op::EXP => {
+            let value = wire::ExpAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::ExpAttribute, value.as_union_value())
+        }
+        wire::Op::FLOOR => {
+            let value = wire::FloorAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::FloorAttribute, value.as_union_value())
+        }
+        wire::Op::LOG => {
+            let value = wire::LogAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::LogAttribute, value.as_union_value())
+        }
+        wire::Op::NEGATE => {
+            let value = wire::NegateAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::NegateAttribute, value.as_union_value())
+        }
+        wire::Op::RECIPROCAL => {
+            let value = wire::ReciprocalAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::ReciprocalAttribute, value.as_union_value())
+        }
+        wire::Op::RSQRT => {
+            let value = wire::RsqrtAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::RsqrtAttribute, value.as_union_value())
+        }
+        wire::Op::SIN => {
+            let value = wire::SinAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::SinAttribute, value.as_union_value())
+        }
+        wire::Op::SIGMOID => {
+            let value = wire::SigmoidAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::SigmoidAttribute, value.as_union_value())
+        }
+        wire::Op::TANH => {
+            let value = wire::TanhAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::TanhAttribute, value.as_union_value())
+        }
+        wire::Op::CLAMP => {
+            let minimum = builder.create_vector(&0xbc00_u16.to_le_bytes());
+            let maximum = builder.create_vector(&0x3c00_u16.to_le_bytes());
+            let value = wire::ClampAttribute::create(
+                &mut builder,
+                &wire::ClampAttributeArgs {
+                    min_val: Some(minimum),
+                    max_val: Some(maximum),
+                    nan_mode: wire::NanPropagationMode::PROPAGATE,
+                },
+            );
+            (wire::Attribute::ClampAttribute, value.as_union_value())
+        }
+        _ => panic!("unsupported unary fixture op"),
+    };
+    let mut tensors = vec![input, output];
+    let mut operators = Vec::new();
+    let inputs = if op == wire::Op::NEGATE {
+        let zero_shape = builder.create_vector(&[1_i32]);
+        let zero_data = builder.create_vector(&0_u16.to_le_bytes());
+        for name in [zero_in_name, zero_out_name] {
+            tensors.push(wire::TosaTensor::create(
+                &mut builder,
+                &wire::TosaTensorArgs {
+                    name: Some(name),
+                    shape: Some(zero_shape),
+                    type_: wire::DType::FP16,
+                    data: Some(zero_data),
+                    ..Default::default()
+                },
+            ));
+            let attribute = wire::ConstAttribute::create(&mut builder, &Default::default());
+            let outputs = builder.create_vector(&[name]);
+            operators.push(wire::TosaOperator::create(
+                &mut builder,
+                &wire::TosaOperatorArgs {
+                    op: wire::Op::CONST,
+                    attribute_type: wire::Attribute::ConstAttribute,
+                    attribute: Some(attribute.as_union_value()),
+                    inputs: None,
+                    outputs: Some(outputs),
+                    location: None,
+                },
+            ));
+        }
+        builder.create_vector(&[input_name, zero_in_name, zero_out_name])
+    } else {
+        builder.create_vector(&[input_name])
+    };
+    let outputs = builder.create_vector(&[output_name]);
+    operators.push(wire::TosaOperator::create(
+        &mut builder,
+        &wire::TosaOperatorArgs {
+            op,
+            attribute_type,
+            attribute: Some(attribute),
+            inputs: Some(inputs),
+            outputs: Some(outputs),
+            location: None,
+        },
+    ));
+    let tensors = builder.create_vector(&tensors);
+    let operators = builder.create_vector(&operators);
+    let block_inputs = builder.create_vector(&[input_name]);
+    let block_outputs = builder.create_vector(&[output_name]);
+    finish_fixture!(
+        builder,
+        tensors,
+        operators,
+        block_inputs,
+        block_outputs,
+        None
+    )
+}
+
+fn comparison_fp16_bytes(op: wire::Op) -> Vec<u8> {
+    let mut builder = flatbuffers::FlatBufferBuilder::new();
+    let left_name = builder.create_string("left");
+    let right_name = builder.create_string("right");
+    let output_name = builder.create_string("output");
+    let shape = builder.create_vector(&[4_i32]);
+    let left = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(left_name),
+            shape: Some(shape),
+            type_: wire::DType::FP16,
+            ..Default::default()
+        },
+    );
+    let right = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(right_name),
+            shape: Some(shape),
+            type_: wire::DType::FP16,
+            ..Default::default()
+        },
+    );
+    let output = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(output_name),
+            shape: Some(shape),
+            type_: wire::DType::BOOL,
+            ..Default::default()
+        },
+    );
+    let (attribute_type, attribute) = match op {
+        wire::Op::EQUAL => {
+            let value = wire::EqualAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::EqualAttribute, value.as_union_value())
+        }
+        wire::Op::GREATER => {
+            let value = wire::GreaterAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::GreaterAttribute, value.as_union_value())
+        }
+        wire::Op::GREATER_EQUAL => {
+            let value = wire::GreaterEqualAttribute::create(&mut builder, &Default::default());
+            (
+                wire::Attribute::GreaterEqualAttribute,
+                value.as_union_value(),
+            )
+        }
+        _ => panic!("unsupported comparison fixture op"),
+    };
+    let inputs = builder.create_vector(&[left_name, right_name]);
+    let outputs = builder.create_vector(&[output_name]);
+    let operator = wire::TosaOperator::create(
+        &mut builder,
+        &wire::TosaOperatorArgs {
+            op,
+            attribute_type,
+            attribute: Some(attribute),
+            inputs: Some(inputs),
+            outputs: Some(outputs),
+            location: None,
+        },
+    );
+    let tensors = builder.create_vector(&[left, right, output]);
+    let operators = builder.create_vector(&[operator]);
+    let block_inputs = builder.create_vector(&[left_name, right_name]);
+    let block_outputs = builder.create_vector(&[output_name]);
+    finish_fixture!(
+        builder,
+        tensors,
+        operators,
+        block_inputs,
+        block_outputs,
+        None
+    )
+}
+
+fn logical_bool_bytes(op: wire::Op) -> Vec<u8> {
+    let mut builder = flatbuffers::FlatBufferBuilder::new();
+    let left_name = builder.create_string("left");
+    let right_name = builder.create_string("right");
+    let output_name = builder.create_string("output");
+    let shape = builder.create_vector(&[4_i32]);
+    let left = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(left_name),
+            shape: Some(shape),
+            type_: wire::DType::BOOL,
+            ..Default::default()
+        },
+    );
+    let right = (op != wire::Op::LOGICAL_NOT).then(|| {
+        wire::TosaTensor::create(
+            &mut builder,
+            &wire::TosaTensorArgs {
+                name: Some(right_name),
+                shape: Some(shape),
+                type_: wire::DType::BOOL,
+                ..Default::default()
+            },
+        )
+    });
+    let output = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(output_name),
+            shape: Some(shape),
+            type_: wire::DType::BOOL,
+            ..Default::default()
+        },
+    );
+    let (attribute_type, attribute) = match op {
+        wire::Op::LOGICAL_AND => {
+            let value = wire::LogicalAndAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::LogicalAndAttribute, value.as_union_value())
+        }
+        wire::Op::LOGICAL_OR => {
+            let value = wire::LogicalOrAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::LogicalOrAttribute, value.as_union_value())
+        }
+        wire::Op::LOGICAL_XOR => {
+            let value = wire::LogicalXorAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::LogicalXorAttribute, value.as_union_value())
+        }
+        wire::Op::LOGICAL_NOT => {
+            let value = wire::LogicalNotAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::LogicalNotAttribute, value.as_union_value())
+        }
+        _ => panic!("unsupported logical fixture op"),
+    };
+    let inputs = if right.is_some() {
+        builder.create_vector(&[left_name, right_name])
+    } else {
+        builder.create_vector(&[left_name])
+    };
+    let outputs = builder.create_vector(&[output_name]);
+    let operator = wire::TosaOperator::create(
+        &mut builder,
+        &wire::TosaOperatorArgs {
+            op,
+            attribute_type,
+            attribute: Some(attribute),
+            inputs: Some(inputs),
+            outputs: Some(outputs),
+            location: None,
+        },
+    );
+    let tensors = if let Some(right) = right {
+        builder.create_vector(&[left, right, output])
+    } else {
+        builder.create_vector(&[left, output])
+    };
+    let operators = builder.create_vector(&[operator]);
+    let block_inputs = if op == wire::Op::LOGICAL_NOT {
+        builder.create_vector(&[left_name])
+    } else {
+        builder.create_vector(&[left_name, right_name])
+    };
+    let block_outputs = builder.create_vector(&[output_name]);
+    finish_fixture!(
+        builder,
+        tensors,
+        operators,
+        block_inputs,
+        block_outputs,
+        None
+    )
+}
+
+fn select_fp16_bytes() -> Vec<u8> {
+    let mut builder = flatbuffers::FlatBufferBuilder::new();
+    let condition_name = builder.create_string("condition");
+    let then_name = builder.create_string("then");
+    let else_name = builder.create_string("else");
+    let output_name = builder.create_string("output");
+    let shape = builder.create_vector(&[4_i32]);
+    let condition = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(condition_name),
+            shape: Some(shape),
+            type_: wire::DType::BOOL,
+            ..Default::default()
+        },
+    );
+    let then_value = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(then_name),
+            shape: Some(shape),
+            type_: wire::DType::FP16,
+            ..Default::default()
+        },
+    );
+    let else_value = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(else_name),
+            shape: Some(shape),
+            type_: wire::DType::FP16,
+            ..Default::default()
+        },
+    );
+    let output = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(output_name),
+            shape: Some(shape),
+            type_: wire::DType::FP16,
+            ..Default::default()
+        },
+    );
+    let attribute = wire::SelectAttribute::create(&mut builder, &Default::default());
+    let inputs = builder.create_vector(&[condition_name, then_name, else_name]);
+    let outputs = builder.create_vector(&[output_name]);
+    let operator = wire::TosaOperator::create(
+        &mut builder,
+        &wire::TosaOperatorArgs {
+            op: wire::Op::SELECT,
+            attribute_type: wire::Attribute::SelectAttribute,
+            attribute: Some(attribute.as_union_value()),
+            inputs: Some(inputs),
+            outputs: Some(outputs),
+            location: None,
+        },
+    );
+    let tensors = builder.create_vector(&[condition, then_value, else_value, output]);
+    let operators = builder.create_vector(&[operator]);
+    let block_inputs = builder.create_vector(&[condition_name, then_name, else_name]);
+    let block_outputs = builder.create_vector(&[output_name]);
+    finish_fixture!(
+        builder,
+        tensors,
+        operators,
+        block_inputs,
+        block_outputs,
+        None
+    )
+}
+
+fn reduction_fp16_bytes(op: wire::Op) -> Vec<u8> {
+    let mut builder = flatbuffers::FlatBufferBuilder::new();
+    let input_name = builder.create_string("input");
+    let output_name = builder.create_string("output");
+    let input_shape = builder.create_vector(&[2_i32, 3]);
+    let output_shape = if op == wire::Op::ARGMAX {
+        builder.create_vector(&[2_i32][..])
+    } else {
+        builder.create_vector(&[2_i32, 1][..])
+    };
+    let input = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(input_name),
+            shape: Some(input_shape),
+            type_: wire::DType::FP16,
+            ..Default::default()
+        },
+    );
+    let output = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(output_name),
+            shape: Some(output_shape),
+            type_: if op == wire::Op::ARGMAX {
+                wire::DType::INT32
+            } else {
+                wire::DType::FP16
+            },
+            ..Default::default()
+        },
+    );
+    let (attribute_type, attribute) = match op {
+        wire::Op::ARGMAX => {
+            let value = wire::ArgMaxAttribute::create(
+                &mut builder,
+                &wire::ArgMaxAttributeArgs {
+                    axis: 1,
+                    nan_mode: wire::NanPropagationMode::PROPAGATE,
+                },
+            );
+            (wire::Attribute::ArgMaxAttribute, value.as_union_value())
+        }
+        wire::Op::REDUCE_MAX => {
+            let value = wire::ReduceMaxAttribute::create(
+                &mut builder,
+                &wire::ReduceMaxAttributeArgs {
+                    axis: 1,
+                    nan_mode: wire::NanPropagationMode::PROPAGATE,
+                },
+            );
+            (wire::Attribute::ReduceMaxAttribute, value.as_union_value())
+        }
+        wire::Op::REDUCE_MIN => {
+            let value = wire::ReduceMinAttribute::create(
+                &mut builder,
+                &wire::ReduceMinAttributeArgs {
+                    axis: 1,
+                    nan_mode: wire::NanPropagationMode::PROPAGATE,
+                },
+            );
+            (wire::Attribute::ReduceMinAttribute, value.as_union_value())
+        }
+        wire::Op::REDUCE_PRODUCT => {
+            let value = wire::ReduceProductAttribute::create(
+                &mut builder,
+                &wire::ReduceProductAttributeArgs { axis: 1 },
+            );
+            (
+                wire::Attribute::ReduceProductAttribute,
+                value.as_union_value(),
+            )
+        }
+        wire::Op::REDUCE_SUM => {
+            let value = wire::ReduceSumAttribute::create(
+                &mut builder,
+                &wire::ReduceSumAttributeArgs { axis: 1 },
+            );
+            (wire::Attribute::ReduceSumAttribute, value.as_union_value())
+        }
+        _ => panic!("unsupported reduction fixture op"),
+    };
+    let inputs = builder.create_vector(&[input_name]);
+    let outputs = builder.create_vector(&[output_name]);
+    let operator = wire::TosaOperator::create(
+        &mut builder,
+        &wire::TosaOperatorArgs {
+            op,
+            attribute_type,
+            attribute: Some(attribute),
+            inputs: Some(inputs),
+            outputs: Some(outputs),
+            location: None,
+        },
+    );
+    let tensors = builder.create_vector(&[input, output]);
+    let operators = builder.create_vector(&[operator]);
+    let block_inputs = builder.create_vector(&[input_name]);
+    let block_outputs = builder.create_vector(&[output_name]);
+    finish_fixture!(
+        builder,
+        tensors,
+        operators,
+        block_inputs,
+        block_outputs,
+        None
+    )
+}
+
+fn movement_fp16_bytes(op: wire::Op) -> Vec<u8> {
+    let mut builder = flatbuffers::FlatBufferBuilder::new();
+    let first_name = builder.create_string("first");
+    let second_name = builder.create_string("second");
+    let parameter_name = builder.create_string("parameter");
+    let output_name = builder.create_string("output");
+    match op {
+        wire::Op::CONST => {
+            let shape = builder.create_vector(&[4_i32]);
+            let constant_data = builder.create_vector(
+                &[0x3c00_u16, 0x4000, 0x4200, 0x4400]
+                    .into_iter()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            );
+            let first = wire::TosaTensor::create(
+                &mut builder,
+                &wire::TosaTensorArgs {
+                    name: Some(first_name),
+                    shape: Some(shape),
+                    type_: wire::DType::FP16,
+                    ..Default::default()
+                },
+            );
+            let parameter = wire::TosaTensor::create(
+                &mut builder,
+                &wire::TosaTensorArgs {
+                    name: Some(parameter_name),
+                    shape: Some(shape),
+                    type_: wire::DType::FP16,
+                    data: Some(constant_data),
+                    ..Default::default()
+                },
+            );
+            let output = wire::TosaTensor::create(
+                &mut builder,
+                &wire::TosaTensorArgs {
+                    name: Some(output_name),
+                    shape: Some(shape),
+                    type_: wire::DType::FP16,
+                    ..Default::default()
+                },
+            );
+            let const_attribute = wire::ConstAttribute::create(&mut builder, &Default::default());
+            let const_outputs = builder.create_vector(&[parameter_name]);
+            let constant = wire::TosaOperator::create(
+                &mut builder,
+                &wire::TosaOperatorArgs {
+                    op: wire::Op::CONST,
+                    attribute_type: wire::Attribute::ConstAttribute,
+                    attribute: Some(const_attribute.as_union_value()),
+                    inputs: None,
+                    outputs: Some(const_outputs),
+                    location: None,
+                },
+            );
+            let add_attribute = wire::AddAttribute::create(&mut builder, &Default::default());
+            let add_inputs = builder.create_vector(&[first_name, parameter_name]);
+            let add_outputs = builder.create_vector(&[output_name]);
+            let add = wire::TosaOperator::create(
+                &mut builder,
+                &wire::TosaOperatorArgs {
+                    op: wire::Op::ADD,
+                    attribute_type: wire::Attribute::AddAttribute,
+                    attribute: Some(add_attribute.as_union_value()),
+                    inputs: Some(add_inputs),
+                    outputs: Some(add_outputs),
+                    location: None,
+                },
+            );
+            let tensors = builder.create_vector(&[first, parameter, output]);
+            let operators = builder.create_vector(&[constant, add]);
+            let inputs = builder.create_vector(&[first_name]);
+            let outputs = builder.create_vector(&[output_name]);
+            finish_fixture!(builder, tensors, operators, inputs, outputs, None)
+        }
+        wire::Op::RESHAPE => {
+            let input_shape = builder.create_vector(&[2_i32, 2]);
+            let output_shape = builder.create_vector(&[1_i32, 4]);
+            let first = wire::TosaTensor::create(
+                &mut builder,
+                &wire::TosaTensorArgs {
+                    name: Some(first_name),
+                    shape: Some(input_shape),
+                    type_: wire::DType::FP16,
+                    ..Default::default()
+                },
+            );
+            let output = wire::TosaTensor::create(
+                &mut builder,
+                &wire::TosaTensorArgs {
+                    name: Some(output_name),
+                    shape: Some(output_shape),
+                    type_: wire::DType::FP16,
+                    ..Default::default()
+                },
+            );
+            let shape_bytes = [1_i64, 4_i64]
+                .into_iter()
+                .flat_map(i64::to_le_bytes)
+                .collect::<Vec<_>>();
+            let shape_data = builder.create_vector(&shape_bytes);
+            let parameter = wire::TosaShape::create(
+                &mut builder,
+                &wire::TosaShapeArgs {
+                    name: Some(parameter_name),
+                    rank: 2,
+                    data: Some(shape_data),
+                },
+            );
+            let const_attribute =
+                wire::ConstShapeAttribute::create(&mut builder, &Default::default());
+            let const_outputs = builder.create_vector(&[parameter_name]);
+            let constant = wire::TosaOperator::create(
+                &mut builder,
+                &wire::TosaOperatorArgs {
+                    op: wire::Op::CONST_SHAPE,
+                    attribute_type: wire::Attribute::ConstShapeAttribute,
+                    attribute: Some(const_attribute.as_union_value()),
+                    inputs: None,
+                    outputs: Some(const_outputs),
+                    location: None,
+                },
+            );
+            let reshape_attribute =
+                wire::ReshapeAttribute::create(&mut builder, &Default::default());
+            let reshape_inputs = builder.create_vector(&[first_name, parameter_name]);
+            let reshape_outputs = builder.create_vector(&[output_name]);
+            let reshape = wire::TosaOperator::create(
+                &mut builder,
+                &wire::TosaOperatorArgs {
+                    op: wire::Op::RESHAPE,
+                    attribute_type: wire::Attribute::ReshapeAttribute,
+                    attribute: Some(reshape_attribute.as_union_value()),
+                    inputs: Some(reshape_inputs),
+                    outputs: Some(reshape_outputs),
+                    location: None,
+                },
+            );
+            let tensors = builder.create_vector(&[first, output]);
+            let operators = builder.create_vector(&[constant, reshape]);
+            let inputs = builder.create_vector(&[first_name]);
+            let outputs = builder.create_vector(&[output_name]);
+            let shapes = builder.create_vector(&[parameter]);
+            finish_fixture!(builder, tensors, operators, inputs, outputs, Some(shapes))
+        }
+        wire::Op::TRANSPOSE => movement_single_input(
+            builder,
+            first_name,
+            output_name,
+            &[2, 3],
+            &[3, 2],
+            op,
+            &[1, 0],
+        ),
+        wire::Op::REVERSE => {
+            movement_single_input(builder, first_name, output_name, &[2, 3], &[2, 3], op, &[1])
+        }
+        wire::Op::CONCAT => {
+            let input_shape = builder.create_vector(&[2_i32, 1]);
+            let output_shape = builder.create_vector(&[2_i32, 2]);
+            let first = wire::TosaTensor::create(
+                &mut builder,
+                &wire::TosaTensorArgs {
+                    name: Some(first_name),
+                    shape: Some(input_shape),
+                    type_: wire::DType::FP16,
+                    ..Default::default()
+                },
+            );
+            let second = wire::TosaTensor::create(
+                &mut builder,
+                &wire::TosaTensorArgs {
+                    name: Some(second_name),
+                    shape: Some(input_shape),
+                    type_: wire::DType::FP16,
+                    ..Default::default()
+                },
+            );
+            let output = wire::TosaTensor::create(
+                &mut builder,
+                &wire::TosaTensorArgs {
+                    name: Some(output_name),
+                    shape: Some(output_shape),
+                    type_: wire::DType::FP16,
+                    ..Default::default()
+                },
+            );
+            let attribute =
+                wire::ConcatAttribute::create(&mut builder, &wire::ConcatAttributeArgs { axis: 1 });
+            let op_inputs = builder.create_vector(&[first_name, second_name]);
+            let op_outputs = builder.create_vector(&[output_name]);
+            let operator = wire::TosaOperator::create(
+                &mut builder,
+                &wire::TosaOperatorArgs {
+                    op,
+                    attribute_type: wire::Attribute::ConcatAttribute,
+                    attribute: Some(attribute.as_union_value()),
+                    inputs: Some(op_inputs),
+                    outputs: Some(op_outputs),
+                    location: None,
+                },
+            );
+            let tensors = builder.create_vector(&[first, second, output]);
+            let operators = builder.create_vector(&[operator]);
+            let inputs = builder.create_vector(&[first_name, second_name]);
+            let outputs = builder.create_vector(&[output_name]);
+            finish_fixture!(builder, tensors, operators, inputs, outputs, None)
+        }
+        _ => panic!("unsupported movement fixture op"),
+    }
+}
+
+fn movement_single_input<'a>(
+    mut builder: flatbuffers::FlatBufferBuilder<'a>,
+    input_name: flatbuffers::WIPOffset<&'a str>,
+    output_name: flatbuffers::WIPOffset<&'a str>,
+    input_dims: &[i32],
+    output_dims: &[i32],
+    op: wire::Op,
+    parameters: &[i32],
+) -> Vec<u8> {
+    let input_shape = builder.create_vector(input_dims);
+    let output_shape = builder.create_vector(output_dims);
+    let input = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(input_name),
+            shape: Some(input_shape),
+            type_: wire::DType::FP16,
+            ..Default::default()
+        },
+    );
+    let output = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(output_name),
+            shape: Some(output_shape),
+            type_: wire::DType::FP16,
+            ..Default::default()
+        },
+    );
+    let (attribute_type, attribute) = if op == wire::Op::TRANSPOSE {
+        let values = builder.create_vector(parameters);
+        let attribute = wire::TransposeAttribute::create(
+            &mut builder,
+            &wire::TransposeAttributeArgs {
+                perms: Some(values),
+            },
+        );
+        (
+            wire::Attribute::TransposeAttribute,
+            attribute.as_union_value(),
+        )
+    } else {
+        let attribute = wire::ReverseAttribute::create(
+            &mut builder,
+            &wire::ReverseAttributeArgs {
+                axis: parameters[0],
+            },
+        );
+        (
+            wire::Attribute::ReverseAttribute,
+            attribute.as_union_value(),
+        )
+    };
+    let inputs = builder.create_vector(&[input_name]);
+    let outputs = builder.create_vector(&[output_name]);
+    let operator = wire::TosaOperator::create(
+        &mut builder,
+        &wire::TosaOperatorArgs {
+            op,
+            attribute_type,
+            attribute: Some(attribute),
+            inputs: Some(inputs),
+            outputs: Some(outputs),
+            location: None,
+        },
+    );
+    let tensors = builder.create_vector(&[input, output]);
+    let operators = builder.create_vector(&[operator]);
+    let block_inputs = builder.create_vector(&[input_name]);
+    let block_outputs = builder.create_vector(&[output_name]);
+    finish_fixture!(
+        builder,
+        tensors,
+        operators,
+        block_inputs,
+        block_outputs,
+        None
+    )
+}
+
+fn parity_fixture(name: &str) -> Vec<u8> {
+    match name {
+        "abs" => unary_fp16_bytes(wire::Op::ABS),
+        "ceil" => unary_fp16_bytes(wire::Op::CEIL),
+        "cos" => unary_fp16_bytes(wire::Op::COS),
+        "exp" => unary_fp16_bytes(wire::Op::EXP),
+        "floor" => unary_fp16_bytes(wire::Op::FLOOR),
+        "log" => unary_fp16_bytes(wire::Op::LOG),
+        "negate" => unary_fp16_bytes(wire::Op::NEGATE),
+        "reciprocal" => unary_fp16_bytes(wire::Op::RECIPROCAL),
+        "rsqrt" => unary_fp16_bytes(wire::Op::RSQRT),
+        "sin" => unary_fp16_bytes(wire::Op::SIN),
+        "sigmoid" => unary_fp16_bytes(wire::Op::SIGMOID),
+        "tanh" => unary_fp16_bytes(wire::Op::TANH),
+        "clamp" => unary_fp16_bytes(wire::Op::CLAMP),
+        "equal" => comparison_fp16_bytes(wire::Op::EQUAL),
+        "greater" => comparison_fp16_bytes(wire::Op::GREATER),
+        "greater-equal" => comparison_fp16_bytes(wire::Op::GREATER_EQUAL),
+        "logical-and" => logical_bool_bytes(wire::Op::LOGICAL_AND),
+        "logical-or" => logical_bool_bytes(wire::Op::LOGICAL_OR),
+        "logical-xor" => logical_bool_bytes(wire::Op::LOGICAL_XOR),
+        "logical-not" => logical_bool_bytes(wire::Op::LOGICAL_NOT),
+        "select" => select_fp16_bytes(),
+        "argmax" => reduction_fp16_bytes(wire::Op::ARGMAX),
+        "reduce-max" => reduction_fp16_bytes(wire::Op::REDUCE_MAX),
+        "reduce-min" => reduction_fp16_bytes(wire::Op::REDUCE_MIN),
+        "reduce-product" => reduction_fp16_bytes(wire::Op::REDUCE_PRODUCT),
+        "reduce-sum" => reduction_fp16_bytes(wire::Op::REDUCE_SUM),
+        "const" => movement_fp16_bytes(wire::Op::CONST),
+        "reshape" => movement_fp16_bytes(wire::Op::RESHAPE),
+        "transpose" => movement_fp16_bytes(wire::Op::TRANSPOSE),
+        "reverse" => movement_fp16_bytes(wire::Op::REVERSE),
+        "concat" => movement_fp16_bytes(wire::Op::CONCAT),
+        _ => panic!("unknown parity fixture {name}"),
+    }
+}
+
+const PARITY_FIXTURE_NAMES: &[&str] = &[
+    "abs",
+    "ceil",
+    "cos",
+    "exp",
+    "floor",
+    "log",
+    "negate",
+    "reciprocal",
+    "rsqrt",
+    "sin",
+    "sigmoid",
+    "tanh",
+    "clamp",
+    "equal",
+    "greater",
+    "greater-equal",
+    "logical-and",
+    "logical-or",
+    "logical-xor",
+    "logical-not",
+    "select",
+    "argmax",
+    "reduce-max",
+    "reduce-min",
+    "reduce-product",
+    "reduce-sum",
+    "const",
+    "reshape",
+    "transpose",
+    "reverse",
+    "concat",
+];
+
+#[test]
+fn parity_fixtures_are_semantically_valid() {
+    let target = Target::new(
+        Version::TOSA_1_0,
+        ProfileSet::FLOATING_POINT,
+        Level::Level8K,
+        ExtensionSet::NONE,
+    );
+    for name in PARITY_FIXTURE_NAMES {
+        parse(&parity_fixture(name))
+            .unwrap_or_else(|error| panic!("{name} parse: {error:?}"))
+            .validate_for(target)
+            .unwrap_or_else(|error| panic!("{name} semantics: {error:?}"));
+    }
+}
+
+#[test]
+#[ignore = "writes one requested checked-in operator-parity fixture"]
+fn regenerate_operator_parity_fixture() {
+    let name = std::env::var("VIRTIO_ACCEL_TOSA_FIXTURE_NAME")
+        .expect("set VIRTIO_ACCEL_TOSA_FIXTURE_NAME");
+    let destination = std::env::var_os("VIRTIO_ACCEL_TOSA_FIXTURE_OUT")
+        .expect("set VIRTIO_ACCEL_TOSA_FIXTURE_OUT to the exact output path");
+    std::fs::write(destination, parity_fixture(&name)).unwrap();
 }
 
 #[test]
