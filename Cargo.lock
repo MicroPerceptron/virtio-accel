@@ -227,6 +227,8 @@ dependencies = [
  "cc",
  "virtio-accel-conformance",
  "virtio-accel-core",
+ "virtio-accel-coreml",
+ "virtio-accel-openvino",
  "virtio-accel-tosa",
 ]
 
