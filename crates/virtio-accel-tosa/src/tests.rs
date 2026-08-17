@@ -1470,7 +1470,8 @@ fn movement_fp16_bytes(op: wire::Op) -> Vec<u8> {
             let shape = builder.create_vector(&[4_i32]);
             let constant_data = builder.create_vector(
                 &[0x3c00_u16, 0x4000, 0x4200, 0x4400]
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .flat_map(u16::to_le_bytes)
                     .collect::<Vec<_>>(),
             );
