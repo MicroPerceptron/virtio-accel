@@ -43,7 +43,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.85"
@@ -60,17 +60,19 @@ serde_json = "1.0.151"
 zerocopy = { version = "0.8.56", default-features = false, features = [
     "derive",
 ] }
-virtio-accel-core = { path = "crates/virtio-accel-core", version = "0.2.1" }
-virtio-accel-cleanroom = { path = "conformance/rust-clean-room", version = "0.2.1" }
-virtio-accel-conformance = { path = "crates/virtio-accel-conformance", version = "0.2.1" }
-virtio-accel-device = { path = "crates/virtio-accel-device", version = "0.2.1" }
-virtio-accel-guest = { path = "crates/virtio-accel-guest", version = "0.2.1" }
-virtio-accel-hexagon = { path = "crates/virtio-accel-hexagon", version = "0.2.1" }
-virtio-accel-mock = { path = "crates/virtio-accel-mock", version = "0.2.1" }
-virtio-accel-proto = { path = "crates/virtio-accel-proto", version = "0.2.1" }
-virtio-accel-split-queue = { path = "crates/virtio-accel-split-queue", version = "0.2.1" }
-virtio-accel-tosa = { path = "crates/virtio-accel-tosa", version = "0.2.1" }
-virtio-accel-transport = { path = "crates/virtio-accel-transport", version = "0.2.1" }
+virtio-accel-core = { path = "crates/virtio-accel-core", version = "0.3.0" }
+virtio-accel-cleanroom = { path = "conformance/rust-clean-room", version = "0.3.0" }
+virtio-accel-conformance = { path = "crates/virtio-accel-conformance", version = "0.3.0" }
+virtio-accel-coreml = { path = "crates/virtio-accel-coreml", version = "0.3.0" }
+virtio-accel-device = { path = "crates/virtio-accel-device", version = "0.3.0" }
+virtio-accel-guest = { path = "crates/virtio-accel-guest", version = "0.3.0" }
+virtio-accel-hexagon = { path = "crates/virtio-accel-hexagon", version = "0.3.0" }
+virtio-accel-mock = { path = "crates/virtio-accel-mock", version = "0.3.0" }
+virtio-accel-openvino = { path = "crates/virtio-accel-openvino", version = "0.3.0" }
+virtio-accel-proto = { path = "crates/virtio-accel-proto", version = "0.3.0" }
+virtio-accel-split-queue = { path = "crates/virtio-accel-split-queue", version = "0.3.0" }
+virtio-accel-tosa = { path = "crates/virtio-accel-tosa", version = "0.3.0" }
+virtio-accel-transport = { path = "crates/virtio-accel-transport", version = "0.3.0" }
 
 [dependencies]
 virtio-accel-core.workspace = true
