@@ -42,14 +42,11 @@ custom hooks that read those values directly.
 
 Use this crate as the stable boundary around your concrete vAccel backend type:
 
-```rust
-let accelerator = VAccelAdapter::new(vaccel_backend);
-let report = virtio_accel_conformance::run(
-    || accelerator,
-    &my_target,
-    &my_hooks,
-);
-```
+    let report = virtio_accel_conformance::run(
+        || VAccelAdapter::new(MyBackend::new(/* ... */)),
+        &my_target,
+        &my_hooks,
+    );
 
 ## Representative validation path
 
