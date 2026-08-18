@@ -10,8 +10,10 @@
 //!   `explicit_transfer_bytes`) to keep integration evidence visible in conformance harnesses.
 
 #![forbid(unsafe_code)]
+#![no_std]
 
 use core::sync::atomic::{AtomicU64, Ordering};
+use core::{convert::TryFrom, result::Result};
 
 use virtio_accel_core::{
     Accelerator, AllocatedBuffer, ArtifactRef, BackendError, BindingRef, BufferDesc, ByteSink,
@@ -40,8 +42,10 @@ impl SubmissionPathCounters {
     }
 
     fn record_submission(&self, bindings: usize) {
-        self.direct_bindings
-            .fetch_add(u64::try_from(bindings).unwrap_or(u64::MAX), Ordering::Relaxed);
+        self.direct_bindings.fetch_add(
+            u64::try_from(bindings).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
     }
 
     fn record_explicit_transfer(&self, bytes: u64) {
