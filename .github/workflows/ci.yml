@@ -158,6 +158,31 @@ jobs:
       - name: Run the example against the real runtime
         run: cargo run -p virtio-accel-openvino --example tosa_openvino
 
+  freebsd-qemu-smoke:
+    name: freebsd-qemu-smoke (amd64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    continue-on-error: true
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install QEMU + SSH helpers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 xz-utils sshpass
+
+      - name: Run FreeBSD QEMU portable smoke test
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+          FREEBSD_QEMU_IMAGE_RELEASE: 14.0-RELEASE
+          FREEBSD_QEMU_SSH_PORT: 2222
+          FREEBSD_QEMU_SSH_TIMEOUT_SECONDS: 600
+          FREEBSD_QEMU_COMMAND_TIMEOUT_SECONDS: 1800
+        run: bash ci/freebsd-qemu-smoke.sh
+
   msrv:
     name: msrv (1.85.0)
     runs-on: ubuntu-latest
