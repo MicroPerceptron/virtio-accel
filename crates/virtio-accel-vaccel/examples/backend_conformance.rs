@@ -1,9 +1,10 @@
-use virtio_accel::core::BackendError;
 use virtio_accel_conformance::{
-    BindingFixture, ConformanceHooks, ProgramFixture, SubmissionPathDiagnostics, TargetDescription, run,
+    BindingFixture, ConformanceHooks, ProgramFixture, SubmissionPathDiagnostics, TargetDescription,
+    run,
 };
+use virtio_accel_core::BackendError;
 use virtio_accel_core::{AccessMode, MemoryDomain};
-use virtio_accel_mock::{reference, MockAccelerator, MockEvent};
+use virtio_accel_mock::{MockAccelerator, MockEvent, reference};
 use virtio_accel_vaccel::VAccelAdapter;
 
 struct Hooks;
@@ -44,7 +45,7 @@ fn target() -> TargetDescription {
         .unwrap(),
         BindingFixture::new(
             7,
-            virtio_accel::core::AccessMode::ReadWrite,
+            AccessMode::ReadWrite,
             MemoryDomain::Shared,
             16,
             initial,

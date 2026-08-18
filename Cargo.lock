@@ -278,6 +278,15 @@ name = "virtio-accel-transport"
 version = "0.3.0"
 
 [[package]]
+name = "virtio-accel-vaccel"
+version = "0.3.0"
+dependencies = [
+ "virtio-accel-conformance",
+ "virtio-accel-core",
+ "virtio-accel-mock",
+]
+
+[[package]]
 name = "zerocopy"
 version = "0.8.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
