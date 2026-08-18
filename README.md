@@ -82,6 +82,7 @@ than a typed hardware implementation.
 | `virtio-accel-transport`   | `core`         | Dependency-free descriptor-chain, queue, reset, and notification ports                                       |
 | `virtio-accel-core`        | `core`         | Backend lifecycle, memory, program, queue, and event contracts                                               |
 | `virtio-accel-tosa`        | `core + alloc` | Bounded zero-copy TOSA 1.0 validation, lowering analysis, specialization, and packed low-precision utilities |
+| `virtio-accel-vaccel`      | `core`         | Adapter seam for mapping native provider contracts (including vAccel-style backends) to `virtio-accel-core` |
 | `virtio-accel-coreml`      | macOS `std`    | TOSA-to-Core ML lowering, direct buffers, and asynchronous ANE-capable prediction                            |
 | `virtio-accel-openvino`    | Linux `std` (probed) | TOSA-to-OpenVINO IR lowering, direct host-pointer tensors, and asynchronous NPU/GPU/CPU inference      |
 | `virtio-accel-hexagon`     | Windows ARM64 `std` (probed) | Strict FP16/INT8 TOSA-to-QNN lowering, direct buffers, and asynchronous Hexagon HTP execution |
@@ -117,6 +118,7 @@ virtio-accel-openvino --------+--------------> virtio-accel-core
 virtio-accel-hexagon ---------+--------------> virtio-accel-core
                               |
                               +--------------> virtio-accel-tosa
+virtio-accel-vaccel -----------------------> virtio-accel-core
 other provider adapters --------------------> virtio-accel-core
 ```
 
@@ -142,6 +144,20 @@ On an ANE-capable Mac, add `virtio-accel-coreml = "0.1"` separately for the host
 On a Linux host with an OpenVINO 2026.x runtime, add `virtio-accel-openvino = "0.1"` instead. Both
 adapters accept the production TOSA 1.0 program format; validation, analysis, and native model
 generation all happen inside the adapter. Neither is re-exported by the portable facade.
+
+For portable adapter-boundary validation while the native vAccel path is wired, add
+`virtio-accel-vaccel = "0.1"`. The crate exposes a vAccel seam with an in-repo representative
+conformance recipe and explicit copy-path diagnostics.
+
+## Adapter profiles
+
+- **Portable-only profile:** use `virtio-accel` (+ `virtio-accel-mock`) to keep all portable layers
+  and conformance fixtures inside the workspace.
+- **Adapter profile:** add `virtio-accel-vaccel` when you need an adapter seam for native/vAccel-like
+  implementations that still re-export the `Accelerator` contract from `virtio-accel-core`.
+- **Production host profile:** add `virtio-accel-coreml`, `virtio-accel-openvino`, and/or
+  `virtio-accel-hexagon` instead of any mock backend once provider licensing and native runtime
+  availability are in place.
 
 `virtio-accel-hexagon = "0.2"` exposes the separate Qualcomm adapter. A complete QAIRT/QNN SDK on
 Windows ARM64 enables its HTP backend; SDK-free builds validate its strict FP16 graph planner and

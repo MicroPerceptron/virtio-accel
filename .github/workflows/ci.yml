@@ -95,6 +95,9 @@ jobs:
       - name: Run backend conformance example
         run: cargo run --example backend_conformance
 
+      - name: Run vAccel adapter conformance example
+        run: cargo run -p virtio-accel-vaccel --example backend_conformance
+
       - name: Run reference execution example
         run: cargo run --example reference_execution
 
@@ -211,6 +214,7 @@ jobs:
           -p virtio-accel-split-queue
           -p virtio-accel-tosa
           -p virtio-accel
+          -p virtio-accel-vaccel
           --target ${{ matrix.target }}
           --no-default-features
 
