@@ -139,8 +139,11 @@ impl<A: Accelerator> Accelerator for VAccelAdapter<A> {
         offset: u64,
         data: &dyn ByteSource,
     ) -> Result<(), BackendError> {
-        self.counters.record_explicit_transfer(data.len());
-        self.inner.write_buffer(buffer, offset, data)
+        let result = self.inner.write_buffer(buffer, offset, data);
+        if result.is_ok() {
+            self.counters.record_explicit_transfer(data.len());
+        }
+        result
     }
 
     fn read_buffer(
