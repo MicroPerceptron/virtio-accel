@@ -177,7 +177,7 @@ jobs:
       - name: Run FreeBSD QEMU portable smoke test
         env:
           GITHUB_SHA: ${{ github.sha }}
-          FREEBSD_QEMU_IMAGE_RELEASE: 14.0-RELEASE
+          FREEBSD_QEMU_IMAGE_RELEASE: 14.4-RELEASE
           FREEBSD_QEMU_SSH_PORT: 2222
           FREEBSD_QEMU_SSH_TIMEOUT_SECONDS: 600
           FREEBSD_QEMU_COMMAND_TIMEOUT_SECONDS: 1800

@@ -3,8 +3,7 @@
 set -euo pipefail
 
 WORKDIR="${FREEBSD_QEMU_WORKDIR:-${RUNNER_TEMP:-/tmp}/virtio-accel-freebsd-qemu}"
-IMAGE_RELEASE="${FREEBSD_QEMU_IMAGE_RELEASE:-14.0-RELEASE}"
-IMAGE_BASE="https://download.freebsd.org/releases/CI-IMAGES/${IMAGE_RELEASE}/amd64/Latest"
+IMAGE_RELEASE="${FREEBSD_QEMU_IMAGE_RELEASE:-14.4-RELEASE}"
 IMAGE_NAME="${FREEBSD_QEMU_IMAGE_NAME:-}"
 SSH_PORT="${FREEBSD_QEMU_SSH_PORT:-2222}"
 SSH_TIMEOUT_SECONDS="${FREEBSD_QEMU_SSH_TIMEOUT_SECONDS:-600}"
@@ -19,15 +18,40 @@ IMAGE_FILE="${WORKDIR}/images/freebsd-ci.qcow2"
 VM_DISK="${WORKDIR}/vm.qcow2"
 QEMU_LOG="${WORKDIR}/qemu.log"
 SERIAL_LOG="${WORKDIR}/serial.log"
+FAILED_BASES=()
 
 if [[ -z "${IMAGE_NAME}" ]]; then
-  if candidate="$(curl -fsSL "${IMAGE_BASE}/" 2>/dev/null | tr -d '\r' | sed -n 's/.*href="\([^"]*amd64[^"]*qcow2[^"]*\.xz\)".*/\1/p' | head -n 1)"; then
-    IMAGE_NAME="${candidate}"
-  fi
-fi
-
-if [[ -n "${IMAGE_NAME}" && "${IMAGE_NAME}" == */* ]]; then
-  IMAGE_NAME="${IMAGE_NAME##*/}"
+  IMAGE_BASE=""
+  for release in "${IMAGE_RELEASE}" "14.4-RELEASE" "14.3-RELEASE" "14.2-RELEASE"; do
+    for base in \
+      "https://download.freebsd.org/releases/VM-IMAGES/${release}/amd64/Latest" \
+      "https://download.freebsd.org/releases/VM-IMAGES/${release}/amd64"; do
+      base_index="${base}"
+      base_html="$(curl -fsSL "${base_index}/" 2>/dev/null | tr -d '\r' || true)"
+      FAILED_BASES+=("${base_index}/")
+      if [[ -n "${base_html}" ]]; then
+        parsed="$(printf '%s' "${base_html}" | sed -n 's/.*href="\([^"]*amd64[^"]*qcow2[^"]*\.xz\)".*/\1/p' | head -n 1)"
+        if [[ -n "${parsed}" ]]; then
+          IMAGE_NAME="${parsed##*/}"
+          IMAGE_BASE="${base_index}"
+          break 2
+        fi
+      fi
+      for candidate in \
+        "FreeBSD-${release}-amd64-BASIC-CLOUDINIT-ufs.qcow2.xz" \
+        "FreeBSD-${release}-amd64-BASIC.qcow2.xz" \
+        "FreeBSD-${release}-amd64-ufs.qcow2.xz" \
+        "FreeBSD-${release}-amd64-zfs.qcow2.xz" \
+        "FreeBSD-${release}-amd64-BASIC-CLOUDINIT-zfs.qcow2.xz"; do
+        if curl -fsSLI "${base_index}/${candidate}" >/dev/null 2>&1; then
+          IMAGE_NAME="${candidate}"
+          IMAGE_BASE="${base_index}"
+          break 3
+        fi
+        FAILED_BASES+=("${base_index}/${candidate}")
+      done
+    done
+  done
 fi
 
 if [[ -n "${IMAGE_NAME}" ]]; then
@@ -35,20 +59,10 @@ if [[ -n "${IMAGE_NAME}" ]]; then
 fi
 
 if [[ -z "${IMAGE_NAME}" ]]; then
-  for candidate in \
-    "FreeBSD-${IMAGE_RELEASE}-amd64-zfs.qcow2.xz" \
-    "FreeBSD-${IMAGE_RELEASE}-amd64.qcow2.xz" \
-    "FreeBSD-${IMAGE_RELEASE}-amd64-ufs.qcow2.xz"; do
-    if curl -fsSLI "${IMAGE_BASE}/${candidate}" >/dev/null 2>&1; then
-      IMAGE_NAME="${candidate}"
-      IMAGE_SOURCE="${WORKDIR}/images/${candidate}"
-      break
-    fi
+  echo "Could not resolve a FreeBSD QCOW2 image URL. Attempted:"
+  for failed in "${FAILED_BASES[@]:-}"; do
+    echo "  - ${failed}"
   done
-fi
-
-if [[ -z "${IMAGE_NAME}" ]]; then
-  echo "Could not resolve a CI image URL from ${IMAGE_BASE}"
   exit 1
 fi
 
