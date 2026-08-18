@@ -177,7 +177,7 @@ jobs:
           mem: 4096
           cpu: 3
           prepare: |
-            pkg update -y
+            pkg update
             pkg install -y rust git
           run: |
             cargo run --example backend_conformance
