@@ -152,8 +152,11 @@ impl<A: Accelerator> Accelerator for VAccelAdapter<A> {
         offset: u64,
         data: &mut dyn ByteSink,
     ) -> Result<(), BackendError> {
-        self.counters.record_explicit_transfer(data.len());
-        self.inner.read_buffer(buffer, offset, data)
+        let result = self.inner.read_buffer(buffer, offset, data);
+        if result.is_ok() {
+            self.counters.record_explicit_transfer(data.len());
+        }
+        result
     }
 
     fn free_buffer(&self, buffer: Self::Buffer) -> Result<(), ReleaseFailure<Self::Buffer>> {
