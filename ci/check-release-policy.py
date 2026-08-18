@@ -34,6 +34,7 @@ PUBLISHED_PACKAGES = {
     "crates/virtio-accel-mock": "virtio-accel-mock",
     "crates/virtio-accel-openvino": "virtio-accel-openvino",
     "crates/virtio-accel-proto": "virtio-accel-proto",
+    "crates/virtio-accel-vaccel": "virtio-accel-vaccel",
     "crates/virtio-accel-split-queue": "virtio-accel-split-queue",
     "crates/virtio-accel-tosa": "virtio-accel-tosa",
     "crates/virtio-accel-transport": "virtio-accel-transport",
