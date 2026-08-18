@@ -169,19 +169,18 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install QEMU + SSH helpers
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 xz-utils sshpass
-
       - name: Run FreeBSD QEMU portable smoke test
-        env:
-          GITHUB_SHA: ${{ github.sha }}
-          FREEBSD_QEMU_IMAGE_RELEASE: 14.4-RELEASE
-          FREEBSD_QEMU_SSH_PORT: 2222
-          FREEBSD_QEMU_SSH_TIMEOUT_SECONDS: 600
-          FREEBSD_QEMU_COMMAND_TIMEOUT_SECONDS: 1800
-        run: bash ci/freebsd-qemu-smoke.sh
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.4"
+          usesh: true
+          mem: 4096
+          cpu: 3
+          prepare: |
+            pkg update -y
+            pkg install -y rust git
+          run: |
+            cargo run --example backend_conformance
 
   msrv:
     name: msrv (1.85.0)
