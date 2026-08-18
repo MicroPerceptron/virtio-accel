@@ -29,6 +29,7 @@ impl ConformanceHooks<VAccelAdapter<MockAccelerator>> for Hooks {
             staged_direct_bytes: 0,
             explicit_transfer_bytes: backend.explicit_transfer_bytes(),
         })
+    }
 }
 
 fn target() -> TargetDescription {
