@@ -23,13 +23,12 @@ impl ConformanceHooks<VAccelAdapter<MockAccelerator>> for Hooks {
         backend: &VAccelAdapter<MockAccelerator>,
     ) -> Option<SubmissionPathDiagnostics> {
         Some(SubmissionPathDiagnostics {
-            direct_bindings: backend.backend().direct_binding_admissions(),
+            direct_bindings: backend.direct_binding_admissions(),
             shared_imported_bindings: 0,
             staged_direct_bindings: 0,
             staged_direct_bytes: 0,
             explicit_transfer_bytes: backend.explicit_transfer_bytes(),
         })
-    }
 }
 
 fn target() -> TargetDescription {
