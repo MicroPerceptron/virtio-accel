@@ -122,13 +122,14 @@ impl OvElement {
     }
 }
 
-/// A model-boundary element type; BOOL and I64 stay internal to the graph.
+/// A model-boundary element type; I64 stays internal to the graph.
 fn boundary_element(dtype: DType) -> Result<OvElement, LoweringError> {
     match dtype {
         DType::FP16 => Ok(OvElement::F16),
         DType::FP32 => Ok(OvElement::F32),
         DType::INT8 => Ok(OvElement::I8),
         DType::INT32 => Ok(OvElement::I32),
+        DType::BOOL => Ok(OvElement::Bool),
         _ => Err(LoweringError::UnsupportedType(dtype)),
     }
 }
@@ -216,7 +217,7 @@ pub const fn supports_tosa_operator(op: Op) -> bool {
 pub const fn supports_tosa_dtype(dtype: DType) -> bool {
     matches!(
         dtype,
-        DType::FP16 | DType::FP32 | DType::INT8 | DType::INT32
+        DType::FP16 | DType::FP32 | DType::INT8 | DType::INT32 | DType::BOOL
     )
 }
 
@@ -524,7 +525,7 @@ fn validate_target_types(analysis: &TosaAnalysis<'_>, target: Target) -> Result<
         };
         let dtype = tensor.dtype();
         let mismatched = if target == OPENVINO_TOSA_TARGET {
-            dtype == DType::INT8
+            dtype == DType::INT8 && !constant_is_parameter_only(analysis, value.id())
         } else {
             matches!(dtype, DType::FP16 | DType::FP32)
         };
@@ -1264,9 +1265,9 @@ fn serialized_float_is_zero(dtype: DType, bytes: &[u8]) -> bool {
 mod tests {
     use super::*;
     use virtio_accel_conformance::numerics::{
-        IDENTITY_EDGES_FP16, IDENTITY_EDGES_FP32, IDENTITY_FP8E4M3, IDENTITY_FP8E5M2,
-        IDENTITY_INT4, IDENTITY_INT8, MATMUL_FP16, MATMUL_FP32, MATMUL_INT8, MAX_POOL2D_FP16,
-        MAX_POOL2D_FP32,
+        HEXAGON_LOGICAL_CASES, IDENTITY_EDGES_FP16, IDENTITY_EDGES_FP32, IDENTITY_FP8E4M3,
+        IDENTITY_FP8E5M2, IDENTITY_INT4, IDENTITY_INT8, MATMUL_FP16, MATMUL_FP32, MATMUL_INT8,
+        MAX_POOL2D_FP16, MAX_POOL2D_FP32, MUL_FP16,
     };
 
     const IDENTITY_FP32_LOCAL: &[u8] = include_bytes!("../tests/data/identity-fp32-v1.0.0.tosa");
@@ -1328,8 +1329,34 @@ mod tests {
         for dtype in [DType::INT4, DType::FP8E4M3, DType::FP8E5M2] {
             assert!(!supports_tosa_dtype(dtype), "{dtype:?}");
         }
-        for dtype in [DType::FP16, DType::FP32, DType::INT8, DType::INT32] {
+        for dtype in [
+            DType::FP16,
+            DType::FP32,
+            DType::INT8,
+            DType::INT32,
+            DType::BOOL,
+        ] {
             assert!(supports_tosa_dtype(dtype), "{dtype:?}");
+        }
+    }
+
+    #[test]
+    fn lowers_boolean_model_boundaries_as_direct_bytes() {
+        let case = HEXAGON_LOGICAL_CASES
+            .iter()
+            .find(|case| case.name == "logical-or")
+            .unwrap();
+        let lowered = lower_tosa(case.artifact, OPENVINO_TOSA_TARGET).unwrap();
+        let xml = xml_str(&lowered);
+        assert_eq!(xml.matches("type=\"Parameter\"").count(), 2);
+        assert_eq!(xml.matches("type=\"LogicalOr\"").count(), 1);
+        assert_eq!(xml.matches("type=\"Result\"").count(), 1);
+        assert!(xml.contains("element_type=\"boolean\""));
+        assert!(xml.contains("precision=\"BOOL\""));
+        assert_eq!(lowered.features.len(), 3);
+        for feature in &lowered.features {
+            assert_eq!(feature.element, OvElement::Bool);
+            assert_eq!(feature.byte_len, 4);
         }
     }
 
@@ -1380,6 +1407,18 @@ mod tests {
             lower_tosa(IDENTITY_FP32_LOCAL, OPENVINO_TOSA_INTEGER_TARGET),
             Err(LoweringError::Analysis(_))
         ));
+    }
+
+    #[test]
+    fn floating_target_admits_only_parameter_only_int8_constants() {
+        let lowered = lower_tosa(MUL_FP16.artifact, OPENVINO_TOSA_TARGET).unwrap();
+        assert!(xml_str(&lowered).contains("type=\"Multiply\""));
+
+        // A graph-visible INT8 boundary remains an integer-tier program.
+        assert_eq!(
+            lower_tosa(IDENTITY_INT8.artifact, OPENVINO_TOSA_TARGET).unwrap_err(),
+            LoweringError::UnsupportedType(DType::INT8)
+        );
     }
 
     #[test]
