@@ -525,7 +525,9 @@ fn validate_target_types(analysis: &TosaAnalysis<'_>, target: Target) -> Result<
         };
         let dtype = tensor.dtype();
         let mismatched = if target == OPENVINO_TOSA_TARGET {
-            dtype == DType::INT8 && !constant_is_parameter_only(analysis, value.id())
+            dtype == DType::INT8
+                && !(analysis.serialized_constant(value.id()).is_some()
+                    && constant_is_parameter_only(analysis, value.id()))
         } else {
             matches!(dtype, DType::FP16 | DType::FP32)
         };
