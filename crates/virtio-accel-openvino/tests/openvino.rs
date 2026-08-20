@@ -8,8 +8,9 @@
 use std::time::{Duration, Instant};
 
 use virtio_accel_conformance::numerics::{
-    IDENTITY_EDGES_FP16, IDENTITY_EDGES_FP32, IDENTITY_FP8E4M3, IDENTITY_FP8E5M2, IDENTITY_INT4,
-    IDENTITY_INT8, MATMUL_FP16, MATMUL_FP32, MATMUL_INT8, MAX_POOL2D_FP16, MAX_POOL2D_FP32,
+    HEXAGON_LOGICAL_CASES, IDENTITY_EDGES_FP16, IDENTITY_EDGES_FP32, IDENTITY_FP8E4M3,
+    IDENTITY_FP8E5M2, IDENTITY_INT4, IDENTITY_INT8, MATMUL_FP16, MATMUL_FP32, MATMUL_INT8,
+    MAX_POOL2D_FP16, MAX_POOL2D_FP32, MUL_FP16,
 };
 use virtio_accel_conformance::{
     BindingFixture, CaseStatus, ConformanceHooks, ProgramFixture, SubmissionPathDiagnostics,
@@ -366,6 +367,55 @@ fn executes_the_shared_fp16_corpus_on_every_available_device() {
                 case.name
             );
         }
+    }
+}
+
+#[test]
+fn executes_boolean_boundaries_on_every_available_device() {
+    for device in devices() {
+        for case in HEXAGON_LOGICAL_CASES {
+            eprintln!("executing {} on {device}", case.name);
+            let encoded = case
+                .inputs
+                .iter()
+                .map(|tensor| tensor.bytes())
+                .collect::<Vec<_>>();
+            let inputs = encoded.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let Some(actual) =
+                run_tosa_bytes(&device, case.artifact, &inputs, case.output.byte_len())
+            else {
+                continue;
+            };
+            assert!(
+                case.output_matches(&actual),
+                "{device}: {} produced {actual:?}",
+                case.name
+            );
+        }
+    }
+}
+
+#[test]
+fn executes_float_mul_with_parameter_only_int8_shift_on_every_available_device() {
+    for device in devices() {
+        let inputs = MUL_FP16
+            .inputs
+            .iter()
+            .map(|tensor| tensor.bits)
+            .collect::<Vec<_>>();
+        let Some(actual) = run_tosa_fp16(
+            &device,
+            MUL_FP16.artifact,
+            &inputs,
+            MUL_FP16.outputs[0].bits.len(),
+        ) else {
+            continue;
+        };
+        assert!(
+            MUL_FP16.output_matches(0, &actual),
+            "{device}: {} produced {actual:?}",
+            MUL_FP16.name
+        );
     }
 }
 
