@@ -10,9 +10,17 @@
 mod lower;
 
 pub use lower::{
-    HEXAGON_TOSA_INTEGER_TARGET, HEXAGON_TOSA_TARGET, LoweringError, supports_tosa_dtype,
-    supports_tosa_operator,
+    HEXAGON_TOSA_CAPABILITY, HEXAGON_TOSA_INTEGER_CAPABILITY, HEXAGON_TOSA_INTEGER_TARGET,
+    HEXAGON_TOSA_TARGET, LoweringError, supports_tosa_dtype, supports_tosa_operator,
 };
+
+use virtio_accel_tosa::{CapabilityDescriptor, TosaCapabilityProvider};
+
+#[cfg(va_hexagon)]
+const TOSA_CAPABILITIES: &[CapabilityDescriptor] =
+    &[HEXAGON_TOSA_CAPABILITY, HEXAGON_TOSA_INTEGER_CAPABILITY];
+#[cfg(not(va_hexagon))]
+const TOSA_CAPABILITIES: &[CapabilityDescriptor] = &[];
 
 /// Native QNN runtime and ABI version validated by the initial backend tier.
 pub const TESTED_QAIRT_RELEASE: &str = "2.49.0.260730";
@@ -67,6 +75,13 @@ impl HexagonAccelerator {
     /// Report that the native QNN build requirements were not detected.
     pub fn available_devices() -> Result<Vec<String>, InitError> {
         Err(InitError::RuntimeUnavailable)
+    }
+}
+
+#[cfg(not(va_hexagon))]
+impl TosaCapabilityProvider for HexagonAccelerator {
+    fn tosa_capabilities(&self) -> &'static [CapabilityDescriptor] {
+        TOSA_CAPABILITIES
     }
 }
 

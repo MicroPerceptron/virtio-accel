@@ -33,6 +33,10 @@ identity and INT8 MATMUL with INT32 output. Everything else is rejected while lo
 `Unsupported`, `Incompatible`, or `InvalidArgument` mapped exactly as the backend implementer
 guide specifies.
 
+`TosaCapabilityProvider` publishes separate conservative floating and integer descriptors after a
+native runtime/device has been constructed. Compile-only placeholders return an empty descriptor
+slice instead of advertising work they cannot execute.
+
 Binding slots are device-neutral: inputs occupy slots `0..N` and outputs occupy `N..N+M`, both in
 declared order.
 

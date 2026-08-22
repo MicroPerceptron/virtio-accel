@@ -78,6 +78,20 @@ defines their failure as unpredictable. `SpecializationKeyBuilder` and `Speciali
 bounded, exact-key shape/CTC specialization without host dependencies. A backend still decides
 which `CUSTOM` domains/operators and implementation payloads it supports.
 
+## Optional provider capability discovery
+
+`TosaCapabilityProvider` gives host-side graph schedulers a generic, optional discovery seam
+without adding artifact semantics to `virtio-accel-core` or changing protocol bytes. Each returned
+`CapabilityDescriptor` describes one exact target/profile tier: role-specific dtypes, implemented
+operators, scheduler-visible attribute and operand constraints, static/dynamic shape support,
+region/block limits, and runtime-condition policy.
+
+Descriptors are deliberately conservative. A positive query authorizes a scheduling and
+`load_program` attempt; it does not promise that concrete shapes, cross-operand relationships,
+resource availability, native compilation, or current device state will succeed. Providers return
+an empty descriptor slice when their runtime/device is unavailable, and `load_program` remains the
+authoritative admission boundary.
+
 The crate also exposes stable-Rust helpers for the TOSA low-precision wire formats:
 `low_precision_storage_bytes`, low-nibble-first `pack_int4`/`unpack_int4`, and exact
 `fp8e4m3_to_f32`/`fp8e5m2_to_f32` reference conversion. They are serialization and numerical

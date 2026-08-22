@@ -12,8 +12,9 @@ use crate::lower::{
     LoweredFeature, LoweredFeatureRole, LoweredModel, LoweringError, encode_feature, static_shape,
 };
 use virtio_accel_tosa::{
-    AnalyzedValueKind, DType, ExtensionSet, Level, Op, ProfileSet, Target, TosaAnalysis, ValueId,
-    Version, parse,
+    AnalyzedValueKind, CapabilityDescriptor, DType, DTypeCapability, ExtensionSet,
+    GraphCapabilities, Level, Op, OperatorCapability, ProfileSet, RuntimeConditionSupport, Target,
+    TosaAnalysis, ValueId, ValueRoles, Version, parse,
 };
 
 /// TOSA integer-profile target lowered to Core ML ML Program on macOS 26 or newer.
@@ -23,6 +24,35 @@ pub const COREML_TOSA_INTEGER_TARGET: Target = Target::new(
     Level::Level8K,
     ExtensionSet::NONE,
 );
+
+const INTEGER_DTYPES: &[DTypeCapability] = &[
+    DTypeCapability::new(DType::INT8, ValueRoles::ALL),
+    DTypeCapability::new(
+        DType::INT32,
+        ValueRoles::OUTPUT
+            .union(ValueRoles::CONSTANT)
+            .union(ValueRoles::INTERMEDIATE),
+    ),
+];
+
+const INTEGER_OPERATORS: &[OperatorCapability] = &[
+    OperatorCapability::new(Op::CONST),
+    OperatorCapability::new(Op::IDENTITY),
+    OperatorCapability::new(Op::MATMUL),
+];
+
+/// Conservative integer-profile boundary for the macOS 26+ ML Program tier.
+pub const COREML_TOSA_INTEGER_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
+    target: COREML_TOSA_INTEGER_TARGET,
+    dtypes: INTEGER_DTYPES,
+    operators: INTEGER_OPERATORS,
+    graph: GraphCapabilities {
+        max_regions: 1,
+        max_blocks: 1,
+        dynamic_shapes: false,
+        runtime_conditions: RuntimeConditionSupport::None,
+    },
+};
 
 const COREML_SPECIFICATION_VERSION: u64 = 10;
 const MLPROGRAM_VERSION: u64 = 1;

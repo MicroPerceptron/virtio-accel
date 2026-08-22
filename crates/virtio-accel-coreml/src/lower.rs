@@ -11,9 +11,10 @@
 use std::fmt;
 
 use virtio_accel_tosa::{
-    AnalysisError, AnalyzedValueKind, DType, Error as ParseError, ExtensionSet, Level,
-    NanPropagationMode, Op, OpAttributes, ProfileSet, Target, TosaAnalysis, ValueId, Version,
-    parse,
+    AnalysisError, AnalyzedValueKind, CapabilityDescriptor, DType, DTypeCapability,
+    DTypeConstraints, Error as ParseError, ExtensionSet, GraphCapabilities, Level,
+    NanPropagationMode, Op, OpAttributes, OperatorCapability, OperatorConstraints, ProfileSet,
+    RuntimeConditionSupport, Target, TosaAnalysis, ValueId, ValueRoles, Version, parse,
 };
 
 /// TOSA target currently lowered by the Core ML backend.
@@ -23,6 +24,82 @@ pub const COREML_TOSA_TARGET: Target = Target::new(
     Level::Level8K,
     ExtensionSet::NONE,
 );
+
+const FLOAT_DTYPES: &[DTypeCapability] = &[
+    DTypeCapability::new(DType::FP16, ValueRoles::ALL),
+    DTypeCapability::new(DType::FP32, ValueRoles::ALL),
+    DTypeCapability::new(DType::INT32, ValueRoles::ALL),
+    DTypeCapability::new(
+        DType::BOOL,
+        ValueRoles::CONSTANT.union(ValueRoles::INTERMEDIATE),
+    ),
+    DTypeCapability::constrained(
+        DType::INT8,
+        ValueRoles::CONSTANT,
+        DTypeConstraints::PARAMETER_ONLY,
+    ),
+];
+
+const FLOAT_OPERATORS: &[OperatorCapability] = &[
+    OperatorCapability::constrained(Op::ARGMAX, OperatorConstraints::PROPAGATING_NAN),
+    OperatorCapability::constrained(Op::MATMUL, OperatorConstraints::ZERO_ZERO_POINTS),
+    OperatorCapability::constrained(
+        Op::MAX_POOL2D,
+        OperatorConstraints::PROPAGATING_NAN.union(OperatorConstraints::ZERO_PADDING),
+    ),
+    OperatorCapability::constrained(Op::CLAMP, OperatorConstraints::PROPAGATING_NAN),
+    OperatorCapability::new(Op::ERF),
+    OperatorCapability::new(Op::SIGMOID),
+    OperatorCapability::new(Op::TANH),
+    OperatorCapability::new(Op::ADD),
+    OperatorCapability::new(Op::LOGICAL_AND),
+    OperatorCapability::new(Op::LOGICAL_OR),
+    OperatorCapability::new(Op::LOGICAL_XOR),
+    OperatorCapability::constrained(Op::MAXIMUM, OperatorConstraints::PROPAGATING_NAN),
+    OperatorCapability::constrained(Op::MINIMUM, OperatorConstraints::PROPAGATING_NAN),
+    OperatorCapability::constrained(Op::MUL, OperatorConstraints::ZERO_SHIFT),
+    OperatorCapability::new(Op::POW),
+    OperatorCapability::new(Op::SUB),
+    OperatorCapability::new(Op::ABS),
+    OperatorCapability::new(Op::CEIL),
+    OperatorCapability::new(Op::COS),
+    OperatorCapability::new(Op::EXP),
+    OperatorCapability::new(Op::FLOOR),
+    OperatorCapability::new(Op::LOG),
+    OperatorCapability::new(Op::LOGICAL_NOT),
+    OperatorCapability::constrained(Op::NEGATE, OperatorConstraints::ZERO_ZERO_POINTS),
+    OperatorCapability::new(Op::RECIPROCAL),
+    OperatorCapability::new(Op::RSQRT),
+    OperatorCapability::new(Op::SIN),
+    OperatorCapability::new(Op::SELECT),
+    OperatorCapability::new(Op::EQUAL),
+    OperatorCapability::new(Op::GREATER),
+    OperatorCapability::new(Op::GREATER_EQUAL),
+    OperatorCapability::constrained(Op::REDUCE_MAX, OperatorConstraints::PROPAGATING_NAN),
+    OperatorCapability::constrained(Op::REDUCE_MIN, OperatorConstraints::PROPAGATING_NAN),
+    OperatorCapability::new(Op::REDUCE_PRODUCT),
+    OperatorCapability::new(Op::REDUCE_SUM),
+    OperatorCapability::new(Op::CONCAT),
+    OperatorCapability::constrained(Op::RESHAPE, OperatorConstraints::CONSTANT_PARAMETERS),
+    OperatorCapability::new(Op::REVERSE),
+    OperatorCapability::new(Op::TRANSPOSE),
+    OperatorCapability::new(Op::CONST),
+    OperatorCapability::new(Op::CONST_SHAPE),
+    OperatorCapability::new(Op::IDENTITY),
+];
+
+/// Conservative static floating-profile capability boundary for Core ML lowering.
+pub const COREML_TOSA_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
+    target: COREML_TOSA_TARGET,
+    dtypes: FLOAT_DTYPES,
+    operators: FLOAT_OPERATORS,
+    graph: GraphCapabilities {
+        max_regions: 1,
+        max_blocks: 1,
+        dynamic_shapes: false,
+        runtime_conditions: RuntimeConditionSupport::None,
+    },
+};
 
 // Float16 MLMultiArray model boundaries require the iOS 16 / macOS 13 format revision. The
 // backend itself requires macOS 14, so all production TOSA models can use this version uniformly.
@@ -72,51 +149,7 @@ pub(crate) struct LoweredModel {
 
 /// Whether the initial Core ML lowering tier can lower `op` for supported types and attributes.
 pub const fn supports_tosa_operator(op: Op) -> bool {
-    matches!(
-        op,
-        Op::ARGMAX
-            | Op::MATMUL
-            | Op::MAX_POOL2D
-            | Op::CLAMP
-            | Op::ERF
-            | Op::SIGMOID
-            | Op::TANH
-            | Op::ADD
-            | Op::LOGICAL_AND
-            | Op::LOGICAL_OR
-            | Op::LOGICAL_XOR
-            | Op::MAXIMUM
-            | Op::MINIMUM
-            | Op::MUL
-            | Op::POW
-            | Op::SUB
-            | Op::ABS
-            | Op::CEIL
-            | Op::COS
-            | Op::EXP
-            | Op::FLOOR
-            | Op::LOG
-            | Op::LOGICAL_NOT
-            | Op::NEGATE
-            | Op::RECIPROCAL
-            | Op::RSQRT
-            | Op::SIN
-            | Op::SELECT
-            | Op::EQUAL
-            | Op::GREATER
-            | Op::GREATER_EQUAL
-            | Op::REDUCE_MAX
-            | Op::REDUCE_MIN
-            | Op::REDUCE_PRODUCT
-            | Op::REDUCE_SUM
-            | Op::CONCAT
-            | Op::RESHAPE
-            | Op::REVERSE
-            | Op::TRANSPOSE
-            | Op::CONST
-            | Op::CONST_SHAPE
-            | Op::IDENTITY
-    )
+    COREML_TOSA_CAPABILITY.supports_operator(op)
 }
 
 /// Whether this lowering can expose `dtype` at a Core ML model boundary.
@@ -125,10 +158,11 @@ pub const fn supports_tosa_operator(op: Op) -> bool {
 /// the integer-profile ML Program tier on macOS 26 or newer; it is never silently dequantized into
 /// the floating-point NeuralNetwork tier.
 pub const fn supports_tosa_dtype(dtype: DType) -> bool {
-    matches!(
-        dtype,
-        DType::FP16 | DType::FP32 | DType::INT8 | DType::INT32
-    )
+    COREML_TOSA_CAPABILITY.supports_dtype(dtype, ValueRoles::INPUT)
+        || COREML_TOSA_CAPABILITY.supports_dtype(dtype, ValueRoles::OUTPUT)
+        || crate::mlprogram::COREML_TOSA_INTEGER_CAPABILITY.supports_dtype(dtype, ValueRoles::INPUT)
+        || crate::mlprogram::COREML_TOSA_INTEGER_CAPABILITY
+            .supports_dtype(dtype, ValueRoles::OUTPUT)
 }
 
 pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, LoweringError> {
@@ -843,6 +877,22 @@ mod tests {
         assert!(!supports_tosa_dtype(DType::INT4));
         assert!(!supports_tosa_dtype(DType::FP8E4M3));
         assert!(!supports_tosa_dtype(DType::FP8E5M2));
+    }
+
+    #[test]
+    fn descriptor_keeps_boolean_and_integer_tiers_role_specific() {
+        assert!(!COREML_TOSA_CAPABILITY.supports_dtype(DType::BOOL, ValueRoles::INPUT));
+        assert!(COREML_TOSA_CAPABILITY.supports_dtype(DType::BOOL, ValueRoles::INTERMEDIATE));
+        assert!(!COREML_TOSA_CAPABILITY.supports_dtype(DType::INT8, ValueRoles::INPUT));
+        assert!(
+            crate::COREML_TOSA_INTEGER_CAPABILITY.supports_dtype(DType::INT8, ValueRoles::INPUT)
+        );
+        let pool = COREML_TOSA_CAPABILITY.operator(Op::MAX_POOL2D).unwrap();
+        assert!(
+            pool.constraints
+                .contains(OperatorConstraints::PROPAGATING_NAN)
+        );
+        assert!(pool.constraints.contains(OperatorConstraints::ZERO_PADDING));
     }
 
     #[test]

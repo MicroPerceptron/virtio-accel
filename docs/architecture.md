@@ -339,6 +339,12 @@ graph IR. A host backend may lower its supported subset directly, reject unsuppo
 program load, and add capability coverage without making its native SDK or model representation a
 dependency of the portable stack.
 
+Before constructing partitions, a host scheduler may query the optional
+`virtio_accel_tosa::TosaCapabilityProvider` interface. Descriptors remain outside `DeviceInfo` and
+the wire contract: they distinguish exact targets, dtype roles, operator/attribute constraints,
+static-shape limits, and runtime-condition policy. They are conservative preflight data, while the
+provider retains final authority at `load_program` for concrete graphs and current resources.
+
 The Intel OpenVINO provider consumes the same verified model and analysis. The adapter lowers one
 static TOSA graph to an in-memory OpenVINO IR document plus weights blob, compiles it for one
 enumerated NPU, GPU, or CPU device with the accuracy-preserving execution hint, and binds exact

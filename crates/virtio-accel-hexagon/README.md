@@ -21,6 +21,10 @@ The backend accepts two explicit TOSA 1.0 targets:
 - the integer target supports bit-exact INT8 identity and nonzero-zero-point INT8 MATMUL with an
   INT32 accumulator/output.
 
+Native instances expose these as distinct conservative descriptors through
+`TosaCapabilityProvider`. SDK-free placeholders return no descriptors, so discovery never turns
+the portable planner into a false execution claim.
+
 The complete operator-to-QNN mapping, restrictions, and evidence are in the
 [Hexagon operator matrix](../../docs/hexagon-operator-matrix.md). `ERF` is the sole shared-surface
 exception because QAIRT 2.49's public operation definitions expose no ERF node.

@@ -19,9 +19,18 @@
 mod lower;
 
 pub use lower::{
-    LoweringError, OPENVINO_TOSA_INTEGER_TARGET, OPENVINO_TOSA_TARGET, supports_tosa_dtype,
+    LoweringError, OPENVINO_TOSA_CAPABILITY, OPENVINO_TOSA_INTEGER_CAPABILITY,
+    OPENVINO_TOSA_INTEGER_TARGET, OPENVINO_TOSA_TARGET, supports_tosa_dtype,
     supports_tosa_operator,
 };
+
+use virtio_accel_tosa::{CapabilityDescriptor, TosaCapabilityProvider};
+
+#[cfg(va_openvino)]
+const TOSA_CAPABILITIES: &[CapabilityDescriptor] =
+    &[OPENVINO_TOSA_CAPABILITY, OPENVINO_TOSA_INTEGER_CAPABILITY];
+#[cfg(not(va_openvino))]
+const TOSA_CAPABILITIES: &[CapabilityDescriptor] = &[];
 
 /// The OpenVINO runtime does not publish a finite upper bound for compiled-model residency.
 ///
@@ -81,5 +90,12 @@ impl OpenVinoAccelerator {
     /// Report that no OpenVINO runtime was detected when this crate was built.
     pub fn available_devices() -> Result<Vec<String>, InitError> {
         Err(InitError::RuntimeUnavailable)
+    }
+}
+
+#[cfg(not(va_openvino))]
+impl TosaCapabilityProvider for OpenVinoAccelerator {
+    fn tosa_capabilities(&self) -> &'static [CapabilityDescriptor] {
+        TOSA_CAPABILITIES
     }
 }

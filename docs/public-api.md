@@ -43,7 +43,10 @@ only verified borrowed views, typed stable-op attributes, and raw forward-compat
 plan intended for provider lowering, and retains verified `Operator`/`Tensor`/`Shape` views rather
 than copying an owned graph. Dynamic providers can validate host-readable CTC values and use the
 bounded exact-key specialization cache. Provider-specific capability utilities extend the layer
-through `ModelValidator`; generated FlatBuffers tables and unchecked roots remain private.
+through `ModelValidator`. The optional `TosaCapabilityProvider` trait exposes conservative,
+target-specific host descriptors for schedulers without adding TOSA concepts to `virtio-accel-core`;
+successful discovery never replaces authoritative program admission. Generated FlatBuffers tables
+and unchecked roots remain private.
 
 ## Runnable entry points
 

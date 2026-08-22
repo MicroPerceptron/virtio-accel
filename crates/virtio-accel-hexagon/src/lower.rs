@@ -9,9 +9,10 @@
 use std::fmt;
 
 use virtio_accel_tosa::{
-    AnalysisError, AnalyzedValueKind, DType, Error as ParseError, ExtensionSet, Level,
-    NanPropagationMode, Op, OpAttributes, ProfileSet, RuntimeCondition, Target, TosaAnalysis,
-    ValueId, Version, parse,
+    AnalysisError, AnalyzedValueKind, CapabilityDescriptor, DType, DTypeCapability,
+    Error as ParseError, ExtensionSet, GraphCapabilities, Level, NanPropagationMode, Op,
+    OpAttributes, OperatorCapability, OperatorConstraints, ProfileSet, RuntimeCondition,
+    RuntimeConditionSupport, Target, TosaAnalysis, ValueId, ValueRoles, Version, parse,
 };
 
 /// TOSA declaration accepted by the first Hexagon tier.
@@ -32,6 +33,106 @@ pub const HEXAGON_TOSA_INTEGER_TARGET: Target = Target::new(
     Level::Level8K,
     ExtensionSet::NONE,
 );
+
+const FLOAT_DTYPES: &[DTypeCapability] = &[
+    DTypeCapability::new(DType::FP16, ValueRoles::ALL),
+    DTypeCapability::new(DType::BOOL, ValueRoles::ALL),
+    DTypeCapability::new(
+        DType::INT32,
+        ValueRoles::OUTPUT
+            .union(ValueRoles::CONSTANT)
+            .union(ValueRoles::INTERMEDIATE),
+    ),
+];
+
+const INTEGER_DTYPES: &[DTypeCapability] = &[
+    DTypeCapability::new(DType::INT8, ValueRoles::ALL),
+    DTypeCapability::new(
+        DType::INT32,
+        ValueRoles::OUTPUT
+            .union(ValueRoles::CONSTANT)
+            .union(ValueRoles::INTERMEDIATE),
+    ),
+];
+
+const FLOAT_OPERATORS: &[OperatorCapability] = &[
+    OperatorCapability::constrained(Op::ARGMAX, OperatorConstraints::PROPAGATING_NAN),
+    OperatorCapability::constrained(Op::MATMUL, OperatorConstraints::ZERO_ZERO_POINTS),
+    OperatorCapability::constrained(
+        Op::MAX_POOL2D,
+        OperatorConstraints::PROPAGATING_NAN.union(OperatorConstraints::ZERO_PADDING),
+    ),
+    OperatorCapability::constrained(Op::CLAMP, OperatorConstraints::PROPAGATING_NAN),
+    OperatorCapability::new(Op::SIGMOID),
+    OperatorCapability::new(Op::TANH),
+    OperatorCapability::new(Op::ADD),
+    OperatorCapability::new(Op::SUB),
+    OperatorCapability::constrained(Op::MUL, OperatorConstraints::ZERO_SHIFT),
+    OperatorCapability::new(Op::POW),
+    OperatorCapability::constrained(Op::MAXIMUM, OperatorConstraints::PROPAGATING_NAN),
+    OperatorCapability::constrained(Op::MINIMUM, OperatorConstraints::PROPAGATING_NAN),
+    OperatorCapability::new(Op::LOGICAL_AND),
+    OperatorCapability::new(Op::LOGICAL_OR),
+    OperatorCapability::new(Op::LOGICAL_XOR),
+    OperatorCapability::new(Op::ABS),
+    OperatorCapability::new(Op::CEIL),
+    OperatorCapability::new(Op::COS),
+    OperatorCapability::new(Op::EXP),
+    OperatorCapability::new(Op::FLOOR),
+    OperatorCapability::new(Op::LOG),
+    OperatorCapability::new(Op::LOGICAL_NOT),
+    OperatorCapability::constrained(Op::NEGATE, OperatorConstraints::ZERO_ZERO_POINTS),
+    OperatorCapability::new(Op::RECIPROCAL),
+    OperatorCapability::new(Op::RSQRT),
+    OperatorCapability::new(Op::SIN),
+    OperatorCapability::new(Op::SELECT),
+    OperatorCapability::new(Op::EQUAL),
+    OperatorCapability::new(Op::GREATER),
+    OperatorCapability::new(Op::GREATER_EQUAL),
+    OperatorCapability::constrained(Op::REDUCE_MAX, OperatorConstraints::PROPAGATING_NAN),
+    OperatorCapability::constrained(Op::REDUCE_MIN, OperatorConstraints::PROPAGATING_NAN),
+    OperatorCapability::new(Op::REDUCE_PRODUCT),
+    OperatorCapability::new(Op::REDUCE_SUM),
+    OperatorCapability::new(Op::CONCAT),
+    OperatorCapability::constrained(Op::RESHAPE, OperatorConstraints::CONSTANT_PARAMETERS),
+    OperatorCapability::new(Op::REVERSE),
+    OperatorCapability::new(Op::TRANSPOSE),
+    OperatorCapability::new(Op::CONST),
+    OperatorCapability::new(Op::IDENTITY),
+    OperatorCapability::new(Op::CONST_SHAPE),
+];
+
+const INTEGER_OPERATORS: &[OperatorCapability] = &[
+    OperatorCapability::new(Op::CONST),
+    OperatorCapability::new(Op::IDENTITY),
+    OperatorCapability::new(Op::MATMUL),
+];
+
+/// Conservative floating-profile capability boundary for the validated QNN HTP tier.
+pub const HEXAGON_TOSA_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
+    target: HEXAGON_TOSA_TARGET,
+    dtypes: FLOAT_DTYPES,
+    operators: FLOAT_OPERATORS,
+    graph: GraphCapabilities {
+        max_regions: 1,
+        max_blocks: 1,
+        dynamic_shapes: false,
+        runtime_conditions: RuntimeConditionSupport::AdvisoryOnly,
+    },
+};
+
+/// Conservative exact integer-profile capability boundary for the validated QNN HTP tier.
+pub const HEXAGON_TOSA_INTEGER_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
+    target: HEXAGON_TOSA_INTEGER_TARGET,
+    dtypes: INTEGER_DTYPES,
+    operators: INTEGER_OPERATORS,
+    graph: GraphCapabilities {
+        max_regions: 1,
+        max_blocks: 1,
+        dynamic_shapes: false,
+        runtime_conditions: RuntimeConditionSupport::None,
+    },
+};
 
 /// Failure while validating and planning a graph for QNN HTP.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,55 +156,12 @@ impl std::error::Error for LoweringError {}
 
 /// Whether the first hardware tier has a QNN lowering for `op`.
 pub const fn supports_tosa_operator(op: Op) -> bool {
-    matches!(
-        op,
-        Op::ARGMAX
-            | Op::MAX_POOL2D
-            | Op::MATMUL
-            | Op::CLAMP
-            | Op::SIGMOID
-            | Op::TANH
-            | Op::ADD
-            | Op::SUB
-            | Op::MUL
-            | Op::POW
-            | Op::MAXIMUM
-            | Op::MINIMUM
-            | Op::LOGICAL_AND
-            | Op::LOGICAL_OR
-            | Op::LOGICAL_XOR
-            | Op::ABS
-            | Op::CEIL
-            | Op::COS
-            | Op::EXP
-            | Op::FLOOR
-            | Op::LOG
-            | Op::LOGICAL_NOT
-            | Op::NEGATE
-            | Op::RECIPROCAL
-            | Op::RSQRT
-            | Op::SIN
-            | Op::SELECT
-            | Op::EQUAL
-            | Op::GREATER
-            | Op::GREATER_EQUAL
-            | Op::REDUCE_MAX
-            | Op::REDUCE_MIN
-            | Op::REDUCE_PRODUCT
-            | Op::REDUCE_SUM
-            | Op::CONCAT
-            | Op::RESHAPE
-            | Op::REVERSE
-            | Op::TRANSPOSE
-            | Op::CONST
-            | Op::IDENTITY
-            | Op::CONST_SHAPE
-    )
+    HEXAGON_TOSA_CAPABILITY.supports_operator(op)
 }
 
 fn supports_operator_for_target(op: Op, integer: bool) -> bool {
     if integer {
-        matches!(op, Op::CONST | Op::IDENTITY | Op::MATMUL)
+        HEXAGON_TOSA_INTEGER_CAPABILITY.supports_operator(op)
     } else {
         supports_tosa_operator(op)
     }
@@ -114,10 +172,10 @@ fn supports_operator_for_target(op: Op, integer: bool) -> bool {
 /// FP32 remains deliberately rejected because current HTP floating-point execution may use FP16
 /// math. Integer and packed low-precision tiers require separate targets and evidence.
 pub const fn supports_tosa_dtype(dtype: DType) -> bool {
-    matches!(
-        dtype,
-        DType::BOOL | DType::FP16 | DType::INT8 | DType::INT32
-    )
+    HEXAGON_TOSA_CAPABILITY.supports_dtype(dtype, ValueRoles::INPUT)
+        || HEXAGON_TOSA_CAPABILITY.supports_dtype(dtype, ValueRoles::OUTPUT)
+        || HEXAGON_TOSA_INTEGER_CAPABILITY.supports_dtype(dtype, ValueRoles::INPUT)
+        || HEXAGON_TOSA_INTEGER_CAPABILITY.supports_dtype(dtype, ValueRoles::OUTPUT)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1082,6 +1140,19 @@ mod tests {
                 assert!(!supports_operator_for_target(op, true), "{op:?}");
             }
         }
+    }
+
+    #[test]
+    fn descriptor_exposes_hexagon_pool_and_precision_restrictions() {
+        assert!(!HEXAGON_TOSA_CAPABILITY.supports_dtype(DType::FP32, ValueRoles::INPUT));
+        assert!(HEXAGON_TOSA_CAPABILITY.supports_dtype(DType::FP16, ValueRoles::INPUT));
+        assert!(HEXAGON_TOSA_INTEGER_CAPABILITY.supports_dtype(DType::INT8, ValueRoles::INPUT));
+        let pool = HEXAGON_TOSA_CAPABILITY.operator(Op::MAX_POOL2D).unwrap();
+        assert!(
+            pool.constraints
+                .contains(OperatorConstraints::PROPAGATING_NAN)
+        );
+        assert!(pool.constraints.contains(OperatorConstraints::ZERO_PADDING));
     }
 
     #[test]

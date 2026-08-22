@@ -18,6 +18,7 @@ use virtio_accel_core::{
     Capabilities, ContextDesc, DeviceIdentity, DeviceInfo, DeviceLimits, EventState, MemoryDomain,
     QueueDesc, ReleaseFailure, SubmitFailure, Timeout,
 };
+use virtio_accel_tosa::{CapabilityDescriptor, TosaCapabilityProvider};
 
 const QNN_EXTERNAL_DOMAIN: u32 = 0x0051_4e4e;
 const MAX_TOSA_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
@@ -545,6 +546,12 @@ impl HexagonAccelerator {
             | crate::LoweringError::UnsupportedOperator(_)
             | crate::LoweringError::InvalidConstant => BackendError::Unsupported,
         }
+    }
+}
+
+impl TosaCapabilityProvider for HexagonAccelerator {
+    fn tosa_capabilities(&self) -> &'static [CapabilityDescriptor] {
+        crate::TOSA_CAPABILITIES
     }
 }
 

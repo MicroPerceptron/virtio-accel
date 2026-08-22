@@ -14,8 +14,23 @@ mod lower;
 mod mlprogram;
 
 pub use artifact::{ArtifactBuildError, CoreMlArtifact, FeatureRole};
-pub use lower::{COREML_TOSA_TARGET, LoweringError, supports_tosa_dtype, supports_tosa_operator};
-pub use mlprogram::COREML_TOSA_INTEGER_TARGET;
+pub use lower::{
+    COREML_TOSA_CAPABILITY, COREML_TOSA_TARGET, LoweringError, supports_tosa_dtype,
+    supports_tosa_operator,
+};
+pub use mlprogram::{COREML_TOSA_INTEGER_CAPABILITY, COREML_TOSA_INTEGER_TARGET};
+
+use virtio_accel_tosa::CapabilityDescriptor;
+#[cfg(not(target_os = "macos"))]
+use virtio_accel_tosa::TosaCapabilityProvider;
+
+#[cfg(target_os = "macos")]
+const FLOAT_CAPABILITIES: &[CapabilityDescriptor] = &[COREML_TOSA_CAPABILITY];
+#[cfg(target_os = "macos")]
+const ALL_CAPABILITIES: &[CapabilityDescriptor] =
+    &[COREML_TOSA_CAPABILITY, COREML_TOSA_INTEGER_CAPABILITY];
+#[cfg(not(target_os = "macos"))]
+const NO_CAPABILITIES: &[CapabilityDescriptor] = &[];
 
 use virtio_accel_core::{ArtifactFormat, TargetIdentity};
 
@@ -89,5 +104,12 @@ impl CoreMlAccelerator {
     /// Report that the native TOSA-to-Core ML execution path is unavailable on this target.
     pub fn new_tosa() -> Result<Self, InitError> {
         Err(InitError::UnsupportedPlatform)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl TosaCapabilityProvider for CoreMlAccelerator {
+    fn tosa_capabilities(&self) -> &'static [CapabilityDescriptor] {
+        NO_CAPABILITIES
     }
 }
