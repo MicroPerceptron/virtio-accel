@@ -36,6 +36,10 @@ identity and INT8 batched matrix multiplication with INT32 output. MATMUL widens
 INT32, explicitly subtracts the two TOSA zero points, and accumulates in INT32; it never converts
 through floating point.
 
+`TosaCapabilityProvider` exposes these as distinct floating and integer descriptors. The native
+instance includes the integer descriptor only when the host runtime reports macOS 26+ INT8 ML
+Program support; non-macOS placeholders expose no descriptors.
+
 ### Low-precision boundary
 
 `supports_tosa_dtype` exposes model-boundary encoding capability independently of operator

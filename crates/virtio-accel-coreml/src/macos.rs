@@ -20,6 +20,7 @@ use virtio_accel_core::{
     Capabilities, ContextDesc, DeviceIdentity, DeviceInfo, DeviceLimits, EventState, MemoryDomain,
     QueueDesc, ReleaseFailure, SubmitFailure, Timeout,
 };
+use virtio_accel_tosa::{CapabilityDescriptor, TosaCapabilityProvider};
 
 const COREML_MIN_ALIGNMENT: usize = 16 * 1024;
 const TRANSFER_CHUNK_BYTES: usize = 16 * 1024;
@@ -497,6 +498,18 @@ impl CoreMlAccelerator {
             | LoweringError::UnsupportedType(_)
             | LoweringError::UnsupportedOperator(_) => BackendError::Unsupported,
             LoweringError::ResourceLimit => BackendError::ResourceLimit,
+        }
+    }
+}
+
+impl TosaCapabilityProvider for CoreMlAccelerator {
+    fn tosa_capabilities(&self) -> &'static [CapabilityDescriptor] {
+        // SAFETY: this scalar query has no pointer arguments and reports whether the host OS can
+        // load the separately described integer ML Program tier.
+        if unsafe { va_coreml_supports_int8() } == 1 {
+            crate::ALL_CAPABILITIES
+        } else {
+            crate::FLOAT_CAPABILITIES
         }
     }
 }

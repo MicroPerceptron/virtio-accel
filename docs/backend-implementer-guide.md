@@ -136,6 +136,13 @@ Capability bits are promises, not hints. An advertised memory domain must alloca
 backing or return a request-specific resource error; an unadvertised optional capability cannot be
 used to skip mandatory context, transfer, program, queue, submission, polling, or release behavior.
 
+TOSA providers may additionally implement `virtio_accel_tosa::TosaCapabilityProvider`. This is a
+host-side artifact-planning interface, not a protocol or `DeviceInfo` capability. Return one
+`CapabilityDescriptor` per exact target tier and keep role-specific dtypes, operator constraints,
+shape limits, and runtime-condition policy conservative. An unavailable runtime returns an empty
+slice. A positive descriptor query permits a load attempt only; `load_program` remains responsible
+for concrete shape relationships, resources, native compilation, and device-state failures.
+
 ### Handles and ownership
 
 Handles own provider state and borrow no call argument. Context children and event dependencies are

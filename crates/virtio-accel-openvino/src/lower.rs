@@ -20,9 +20,10 @@ use std::fmt;
 use std::fmt::Write as _;
 
 use virtio_accel_tosa::{
-    AnalysisError, AnalyzedValueKind, DType, Error as ParseError, ExtensionSet, Level,
-    NanPropagationMode, Op, OpAttributes, ProfileSet, Target, TosaAnalysis, ValueId, Version,
-    parse,
+    AnalysisError, AnalyzedValueKind, CapabilityDescriptor, DType, DTypeCapability,
+    DTypeConstraints, Error as ParseError, ExtensionSet, GraphCapabilities, Level,
+    NanPropagationMode, Op, OpAttributes, OperatorCapability, OperatorConstraints, ProfileSet,
+    RuntimeConditionSupport, Target, TosaAnalysis, ValueId, ValueRoles, Version, parse,
 };
 
 /// TOSA target currently lowered by the OpenVINO backend.
@@ -40,6 +41,108 @@ pub const OPENVINO_TOSA_INTEGER_TARGET: Target = Target::new(
     Level::Level8K,
     ExtensionSet::NONE,
 );
+
+const FLOAT_DTYPES: &[DTypeCapability] = &[
+    DTypeCapability::new(DType::FP16, ValueRoles::ALL),
+    DTypeCapability::new(DType::FP32, ValueRoles::ALL),
+    DTypeCapability::new(DType::BOOL, ValueRoles::ALL),
+    DTypeCapability::new(DType::INT32, ValueRoles::ALL),
+    DTypeCapability::constrained(
+        DType::INT8,
+        ValueRoles::CONSTANT,
+        DTypeConstraints::PARAMETER_ONLY,
+    ),
+];
+
+const INTEGER_DTYPES: &[DTypeCapability] = &[
+    DTypeCapability::new(DType::INT8, ValueRoles::ALL),
+    DTypeCapability::new(
+        DType::INT32,
+        ValueRoles::OUTPUT
+            .union(ValueRoles::CONSTANT)
+            .union(ValueRoles::INTERMEDIATE),
+    ),
+];
+
+const FLOAT_OPERATORS: &[OperatorCapability] = &[
+    OperatorCapability::constrained(Op::ARGMAX, OperatorConstraints::PROPAGATING_NAN),
+    OperatorCapability::constrained(Op::MATMUL, OperatorConstraints::ZERO_ZERO_POINTS),
+    OperatorCapability::constrained(
+        Op::MAX_POOL2D,
+        OperatorConstraints::PROPAGATING_NAN.union(OperatorConstraints::ZERO_PADDING),
+    ),
+    OperatorCapability::constrained(Op::CLAMP, OperatorConstraints::PROPAGATING_NAN),
+    OperatorCapability::new(Op::ERF),
+    OperatorCapability::new(Op::SIGMOID),
+    OperatorCapability::new(Op::TANH),
+    OperatorCapability::new(Op::ADD),
+    OperatorCapability::new(Op::LOGICAL_AND),
+    OperatorCapability::new(Op::LOGICAL_OR),
+    OperatorCapability::new(Op::LOGICAL_XOR),
+    OperatorCapability::constrained(Op::MAXIMUM, OperatorConstraints::PROPAGATING_NAN),
+    OperatorCapability::constrained(Op::MINIMUM, OperatorConstraints::PROPAGATING_NAN),
+    OperatorCapability::constrained(Op::MUL, OperatorConstraints::ZERO_SHIFT),
+    OperatorCapability::new(Op::POW),
+    OperatorCapability::new(Op::SUB),
+    OperatorCapability::new(Op::ABS),
+    OperatorCapability::new(Op::CEIL),
+    OperatorCapability::new(Op::COS),
+    OperatorCapability::new(Op::EXP),
+    OperatorCapability::new(Op::FLOOR),
+    OperatorCapability::new(Op::LOG),
+    OperatorCapability::new(Op::LOGICAL_NOT),
+    OperatorCapability::constrained(Op::NEGATE, OperatorConstraints::ZERO_ZERO_POINTS),
+    OperatorCapability::new(Op::RECIPROCAL),
+    OperatorCapability::new(Op::RSQRT),
+    OperatorCapability::new(Op::SIN),
+    OperatorCapability::new(Op::SELECT),
+    OperatorCapability::new(Op::EQUAL),
+    OperatorCapability::new(Op::GREATER),
+    OperatorCapability::new(Op::GREATER_EQUAL),
+    OperatorCapability::constrained(Op::REDUCE_MAX, OperatorConstraints::PROPAGATING_NAN),
+    OperatorCapability::constrained(Op::REDUCE_MIN, OperatorConstraints::PROPAGATING_NAN),
+    OperatorCapability::new(Op::REDUCE_PRODUCT),
+    OperatorCapability::new(Op::REDUCE_SUM),
+    OperatorCapability::new(Op::CONCAT),
+    OperatorCapability::constrained(Op::RESHAPE, OperatorConstraints::CONSTANT_PARAMETERS),
+    OperatorCapability::new(Op::REVERSE),
+    OperatorCapability::new(Op::TRANSPOSE),
+    OperatorCapability::new(Op::CONST),
+    OperatorCapability::new(Op::CONST_SHAPE),
+    OperatorCapability::new(Op::IDENTITY),
+];
+
+const INTEGER_OPERATORS: &[OperatorCapability] = &[
+    OperatorCapability::new(Op::CONST),
+    OperatorCapability::new(Op::IDENTITY),
+    OperatorCapability::new(Op::MATMUL),
+];
+
+/// Conservative floating-profile capability boundary for OpenVINO lowering.
+pub const OPENVINO_TOSA_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
+    target: OPENVINO_TOSA_TARGET,
+    dtypes: FLOAT_DTYPES,
+    operators: FLOAT_OPERATORS,
+    graph: GraphCapabilities {
+        max_regions: 1,
+        max_blocks: 1,
+        dynamic_shapes: false,
+        runtime_conditions: RuntimeConditionSupport::None,
+    },
+};
+
+/// Conservative exact integer-profile capability boundary for OpenVINO lowering.
+pub const OPENVINO_TOSA_INTEGER_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
+    target: OPENVINO_TOSA_INTEGER_TARGET,
+    dtypes: INTEGER_DTYPES,
+    operators: INTEGER_OPERATORS,
+    graph: GraphCapabilities {
+        max_regions: 1,
+        max_blocks: 1,
+        dynamic_shapes: false,
+        runtime_conditions: RuntimeConditionSupport::None,
+    },
+};
 
 /// Weights-blob entries are aligned generously so every element type loads aligned.
 const WEIGHTS_ALIGNMENT: usize = 64;
@@ -162,51 +265,7 @@ pub(crate) struct LoweredModel {
 
 /// Whether the initial OpenVINO lowering tier can lower `op` for supported types and attributes.
 pub const fn supports_tosa_operator(op: Op) -> bool {
-    matches!(
-        op,
-        Op::ARGMAX
-            | Op::MATMUL
-            | Op::MAX_POOL2D
-            | Op::CLAMP
-            | Op::ERF
-            | Op::SIGMOID
-            | Op::TANH
-            | Op::ADD
-            | Op::LOGICAL_AND
-            | Op::LOGICAL_OR
-            | Op::LOGICAL_XOR
-            | Op::MAXIMUM
-            | Op::MINIMUM
-            | Op::MUL
-            | Op::POW
-            | Op::SUB
-            | Op::ABS
-            | Op::CEIL
-            | Op::COS
-            | Op::EXP
-            | Op::FLOOR
-            | Op::LOG
-            | Op::LOGICAL_NOT
-            | Op::NEGATE
-            | Op::RECIPROCAL
-            | Op::RSQRT
-            | Op::SIN
-            | Op::SELECT
-            | Op::EQUAL
-            | Op::GREATER
-            | Op::GREATER_EQUAL
-            | Op::REDUCE_MAX
-            | Op::REDUCE_MIN
-            | Op::REDUCE_PRODUCT
-            | Op::REDUCE_SUM
-            | Op::CONCAT
-            | Op::RESHAPE
-            | Op::REVERSE
-            | Op::TRANSPOSE
-            | Op::CONST
-            | Op::CONST_SHAPE
-            | Op::IDENTITY
-    )
+    OPENVINO_TOSA_CAPABILITY.supports_operator(op)
 }
 
 /// Whether this lowering can expose `dtype` at an OpenVINO model boundary.
@@ -215,10 +274,10 @@ pub const fn supports_tosa_operator(op: Op) -> bool {
 /// exact identity and zero-point-aware MATMUL; other integer operators are rejected instead of
 /// silently dequantized.
 pub const fn supports_tosa_dtype(dtype: DType) -> bool {
-    matches!(
-        dtype,
-        DType::FP16 | DType::FP32 | DType::INT8 | DType::INT32 | DType::BOOL
-    )
+    OPENVINO_TOSA_CAPABILITY.supports_dtype(dtype, ValueRoles::INPUT)
+        || OPENVINO_TOSA_CAPABILITY.supports_dtype(dtype, ValueRoles::OUTPUT)
+        || OPENVINO_TOSA_INTEGER_CAPABILITY.supports_dtype(dtype, ValueRoles::INPUT)
+        || OPENVINO_TOSA_INTEGER_CAPABILITY.supports_dtype(dtype, ValueRoles::OUTPUT)
 }
 
 /// A produced tensor inside the document: one output port of one layer.
@@ -1340,6 +1399,25 @@ mod tests {
         ] {
             assert!(supports_tosa_dtype(dtype), "{dtype:?}");
         }
+    }
+
+    #[test]
+    fn descriptors_separate_parameter_constants_and_integer_boundaries() {
+        let parameter = OPENVINO_TOSA_CAPABILITY.dtype(DType::INT8).unwrap();
+        assert_eq!(parameter.roles, ValueRoles::CONSTANT);
+        assert!(
+            parameter
+                .constraints
+                .contains(DTypeConstraints::PARAMETER_ONLY)
+        );
+        assert!(OPENVINO_TOSA_INTEGER_CAPABILITY.supports_dtype(DType::INT8, ValueRoles::INPUT));
+        assert!(!OPENVINO_TOSA_INTEGER_CAPABILITY.supports_operator(Op::ADD));
+        let pool = OPENVINO_TOSA_CAPABILITY.operator(Op::MAX_POOL2D).unwrap();
+        assert!(
+            pool.constraints
+                .contains(OperatorConstraints::PROPAGATING_NAN)
+        );
+        assert!(pool.constraints.contains(OperatorConstraints::ZERO_PADDING));
     }
 
     #[test]

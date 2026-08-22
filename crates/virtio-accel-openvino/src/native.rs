@@ -23,6 +23,7 @@ use virtio_accel_core::{
     Capabilities, ContextDesc, DeviceIdentity, DeviceInfo, DeviceLimits, EventState, MemoryDomain,
     QueueDesc, ReleaseFailure, SubmitFailure, Timeout,
 };
+use virtio_accel_tosa::{CapabilityDescriptor, TosaCapabilityProvider};
 
 use crate::lower::{LoweredFeature, LoweredFeatureRole, OvElement, lower_tosa};
 use crate::{InitError, REQUIRED_RESIDENT_BYTES, ffi};
@@ -970,6 +971,12 @@ impl OpenVinoAccelerator {
             other => EventState::Failed(backend_error_from_status(other)),
         };
         event.latch(state)
+    }
+}
+
+impl TosaCapabilityProvider for OpenVinoAccelerator {
+    fn tosa_capabilities(&self) -> &'static [CapabilityDescriptor] {
+        crate::TOSA_CAPABILITIES
     }
 }
 
