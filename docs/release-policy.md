@@ -135,7 +135,7 @@ declares its own `description` and `readme`, and carries its own byte-identical 
 root license files do not reach the sub-crate tarballs; the copies exist for that reason and are
 copies rather than symlinks because CI runs `windows-latest`.
 
-`ci/check-release-policy.py` enforces all of this against an explicit fourteen-crate allowlist. A new
+`ci/check-release-policy.py` enforces all of this against an explicit sixteen-crate allowlist. A new
 package fails that check until it is added to the allowlist, which forces a decision about whether
 it is public rather than letting it default either way. The check also validates the crates.io
 keyword and category limits, which neither `cargo package` nor `cargo publish --dry-run` catches
