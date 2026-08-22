@@ -48,9 +48,10 @@ target-specific host descriptors for schedulers without adding TOSA concepts to 
 successful discovery never replaces authoritative program admission. Generated FlatBuffers tables
 and unchecked roots remain private.
 
-`virtio-accel-tosa-build` is the authoring companion, not a second ingestion path. It exposes only
-owned output bytes and typed static graph definitions, keeps raw table slots and union tags private,
-and invokes `virtio-accel-tosa` structural and target validation before returning success.
+`virtio-accel-tosa-build` is the authoring companion, not a second ingestion path. It exposes
+borrowed definitions for statically declared graphs and owned definitions for incremental compiler
+frontends, keeps raw table slots and union tags private, and invokes the same `virtio-accel-tosa`
+structural and target validation before either build surface returns owned output bytes.
 
 ## Runnable entry points
 
