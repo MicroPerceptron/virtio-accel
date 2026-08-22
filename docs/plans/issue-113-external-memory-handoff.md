@@ -11,8 +11,8 @@ Last reviewed: 2026-08-22
 External-memory handoff is a **compatible protocol extension** under
 [`wire-abi.md` section 9](../wire-abi.md#9-candidate-and-post-freeze-change-procedure). A future
 minor protocol may assign the reserved external-memory feature position and new opcodes only when
-the complete normative, implementation, and conformance change lands. Every protocol 1.0 frame,
-payload length, status, object rule, and fallback remains unchanged.
+the complete normative, implementation, and conformance change lands. Every Protocol 1.0 frame,
+payload length, status, object rule, and fallback remain unchanged.
 
 This design does not assign a feature bit, opcode, status, structure layout, or protocol minor. A
 1.0 implementation that advertises external memory is still nonconformant. The design fixes the
