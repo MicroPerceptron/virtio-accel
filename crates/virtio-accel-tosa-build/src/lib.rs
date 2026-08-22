@@ -9,6 +9,7 @@
 
 extern crate alloc;
 
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -27,6 +28,10 @@ mod slot {
     pub const TENSOR_TYPE: u16 = 8;
     pub const TENSOR_DATA: u16 = 10;
 
+    pub const SHAPE_NAME: u16 = 4;
+    pub const SHAPE_RANK: u16 = 6;
+    pub const SHAPE_DATA: u16 = 8;
+
     pub const OPERATOR_OP: u16 = 4;
     pub const OPERATOR_ATTRIBUTE_TYPE: u16 = 6;
     pub const OPERATOR_ATTRIBUTE: u16 = 8;
@@ -38,6 +43,7 @@ mod slot {
     pub const BLOCK_TENSORS: u16 = 8;
     pub const BLOCK_INPUTS: u16 = 10;
     pub const BLOCK_OUTPUTS: u16 = 12;
+    pub const BLOCK_SHAPES: u16 = 14;
 
     pub const REGION_NAME: u16 = 4;
     pub const REGION_BLOCKS: u16 = 6;
@@ -51,6 +57,24 @@ mod slot {
     pub const VERSION_DRAFT: u16 = 10;
 
     pub const NAN_MODE: u16 = 4;
+}
+
+/// A serialized compile-time shape value.
+///
+/// Shape values occupy the TOSA shape namespace rather than the tensor namespace. They must be
+/// produced by [`OperatorKind::ConstShape`] before an operator such as `RESHAPE` consumes them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shape<'a> {
+    /// Unique block-local shape name.
+    pub name: &'a str,
+    /// Signed 64-bit TOSA shape components. A scalar target shape uses an empty slice.
+    pub values: &'a [i64],
+}
+
+impl<'a> Shape<'a> {
+    pub const fn new(name: &'a str, values: &'a [i64]) -> Self {
+        Self { name, values }
+    }
 }
 
 /// A statically shaped tensor definition.
@@ -124,6 +148,7 @@ pub enum OperatorKind {
     Cast,
     Const,
     Identity,
+    ConstShape,
 }
 
 impl OperatorKind {
@@ -159,6 +184,7 @@ impl OperatorKind {
             Self::Cast => Op::CAST,
             Self::Const => Op::CONST,
             Self::Identity => Op::IDENTITY,
+            Self::ConstShape => Op::CONST_SHAPE,
         }
     }
 }
@@ -186,6 +212,7 @@ impl<'a> Operator<'a> {
 pub struct Graph<'a> {
     pub name: &'a str,
     pub tensors: &'a [Tensor<'a>],
+    pub shapes: &'a [Shape<'a>],
     pub operators: &'a [Operator<'a>],
     pub inputs: &'a [&'a str],
     pub outputs: &'a [&'a str],
@@ -202,10 +229,17 @@ impl<'a> Graph<'a> {
         Self {
             name,
             tensors,
+            shapes: &[],
             operators,
             inputs,
             outputs,
         }
+    }
+
+    /// Add compile-time shape values to this graph.
+    pub const fn with_shapes(mut self, shapes: &'a [Shape<'a>]) -> Self {
+        self.shapes = shapes;
+        self
     }
 
     /// Serialize and semantically validate this graph for `target`.
@@ -234,6 +268,44 @@ impl<'a> Graph<'a> {
                 return Err(BuildError::UnsupportedDType(tensor.dtype));
             }
         }
+
+        for shape in self.shapes {
+            if u32::try_from(shape.values.len()).is_err() {
+                return Err(BuildError::ShapeRankOverflow);
+            }
+        }
+
+        let mut constant_tensors = BTreeSet::new();
+        let mut constant_shapes = BTreeSet::new();
+        for operator in self.operators {
+            let outputs = match operator.kind {
+                OperatorKind::Const => &mut constant_tensors,
+                OperatorKind::ConstShape => &mut constant_shapes,
+                _ => continue,
+            };
+            outputs.extend(operator.outputs.iter().copied());
+        }
+
+        for tensor in self.tensors {
+            match tensor.data {
+                Some([]) => return Err(BuildError::EmptyConstantData),
+                Some(_) if !constant_tensors.contains(tensor.name) => {
+                    return Err(BuildError::TensorDataWithoutConst);
+                }
+                Some(_) => {}
+                None if constant_tensors.contains(tensor.name) => {
+                    return Err(BuildError::ConstWithoutTensorData);
+                }
+                None => {}
+            }
+        }
+        if self
+            .shapes
+            .iter()
+            .any(|shape| !constant_shapes.contains(shape.name))
+        {
+            return Err(BuildError::ShapeWithoutConstShape);
+        }
         Ok(())
     }
 
@@ -245,6 +317,14 @@ impl<'a> Graph<'a> {
                 .tensors
                 .iter()
                 .map(|tensor| tensor_table(&mut builder, *tensor))
+                .collect();
+            builder.create_vector(&tables)
+        };
+        let shapes = {
+            let tables: Vec<_> = self
+                .shapes
+                .iter()
+                .map(|shape| shape_table(&mut builder, *shape))
                 .collect();
             builder.create_vector(&tables)
         };
@@ -266,6 +346,7 @@ impl<'a> Graph<'a> {
             builder.push_slot_always(slot::BLOCK_TENSORS, tensors);
             builder.push_slot_always(slot::BLOCK_INPUTS, inputs);
             builder.push_slot_always(slot::BLOCK_OUTPUTS, outputs);
+            builder.push_slot_always(slot::BLOCK_SHAPES, shapes);
             builder.end_table(table)
         };
         let region = {
@@ -295,6 +376,25 @@ impl<'a> Graph<'a> {
         builder.finish(graph, Some("TOSA"));
         builder.finished_data().to_vec()
     }
+}
+
+fn shape_table(builder: &mut FlatBufferBuilder<'_>, shape: Shape<'_>) -> Table {
+    let name = builder.create_string(shape.name);
+    let bytes: Vec<_> = shape
+        .values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    let data = builder.create_vector(&bytes);
+    let table = builder.start_table();
+    builder.push_slot_always(slot::SHAPE_NAME, name);
+    builder.push_slot::<u32>(
+        slot::SHAPE_RANK,
+        u32::try_from(shape.values.len()).expect("shape rank checked before serialization"),
+        0,
+    );
+    builder.push_slot_always(slot::SHAPE_DATA, data);
+    builder.end_table(table)
 }
 
 fn tensor_table(builder: &mut FlatBufferBuilder<'_>, tensor: Tensor<'_>) -> Table {
@@ -353,6 +453,11 @@ fn string_vector<'a>(
 pub enum BuildError {
     EmptyGraphName,
     DynamicShape,
+    ShapeRankOverflow,
+    EmptyConstantData,
+    TensorDataWithoutConst,
+    ConstWithoutTensorData,
+    ShapeWithoutConstShape,
     UnsupportedDType(DType),
     Parse(virtio_accel_tosa::Error),
     Semantic(SemanticError),
@@ -364,6 +469,19 @@ impl fmt::Display for BuildError {
             Self::EmptyGraphName => formatter.write_str("graph name must not be empty"),
             Self::DynamicShape => {
                 formatter.write_str("the single-block authoring surface requires static shapes")
+            }
+            Self::ShapeRankOverflow => formatter.write_str("shape rank does not fit TOSA u32"),
+            Self::EmptyConstantData => {
+                formatter.write_str("tensor constants require nonempty inline data")
+            }
+            Self::TensorDataWithoutConst => {
+                formatter.write_str("inline tensor data requires a CONST producer")
+            }
+            Self::ConstWithoutTensorData => {
+                formatter.write_str("CONST outputs require nonempty inline tensor data")
+            }
+            Self::ShapeWithoutConstShape => {
+                formatter.write_str("shape values require a CONST_SHAPE producer")
             }
             Self::UnsupportedDType(dtype) => {
                 write!(formatter, "unsupported TOSA 1.0 dtype {dtype:?}")
@@ -440,6 +558,135 @@ mod tests {
         let model = virtio_accel_tosa::parse(&bytes).unwrap();
         let block = model.regions().next().unwrap().blocks().next().unwrap();
         assert_eq!(block.operators().len(), 2);
+    }
+
+    #[test]
+    fn reshape_uses_a_typed_const_shape_operand() {
+        let tensors = [
+            Tensor::new("input", &[1, 4], DType::FP32),
+            Tensor::new("output", &[2, 2], DType::FP32),
+        ];
+        let shapes = [Shape::new("target", &[2, 2])];
+        let operators = [
+            Operator::new(OperatorKind::ConstShape, &[], &["target"]),
+            Operator::new(OperatorKind::Reshape, &["input", "target"], &["output"]),
+        ];
+        let bytes = Graph::new("main", &tensors, &operators, &["input"], &["output"])
+            .with_shapes(&shapes)
+            .build(FLOAT_TARGET)
+            .unwrap();
+
+        let model = virtio_accel_tosa::parse(&bytes).unwrap();
+        let block = model.regions().next().unwrap().blocks().next().unwrap();
+        assert_eq!(block.shapes().len(), 1);
+        assert_eq!(block.shapes().next().unwrap().values().unwrap().len(), 2);
+        assert_eq!(block.operators().len(), 2);
+    }
+
+    #[test]
+    fn inline_tensor_data_requires_a_nonempty_const_producer() {
+        let one = 1.0_f32.to_le_bytes();
+        let data_without_const = [Tensor::constant("value", &[1], DType::FP32, &one)];
+        assert!(matches!(
+            Graph::new("main", &data_without_const, &[], &["value"], &["value"])
+                .build(FLOAT_TARGET),
+            Err(BuildError::TensorDataWithoutConst)
+        ));
+
+        let missing_data = [Tensor::new("value", &[1], DType::FP32)];
+        let constant = [Operator::new(OperatorKind::Const, &[], &["value"])];
+        assert!(matches!(
+            Graph::new("main", &missing_data, &constant, &[], &["value"]).build(FLOAT_TARGET),
+            Err(BuildError::ConstWithoutTensorData)
+        ));
+
+        let empty_data = [Tensor::constant("value", &[0], DType::FP32, &[])];
+        assert!(matches!(
+            Graph::new("main", &empty_data, &constant, &[], &["value"]).build(FLOAT_TARGET),
+            Err(BuildError::EmptyConstantData)
+        ));
+    }
+
+    #[test]
+    fn every_operator_kind_serializes_its_pinned_opcode_and_union_tag() {
+        let cases = [
+            (OperatorKind::MatMul, Op::MATMUL, 7),
+            (OperatorKind::Sigmoid, Op::SIGMOID, 13),
+            (OperatorKind::Tanh, Op::TANH, 14),
+            (OperatorKind::Add, Op::ADD, 15),
+            (OperatorKind::LogicalAnd, Op::LOGICAL_AND, 21),
+            (OperatorKind::LogicalOr, Op::LOGICAL_OR, 24),
+            (OperatorKind::LogicalXor, Op::LOGICAL_XOR, 25),
+            (
+                OperatorKind::Maximum {
+                    nan_mode: NanPropagationMode::PROPAGATE,
+                },
+                Op::MAXIMUM,
+                26,
+            ),
+            (
+                OperatorKind::Minimum {
+                    nan_mode: NanPropagationMode::PROPAGATE,
+                },
+                Op::MINIMUM,
+                27,
+            ),
+            (OperatorKind::Mul, Op::MUL, 28),
+            (OperatorKind::Pow, Op::POW, 29),
+            (OperatorKind::Sub, Op::SUB, 30),
+            (OperatorKind::Abs, Op::ABS, 32),
+            (OperatorKind::Cos, Op::COS, 36),
+            (OperatorKind::Exp, Op::EXP, 37),
+            (OperatorKind::Log, Op::LOG, 39),
+            (OperatorKind::LogicalNot, Op::LOGICAL_NOT, 40),
+            (OperatorKind::Negate, Op::NEGATE, 41),
+            (OperatorKind::Reciprocal, Op::RECIPROCAL, 42),
+            (OperatorKind::Rsqrt, Op::RSQRT, 43),
+            (OperatorKind::Sin, Op::SIN, 44),
+            (OperatorKind::Select, Op::SELECT, 45),
+            (OperatorKind::Equal, Op::EQUAL, 46),
+            (OperatorKind::Greater, Op::GREATER, 47),
+            (OperatorKind::GreaterEqual, Op::GREATER_EQUAL, 48),
+            (OperatorKind::Reshape, Op::RESHAPE, 57),
+            (OperatorKind::Cast, Op::CAST, 65),
+            (OperatorKind::Const, Op::CONST, 67),
+            (OperatorKind::Identity, Op::IDENTITY, 68),
+            (OperatorKind::ConstShape, Op::CONST_SHAPE, 75),
+        ];
+
+        for (kind, expected_op, expected_attribute) in cases {
+            let tensors = [
+                Tensor::new("input", &[1], DType::FP32),
+                Tensor::new("output", &[1], DType::FP32),
+            ];
+            let shapes = [Shape::new("target", &[1])];
+            let regular_inputs = ["input"];
+            let reshape_inputs = ["input", "target"];
+            let tensor_output = ["output"];
+            let shape_output = ["target"];
+            let (inputs, outputs): (&[&str], &[&str]) = match kind {
+                OperatorKind::Const => (&[], &tensor_output),
+                OperatorKind::ConstShape => (&[], &shape_output),
+                OperatorKind::Reshape => (&reshape_inputs, &tensor_output),
+                _ => (&regular_inputs, &tensor_output),
+            };
+            let operator = [Operator::new(kind, inputs, outputs)];
+            let graph = Graph::new("main", &tensors, &operator, &[], &[]).with_shapes(&shapes);
+            let bytes = graph.serialize();
+            let model = virtio_accel_tosa::parse(&bytes).unwrap();
+            let parsed = model
+                .regions()
+                .next()
+                .unwrap()
+                .blocks()
+                .next()
+                .unwrap()
+                .operators()
+                .next()
+                .unwrap();
+            assert_eq!(parsed.op(), expected_op);
+            assert_eq!(parsed.attribute_kind().get(), expected_attribute);
+        }
     }
 
     #[test]
