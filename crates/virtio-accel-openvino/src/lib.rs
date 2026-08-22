@@ -24,7 +24,9 @@ pub use lower::{
     supports_tosa_operator,
 };
 
-use virtio_accel_tosa::{CapabilityDescriptor, TosaCapabilityProvider};
+use virtio_accel_tosa::CapabilityDescriptor;
+#[cfg(not(va_openvino))]
+use virtio_accel_tosa::TosaCapabilityProvider;
 
 #[cfg(va_openvino)]
 const TOSA_CAPABILITIES: &[CapabilityDescriptor] =

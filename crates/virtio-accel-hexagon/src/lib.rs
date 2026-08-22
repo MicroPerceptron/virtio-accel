@@ -14,7 +14,9 @@ pub use lower::{
     HEXAGON_TOSA_TARGET, LoweringError, supports_tosa_dtype, supports_tosa_operator,
 };
 
-use virtio_accel_tosa::{CapabilityDescriptor, TosaCapabilityProvider};
+use virtio_accel_tosa::CapabilityDescriptor;
+#[cfg(not(va_hexagon))]
+use virtio_accel_tosa::TosaCapabilityProvider;
 
 #[cfg(va_hexagon)]
 const TOSA_CAPABILITIES: &[CapabilityDescriptor] =
