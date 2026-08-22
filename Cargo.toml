@@ -39,6 +39,7 @@ members = [
     "crates/virtio-accel-proto",
     "crates/virtio-accel-split-queue",
     "crates/virtio-accel-tosa",
+    "crates/virtio-accel-tosa-build",
     "crates/virtio-accel-transport",
 ]
 resolver = "3"
@@ -73,6 +74,7 @@ virtio-accel-openvino = { path = "crates/virtio-accel-openvino", version = "0.3.
 virtio-accel-proto = { path = "crates/virtio-accel-proto", version = "0.3.1" }
 virtio-accel-split-queue = { path = "crates/virtio-accel-split-queue", version = "0.3.1" }
 virtio-accel-tosa = { path = "crates/virtio-accel-tosa", version = "0.3.1" }
+virtio-accel-tosa-build = { path = "crates/virtio-accel-tosa-build", version = "0.3.1" }
 virtio-accel-transport = { path = "crates/virtio-accel-transport", version = "0.3.1" }
 virtio-accel-vaccel = { path = "crates/virtio-accel-vaccel", version = "0.3.1" }
 

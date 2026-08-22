@@ -1,0 +1,23 @@
+[package]
+name = "virtio-accel-tosa-build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Safe portable authoring for static TOSA 1.0 artifacts"
+readme = "README.md"
+include = [
+    "/Cargo.toml",
+    "/README.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+    "/src/**",
+]
+
+[dependencies]
+flatbuffers.workspace = true
+virtio-accel-tosa.workspace = true
