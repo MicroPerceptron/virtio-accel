@@ -220,7 +220,10 @@ read segmented bytes directly into final resident storage.
 Zero-copy guest-memory imports are deliberately deferred rather than pretending that DMA-BUF,
 Windows shared handles, and other mechanisms have identical lifetime or coherency semantics. When
 external memory is specified, fallback staging will require explicit negotiation and copy
-accounting; it will not weaken the provider-owned direct-binding rule.
+accounting; it will not weaken the provider-owned direct-binding rule. The non-normative
+[external-memory handoff design](plans/issue-113-external-memory-handoff.md) fixes the proposed
+ownership, visibility, reset, isolation, fallback, and conformance boundaries without assigning or
+advertising the reserved protocol feature.
 
 ### Backend fast-path checklist
 

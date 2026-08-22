@@ -158,7 +158,9 @@ Protocol 1.0 does not claim protection against:
 
 These exclusions do not permit a portable adapter to weaken object ownership, response atomicity,
 or resource accounting. A future feature that crosses one of these boundaries needs its own threat
-model, negotiation, conformance evidence, and release audit.
+model, negotiation, conformance evidence, and release audit. The non-normative
+[external-memory handoff design](plans/issue-113-external-memory-handoff.md) enumerates those gates;
+it does not narrow this protocol 1.0 exclusion or authorize advertising the reserved feature.
 
 ## Review obligations
 
