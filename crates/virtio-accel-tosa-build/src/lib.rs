@@ -1,15 +1,18 @@
 //! Safe authoring of static, single-block TOSA 1.0 artifacts.
 //!
-//! The raw FlatBuffers layout is private to this crate. [`Graph::build`]
-//! round-trips every artifact through `virtio-accel-tosa`'s bounded parser and
-//! complete target validator before returning owned bytes.
+//! The raw FlatBuffers layout is private to this crate. Borrowed [`Graph`] definitions suit
+//! statically declared artifacts, while [`OwnedGraph`] supports frontends that discover names,
+//! shapes, constants, and operators incrementally. Both surfaces round-trip every artifact through
+//! `virtio-accel-tosa`'s bounded parser and complete target validator before returning owned bytes.
 
 #![no_std]
 #![forbid(unsafe_code)]
 
 extern crate alloc;
 
+use alloc::borrow::Cow;
 use alloc::collections::BTreeSet;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -203,6 +206,238 @@ impl<'a> Operator<'a> {
             kind,
             inputs,
             outputs,
+        }
+    }
+}
+
+/// An owned compile-time shape for incrementally assembled graphs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnedShape {
+    pub name: String,
+    pub values: Vec<i64>,
+}
+
+impl OwnedShape {
+    pub fn new(name: impl Into<String>, values: Vec<i64>) -> Self {
+        Self {
+            name: name.into(),
+            values,
+        }
+    }
+}
+
+impl From<Shape<'_>> for OwnedShape {
+    fn from(shape: Shape<'_>) -> Self {
+        Self::new(shape.name, shape.values.to_vec())
+    }
+}
+
+/// An owned tensor definition for incrementally assembled graphs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnedTensor<'a> {
+    pub name: String,
+    pub shape: Vec<i32>,
+    pub dtype: DType,
+    /// Inline constant bytes. Existing frontend storage may be borrowed to avoid a second copy;
+    /// newly transformed data can be moved into this field.
+    pub data: Option<Cow<'a, [u8]>>,
+}
+
+impl<'a> OwnedTensor<'a> {
+    /// Define a non-constant owned tensor.
+    pub fn new(name: impl Into<String>, shape: Vec<i32>, dtype: DType) -> Self {
+        Self {
+            name: name.into(),
+            shape,
+            dtype,
+            data: None,
+        }
+    }
+
+    /// Define an owned tensor with inline constant storage.
+    pub fn constant(
+        name: impl Into<String>,
+        shape: Vec<i32>,
+        dtype: DType,
+        data: impl Into<Cow<'a, [u8]>>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            shape,
+            dtype,
+            data: Some(data.into()),
+        }
+    }
+}
+
+impl<'a> From<Tensor<'a>> for OwnedTensor<'a> {
+    fn from(tensor: Tensor<'a>) -> Self {
+        match tensor.data {
+            Some(data) => Self::constant(tensor.name, tensor.shape.to_vec(), tensor.dtype, data),
+            None => Self::new(tensor.name, tensor.shape.to_vec(), tensor.dtype),
+        }
+    }
+}
+
+/// An owned typed operator for incrementally assembled graphs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnedOperator {
+    pub kind: OperatorKind,
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
+}
+
+impl OwnedOperator {
+    /// Define an operator from owned operand names.
+    pub const fn new(kind: OperatorKind, inputs: Vec<String>, outputs: Vec<String>) -> Self {
+        Self {
+            kind,
+            inputs,
+            outputs,
+        }
+    }
+}
+
+impl From<Operator<'_>> for OwnedOperator {
+    fn from(operator: Operator<'_>) -> Self {
+        Self::new(
+            operator.kind,
+            operator
+                .inputs
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
+            operator
+                .outputs
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
+        )
+    }
+}
+
+/// An owned, incrementally assembled static TOSA graph.
+///
+/// This surface is intended for compiler frontends whose names, shapes, constants, and operator
+/// lists are discovered at runtime. It owns names and metadata while permitting explicit borrowing
+/// of existing constant storage. It creates borrowed [`Graph`] views only during [`Self::build`],
+/// so callers do not need parallel adapter structures. The same structural and target validation
+/// as [`Graph::build`] remains authoritative.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnedGraph<'a> {
+    pub name: String,
+    pub tensors: Vec<OwnedTensor<'a>>,
+    pub shapes: Vec<OwnedShape>,
+    pub operators: Vec<OwnedOperator>,
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
+}
+
+impl<'a> OwnedGraph<'a> {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            tensors: Vec::new(),
+            shapes: Vec::new(),
+            operators: Vec::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        }
+    }
+
+    pub fn push_tensor(&mut self, tensor: OwnedTensor<'a>) -> &mut Self {
+        self.tensors.push(tensor);
+        self
+    }
+
+    pub fn push_shape(&mut self, shape: OwnedShape) -> &mut Self {
+        self.shapes.push(shape);
+        self
+    }
+
+    pub fn push_operator(&mut self, operator: OwnedOperator) -> &mut Self {
+        self.operators.push(operator);
+        self
+    }
+
+    pub fn push_input(&mut self, name: impl Into<String>) -> &mut Self {
+        self.inputs.push(name.into());
+        self
+    }
+
+    pub fn push_output(&mut self, name: impl Into<String>) -> &mut Self {
+        self.outputs.push(name.into());
+        self
+    }
+
+    /// Serialize and semantically validate this graph for `target`.
+    ///
+    /// The graph remains reusable after a build. All metadata views allocated here are transient;
+    /// the returned artifact bytes are the only allocation retained by the caller.
+    pub fn build(&self, target: Target) -> Result<Vec<u8>, BuildError> {
+        let tensors: Vec<_> = self
+            .tensors
+            .iter()
+            .map(|tensor| match &tensor.data {
+                Some(data) => {
+                    Tensor::constant(&tensor.name, &tensor.shape, tensor.dtype, data.as_ref())
+                }
+                None => Tensor::new(&tensor.name, &tensor.shape, tensor.dtype),
+            })
+            .collect();
+        let shapes: Vec<_> = self
+            .shapes
+            .iter()
+            .map(|shape| Shape::new(&shape.name, &shape.values))
+            .collect();
+        let operator_inputs: Vec<Vec<&str>> = self
+            .operators
+            .iter()
+            .map(|operator| operator.inputs.iter().map(String::as_str).collect())
+            .collect();
+        let operator_outputs: Vec<Vec<&str>> = self
+            .operators
+            .iter()
+            .map(|operator| operator.outputs.iter().map(String::as_str).collect())
+            .collect();
+        let operators: Vec<_> = self
+            .operators
+            .iter()
+            .enumerate()
+            .map(|(index, operator)| {
+                Operator::new(
+                    operator.kind,
+                    &operator_inputs[index],
+                    &operator_outputs[index],
+                )
+            })
+            .collect();
+        let inputs: Vec<_> = self.inputs.iter().map(String::as_str).collect();
+        let outputs: Vec<_> = self.outputs.iter().map(String::as_str).collect();
+
+        Graph::new(&self.name, &tensors, &operators, &inputs, &outputs)
+            .with_shapes(&shapes)
+            .build(target)
+    }
+}
+
+impl<'a> From<Graph<'a>> for OwnedGraph<'a> {
+    fn from(graph: Graph<'a>) -> Self {
+        Self {
+            name: graph.name.to_string(),
+            tensors: graph.tensors.iter().copied().map(Into::into).collect(),
+            shapes: graph.shapes.iter().copied().map(Into::into).collect(),
+            operators: graph.operators.iter().copied().map(Into::into).collect(),
+            inputs: graph
+                .inputs
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
+            outputs: graph
+                .outputs
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
         }
     }
 }
@@ -501,6 +736,7 @@ impl fmt::Display for BuildError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use virtio_accel_tosa::{ExtensionSet, Level, ProfileSet, Version};
 
     const FLOAT_TARGET: Target = Target::new(
@@ -558,6 +794,101 @@ mod tests {
         let model = virtio_accel_tosa::parse(&bytes).unwrap();
         let block = model.regions().next().unwrap().blocks().next().unwrap();
         assert_eq!(block.operators().len(), 2);
+    }
+
+    #[test]
+    fn incrementally_owned_graph_matches_borrowed_artifact_bytes() {
+        let one = 1.0_f32.to_le_bytes();
+        let tensors = [
+            Tensor::new("lhs", &[1], DType::FP32),
+            Tensor::constant("rhs", &[1], DType::FP32, &one),
+            Tensor::new("output", &[1], DType::FP32),
+        ];
+        let operators = [
+            Operator::new(OperatorKind::Const, &[], &["rhs"]),
+            Operator::new(OperatorKind::Add, &["lhs", "rhs"], &["output"]),
+        ];
+        let expected = Graph::new("main", &tensors, &operators, &["lhs"], &["output"])
+            .build(FLOAT_TARGET)
+            .unwrap();
+
+        let mut graph = OwnedGraph::new(String::from("main"));
+        graph
+            .push_tensor(OwnedTensor::new(String::from("lhs"), vec![1], DType::FP32))
+            .push_tensor(OwnedTensor::constant(
+                String::from("rhs"),
+                vec![1],
+                DType::FP32,
+                one.to_vec(),
+            ))
+            .push_tensor(OwnedTensor::new("output", vec![1], DType::FP32))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::Const,
+                vec![],
+                vec![String::from("rhs")],
+            ))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::Add,
+                vec![String::from("lhs"), String::from("rhs")],
+                vec![String::from("output")],
+            ))
+            .push_input(String::from("lhs"))
+            .push_output(String::from("output"));
+
+        let first = graph.build(FLOAT_TARGET).unwrap();
+        let second = graph.build(FLOAT_TARGET).unwrap();
+        assert_eq!(first, expected);
+        assert_eq!(second, expected);
+    }
+
+    #[test]
+    fn borrowed_graph_converts_to_an_incremental_graph() {
+        let tensors = [
+            Tensor::new("input", &[1, 4], DType::FP32),
+            Tensor::new("output", &[2, 2], DType::FP32),
+        ];
+        let shapes = [Shape::new("target", &[2, 2])];
+        let operators = [
+            Operator::new(OperatorKind::ConstShape, &[], &["target"]),
+            Operator::new(OperatorKind::Reshape, &["input", "target"], &["output"]),
+        ];
+        let borrowed =
+            Graph::new("main", &tensors, &operators, &["input"], &["output"]).with_shapes(&shapes);
+        let expected = borrowed.build(FLOAT_TARGET).unwrap();
+
+        let owned = OwnedGraph::from(borrowed);
+        assert_eq!(owned.build(FLOAT_TARGET).unwrap(), expected);
+        assert_eq!(owned.shapes, vec![OwnedShape::new("target", vec![2, 2])]);
+    }
+
+    #[test]
+    fn owned_tensor_can_reuse_existing_constant_storage() {
+        let data = 1.0_f32.to_le_bytes();
+        let tensor = OwnedTensor::constant("value", vec![1], DType::FP32, data.as_slice());
+
+        let Some(Cow::Borrowed(stored)) = tensor.data else {
+            panic!("borrowed constant data was copied");
+        };
+        assert!(core::ptr::eq(stored, data.as_slice()));
+    }
+
+    #[test]
+    fn owned_graph_uses_the_borrowed_validation_contract() {
+        let mut graph = OwnedGraph::new("main");
+        graph
+            .push_tensor(OwnedTensor::constant(
+                "value",
+                vec![1],
+                DType::FP32,
+                1.0_f32.to_le_bytes().to_vec(),
+            ))
+            .push_input("value")
+            .push_output("value");
+
+        assert!(matches!(
+            graph.build(FLOAT_TARGET),
+            Err(BuildError::TensorDataWithoutConst)
+        ));
     }
 
     #[test]
