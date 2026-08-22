@@ -237,6 +237,7 @@ jobs:
           -p virtio-accel-guest
           -p virtio-accel-split-queue
           -p virtio-accel-tosa
+          -p virtio-accel-tosa-build
           -p virtio-accel
           -p virtio-accel-vaccel
           --target ${{ matrix.target }}

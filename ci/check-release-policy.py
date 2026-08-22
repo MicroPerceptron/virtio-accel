@@ -37,6 +37,7 @@ PUBLISHED_PACKAGES = {
     "crates/virtio-accel-vaccel": "virtio-accel-vaccel",
     "crates/virtio-accel-split-queue": "virtio-accel-split-queue",
     "crates/virtio-accel-tosa": "virtio-accel-tosa",
+    "crates/virtio-accel-tosa-build": "virtio-accel-tosa-build",
     "crates/virtio-accel-transport": "virtio-accel-transport",
 }
 

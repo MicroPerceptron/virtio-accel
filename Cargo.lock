@@ -274,6 +274,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "virtio-accel-tosa-build"
+version = "0.3.1"
+dependencies = [
+ "flatbuffers",
+ "virtio-accel-tosa",
+]
+
+[[package]]
 name = "virtio-accel-transport"
 version = "0.3.1"
 

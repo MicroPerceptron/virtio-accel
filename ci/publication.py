@@ -22,6 +22,7 @@ PUBLISH_ORDER = (
     "virtio-accel-proto",
     "virtio-accel-core",
     "virtio-accel-tosa",
+    "virtio-accel-tosa-build",
     "virtio-accel-split-queue",
     "virtio-accel-guest",
     "virtio-accel-mock",

@@ -70,8 +70,9 @@ and [operator matrix](docs/hexagon-operator-matrix.md).
 
 Independently of backend execution, `virtio-accel-tosa` validates the TOSA 1.0 profiles and
 extensions for all five dtype columns, and `virtio-accel-conformance` ships shared fixtures and
-oracles for them. The byte-oriented `virtio-accel-mock` backend remains test infrastructure rather
-than a typed hardware implementation.
+oracles for them. `virtio-accel-tosa-build` provides the matching safe authoring path for static
+single-block graphs and validates every result through that ingestion boundary. The byte-oriented
+`virtio-accel-mock` backend remains test infrastructure rather than a typed hardware implementation.
 
 ## Workspace
 
@@ -82,6 +83,7 @@ than a typed hardware implementation.
 | `virtio-accel-transport`   | `core`         | Dependency-free descriptor-chain, queue, reset, and notification ports                                       |
 | `virtio-accel-core`        | `core`         | Backend lifecycle, memory, program, queue, and event contracts                                               |
 | `virtio-accel-tosa`        | `core + alloc` | Bounded zero-copy TOSA 1.0 validation, lowering analysis, specialization, and packed low-precision utilities |
+| `virtio-accel-tosa-build`  | `core + alloc` | Typed static TOSA 1.0 authoring with mandatory parser and semantic-validation round trips                     |
 | `virtio-accel-vaccel`      | `core`         | Adapter seam for mapping native provider contracts (including vAccel-style backends) to `virtio-accel-core` |
 | `virtio-accel-coreml`      | macOS `std`    | TOSA-to-Core ML lowering, direct buffers, and asynchronous ANE-capable prediction                            |
 | `virtio-accel-openvino`    | Linux `std` (probed) | TOSA-to-OpenVINO IR lowering, direct host-pointer tensors, and asynchronous NPU/GPU/CPU inference      |
@@ -109,6 +111,7 @@ virtio-accel-guest -----------> virtio-accel-transport
 
 virtio-accel-conformance --------------------> virtio-accel-core
 virtio-accel-tosa ---------------------------> virtio-accel-core
+virtio-accel-tosa-build ---------------------> virtio-accel-tosa
 virtio-accel-coreml ----------+--------------> virtio-accel-core
                               |
                               +--------------> virtio-accel-tosa
@@ -168,6 +171,10 @@ graph and typed-attribute views, enforce complete stable-op semantics for a decl
 construct the device-neutral TOSA artifact envelope. `Model::analyze_for` also produces bounded
 dense IDs, topological order, liveness, runtime obligations, and specialization keys for Core ML,
 OpenVINO, or another provider. It is intentionally not re-exported by the facade.
+
+Add `virtio-accel-tosa-build = "0.3"` to produce static single-block TOSA artifacts through typed
+tensor and operator definitions. Successful builds have already passed the same parser and target
+validator providers use at admission.
 
 ## Production TOSA-to-Core ML example
 

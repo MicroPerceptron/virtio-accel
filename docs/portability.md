@@ -36,7 +36,7 @@ directly, and they must keep working on any platform the portable crates support
 | Tier | Crates | Allowed runtime surface |
 |---|---|---|
 | `core-only` | `virtio-accel-cleanroom`, `virtio-accel-proto`, `virtio-accel-transport`, `virtio-accel-core` | `core`; the clean-room codec and transport ports have no normal/build dependencies, while proc-macros used by other crates may execute with `std` on the build host |
-| `alloc-portable` | `virtio-accel-guest`, `virtio-accel-split-queue`, `virtio-accel-device`, `virtio-accel-tosa`, `virtio-accel` | `core + alloc`; no OS, filesystem, sockets, threads, or host synchronization |
+| `alloc-portable` | `virtio-accel-guest`, `virtio-accel-split-queue`, `virtio-accel-device`, `virtio-accel-tosa`, `virtio-accel-tosa-build`, `virtio-accel` | `core + alloc`; no OS, filesystem, sockets, threads, or host synchronization |
 | `std-reference` | `virtio-accel-mock`, `virtio-accel-conformance` | Portable `std`; no host-OS or vendor-specific API |
 | `host-native` | `virtio-accel-coreml`, `virtio-accel-openvino`, `virtio-accel-hexagon` | Core ML/Foundation on macOS 14+, the OpenVINO C runtime (`libopenvino_c` 2026.x), or the complete QAIRT/QNN C SDK on Windows ARM64 when detected at build time; a compile-only unsupported-platform or unsupported-runtime placeholder elsewhere |
 

@@ -3,8 +3,8 @@
 The public Rust API is split into three documentation layers:
 
 1. Human-facing contracts in `virtio-accel-core`, `virtio-accel-guest`,
-   `virtio-accel-device`, `virtio-accel-transport`, `virtio-accel-tosa`, and
-   `virtio-accel-conformance`.
+   `virtio-accel-device`, `virtio-accel-transport`, `virtio-accel-tosa`,
+   `virtio-accel-tosa-build`, and `virtio-accel-conformance`.
 2. Pointer-free wire mirrors in `virtio-accel-proto` and the checked C projection in
    [`include/virtio_accel.h`](../include/virtio_accel.h).
 3. Independent conformance artifacts and the clean-room codec under `conformance/`.
@@ -44,6 +44,10 @@ plan intended for provider lowering, and retains verified `Operator`/`Tensor`/`S
 than copying an owned graph. Dynamic providers can validate host-readable CTC values and use the
 bounded exact-key specialization cache. Provider-specific capability utilities extend the layer
 through `ModelValidator`; generated FlatBuffers tables and unchecked roots remain private.
+
+`virtio-accel-tosa-build` is the authoring companion, not a second ingestion path. It exposes only
+owned output bytes and typed static graph definitions, keeps raw table slots and union tags private,
+and invokes `virtio-accel-tosa` structural and target validation before returning success.
 
 ## Runnable entry points
 
