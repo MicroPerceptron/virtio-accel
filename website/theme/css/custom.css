@@ -1,3 +1,19 @@
+:root {
+  --content-max-width: 900px;
+}
+
+/* Brand accent on top of mdBook's stock navy theme. Only the identity colors
+   are overridden here; surfaces (quotes, tables, search) keep the stock navy
+   values so everything stays internally consistent. */
+.navy {
+  --sidebar-bg: #0f172a;
+  --sidebar-active: #38bdf8;
+  --links: #0ea5e9;
+  --inline-code-color: #0ea5e9;
+  --warning-border: #f59e0b;
+  --search-mark-bg: #bae6fd;
+}
+
 /* Landing page: hide the sidebar and let the hero span the full width. */
 body:has(#landing-hero) .sidebar {
   display: none;
@@ -53,5 +69,11 @@ body:has(#landing-hero) .content {
   background: var(--quote-bg);
   padding: 1rem 1.25rem;
   border-radius: 0 0.5rem 0.5rem 0;
-  color: #475569;
+  color: var(--fg);
+}
+
+.landing-logo {
+  display: block;
+  margin: 0 auto 1rem;
+  color: var(--links);
 }
