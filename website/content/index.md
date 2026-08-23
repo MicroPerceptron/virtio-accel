@@ -24,45 +24,90 @@
   </g>
 </svg>
 
+<p class="landing-kicker">Open source &middot; Rust</p>
+
 # virtio-accel
 
-An experimental virtual-accelerator protocol plus production-oriented Rust
-implementations.
+<p class="landing-lede">An experimental, native-Rust foundation for a transport-neutral virtual
+accelerator device. First target: NPU execution — with a core model that leaves room for GPUs,
+DSPs, and other program-driven accelerators.</p>
+
+<p class="landing-status"><span class="landing-status-dot"></span> Active &middot; protocol 1.0 frozen &middot; workspace at 0.3.x</p>
 
 </div>
 
-<div class="landing-grid">
+<div class="landing-sections">
 
-<div class="landing-card">
+<div class="landing-section">
+
+## What it is
+
+virtio-accel concentrates on the portable majority of the system: protocol wire structures,
+transport ports, device-owned state, a guest client, a mock backend, and a transport-free
+conformance suite — without Linux ioctls, macOS frameworks, Windows APIs, guest physical
+addresses, vendor command formats, or a claimed Virtio device ID.
+
+Platform adapters are meant to be written against these layers rather than inside them. What
+ships here is the part that should not have to be rewritten per platform.
+
+</div>
+
+<div class="landing-section">
+
+## The workspace
+
+Ten crates publish together in dependency order, each pinned to a portability tier that CI
+enforces on bare-metal `aarch64`, `riscv64`, and `wasm32` targets, so a crate cannot quietly
+acquire a host dependency. Every crate is `#![forbid(unsafe_code)]`.
+
+<dl class="landing-crates">
+<div><dt>virtio-accel</dt><dd>Facade re-exporting the portable layers.</dd></div>
+<div><dt>virtio-accel-proto</dt><dd>Pointer-free, little-endian protocol 1.0 wire structures.</dd></div>
+<div><dt>virtio-accel-transport</dt><dd>Descriptor-chain, queue, reset, and notification ports.</dd></div>
+<div><dt>virtio-accel-core</dt><dd>Backend lifecycle, memory, program, queue, and event contracts.</dd></div>
+<div><dt>virtio-accel-conformance</dt><dd>Transport-free semantic suite and numerical corpus.</dd></div>
+</dl>
+
+[Full crate reference →](api.md)
+
+</div>
+
+<div class="landing-section">
 
 ## Protocol 1.0
 
-A frozen, versioned wire contract for exposing an accelerator to a guest:
-contexts, buffers, programs, execution queues, submissions, and events.
+A frozen, versioned wire contract for exposing an accelerator to a guest: contexts, buffers,
+programs, execution queues, submissions, and events.
 
-[Read the specification](docs/specification.md)
+Unknown opcodes, statuses, and event states stay raw integers until validated, so decoding
+untrusted bytes never constructs an invalid Rust enum. Failure still returns an event: a
+successful submit yields one, and an indeterminate failure must yield one too, because the
+operation's resources are still owned by the device.
 
-</div>
-
-<div class="landing-card">
-
-## Portable Rust
-
-Executable `no_std` guest, device, transport, queue, and TOSA layers with a
-transport-free conformance suite and an independent clean-room codec.
-
-[Browse the API](api.md)
+[Read the specification →](docs/specification.md)
 
 </div>
 
-<div class="landing-card">
+<div class="landing-section">
 
-## Real backends
+## Supported backends
 
-macOS Core ML / ANE, Intel OpenVINO, and Qualcomm Hexagon adapters that lower
-device-neutral TOSA to native runtimes with direct buffer bindings.
+macOS Core ML / ANE, Intel OpenVINO, and Qualcomm Hexagon adapters lower device-neutral TOSA to
+native runtimes with direct buffer bindings, alongside an in-memory mock backend for portable
+conformance testing.
 
-[Getting started](getting-started.md)
+[Backend implementer guide →](docs/backend-implementer-guide.md)
+
+</div>
+
+<div class="landing-section">
+
+## Status
+
+The workspace publishes together at 0.3.x. The Cargo version tracks the Rust API, which is
+still young and expected to change as adapter authors build against it; Protocol 1.0 itself is
+frozen separately by the v1.0 freeze audit — a pre-1.0 crate version is not a statement about
+protocol stability.
 
 </div>
 
@@ -73,5 +118,16 @@ device-neutral TOSA to native runtimes with direct buffer bindings.
 This project is pre-standardization and experimental. Protocol 1.0 is frozen as
 a versioned review input for independent implementation — stable enough to build
 against and to disagree with in writing, not an approved Virtio specification.
+
+</div>
+
+<div class="landing-links">
+
+<p class="landing-kicker">Links</p>
+
+- [GitHub](https://github.com/MicroPerceptron/virtio-accel)
+- [crates.io](https://crates.io/crates/virtio-accel)
+- [Getting started](getting-started.md)
+- [API reference](api.md)
 
 </div>

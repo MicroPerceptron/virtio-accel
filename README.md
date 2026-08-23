@@ -134,23 +134,23 @@ ring pointers, or concrete descriptor types into the command engine or provider 
 
 ```toml
 [dependencies]
-virtio-accel = "0.2"
+virtio-accel = "0.3"
 ```
 
 The facade is `no_std`. Add the reference backend as a dev-dependency to run the example below:
 
 ```toml
 [dev-dependencies]
-virtio-accel-mock = "0.2"
+virtio-accel-mock = "0.3"
 ```
 
-On an ANE-capable Mac, add `virtio-accel-coreml = "0.1"` separately for the host-native backend.
-On a Linux host with an OpenVINO 2026.x runtime, add `virtio-accel-openvino = "0.1"` instead. Both
+On an ANE-capable Mac, add `virtio-accel-coreml = "0.3"` separately for the host-native backend.
+On a Linux host with an OpenVINO 2026.x runtime, add `virtio-accel-openvino = "0.3"` instead. Both
 adapters accept the production TOSA 1.0 program format; validation, analysis, and native model
 generation all happen inside the adapter. Neither is re-exported by the portable facade.
 
 For portable adapter-boundary validation while the native vAccel path is wired, add
-`virtio-accel-vaccel = "0.1"`. The crate exposes a vAccel seam with an in-repo representative
+`virtio-accel-vaccel = "0.3"`. The crate exposes a vAccel seam with an in-repo representative
 conformance recipe and explicit copy-path diagnostics.
 
 ## Adapter profiles
@@ -163,11 +163,11 @@ conformance recipe and explicit copy-path diagnostics.
   `virtio-accel-hexagon` instead of any mock backend once provider licensing and native runtime
   availability are in place.
 
-`virtio-accel-hexagon = "0.2"` exposes the separate Qualcomm adapter. A complete QAIRT/QNN SDK on
+`virtio-accel-hexagon = "0.3"` exposes the separate Qualcomm adapter. A complete QAIRT/QNN SDK on
 Windows ARM64 enables its HTP backend; SDK-free builds validate its strict FP16 graph planner and
 constructors return `RuntimeUnavailable`.
 
-Add `virtio-accel-tosa = "0.1"` separately to validate TOSA 1.0 artifacts, inspect safe borrowed
+Add `virtio-accel-tosa = "0.3"` separately to validate TOSA 1.0 artifacts, inspect safe borrowed
 graph and typed-attribute views, enforce complete stable-op semantics for a declared target, and
 construct the device-neutral TOSA artifact envelope. `Model::analyze_for` also produces bounded
 dense IDs, topological order, liveness, runtime obligations, and specialization keys for Core ML,
