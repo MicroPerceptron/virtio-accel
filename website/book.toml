@@ -1,0 +1,19 @@
+[book]
+title = "virtio-accel"
+authors = ["MicroPerceptron"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/MicroPerceptron/virtio-accel"
+git-repository-icon = "fab-github"
+additional-css = ["theme/css/custom.css"]
+no-section-label = true
+site-url = "/"
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+limit-results = 20

@@ -1,0 +1,57 @@
+/* Landing page: hide the sidebar and let the hero span the full width. */
+body:has(#landing-hero) .sidebar {
+  display: none;
+}
+
+body:has(#landing-hero) .page-wrapper {
+  margin-left: 0;
+}
+
+body:has(#landing-hero) .content {
+  max-width: 1000px;
+}
+
+.landing-hero {
+  padding: 4rem 0 2rem;
+  text-align: center;
+}
+
+.landing-hero h1 {
+  font-size: 3.5rem;
+  margin-bottom: 0.5rem;
+  letter-spacing: -0.02em;
+}
+
+.landing-hero p {
+  font-size: 1.25rem;
+  color: var(--sidebar-non-existant);
+  max-width: 40rem;
+  margin: 0 auto;
+}
+
+.landing-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: 1.25rem;
+  margin: 2rem 0;
+}
+
+.landing-card {
+  border: 1px solid var(--table-border-color);
+  border-radius: 0.75rem;
+  padding: 1.5rem;
+  background: var(--table-header-bg);
+}
+
+.landing-card h2 {
+  margin-top: 0;
+  font-size: 1.25rem;
+}
+
+.landing-note {
+  border-left: 4px solid var(--warning-border);
+  background: var(--quote-bg);
+  padding: 1rem 1.25rem;
+  border-radius: 0 0.5rem 0.5rem 0;
+  color: #475569;
+}
