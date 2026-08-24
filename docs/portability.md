@@ -70,16 +70,20 @@ advertised operators plus INT8 identity and zero-point-aware INT8 MATMUL through
 by the reusable semantic suite. A public hardware CI lane remains unavailable, so the README
 publishes the exact manual replacement commands.
 
-The AMD XDNA crate is currently the scaffold: portable CI compiles and unit-tests its admission
-surface (the two advertised `Target` constants) and a placeholder. HRX exposes a plain C ABI, so
-its build script has no `cc`/CMake step; it enables the native modules only when an amdxdna-native
-HRX prefix (`VIRTIO_ACCEL_HRX_DIR`/`HRX_DIR`) carries both HRX headers — the amdxdna header must
-declare `hrx_amdxdna_executable_create`, whose absence marks an older, incompatible libhrx
-generation — and `lib/libhrx.so`. `VIRTIO_ACCEL_XDNA=0` forces the placeholder,
+The AMD XDNA crate compiles its portable admission surface (`lower`, including the TOSA IDENTITY
+admission and the two advertised `Target` constants), the portable precompiled-artifact codec, and
+a placeholder on every host; portable CI unit-tests admission. HRX exposes a plain C ABI, so its
+build script has no `cc`/CMake step; it enables the native modules (HRX FFI, the `Accelerator`
+implementation with its serialized dispatch worker, and the compiler-helper subprocess) only when
+an amdxdna-native HRX prefix (`VIRTIO_ACCEL_HRX_DIR`/`HRX_DIR`) carries both HRX headers — the
+amdxdna header must declare `hrx_amdxdna_executable_create`, whose absence marks an older,
+incompatible libhrx generation — and `lib/libhrx.so`. `VIRTIO_ACCEL_XDNA=0` forces the placeholder,
 `VIRTIO_ACCEL_XDNA=1` makes a missing or incomplete runtime a build failure, and
 `VIRTIO_ACCEL_HRX_LIB_DIR` links a bare lib directory. No standard locations are scanned, keeping
-the toolchain pin authoritative. The native `Accelerator`, HRX FFI, and compiler helper land in
-later tickets of the AMD XDNA wayfinder map.
+the toolchain pin authoritative. On the reference machine with the pinned toolchain
+(`VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN`) and an NPU, backend-local tests run a DMA passthrough and a
+compiled TOSA BF16 IDENTITY end to end; compilation invokes the aiecc helper as a bounded
+subprocess (never a Cargo dependency). A public hardware CI lane remains unavailable.
 
 Concrete VMM, kernel, OS, and vendor adapters are outside the portable-v1 milestone and must not
 become default dependencies of a portable crate.

@@ -13,7 +13,32 @@ use virtio_accel_core::{
     BufferUsage, ByteSink, ByteSource, ContextDesc, EventState, MemoryDomain, QueueDesc,
     TargetIdentity, Timeout,
 };
-use virtio_accel_xdna::{InitError, XDNA_PRECOMPILED_FORMAT, XdnaAccelerator};
+use virtio_accel_tosa::{ARTIFACT_FORMAT, DType};
+use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
+use virtio_accel_xdna::{
+    InitError, XDNA_PRECOMPILED_FORMAT, XDNA_TOSA_TARGET, XdnaAccelerator, compile_artifact,
+};
+
+/// Whether the pinned compiler toolchain is configured (the compiler tests need it, not a device).
+fn toolchain_present() -> bool {
+    std::env::var_os("VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN").is_some()
+}
+
+/// Author a BF16 IDENTITY TOSA artifact of `elements` for the advertised target.
+fn bf16_identity_tosa(elements: usize) -> Vec<u8> {
+    let shape = vec![1, 1, elements as i32];
+    let mut graph = OwnedGraph::new("main");
+    graph.push_tensor(OwnedTensor::new("x", shape.clone(), DType::BF16));
+    graph.push_tensor(OwnedTensor::new("y", shape, DType::BF16));
+    graph.push_operator(OwnedOperator::new(
+        OperatorKind::Identity,
+        vec!["x".into()],
+        vec!["y".into()],
+    ));
+    graph.push_input("x");
+    graph.push_output("y");
+    graph.build(XDNA_TOSA_TARGET).expect("build bf16 identity")
+}
 
 /// Precompiled DMA passthrough for npu2, built with the pinned toolchain from
 /// `programming_examples/basic/passthrough_dmas` (n=4096 int32; entry `MLIR_AIE`) and packaged with
@@ -324,6 +349,151 @@ fn precompiled_passthrough_runs_the_full_lifecycle() {
     backend.destroy_event(event).expect("destroy event");
     backend.free_buffer(input).expect("free input");
     backend.free_buffer(unused).expect("free unused");
+    backend.free_buffer(output).expect("free output");
+    backend.unload_program(program).expect("unload");
+    backend.destroy_queue(queue).expect("destroy queue");
+    backend.destroy_context(context).expect("destroy context");
+}
+
+#[test]
+fn tosa_bf16_identity_compiles_to_a_wellformed_artifact() {
+    // Hardware-free: needs the compiler toolchain but never initializes a device.
+    if !toolchain_present() {
+        eprintln!("no XDNA toolchain configured; skipping compiler test");
+        return;
+    }
+    let tosa = bf16_identity_tosa(4096);
+    let container = compile_artifact(&tosa, XDNA_TOSA_TARGET).expect("compile TOSA identity");
+    let parsed =
+        virtio_accel_xdna::PrecompiledArtifact::parse(&container).expect("valid container");
+    // The packaged xclbin is an AMD xclbin container; its instruction stream is TXN words.
+    assert!(
+        parsed.xclbin.starts_with(b"xclbin2"),
+        "expected xclbin2 magic"
+    );
+    assert!(!parsed.insts.is_empty() && parsed.insts.len() % 4 == 0);
+    assert_eq!((parsed.inputs, parsed.outputs), (1, 1));
+    assert_eq!(parsed.entry, "MLIR_AIE");
+
+    // Non-subset graphs are rejected before any compile runs.
+    let fp32 = {
+        let shape = vec![1, 1, 4096];
+        let mut g = OwnedGraph::new("main");
+        g.push_tensor(OwnedTensor::new("x", shape.clone(), DType::FP32));
+        g.push_tensor(OwnedTensor::new("y", shape, DType::FP32));
+        g.push_operator(OwnedOperator::new(
+            OperatorKind::Identity,
+            vec!["x".into()],
+            vec!["y".into()],
+        ));
+        g.push_input("x");
+        g.push_output("y");
+        g.build(XDNA_TOSA_TARGET).expect("build fp32 identity")
+    };
+    assert!(matches!(
+        compile_artifact(&fp32, XDNA_TOSA_TARGET),
+        Err(BackendError::Unsupported)
+    ));
+}
+
+#[test]
+fn tosa_bf16_identity_runs_on_the_npu() {
+    let Some(backend) = backend() else { return };
+    if !toolchain_present() {
+        eprintln!("no XDNA toolchain configured; skipping TOSA execution test");
+        return;
+    }
+    const ELEMENTS: usize = 4096;
+    const BYTES: usize = ELEMENTS * 2; // bf16
+
+    let context = backend
+        .create_context(ContextDesc::default())
+        .expect("context");
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .expect("queue");
+    let tosa = bf16_identity_tosa(ELEMENTS);
+    let program = backend
+        .load_program(
+            &context,
+            ArtifactRef {
+                format: ARTIFACT_FORMAT,
+                target: XDNA_TOSA_TARGET.to_identity(),
+                payload: &Slice(&tosa),
+                resident_bytes: u64::MAX,
+            },
+        )
+        .expect("load + compile TOSA identity");
+
+    let (mut input, _) = backend
+        .allocate_buffer(
+            &context,
+            BufferDesc::new(
+                BYTES as u64,
+                4096,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+            )
+            .unwrap(),
+        )
+        .expect("input")
+        .into_parts();
+    let (output, _) = backend
+        .allocate_buffer(
+            &context,
+            BufferDesc::new(
+                BYTES as u64,
+                4096,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+            )
+            .unwrap(),
+        )
+        .expect("output")
+        .into_parts();
+
+    let payload: Vec<u8> = (0..BYTES).map(|i| (i * 13 + 5) as u8).collect();
+    backend
+        .write_buffer(&mut input, 0, &Slice(&payload))
+        .expect("write input");
+    let range = BufferRange::new(0, BYTES as u64).unwrap();
+    let bindings = [
+        BindingRef {
+            slot: 0,
+            buffer: &input,
+            range,
+            access: AccessMode::Read,
+        },
+        BindingRef {
+            slot: 1,
+            buffer: &output,
+            range,
+            access: AccessMode::Write,
+        },
+    ];
+    let event = backend
+        .submit(&queue, &program, &bindings, Timeout::Infinite)
+        .expect("submit");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let state = loop {
+        match backend.poll_event(&event).expect("poll") {
+            EventState::Pending => {
+                assert!(Instant::now() < deadline, "identity did not complete");
+                std::thread::yield_now();
+            }
+            terminal => break terminal,
+        }
+    };
+    assert!(matches!(state, EventState::Complete), "got {state:?}");
+
+    let mut result = vec![0u8; BYTES];
+    backend
+        .read_buffer(&output, 0, &mut SliceMut(&mut result))
+        .expect("read output");
+    assert_eq!(result, payload, "TOSA IDENTITY must copy input to output");
+
+    backend.destroy_event(event).expect("destroy event");
+    backend.free_buffer(input).expect("free input");
     backend.free_buffer(output).expect("free output");
     backend.unload_program(program).expect("unload");
     backend.destroy_queue(queue).expect("destroy queue");

@@ -3,12 +3,14 @@
 This crate is a host-native exception to the portable workspace's `forbid(unsafe_code)` rule, on
 the same terms as `virtio-accel-openvino`. Unsafe Rust is confined to the `va_xdna` build
 configuration — `src/ffi.rs` (HRX C ABI declarations only) and `src/native.rs` (the calls) — and
-the crate root carries `cfg_attr(not(va_xdna), forbid(unsafe_code))`. Builds without a detected HRX
-runtime compile no `unsafe` at all: only the portable admission surface (`src/lower.rs`), the
-portable precompiled-artifact codec (`src/artifact.rs`), and a placeholder.
+the crate root carries `cfg_attr(not(va_xdna), forbid(unsafe_code))`. The compiler-helper driver
+(`src/compiler.rs`) is safe code — it spawns the aiecc helper as a subprocess and touches no FFI.
+Builds without a detected HRX runtime compile no `unsafe` at all: only the portable admission
+surface (`src/lower.rs`), the portable precompiled-artifact codec (`src/artifact.rs`), and a
+placeholder.
 
-Scope: the device/stream owner, `hrx_buffer` primitives, the amdxdna executable lifecycle, and the
-serialized dispatch worker. TOSA compilation is a later ticket.
+Scope: the device/stream owner, `hrx_buffer` primitives, the amdxdna executable lifecycle (for both
+the precompiled and compiled paths), and the serialized dispatch worker.
 
 ## ABI and status ownership
 

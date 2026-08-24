@@ -12,12 +12,13 @@
 //! loudly) or off (`0`). Hosts without HRX build and unit-test the portable admission surface
 //! (`lower`) plus a compile-only placeholder, and compile no `unsafe` at all.
 //!
-//! **Scope today:** the full `Accelerator` lifecycle for a *precompiled* artifact — the HRX
-//! device/stream owner, `hrx_buffer` primitives (persistent mapping, range flush/invalidate,
-//! release), and the serialized dispatch worker bridging `hrx_stream_dispatch`/`synchronize` to a
-//! latched nonblocking `poll_event` (execution-model spec, issue #85). `load_program` accepts the
-//! crate-local precompiled format ([`artifact`]); TOSA compilation is a later ticket, so a
-//! TOSA-format artifact is rejected with `Unsupported`.
+//! **Scope today:** the full `Accelerator` lifecycle — the HRX device/stream owner, `hrx_buffer`
+//! primitives (persistent mapping, range flush/invalidate, release), and the serialized dispatch
+//! worker bridging `hrx_stream_dispatch`/`synchronize` to a latched nonblocking `poll_event`
+//! (execution-model spec, issue #85). `load_program` accepts the crate-local precompiled format
+//! ([`artifact`]) directly, and a TOSA artifact by admitting it and compiling it with the bounded
+//! aiecc helper subprocess (issue #84). The compilable TOSA subset today is the BF16 IDENTITY (a
+//! DMA copy); the compute tiers grow on top of it. Admission (`lower`) unit-tests on every host.
 
 #![cfg_attr(not(va_xdna), forbid(unsafe_code))]
 
@@ -55,6 +56,8 @@ impl core::fmt::Display for InitError {
 impl std::error::Error for InitError {}
 
 #[cfg(va_xdna)]
+mod compiler;
+#[cfg(va_xdna)]
 mod ffi;
 #[cfg(va_xdna)]
 mod native;
@@ -62,6 +65,26 @@ mod native;
 pub use native::{
     XDNA_ERROR_DOMAIN, XdnaAccelerator, XdnaBuffer, XdnaContext, XdnaEvent, XdnaProgram, XdnaQueue,
 };
+
+/// Admit a TOSA artifact and compile it to a precompiled-artifact container ([`artifact`]) with
+/// the pinned toolchain, without touching the device.
+///
+/// This is the offline / catalog-population path (compiler-helper contract, issue #84): a build
+/// host produces artifacts that a device-less serving host later loads through the precompiled
+/// format. Requires the toolchain (`VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN`); it never initializes HRX.
+#[cfg(va_xdna)]
+pub fn compile_artifact(
+    tosa: &[u8],
+    target: virtio_accel_tosa::Target,
+) -> Result<Vec<u8>, virtio_accel_core::BackendError> {
+    use virtio_accel_core::BackendError;
+    let spec = lower::admit(tosa, target).map_err(|error| match error {
+        lower::AdmitError::Parse => BackendError::InvalidArgument,
+        lower::AdmitError::Analysis => BackendError::Incompatible,
+        lower::AdmitError::Unsupported => BackendError::Unsupported,
+    })?;
+    compiler::Compiler::from_env()?.compile(spec)
+}
 
 /// Placeholder that keeps workspace consumers portable when no HRX runtime was detected.
 #[cfg(not(va_xdna))]

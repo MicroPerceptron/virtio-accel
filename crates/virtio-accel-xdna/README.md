@@ -9,16 +9,24 @@ bounded subprocess (never a Cargo dependency, never in-process Python).
 build time; a compile-only unsupported-runtime placeholder elsewhere.
 
 **This crate is under construction.** In a `va_xdna` build it runs the full `Accelerator`
-lifecycle for a *precompiled* artifact — device/stream owner, `hrx_buffer` primitives (persistent
-mapping, range flush/invalidate, release), and a serialized dispatch worker bridging
-`hrx_stream_dispatch`/`synchronize` to a latched nonblocking `poll_event` — validated on-device by
-the `tests/hardware.rs` suite (an end-to-end DMA passthrough on the NPU). `load_program` accepts
-the crate-local precompiled artifact format; TOSA compilation via the aiecc compiler helper, and
-the executing numerical tiers, land in subsequent tickets of the
-[AMD XDNA wayfinder map](https://github.com/MicroPerceptron/virtio-accel/issues/78). Hosts without
-HRX build the portable admission surface plus a placeholder and compile no `unsafe`. The design
+lifecycle — device/stream owner, `hrx_buffer` primitives (persistent mapping, range
+flush/invalidate, release), and a serialized dispatch worker bridging
+`hrx_stream_dispatch`/`synchronize` to a latched nonblocking `poll_event`. `load_program` accepts
+the crate-local precompiled artifact format directly, and a TOSA artifact by admitting it and
+compiling it with the bounded aiecc helper subprocess (`compiler/xdna_compile.py`, run under the
+pinned toolchain venv in a cleared environment, content-addressed in a cache). The compilable TOSA
+subset today is the BF16 IDENTITY (a DMA copy); the compute tiers grow on top of it. All of this is
+validated on-device by `tests/hardware.rs` (a DMA passthrough and a compiled TOSA IDENTITY on the
+NPU). Hosts without HRX build the portable admission surface plus a placeholder, compile no
+`unsafe`, and still unit-test admission and the artifact codec. The remaining executing numerical
+tiers land in subsequent tickets of the
+[AMD XDNA wayfinder map](https://github.com/MicroPerceptron/virtio-accel/issues/78); the design
 decisions live on their ticket branches: crate layout (#83), FFI/buffers (#87), execution model
 (#85), compiler helper (#84), and the advertised numerical tier (#82).
+
+The compiler is never a Cargo dependency and never runs in-process. `compile_artifact` exposes the
+admit-then-compile path without a device (the offline / catalog-population use), so a build host can
+produce precompiled artifacts that a device-less serving host later loads.
 
 ## Build-time probe
 
