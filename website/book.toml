@@ -8,8 +8,14 @@ src = "src"
 git-repository-url = "https://github.com/MicroPerceptron/virtio-accel"
 git-repository-icon = "fab-github"
 additional-css = ["theme/css/custom.css"]
+additional-js = ["theme/js/site.js"]
 no-section-label = true
 site-url = "/"
+
+# `navy` and `light` are rebound to the project palette in
+# theme/css/custom.css; the reader can still switch between them.
+default-theme = "navy"
+preferred-dark-theme = "navy"
 
 [output.html.fold]
 enable = true
