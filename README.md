@@ -74,7 +74,7 @@ The XDNA row is a scaffold for AMD's XDNA2 NPU over the HRX runtime. It is not y
 
 ### Vulkan (_planned_)
 
-The Vulkan row is a placeholder for a future Vulkan compute backend. It is not yet implemented, but the crate is present to allow early integration and to provide a build probe for the Vulkan runtime.
+The Vulkan row is a placeholder for a future Vulkan compute backend. It is not yet implemented, and no Vulkan crate or runtime build probe is currently included.
 
 ### TOSA 1.0
 
