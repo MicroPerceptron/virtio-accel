@@ -39,7 +39,7 @@ execution. “Not implemented” describes this repository, not necessarily the 
 | ------------------------------------------- | ---------------------- | ------------------------------------- | --------------- | --------------- | --------------- | --------------- | --------------- | --------------------------- |
 | Apple Core ML / ANE (`virtio-accel-coreml`) | Implemented; macOS 14+ | Static TOSA 1.0 FP; INT8 tier on macOS 26+ | Supported       | Supported       | Not implemented | Identity + MATMUL | Not implemented | Direct host/shared bindings |
 | Intel OpenVINO (`virtio-accel-openvino`)    | Implemented; OpenVINO 2026.x | Static TOSA 1.0 FP + INT8 tier | Supported       | Supported       | Not implemented | Identity + MATMUL | Not implemented | Direct host/shared bindings |
-| AMD XDNA (`virtio-accel-amdxdna`)           | Scaffolded (probe + placeholder) | Not implemented             | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented             |
+| AMD XDNA (`virtio-accel-amdxdna`)           | In Progress | In Progress             | In Progress | In Progress | In Progress | In Progress | In Progress | In Progress             |
 | Qualcomm Hexagon (`virtio-accel-hexagon`)  | Experimental; QAIRT 2.49 on Windows ARM64 | Static TOSA 1.0 FP16 + BOOL/INT32 auxiliaries; INT8 tier | Blocked by v73 precision evidence | 41/42 shared operators (`ERF` blocked) | Blocked: ambiguous encoding | Identity + MATMUL | Not implemented | Direct host/shared bindings |
 
 The Core ML row describes model-boundary support; restricted INT32 outputs are also available.
