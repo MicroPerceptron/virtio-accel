@@ -27,6 +27,7 @@ include = [
 [workspace]
 members = [
     "conformance/rust-clean-room",
+    "crates/virtio-accel-amdxdna",
     "crates/virtio-accel-conformance",
     "crates/virtio-accel-core",
     "crates/virtio-accel-coreml",
@@ -63,6 +64,7 @@ zerocopy = { version = "0.8.56", default-features = false, features = [
     "derive",
 ] }
 virtio-accel-core = { path = "crates/virtio-accel-core", version = "0.3.3" }
+virtio-accel-amdxdna = { path = "crates/virtio-accel-amdxdna", version = "0.3.3" }
 virtio-accel-cleanroom = { path = "conformance/rust-clean-room", version = "0.3.3" }
 virtio-accel-conformance = { path = "crates/virtio-accel-conformance", version = "0.3.3" }
 virtio-accel-coreml = { path = "crates/virtio-accel-coreml", version = "0.3.3" }

@@ -39,7 +39,7 @@ execution. “Not implemented” describes this repository, not necessarily the 
 | ------------------------------------------- | ---------------------- | ------------------------------------- | --------------- | --------------- | --------------- | --------------- | --------------- | --------------------------- |
 | Apple Core ML / ANE (`virtio-accel-coreml`) | Implemented; macOS 14+ | Static TOSA 1.0 FP; INT8 tier on macOS 26+ | Supported       | Supported       | Not implemented | Identity + MATMUL | Not implemented | Direct host/shared bindings |
 | Intel OpenVINO (`virtio-accel-openvino`)    | Implemented; OpenVINO 2026.x | Static TOSA 1.0 FP + INT8 tier | Supported       | Supported       | Not implemented | Identity + MATMUL | Not implemented | Direct host/shared bindings |
-| AMD XDNA                                    | Planned                | Not implemented                       | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented             |
+| AMD XDNA (`virtio-accel-amdxdna`)           | Scaffolded (probe + placeholder) | Not implemented             | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented             |
 | Qualcomm Hexagon (`virtio-accel-hexagon`)  | Experimental; QAIRT 2.49 on Windows ARM64 | Static TOSA 1.0 FP16 + BOOL/INT32 auxiliaries; INT8 tier | Blocked by v73 precision evidence | 41/42 shared operators (`ERF` blocked) | Blocked: ambiguous encoding | Identity + MATMUL | Not implemented | Direct host/shared bindings |
 
 The Core ML row describes model-boundary support; restricted INT32 outputs are also available.
@@ -86,6 +86,7 @@ boundary. The byte-oriented
 | `virtio-accel-tosa`        | `core + alloc` | Bounded zero-copy TOSA 1.0 validation, lowering analysis, specialization, and packed low-precision utilities |
 | `virtio-accel-tosa-build`  | `core + alloc` | Borrowed and incrementally owned static TOSA 1.0 authoring with mandatory validation round trips             |
 | `virtio-accel-vaccel`      | `core`         | Adapter seam for mapping native provider contracts (including vAccel-style backends) to `virtio-accel-core` |
+| `virtio-accel-amdxdna`     | Linux `std` (probed) | AMD XDNA2 NPU backend over the HRX runtime (`libhrx`); scaffold with build probe and placeholder today   |
 | `virtio-accel-coreml`      | macOS `std`    | TOSA-to-Core ML lowering, direct buffers, and asynchronous ANE-capable prediction                            |
 | `virtio-accel-openvino`    | Linux `std` (probed) | TOSA-to-OpenVINO IR lowering, direct host-pointer tensors, and asynchronous NPU/GPU/CPU inference      |
 | `virtio-accel-hexagon`     | Windows ARM64 `std` (probed) | Strict FP16/INT8 TOSA-to-QNN lowering, direct buffers, and asynchronous Hexagon HTP execution |
@@ -113,6 +114,9 @@ virtio-accel-guest -----------> virtio-accel-transport
 virtio-accel-conformance --------------------> virtio-accel-core
 virtio-accel-tosa ---------------------------> virtio-accel-core
 virtio-accel-tosa-build ---------------------> virtio-accel-tosa
+virtio-accel-amdxdna ---------+--------------> virtio-accel-core
+                              |
+                              +--------------> virtio-accel-tosa
 virtio-accel-coreml ----------+--------------> virtio-accel-core
                               |
                               +--------------> virtio-accel-tosa
@@ -159,9 +163,9 @@ conformance recipe and explicit copy-path diagnostics.
   and conformance fixtures inside the workspace.
 - **Adapter profile:** add `virtio-accel-vaccel` when you need an adapter seam for native/vAccel-like
   implementations that still re-export the `Accelerator` contract from `virtio-accel-core`.
-- **Production host profile:** add `virtio-accel-coreml`, `virtio-accel-openvino`, and/or
-  `virtio-accel-hexagon` instead of any mock backend once provider licensing and native runtime
-  availability are in place.
+- **Production host profile:** add `virtio-accel-coreml`, `virtio-accel-openvino`,
+  `virtio-accel-hexagon`, and/or `virtio-accel-amdxdna` instead of any mock backend once provider
+  licensing and native runtime availability are in place.
 
 `virtio-accel-hexagon = "0.2"` exposes the separate Qualcomm adapter. A complete QAIRT/QNN SDK on
 Windows ARM64 enables its HTP backend; SDK-free builds validate its strict FP16 graph planner and

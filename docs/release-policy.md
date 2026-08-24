@@ -164,10 +164,11 @@ source.
 | 10 | `virtio-accel-device` | `core`, `proto`, `transport` | `mock` |
 | 11 | `virtio-accel-conformance` | `core` | `mock`, `tosa` |
 | 12 | `virtio-accel-vaccel` | `core` | `conformance` |
-| 13 | `virtio-accel-coreml` | `core`, `tosa` | `conformance` |
-| 14 | `virtio-accel-openvino` | `core`, `tosa` | `conformance` |
-| 15 | `virtio-accel-hexagon` | `core`, `tosa` | `conformance` |
-| 16 | `virtio-accel` | the six runtime crates | `conformance`, `mock`, `cleanroom` |
+| 13 | `virtio-accel-amdxdna` | `core`, `tosa` | — |
+| 14 | `virtio-accel-coreml` | `core`, `tosa` | `conformance` |
+| 15 | `virtio-accel-openvino` | `core`, `tosa` | `conformance` |
+| 16 | `virtio-accel-hexagon` | `core`, `tosa` | `conformance` |
+| 17 | `virtio-accel` | the six runtime crates | `conformance`, `mock`, `cleanroom` |
 
 This order is executable, not just documentary: `ci/publish-dry-run.py` walks it against an isolated
 local registry, adding each crate only after it has been built, tested, and documented from its own
