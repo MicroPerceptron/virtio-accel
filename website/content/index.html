@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>virtio-accel — a transport-neutral virtual accelerator device, in Rust</title>
+<meta name="description" content="An experimental virtual-accelerator protocol plus production-oriented Rust implementations: a frozen 1.0 wire contract and executable no_std guest, device, transport and TOSA layers. First target is NPU execution.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="canonical" href="https://virtio-accel.org/">
+
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://virtio-accel.org/">
+<meta property="og:title" content="virtio-accel">
+<meta property="og:description" content="A transport-neutral virtual accelerator device: a frozen 1.0 wire contract plus executable no_std guest, device, transport and TOSA layers in Rust.">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+
+<style>
+/* ------------------------------------------------------------------------
+   Tokens. Kept in sync with theme/css/custom.css, which dresses the mdBook
+   docs reader in the same palette.
+   --------------------------------------------------------------------- */
+:root {
+  --bg:            oklch(0.170 0.012 265);
+  --bg-raised:     oklch(0.195 0.012 265);
+  --bg-sunken:     oklch(0.140 0.012 265);
+  --rule:          oklch(0.280 0.014 265);
+  --rule-strong:   oklch(0.340 0.016 265);
+
+  --fg:            oklch(0.925 0.008 265);
+  --fg-muted:      oklch(0.740 0.012 265);
+  --fg-dim:        oklch(0.600 0.012 265);
+
+  --accent:        oklch(0.800 0.160 165);
+  --accent-soft:   oklch(0.800 0.160 165 / 0.10);
+  --accent-line:   oklch(0.800 0.160 165 / 0.36);
+  --cyan:          oklch(0.800 0.160 200);
+  --amber:         oklch(0.800 0.160 75);
+
+  --sans: "Archivo", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  --gutter: clamp(20px, 5vw, 60px);
+  --measure: 1320px;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: oklch(0.88 0.16 165); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
+
+h1, h2, h3 { letter-spacing: -0.025em; margin: 0; font-weight: 600; text-wrap: balance; }
+p { margin: 0; text-wrap: pretty; }
+code, pre, kbd { font-family: var(--mono); }
+
+.shell { max-width: var(--measure); margin: 0 auto; padding-inline: var(--gutter); }
+
+.skip {
+  position: absolute; left: -9999px; top: 0; z-index: 100;
+  background: var(--accent); color: var(--bg); padding: 10px 18px;
+  font-size: 14px; font-weight: 600;
+}
+.skip:focus { left: 0; }
+
+/* --- nav ---------------------------------------------------------------- */
+
+.nav {
+  position: sticky; top: 0; z-index: 50;
+  border-bottom: 1px solid var(--rule);
+  background: oklch(0.170 0.012 265 / 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.nav-inner {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 24px; min-height: 62px;
+}
+.brand { display: flex; align-items: center; gap: 11px; color: var(--fg); }
+.brand svg { display: block; flex: none; }
+.brand span { font-family: var(--mono); font-weight: 700; font-size: 14px; letter-spacing: -0.01em; }
+
+.nav-links { display: flex; align-items: center; gap: 28px; font-size: 14.5px; }
+.nav-links a { color: var(--fg-muted); }
+.nav-links a:hover { color: var(--fg); }
+.nav-cta {
+  color: var(--bg) !important; background: var(--accent);
+  padding: 8px 16px; border-radius: 6px; font-weight: 600; font-size: 13.5px;
+}
+.nav-cta:hover { background: oklch(0.86 0.16 165); }
+
+@media (max-width: 780px) {
+  .nav-links { gap: 18px; font-size: 13.5px; }
+  .nav-hide-sm { display: none; }
+}
+
+/* --- hero --------------------------------------------------------------- */
+
+.hero {
+  position: relative; overflow: hidden;
+  border-bottom: 1px solid var(--rule);
+  background:
+    radial-gradient(120% 88% at 78% 4%,  oklch(0.28 0.075 200 / 0.50) 0%, transparent 62%),
+    radial-gradient(92% 70% at 4% 100%, oklch(0.26 0.065 165 / 0.38) 0%, transparent 58%);
+}
+.hero-inner {
+  display: grid;
+  grid-template-columns: minmax(0, 1.06fr) minmax(0, 0.94fr);
+  gap: clamp(32px, 5vw, 60px);
+  align-items: center;
+  padding-block: clamp(56px, 8vw, 92px) clamp(48px, 7vw, 78px);
+}
+
+.pill {
+  display: inline-flex; align-items: center; gap: 9px;
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.05em;
+  color: var(--accent);
+  border: 1px solid var(--accent-line); background: var(--accent-soft);
+  padding: 6px 13px; border-radius: 999px; margin-bottom: 26px;
+}
+.pill i {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent); display: block; flex: none;
+}
+
+.hero h1 {
+  font-size: clamp(36px, 5.6vw, 62px);
+  line-height: 1.02;
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  margin-bottom: 22px;
+}
+.lede {
+  font-size: clamp(16.5px, 1.6vw, 19px);
+  line-height: 1.62;
+  color: var(--fg-muted);
+  max-width: 34rem;
+  margin-bottom: 34px;
+}
+.lede code { font-size: 0.88em; color: var(--accent); }
+
+.actions { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+.btn {
+  display: inline-flex; align-items: center; gap: 9px;
+  font-size: 15px; font-weight: 600;
+  padding: 13px 24px; border-radius: 8px;
+  border: 1px solid transparent;
+  min-height: 46px;
+}
+.btn-primary { background: var(--accent); color: var(--bg); }
+.btn-primary:hover { background: oklch(0.86 0.16 165); color: var(--bg); }
+.btn-ghost { color: var(--fg); border-color: var(--rule-strong); font-weight: 500; }
+.btn-ghost:hover { color: var(--fg); border-color: var(--fg-dim); background: oklch(1 0 0 / 0.03); }
+
+/* --- code panel --------------------------------------------------------- */
+
+.panel {
+  border: 1px solid var(--rule-strong);
+  border-radius: 12px;
+  background: var(--bg-sunken);
+  overflow: hidden;
+  box-shadow: 0 26px 60px -20px oklch(0.06 0.02 265 / 0.9);
+  min-width: 0;
+}
+.panel-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 11px 16px; border-bottom: 1px solid var(--rule);
+}
+.panel-bar i {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--rule-strong); display: block; flex: none;
+}
+.panel-bar span {
+  font-family: var(--mono); font-size: 11.5px; color: var(--fg-dim); margin-left: 8px;
+}
+.panel pre {
+  margin: 0; padding: 20px 22px;
+  font-size: 12.5px; line-height: 1.85;
+  color: oklch(0.86 0.010 265);
+  overflow-x: auto;
+}
+.c  { color: var(--fg-dim); }          /* comment */
+.k  { color: var(--cyan); }            /* keyword */
+.t  { color: var(--accent); }          /* type / path segment */
+
+@media (max-width: 900px) {
+  .hero-inner { grid-template-columns: minmax(0, 1fr); }
+  .lede { max-width: none; }
+}
+
+/* --- stat strip --------------------------------------------------------- */
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-bottom: 1px solid var(--rule);
+}
+.stat { padding: 26px var(--gutter); border-right: 1px solid var(--rule); }
+.stat:last-child { border-right: none; }
+.stat b {
+  display: block; font-size: clamp(26px, 3.4vw, 34px);
+  font-weight: 700; letter-spacing: -0.03em; line-height: 1.1;
+}
+.stat span {
+  display: block; font-family: var(--mono); font-size: 11.5px;
+  color: var(--fg-dim); margin-top: 5px;
+}
+.stats-shell { max-width: var(--measure); margin: 0 auto; }
+.stats-shell .stat:first-child { padding-left: var(--gutter); }
+
+@media (max-width: 760px) {
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stat { border-bottom: 1px solid var(--rule); padding-inline: var(--gutter); }
+  .stat:nth-child(2n) { border-right: none; }
+  .stat:nth-last-child(-n+2) { border-bottom: none; }
+}
+
+/* --- sections ----------------------------------------------------------- */
+
+section { border-bottom: 1px solid var(--rule); }
+.sec { padding-block: clamp(48px, 7vw, 72px); }
+
+.sec-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 24px; flex-wrap: wrap; margin-bottom: 28px;
+}
+.sec-head h2 { font-size: clamp(22px, 2.6vw, 27px); }
+.sec-head a { font-family: var(--mono); font-size: 13px; }
+
+.eyebrow {
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.16em;
+  text-transform: uppercase; color: var(--fg-dim); margin-bottom: 14px;
+}
+
+/* two-column prose + aside */
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: clamp(32px, 5vw, 64px);
+}
+.split p + p { margin-top: 16px; }
+.split p { color: var(--fg-muted); font-size: 16.5px; }
+@media (max-width: 860px) { .split { grid-template-columns: minmax(0, 1fr); } }
+
+/* principle cards */
+.principles {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px; background: var(--rule);
+  border: 1px solid var(--rule); border-radius: 10px; overflow: hidden;
+}
+.principle { background: var(--bg); padding: 26px 24px; }
+.principle h3 {
+  font-family: var(--mono); font-size: 13px; letter-spacing: 0.04em;
+  font-weight: 700; margin-bottom: 12px; color: var(--accent);
+}
+.principle p { font-size: 14.5px; line-height: 1.62; color: var(--fg-muted); }
+@media (max-width: 860px) { .principles { grid-template-columns: minmax(0, 1fr); } }
+
+/* backend cards */
+.backends {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px;
+}
+.backend {
+  border: 1px solid var(--rule); border-radius: 10px;
+  padding: 20px; background: var(--bg-raised);
+}
+.backend.planned { background: none; border-style: dashed; }
+.backend-top {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; margin-bottom: 12px;
+}
+.backend-top b { font-family: var(--mono); font-size: 13px; font-weight: 700; }
+.backend p { font-size: 13.5px; line-height: 1.55; color: var(--fg-muted); }
+.backend.planned b, .backend.planned p { color: var(--fg-dim); }
+.tag {
+  font-family: var(--mono); font-size: 10.5px; white-space: nowrap;
+  border-radius: 4px; padding: 2px 7px; border: 1px solid;
+}
+.tag-ok    { color: var(--accent); border-color: var(--accent-line); }
+.tag-exp   { color: var(--amber);  border-color: oklch(0.80 0.16 75 / 0.4); }
+.tag-plan  { color: var(--fg-dim); border-color: var(--rule-strong); }
+@media (max-width: 1000px) { .backends { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px)  { .backends { grid-template-columns: minmax(0, 1fr); } }
+
+/* crate table */
+.crates { font-family: var(--mono); font-size: 13px; }
+.crate-head,
+.crate-row {
+  display: grid;
+  grid-template-columns: minmax(0, 15rem) minmax(0, 11rem) minmax(0, 1fr);
+  gap: 16px; padding: 13px 0;
+  border-bottom: 1px solid var(--rule);
+  align-items: baseline;
+}
+.crate-head {
+  font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--fg-dim); border-bottom-color: var(--rule-strong);
+}
+.crate-row:last-of-type { border-bottom: none; }
+.crate-row .tier { color: var(--cyan); font-size: 12px; }
+.crate-row .role {
+  font-family: var(--sans); font-size: 14.5px; color: var(--fg-muted);
+}
+@media (max-width: 860px) {
+  .crate-head { display: none; }
+  .crate-row { grid-template-columns: minmax(0, 1fr); gap: 3px; padding: 14px 0; }
+}
+
+/* caveat */
+.caveat {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 18px;
+  border: 1px solid oklch(0.80 0.16 75 / 0.3);
+  background: oklch(0.80 0.16 75 / 0.05);
+  border-radius: 10px; padding: 22px 24px;
+}
+.caveat svg { display: block; flex: none; margin-top: 2px; }
+.caveat p { font-size: 15.5px; color: var(--fg-muted); }
+.caveat p + p { margin-top: 10px; }
+.caveat strong { color: var(--fg); font-weight: 600; }
+
+/* --- footer ------------------------------------------------------------- */
+
+footer { padding-block: 44px 52px; }
+.foot {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) repeat(3, minmax(0, 1fr));
+  gap: 32px;
+}
+.foot h4 {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--fg-dim);
+  margin: 0 0 12px; font-weight: 500;
+}
+.foot ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.foot a { color: var(--fg-muted); font-size: 14.5px; }
+.foot a:hover { color: var(--fg); }
+.foot-note { font-size: 13.5px; color: var(--fg-dim); line-height: 1.65; }
+.foot-note code { font-size: 0.92em; }
+@media (max-width: 860px) { .foot { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 460px) { .foot { grid-template-columns: minmax(0, 1fr); } }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<nav class="nav">
+  <div class="shell nav-inner">
+    <a class="brand" href="/" aria-label="virtio-accel home">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" style="color: var(--accent)" aria-hidden="true">
+        <path d="M12 3 3 7.5v9L12 21l9-4.5v-9L12 3Z"/>
+        <path d="M12 12 3 7.5M12 12l9-4.5M12 12v9" opacity="0.55"/>
+      </svg>
+      <span>virtio-accel</span>
+    </a>
+    <div class="nav-links">
+      <a href="docs/specification.html">Specification</a>
+      <a href="getting-started.html" class="nav-hide-sm">Docs</a>
+      <a href="api.html" class="nav-hide-sm">API</a>
+      <a class="nav-cta" href="https://github.com/MicroPerceptron/virtio-accel">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<main id="main">
+
+<section class="hero">
+  <div class="shell hero-inner">
+    <div>
+      <p class="pill"><i></i>Protocol 1.0 frozen &middot; workspace 0.3.x</p>
+      <h1>Give a guest an accelerator, not a driver.</h1>
+      <p class="lede">virtio-accel is a transport-neutral virtual accelerator device: a frozen wire
+        contract plus executable <code>no_std</code> guest, device, transport and TOSA layers in
+        Rust. First target is NPU execution &mdash; with a core model that leaves room for GPUs,
+        DSPs and other program-driven accelerators.</p>
+      <div class="actions">
+        <a class="btn btn-primary" href="docs/specification.html">Read the specification</a>
+        <a class="btn btn-ghost" href="getting-started.html">Getting started</a>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-bar">
+        <i></i><i></i><i></i><span>submit.rs</span>
+      </div>
+<pre><code><span class="c">// device-owned state, bounded generational IDs</span>
+<span class="k">let</span> ctx   = device.create_context(&amp;desc)?;
+<span class="k">let</span> buf   = ctx.import_buffer(bytes, Access::<span class="t">ReadWrite</span>)?;
+<span class="k">let</span> prog  = ctx.load_program(tosa_artifact)?;
+
+<span class="k">let</span> queue = ctx.create_queue(QueueDesc::<span class="t">default</span>())?;
+<span class="k">let</span> token = queue.submit(prog, &amp;[buf])?;
+
+<span class="c">// success or failure, an event always arrives</span>
+<span class="k">match</span> queue.wait(token)? {
+    Event::<span class="t">Complete</span>(e) =&gt; use_outputs(e),
+    Event::<span class="t">Failed</span>(e)   =&gt; reclaim(e),
+}</code></pre>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="stats-shell">
+    <div class="stats">
+      <div class="stat"><b>16</b><span>crates, one release train</span></div>
+      <div class="stat"><b style="color: var(--accent)">0</b><span>lines of unsafe</span></div>
+      <div class="stat"><b>3</b><span>bare-metal CI targets</span></div>
+      <div class="stat"><b>1.85</b><span>minimum rustc</span></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="shell sec">
+    <p class="eyebrow">What it is</p>
+    <div class="split">
+      <div>
+        <h2 style="font-size: clamp(22px, 2.6vw, 27px); margin-bottom: 16px;">The portable majority of the system</h2>
+        <p>virtio-accel concentrates on the part that should not have to be rewritten per platform:
+          protocol wire structures, transport ports, device-owned state, a guest client, a mock
+          backend and a transport-free conformance suite.</p>
+        <p>What it deliberately does not contain: Linux ioctls, macOS frameworks, Windows APIs,
+          guest physical addresses, vendor command formats, or a claimed Virtio device ID.</p>
+      </div>
+      <div>
+        <p>Platform adapters are meant to be written <em>against</em> these layers rather than
+          inside them. Each crate is pinned to a portability tier that CI enforces on bare-metal
+          <code style="font-size: 0.9em">aarch64-unknown-none</code>,
+          <code style="font-size: 0.9em">riscv64gc-unknown-none-elf</code> and
+          <code style="font-size: 0.9em">wasm32-unknown-unknown</code>, so a crate cannot quietly
+          acquire a host dependency.</p>
+        <p style="margin-top: 18px;"><a href="docs/architecture.html" style="font-family: var(--mono); font-size: 13px;">Architecture &rarr;</a></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="shell sec">
+    <div class="sec-head">
+      <h2>Protocol 1.0, frozen</h2>
+      <a href="docs/wire-abi.html">Wire ABI &rarr;</a>
+    </div>
+    <p class="lede" style="max-width: 52rem; margin-bottom: 30px;">A versioned wire contract for
+      exposing an accelerator to a guest: contexts, buffers, programs, execution queues,
+      submissions and events.</p>
+    <div class="principles">
+      <div class="principle">
+        <h3>Decoding is total</h3>
+        <p>Unknown opcodes, statuses and event states stay raw integers until validated, so
+          decoding untrusted bytes never constructs an invalid Rust enum.</p>
+      </div>
+      <div class="principle">
+        <h3>Failure still returns</h3>
+        <p>A successful submit yields an event, and an indeterminate failure must yield one too
+          &mdash; the operation's resources are still owned by the device.</p>
+      </div>
+      <div class="principle">
+        <h3>Tiers are enforced</h3>
+        <p>Portability tiers are checked in CI on bare-metal targets rather than asserted in a
+          README, so a <code>no_std</code> crate stays <code>no_std</code>.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="shell sec">
+    <div class="sec-head">
+      <h2>Real backends, not shims</h2>
+      <a href="docs/backend-implementer-guide.html">Backend implementer guide &rarr;</a>
+    </div>
+    <div class="backends">
+      <div class="backend">
+        <div class="backend-top"><b>Core ML / ANE</b><span class="tag tag-ok">implemented</span></div>
+        <p>TOSA lowered to Core ML with direct buffer bindings and ANE-capable prediction on
+          macOS&nbsp;14+.</p>
+      </div>
+      <div class="backend">
+        <div class="backend-top"><b>OpenVINO</b><span class="tag tag-ok">implemented</span></div>
+        <p>TOSA lowered to in-memory OpenVINO IR, executed on NPU, GPU or CPU with direct
+          host-pointer tensors.</p>
+      </div>
+      <div class="backend">
+        <div class="backend-top"><b>Hexagon</b><span class="tag tag-exp">experimental</span></div>
+        <p>Strict FP16 and INT8 TOSA subsets lowered to QNN and executed on Hexagon HTP.</p>
+      </div>
+      <div class="backend planned">
+        <div class="backend-top"><b>AMD XDNA</b><span class="tag tag-plan">planned</span></div>
+        <p>Not implemented.</p>
+      </div>
+    </div>
+    <p style="margin-top: 18px; font-size: 14px; color: var(--fg-dim);">None of these silently
+      dequantize an unsupported graph: an FP8, unsupported INT8 or packed INT4 graph is rejected at
+      load. See the <a href="docs/hexagon-operator-matrix.html">Hexagon operator matrix</a> for the
+      per-operator detail.</p>
+  </div>
+</section>
+
+<section>
+  <div class="shell sec">
+    <div class="sec-head">
+      <h2>Sixteen crates, one release train</h2>
+      <a href="api.html">Full crate reference &rarr;</a>
+    </div>
+    <div class="crates">
+      <div class="crate-head"><div>Crate</div><div>Tier</div><div>Role</div></div>
+      <div class="crate-row"><div>virtio-accel</div><div class="tier">core + alloc</div><div class="role">Facade re-exporting the portable layers</div></div>
+      <div class="crate-row"><div>virtio-accel-proto</div><div class="tier">core</div><div class="role">Pointer-free, little-endian protocol 1.0 wire structures</div></div>
+      <div class="crate-row"><div>virtio-accel-transport</div><div class="tier">core</div><div class="role">Descriptor-chain, queue, reset and notification ports</div></div>
+      <div class="crate-row"><div>virtio-accel-core</div><div class="tier">core</div><div class="role">Backend lifecycle, memory, program, queue and event contracts</div></div>
+      <div class="crate-row"><div>virtio-accel-tosa</div><div class="tier">core + alloc</div><div class="role">Bounded zero-copy TOSA 1.0 validation and lowering analysis</div></div>
+      <div class="crate-row"><div>virtio-accel-tosa-build</div><div class="tier">core + alloc</div><div class="role">Borrowed and owned static TOSA 1.0 authoring</div></div>
+      <div class="crate-row"><div>virtio-accel-vaccel</div><div class="tier">core</div><div class="role">Adapter seam for native provider contracts</div></div>
+      <div class="crate-row"><div>virtio-accel-coreml</div><div class="tier">macOS std</div><div class="role">TOSA-to-Core ML lowering and ANE-capable prediction</div></div>
+      <div class="crate-row"><div>virtio-accel-openvino</div><div class="tier">Linux std</div><div class="role">TOSA-to-OpenVINO IR lowering and NPU/GPU/CPU inference</div></div>
+      <div class="crate-row"><div>virtio-accel-hexagon</div><div class="tier">Windows ARM64 std</div><div class="role">Strict FP16/INT8 TOSA-to-QNN lowering</div></div>
+      <div class="crate-row"><div>virtio-accel-split-queue</div><div class="tier">core + alloc</div><div class="role">Bounded in-memory split-ring reference model</div></div>
+      <div class="crate-row"><div>virtio-accel-guest</div><div class="tier">core + alloc</div><div class="role">Typed reference client with bounded request tracking</div></div>
+      <div class="crate-row"><div>virtio-accel-device</div><div class="tier">core + alloc</div><div class="role">Device-owned state with generational IDs</div></div>
+      <div class="crate-row"><div>virtio-accel-mock</div><div class="tier">std</div><div class="role">In-memory backend with deterministic test-only artifacts</div></div>
+      <div class="crate-row"><div>virtio-accel-conformance</div><div class="tier">std</div><div class="role">Transport-free semantic suite and numerical corpus</div></div>
+      <div class="crate-row"><div>virtio-accel-cleanroom</div><div class="tier">core</div><div class="role">Independent conformance codec, written without the shared types</div></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="shell sec">
+    <div class="caveat">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--amber)" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+        <path d="M12 3 2 20h20L12 3Z"/><path d="M12 10v4"/><path d="M12 17.5v.5"/>
+      </svg>
+      <div>
+        <p><strong>This project is pre-standardization and experimental.</strong> Protocol 1.0 is
+          frozen as a versioned review input for independent implementation &mdash; stable enough to
+          build against and to disagree with in writing, not an approved Virtio specification.</p>
+        <p>The workspace publishes together at 0.3.x. That Cargo version tracks the Rust API, which
+          is still young and expected to change as adapter authors build against it; the protocol
+          freeze is a separate guarantee, so a pre-1.0 crate version is not a statement about
+          protocol stability.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="shell foot">
+    <div>
+      <a class="brand" href="/" style="margin-bottom: 14px;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" style="color: var(--accent)" aria-hidden="true">
+          <path d="M12 3 3 7.5v9L12 21l9-4.5v-9L12 3Z"/>
+          <path d="M12 12 3 7.5M12 12l9-4.5M12 12v9" opacity="0.55"/>
+        </svg>
+        <span>virtio-accel</span>
+      </a>
+      <p class="foot-note">Dual-licensed <code>MIT OR Apache-2.0</code>.<br>
+        Built by <a href="https://github.com/MicroPerceptron">MicroPerceptron</a>.</p>
+    </div>
+    <div>
+      <h4>Protocol</h4>
+      <ul>
+        <li><a href="docs/specification.html">Specification</a></li>
+        <li><a href="docs/wire-abi.html">Wire ABI</a></li>
+        <li><a href="docs/virtqueue.html">Command virtqueue</a></li>
+        <li><a href="docs/threat-model.html">Threat model</a></li>
+      </ul>
+    </div>
+    <div>
+      <h4>Implementation</h4>
+      <ul>
+        <li><a href="docs/architecture.html">Architecture</a></li>
+        <li><a href="docs/portability.html">Portability</a></li>
+        <li><a href="docs/performance.html">Performance budgets</a></li>
+        <li><a href="docs/backend-implementer-guide.html">Backend guide</a></li>
+      </ul>
+    </div>
+    <div>
+      <h4>Project</h4>
+      <ul>
+        <li><a href="https://github.com/MicroPerceptron/virtio-accel">GitHub</a></li>
+        <li><a href="https://crates.io/crates/virtio-accel">crates.io</a></li>
+        <li><a href="api.html">API reference</a></li>
+        <li><a href="docs/release-policy.html">Release policy</a></li>
+      </ul>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

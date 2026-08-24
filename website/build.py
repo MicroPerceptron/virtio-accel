@@ -12,6 +12,9 @@ This script is the single entry point for producing the public site. It:
   3. Generates ``src/SUMMARY.md``.
   4. Builds rustdoc for the whole workspace and copies it under ``book/api/``.
   5. Runs ``mdbook build``.
+  6. Overlays the hand-written landing page (``content/index.html``) onto
+     ``book/index.html``. The landing page is a standalone document rather than
+     an mdBook chapter, so it is not constrained by the book's chrome.
 
 The generated ``src/`` and ``book/`` trees are git-ignored; only the curated
 inputs, the theme, and this script are checked in.
@@ -64,10 +67,18 @@ CURATED: list[tuple[str, str]] = [
     ("docs/releases/v1.0.md", "docs/releases/v1.0.md"),
 ]
 
-# Hand-authored pages that live in website/content/ and are copied verbatim.
+# Hand-authored mdBook chapters that live in website/content/ and are copied
+# verbatim into the book source.
 CONTENT_PAGES: list[tuple[str, str]] = [
-    ("index.md", "index.md"),
     ("api.md", "api.md"),
+]
+
+# Standalone documents copied straight into the built site, bypassing mdBook.
+# ``index.html`` overwrites the copy mdBook emits for the first chapter, which
+# is also written under its own name and so is not lost.
+STANDALONE_PAGES: list[tuple[Path, str]] = [
+    (CONTENT / "index.html", "index.html"),
+    (WEBSITE / "theme" / "favicon.svg", "favicon.svg"),
 ]
 
 LINK_RE = re.compile(r"(\[[^\]]*\]\()([^)\s]+)(\))")
@@ -152,27 +163,38 @@ def copy_content() -> None:
 
 
 def write_summary() -> None:
+    """Write the mdBook table of contents.
+
+    ``getting-started.md`` is a prefix chapter, so it is the book's first page
+    and mdBook also emits it as ``book/index.html`` -- which the standalone
+    landing page then overwrites.
+    """
     lines = [
         "# Summary",
         "",
-        "- [Home](index.md)",
+        "[Getting started](getting-started.md)",
+        "",
+        "# Protocol 1.0",
+        "",
+        "- [Specification](docs/specification.md)",
+        "- [Wire ABI](docs/wire-abi.md)",
+        "- [Command virtqueue](docs/virtqueue.md)",
+        "- [Threat model](docs/threat-model.md)",
+        "- [Release notes](docs/releases/v1.0.md)",
+        "",
+        "# Implementation",
+        "",
+        "- [Architecture](docs/architecture.md)",
+        "- [Portability](docs/portability.md)",
+        "- [Performance budgets](docs/performance.md)",
+        "- [Backend implementer guide](docs/backend-implementer-guide.md)",
+        "- [Hexagon operator matrix](docs/hexagon-operator-matrix.md)",
+        "",
+        "# Reference",
+        "",
         "- [API reference](api.md)",
-        "- [Getting started](getting-started.md)",
-        "",
-        "- [Protocol 1.0](docs/specification.md)",
-        "  - [Wire ABI](docs/wire-abi.md)",
-        "  - [Command virtqueue](docs/virtqueue.md)",
-        "  - [Threat model](docs/threat-model.md)",
-        "  - [Release notes](docs/releases/v1.0.md)",
-        "",
-        "- [Implementation](docs/architecture.md)",
-        "  - [Portability](docs/portability.md)",
-        "  - [Performance budgets](docs/performance.md)",
-        "  - [Public API policy](docs/public-api.md)",
-        "  - [Backend implementer guide](docs/backend-implementer-guide.md)",
-        "  - [Hexagon operator matrix](docs/hexagon-operator-matrix.md)",
-        "",
-        "- [Governance](docs/release-policy.md)",
+        "- [Public API policy](docs/public-api.md)",
+        "- [Release policy](docs/release-policy.md)",
         "",
     ]
     (SRC / "SUMMARY.md").write_text("\n".join(lines), encoding="utf-8")
@@ -204,7 +226,8 @@ def write_api_index(api_dir: Path) -> None:
         if p.is_dir() and (p / "index.html").exists()
     )
     rows = "\n".join(
-        f'<li><a href="{name}/index.html">{name.replace("_", "-")}</a></li>'
+        f'<li><a href="{name}/index.html"><b>{name.replace("_", "-")}</b>'
+        f'<span>{name}/index.html</span></a></li>'
         for name in crates
     )
     html = f"""<!DOCTYPE html>
@@ -213,22 +236,74 @@ def write_api_index(api_dir: Path) -> None:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>virtio-accel API reference</title>
+<link rel="icon" href="../favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;700&amp;display=swap">
 <style>
-body {{ font-family: system-ui, -apple-system, sans-serif; max-width: 48rem;
-       margin: 3rem auto; padding: 0 1.5rem; color: #0f172a; }}
-h1 {{ font-size: 2rem; }}
-ul {{ list-style: none; padding: 0; }}
-li {{ margin: 0.5rem 0; }}
-a {{ color: #0ea5e9; text-decoration: none; }}
-a:hover {{ text-decoration: underline; }}
+:root {{
+  --bg: oklch(0.170 0.012 265);
+  --raised: oklch(0.195 0.012 265);
+  --rule: oklch(0.280 0.014 265);
+  --fg: oklch(0.925 0.008 265);
+  --dim: oklch(0.600 0.012 265);
+  --accent: oklch(0.800 0.160 165);
+  --sans: "Archivo", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color-scheme: dark;
+}}
+* {{ box-sizing: border-box; }}
+body {{
+  margin: 0; background: var(--bg); color: var(--fg);
+  font-family: var(--sans); line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}}
+a {{ color: var(--accent); text-decoration: none; }}
+.wrap {{ max-width: 56rem; margin: 0 auto; padding: 0 clamp(20px, 5vw, 40px) 72px; }}
+header {{ border-bottom: 1px solid var(--rule); margin-bottom: 40px; }}
+.bar {{
+  max-width: 56rem; margin: 0 auto;
+  padding: 0 clamp(20px, 5vw, 40px); height: 62px;
+  display: flex; align-items: center; gap: 10px;
+}}
+.bar a {{ display: flex; align-items: center; gap: 10px; color: var(--fg); }}
+.bar b {{ font-family: var(--mono); font-size: 14px; letter-spacing: -0.01em; }}
+h1 {{ font-size: clamp(28px, 4vw, 38px); letter-spacing: -0.03em; margin: 40px 0 12px; }}
+.lede {{ color: var(--dim); margin: 0 0 36px; max-width: 40rem; }}
+ul {{ list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }}
+li a {{
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap;
+  border: 1px solid var(--rule); border-radius: 8px;
+  background: var(--raised); padding: 14px 18px; color: var(--fg);
+}}
+li a:hover {{ border-color: var(--accent); }}
+li b {{ font-family: var(--mono); font-size: 14px; font-weight: 700; }}
+li span {{ font-family: var(--mono); font-size: 11.5px; color: var(--dim); }}
 </style>
 </head>
 <body>
-<h1>virtio-accel API reference</h1>
-<p>rustdoc for every crate in the workspace, built with all features enabled.</p>
+<header>
+  <div class="bar">
+    <a href="../index.html" aria-label="virtio-accel home">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="1.7" stroke-linejoin="round" style="color: var(--accent)" aria-hidden="true">
+        <path d="M12 3 3 7.5v9L12 21l9-4.5v-9L12 3Z"/>
+        <path d="M12 12 3 7.5M12 12l9-4.5M12 12v9" opacity="0.55"/>
+      </svg>
+      <b>virtio-accel</b>
+    </a>
+  </div>
+</header>
+<div class="wrap">
+<h1>API reference</h1>
+<p class="lede">rustdoc for every crate in the workspace, built with all features enabled.
+See the <a href="../api.html">crate reference</a> for tiers and roles, or the
+<a href="../docs/public-api.html">public API policy</a> for what is guaranteed stable.</p>
 <ul>
 {rows}
 </ul>
+</div>
 </body>
 </html>
 """
@@ -237,6 +312,19 @@ a:hover {{ text-decoration: underline; }}
 
 def build_mdbook() -> None:
     subprocess.run(["mdbook", "build"], cwd=WEBSITE, check=True)
+
+
+def copy_standalone() -> None:
+    """Copy the standalone landing page and favicon into the built site.
+
+    ``mdbook build`` recreates ``book/`` from scratch, so this must run after
+    it to survive.
+    """
+    BOOK.mkdir(parents=True, exist_ok=True)
+    for source, dest_rel in STANDALONE_PAGES:
+        dest = BOOK / dest_rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, dest)
 
 
 def write_cname() -> None:
@@ -266,6 +354,7 @@ def main() -> int:
     if not args.skip_rustdoc:
         build_rustdoc()
 
+    copy_standalone()
     write_cname()
 
     return 0

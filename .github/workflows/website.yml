@@ -12,6 +12,18 @@ name: Website
       - "Cargo.lock"
       - "crates/**"
       - ".github/workflows/website.yml"
+  # Every pull request that can change what the site publishes rebuilds it, so
+  # a broken doc, a dangling cross-link, or a rustdoc failure fails the PR
+  # instead of landing on virtio-accel.org after the merge.
+  pull_request:
+    paths:
+      - "docs/**"
+      - "website/**"
+      - "README.md"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - ".github/workflows/website.yml"
   workflow_run:
     workflows:
       - "Publish crates"
@@ -23,20 +35,28 @@ permissions:
   contents: read
 
 # Allow one concurrent deployment; do not cancel an in-progress Pages deploy,
-# so a running publish always finishes cleanly.
+# so a running publish always finishes cleanly. Pull-request builds are keyed
+# per-ref instead, and superseded pushes to a PR are cancelled.
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: >-
+    ${{ github.event_name == 'pull_request'
+        && format('website-pr-{0}', github.ref)
+        || 'pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
+  MDBOOK_VERSION: "0.5.4"
 
 jobs:
-  build:
-    name: build-site
+  # Pull-request validation. Builds exactly what a push to main would publish
+  # and stops there: no Pages configuration, no artifact upload, no deploy, and
+  # no permissions beyond `contents: read`.
+  check:
+    name: check-site
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    if: github.event_name == 'pull_request'
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -49,10 +69,47 @@ jobs:
           toolchain: stable
 
       - name: Install mdBook
-        run: cargo install mdbook --version 0.5.4 --locked
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        with:
+          tool: mdbook@${{ env.MDBOOK_VERSION }}
+          fallback: none
 
       - name: Build the site
         run: python3 website/build.py
+
+      - name: Check the built tree
+        run: python3 website/check.py
+
+  build:
+    name: build-site
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: >-
+      github.event_name != 'pull_request'
+      && (github.event_name != 'workflow_run'
+          || github.event.workflow_run.conclusion == 'success')
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: stable
+
+      - name: Install mdBook
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        with:
+          tool: mdbook@${{ env.MDBOOK_VERSION }}
+          fallback: none
+
+      - name: Build the site
+        run: python3 website/build.py
+
+      - name: Check the built tree
+        run: python3 website/check.py
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
@@ -67,7 +124,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: build
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    if: >-
+      github.event_name != 'pull_request'
+      && (github.event_name != 'workflow_run'
+          || github.event.workflow_run.conclusion == 'success')
     # The deploy job needs write access to Pages and an OIDC token to prove the
     # artifact came from this workflow run.
     permissions:

@@ -1,179 +1,405 @@
-@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap");
+/* virtio-accel.org docs reader.
+ *
+ * mdBook ships a fixed set of built-in themes and picks one by class on
+ * <html>. Rather than fork index.hbs, we rebind two of them:
+ *
+ *   .navy  -> the dark terminal palette the landing page uses (the default)
+ *   .light -> a warm-neutral light companion for long-form reading
+ *
+ * Everything below the palette block is structural: type scale, chrome, and
+ * the code/table/callout treatments. Keep the token values in sync with the
+ * inline <style> in website/content/index.html.
+ */
+
+@import url("https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap");
+
+/* ---------------------------------------------------------------- globals */
 
 :root {
-  --content-max-width: 900px;
+  --content-max-width: 820px;
+  --sidebar-target-width: 310px;
+  --menu-bar-height: 56px;
+  --page-padding: 20px;
+
+  --va-sans: "Archivo", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --va-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --mono-font: var(--va-mono);
+  --code-font-size: 0.86em;
 }
 
-/* Brand accent on top of mdBook's stock navy theme. Only the identity colors
-   are overridden here; surfaces (quotes, tables, search) keep the stock navy
-   values so everything stays internally consistent. */
+/* ------------------------------------------------------------ dark theme */
+
 .navy {
-  --sidebar-bg: #0f172a;
-  --sidebar-active: #38bdf8;
-  --links: #0ea5e9;
-  --inline-code-color: #0ea5e9;
-  --warning-border: #f59e0b;
-  --search-mark-bg: #bae6fd;
-  --sidebar-non-existant: var(--fg);
+  --bg: oklch(0.170 0.012 265);
+  --fg: oklch(0.860 0.008 265);
+
+  --va-raised: oklch(0.195 0.012 265);
+  --va-sunken: oklch(0.140 0.012 265);
+  --va-rule: oklch(0.280 0.014 265);
+  --va-rule-strong: oklch(0.340 0.016 265);
+  --va-dim: oklch(0.600 0.012 265);
+  --va-accent: oklch(0.800 0.160 165);
+  --va-cyan: oklch(0.800 0.160 200);
+
+  --sidebar-bg: oklch(0.140 0.012 265);
+  --sidebar-fg: oklch(0.760 0.010 265);
+  --sidebar-non-existant: oklch(0.520 0.012 265);
+  --sidebar-active: oklch(0.800 0.160 165);
+  --sidebar-spacer: oklch(0.260 0.014 265);
+  --sidebar-header-border-color: oklch(0.280 0.014 265);
+
+  --scrollbar: oklch(0.360 0.016 265);
+
+  --icons: oklch(0.560 0.012 265);
+  --icons-hover: oklch(0.880 0.010 265);
+
+  --links: oklch(0.800 0.160 165);
+  --inline-code-color: oklch(0.820 0.120 200);
+
+  --theme-popup-bg: oklch(0.150 0.012 265);
+  --theme-popup-border: oklch(0.320 0.016 265);
+  --theme-hover: oklch(0.220 0.014 265);
+
+  --quote-bg: oklch(0.200 0.014 265);
+  --quote-border: oklch(0.300 0.016 265);
+
+  --warning-border: oklch(0.800 0.160 75);
+
+  --table-border-color: oklch(0.280 0.014 265);
+  --table-header-bg: oklch(0.230 0.014 265);
+  --table-alternate-bg: oklch(0.186 0.012 265);
+
+  --searchbar-border-color: oklch(0.340 0.016 265);
+  --searchbar-bg: oklch(0.140 0.012 265);
+  --searchbar-fg: oklch(0.900 0.008 265);
+  --searchbar-shadow-color: oklch(0.800 0.160 165 / 0.35);
+  --searchresults-header-fg: oklch(0.600 0.012 265);
+  --searchresults-border-color: oklch(0.280 0.014 265);
+  --searchresults-li-bg: oklch(0.195 0.012 265);
+  --search-mark-bg: oklch(0.800 0.160 165 / 0.28);
+
+  --color-scheme: dark;
+
+  /* Approximates --icons / --sidebar-active for the copy-to-clipboard glyph. */
+  --copy-button-filter: invert(62%) sepia(6%) saturate(500%) hue-rotate(196deg) brightness(92%) contrast(88%);
+  --copy-button-filter-hover: invert(78%) sepia(46%) saturate(495%) hue-rotate(102deg) brightness(97%) contrast(92%);
+
+  --footnote-highlight: oklch(0.800 0.160 165 / 0.4);
+  --overlay-bg: oklch(0.10 0.012 265 / 0.6);
+
+  --blockquote-note-color: oklch(0.800 0.160 200);
+  --blockquote-tip-color: oklch(0.800 0.160 165);
+  --blockquote-important-color: oklch(0.780 0.150 300);
+  --blockquote-warning-color: oklch(0.800 0.160 75);
+  --blockquote-caution-color: oklch(0.700 0.190 25);
 }
 
-/* Landing page: hide the sidebar and let the hero span the full width. */
-body:has(#landing-hero) .sidebar {
-  display: none;
+/* ----------------------------------------------------------- light theme */
+
+.light, html:not(.js) {
+  --bg: oklch(0.985 0.003 265);
+  --fg: oklch(0.280 0.014 265);
+
+  --va-raised: oklch(1 0 0);
+  --va-sunken: oklch(0.965 0.004 265);
+  --va-rule: oklch(0.890 0.006 265);
+  --va-rule-strong: oklch(0.830 0.008 265);
+  --va-dim: oklch(0.540 0.012 265);
+  --va-accent: oklch(0.520 0.130 165);
+  --va-cyan: oklch(0.500 0.120 235);
+
+  --sidebar-bg: oklch(0.960 0.004 265);
+  --sidebar-fg: oklch(0.360 0.012 265);
+  --sidebar-non-existant: oklch(0.620 0.010 265);
+  --sidebar-active: oklch(0.480 0.140 165);
+  --sidebar-spacer: oklch(0.890 0.006 265);
+  --sidebar-header-border-color: oklch(0.880 0.006 265);
+
+  --scrollbar: oklch(0.760 0.010 265);
+
+  --icons: oklch(0.620 0.010 265);
+  --icons-hover: oklch(0.300 0.014 265);
+
+  --links: oklch(0.480 0.140 165);
+  --inline-code-color: oklch(0.470 0.120 235);
+
+  --theme-popup-bg: oklch(1 0 0);
+  --theme-popup-border: oklch(0.870 0.006 265);
+  --theme-hover: oklch(0.950 0.005 265);
+
+  --quote-bg: oklch(0.960 0.006 265);
+  --quote-border: oklch(0.880 0.008 265);
+
+  --warning-border: oklch(0.680 0.150 70);
+
+  --table-border-color: oklch(0.890 0.006 265);
+  --table-header-bg: oklch(0.945 0.005 265);
+  --table-alternate-bg: oklch(0.972 0.004 265);
+
+  --searchbar-border-color: oklch(0.840 0.008 265);
+  --searchbar-bg: oklch(1 0 0);
+  --searchbar-fg: oklch(0.280 0.014 265);
+  --searchbar-shadow-color: oklch(0.520 0.130 165 / 0.3);
+  --searchresults-header-fg: oklch(0.540 0.012 265);
+  --searchresults-border-color: oklch(0.890 0.006 265);
+  --searchresults-li-bg: oklch(0.972 0.004 265);
+  --search-mark-bg: oklch(0.520 0.130 165 / 0.20);
+
+  --color-scheme: light;
+
+  --copy-button-filter: invert(45%) sepia(6%) saturate(400%) hue-rotate(196deg) brightness(95%) contrast(88%);
+  --copy-button-filter-hover: invert(38%) sepia(40%) saturate(700%) hue-rotate(110deg) brightness(92%) contrast(95%);
+
+  --footnote-highlight: oklch(0.520 0.130 165 / 0.35);
+  --overlay-bg: oklch(0.30 0.01 265 / 0.35);
+
+  --blockquote-note-color: oklch(0.500 0.130 235);
+  --blockquote-tip-color: oklch(0.480 0.140 165);
+  --blockquote-important-color: oklch(0.480 0.150 300);
+  --blockquote-warning-color: oklch(0.620 0.150 70);
+  --blockquote-caution-color: oklch(0.520 0.190 25);
 }
 
-body:has(#landing-hero) .page-wrapper {
-  margin-left: 0;
+/* ------------------------------------------------------------- typography */
+
+html { font-family: var(--va-sans); }
+
+body {
+  font-size: 16.5px;
+  line-height: 1.68;
+  -webkit-font-smoothing: antialiased;
 }
 
-body:has(#landing-hero) .content {
-  max-width: 1000px;
+.content { overflow-wrap: break-word; }
+
+.content h1,
+.content h2,
+.content h3,
+.content h4 {
+  font-family: var(--va-sans);
+  font-weight: 600;
+  letter-spacing: -0.022em;
+  line-height: 1.2;
+  text-wrap: balance;
 }
 
-.landing-hero {
-  padding: 4rem 0 2.5rem;
-  text-align: center;
+.content h1 { font-size: 2.15em; margin-block: 0 0.7em; letter-spacing: -0.032em; }
+.content h2 {
+  font-size: 1.5em;
+  margin-block: 2.2em 0.7em;
+  padding-block-end: 0.35em;
+  border-block-end: 1px solid var(--va-rule);
+}
+.content h3 { font-size: 1.18em; margin-block: 1.9em 0.6em; }
+.content h4 { font-size: 1.02em; margin-block: 1.7em 0.5em; color: var(--va-dim); }
+
+.content p,
+.content li { text-wrap: pretty; }
+
+.content p { margin-block: 0 1.15em; }
+
+.content a:link,
+.content a:visited { text-decoration: none; border-block-end: 1px solid transparent; }
+.content a:hover { border-block-end-color: currentColor; }
+
+/* Header anchor links stay quiet until hovered. */
+.content .header:link,
+.content .header:visited { color: var(--fg); border: none; }
+.content .header:hover { color: var(--links); border: none; }
+
+/* --------------------------------------------------------------- chrome */
+
+#mdbook-menu-bar,
+#mdbook-menu-bar.sticky,
+#mdbook-menu-bar-hover-placeholder:hover + #mdbook-menu-bar,
+#mdbook-menu-bar:hover {
+  background: color-mix(in oklab, var(--bg) 86%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-block-end: 1px solid var(--va-rule);
 }
 
-.landing-hero h1 {
-  font-family: "Space Grotesk", var(--mono-font, sans-serif);
-  font-size: 3.5rem;
+.menu-title {
+  font-family: var(--va-mono);
+  font-size: 0.82em;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  opacity: 0.75;
+}
+
+.icon-button { border-radius: 6px; }
+.icon-button:hover { background: var(--theme-hover); }
+
+/* Brand header injected by theme/js/site.js — links back to the landing page. */
+.va-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 22px;
+  height: var(--menu-bar-height);
+  flex: none;
+  color: var(--sidebar-fg);
+  text-decoration: none;
+  border-block-end: 1px solid var(--sidebar-spacer);
+}
+.va-brand:hover { color: var(--sidebar-active); }
+.va-brand svg { display: block; flex: none; color: var(--va-accent); }
+.va-brand b {
+  font-family: var(--va-mono);
+  font-size: 13.5px;
   font-weight: 700;
-  margin: 0.5rem 0;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.01em;
 }
 
-.landing-kicker {
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 0.8rem;
-  letter-spacing: 0.12em;
+/* -------------------------------------------------------------- sidebar */
+
+.sidebar { border-inline-end: 1px solid var(--va-rule); }
+
+.sidebar .sidebar-scrollbox { padding: 14px 12px 40px; }
+
+.chapter li.chapter-item {
+  font-size: 14.5px;
+  line-height: 1.45;
+  margin-block: 1px;
+}
+
+.chapter li a {
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+.chapter li a:hover { background: var(--theme-hover); }
+.chapter li a.active {
+  font-weight: 600;
+  background: color-mix(in oklab, var(--sidebar-active) 12%, transparent);
+}
+
+.chapter li.part-title {
+  font-family: var(--va-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--sidebar-non-existant);
-  margin: 0;
+  margin-block: 22px 8px;
+  padding-inline: 10px;
 }
 
-.landing-lede {
-  font-size: 1.2rem;
-  line-height: 1.6;
-  color: var(--fg);
-  max-width: 40rem;
-  margin: 0 auto;
+/* ----------------------------------------------------------------- code */
+
+.content code {
+  font-family: var(--va-mono);
+  font-size: var(--code-font-size);
 }
 
-.landing-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 0.8rem;
-  letter-spacing: 0.04em;
-  color: var(--sidebar-non-existant);
-  margin-top: 1.25rem;
+.content :not(pre) > code {
+  background: color-mix(in oklab, var(--inline-code-color) 11%, transparent);
+  padding: 0.14em 0.36em;
+  border-radius: 4px;
 }
 
-.landing-status-dot {
-  width: 0.5rem;
-  height: 0.5rem;
-  border-radius: 50%;
-  background: var(--links);
-  display: inline-block;
-}
-
-.landing-sections {
-  max-width: 42rem;
-  margin: 1rem auto 0;
-  text-align: left;
-}
-
-.landing-section {
-  border-top: 1px solid var(--table-border-color);
-  padding: 2rem 0;
-}
-
-.landing-section:first-child {
-  border-top: none;
-}
-
-.landing-section h2 {
-  font-family: "Space Grotesk", var(--mono-font, sans-serif);
-  font-size: 1.4rem;
-  font-weight: 500;
-  letter-spacing: -0.01em;
-  margin-top: 0;
-}
-
-.landing-section p {
-  line-height: 1.75;
-  color: var(--fg);
-}
-
-.landing-crates {
-  margin: 1.25rem 0;
-}
-
-.landing-crates > div {
-  display: grid;
-  grid-template-columns: minmax(0, 13rem) minmax(0, 1fr);
-  gap: 0.5rem 1.5rem;
-  padding: 0.6rem 0;
-  border-top: 1px solid var(--table-border-color);
-}
-
-.landing-crates > div:first-child {
-  border-top: none;
-}
-
-.landing-crates dt {
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 0.85rem;
-  color: var(--inline-code-color);
-}
-
-.landing-crates dd {
-  margin: 0;
-  font-size: 0.9rem;
-  color: var(--sidebar-non-existant);
-  line-height: 1.6;
-}
-
-@media (max-width: 40rem) {
-  .landing-crates > div {
-    grid-template-columns: 1fr;
-    gap: 0.15rem;
-  }
-}
-
-.landing-note {
-  max-width: 42rem;
-  margin: 0 auto;
-  border-left: 4px solid var(--warning-border);
-  background: var(--quote-bg);
-  padding: 1rem 1.25rem;
-  border-radius: 0 0.5rem 0.5rem 0;
-  color: var(--fg);
-}
-
-.landing-links {
-  max-width: 42rem;
-  margin: 2.5rem auto 3rem;
-}
-
-.landing-links ul {
-  list-style: none;
+.content pre {
+  background: var(--va-sunken);
+  border: 1px solid var(--va-rule);
+  border-radius: 10px;
   padding: 0;
-  margin: 0.75rem 0 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem 1.5rem;
 }
 
-.landing-links a {
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 0.85rem;
-}
-
-.landing-logo {
+.content pre > code {
   display: block;
-  margin: 0 auto 1rem;
-  color: var(--links);
+  padding: 16px 18px;
+  line-height: 1.72;
+  font-size: 0.82em;
+  background: none;
+}
+
+/* mdBook draws code-block buttons in the top-right corner. */
+.content pre > .buttons { inset-block-start: 8px; inset-inline-end: 10px; }
+
+/* --------------------------------------------------------------- tables */
+
+.content table {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
+  font-size: 14.5px;
+  border: 1px solid var(--table-border-color);
+  border-radius: 10px;
+  overflow: hidden;
+  margin-block: 1.4em;
+}
+
+.content table thead th {
+  background: var(--table-header-bg);
+  font-family: var(--va-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--va-dim);
+  border: none;
+  border-block-end: 1px solid var(--table-border-color);
+  padding: 11px 14px;
+  text-align: start;
+}
+
+.content table td {
+  border: none;
+  border-block-end: 1px solid var(--table-border-color);
+  padding: 11px 14px;
+  vertical-align: top;
+}
+
+.content table tbody tr:last-child td { border-block-end: none; }
+.content table tbody tr:nth-child(2n) { background: var(--table-alternate-bg); }
+
+/* Wide matrices (the backend/operator tables) scroll instead of overflowing. */
+.content .table-wrapper { overflow-x: auto; }
+
+/* ------------------------------------------------------------ callouts */
+
+.content blockquote {
+  background: var(--quote-bg);
+  border: 1px solid var(--quote-border);
+  border-inline-start: 3px solid var(--va-accent);
+  border-radius: 0 8px 8px 0;
+  padding: 14px 18px;
+  margin-block: 1.4em;
+  color: var(--fg);
+}
+.content blockquote p:last-child { margin-block-end: 0; }
+
+.content hr {
+  border: none;
+  border-block-start: 1px solid var(--va-rule);
+  margin-block: 2.4em;
+}
+
+/* -------------------------------------------------------------- search */
+
+#mdbook-searchbar {
+  border-radius: 8px;
+  font-family: var(--va-sans);
+  padding: 10px 12px;
+}
+
+.searchresults-header {
+  font-family: var(--va-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+/* ------------------------------------------------------- nav & printing */
+
+.nav-chapters {
+  border-radius: 8px;
+  font-size: 0.9em;
+}
+
+@media print {
+  .va-brand { display: none; }
+  .content pre { border-color: #ccc; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
 }
