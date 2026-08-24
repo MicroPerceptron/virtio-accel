@@ -4,19 +4,19 @@ This crate is a host-native exception to the portable workspace's `forbid(unsafe
 the same terms as `virtio-accel-openvino`. Unsafe Rust is confined to the `va_xdna` build
 configuration — `src/ffi.rs` (HRX C ABI declarations only) and `src/native.rs` (the calls) — and
 the crate root carries `cfg_attr(not(va_xdna), forbid(unsafe_code))`. Builds without a detected HRX
-runtime compile no `unsafe` at all: only the portable admission surface (`src/lower.rs`) and a
-placeholder.
+runtime compile no `unsafe` at all: only the portable admission surface (`src/lower.rs`), the
+portable precompiled-artifact codec (`src/artifact.rs`), and a placeholder.
 
-Scope implemented so far: the device/stream owner and `hrx_buffer` primitives. Program loading and
-dispatch report `Unsupported`; their FFI and audit land with the execution path (at which point the
-uninhabited `XdnaProgram`/`XdnaEvent` become real types and this file gains their sections).
+Scope: the device/stream owner, `hrx_buffer` primitives, the amdxdna executable lifecycle, and the
+serialized dispatch worker. TOSA compilation is a later ticket.
 
 ## ABI and status ownership
 
 `src/ffi.rs` declares the HRX C ABI transcribed from the pinned release headers
-(`include/hrx/hrx_runtime.h`, `libhrx.so.0.1.0`, version 0.1.0): opaque refcounted handles, the
-`uint32`/`uint16` bitmask constants, and the `extern "C"` functions this ticket calls. No struct
-layout is invented; handles are opaque pointers.
+(`include/hrx/hrx_runtime.h`, `include/hrx/hrx_amdxdna.h`, `libhrx.so.0.1.0`, version 0.1.0):
+opaque refcounted handles, the `uint32`/`uint16` bitmask constants, the `#[repr(C)]` span/config
+and v0 executable records, and the `extern "C"` functions this crate calls. No struct layout is
+invented beyond the header's own definitions; handles are opaque pointers.
 
 Every fallible HRX call returns an `hrx_status_t` — an owned, opaque pointer that is `NULL` on
 success and must be consumed exactly once on failure. The single `check` helper in `native.rs`
@@ -28,40 +28,63 @@ both the string-status and the original status. No status escapes unconsumed, so
 
 Each HRX handle has exactly one Rust owner with a `Drop`:
 
-- The process-wide device is initialized once through a `OnceLock` (`hrx_gpu_initialize` →
-  `hrx_gpu_device_count` → `hrx_gpu_device_get`) and held in `SharedDevice`. Per the fork's model
-  (one device per process) it is never shut down; `hrx_gpu_shutdown` is never called. `SharedDevice`
-  is `unsafe impl Send + Sync` because it is used only as a read-only factory for per-instance
-  streams and the amdxdna HAL exposes the device as a process-wide singleton.
-- Each `XdnaAccelerator` owns one `hrx_stream_t`, released exactly once in `Drop`. The instance is
-  `!Send`/`!Sync` (a `PhantomData<*mut u8>`): one stream is not safe for concurrent dispatch, so the
-  instance stays single-threaded until the execution path introduces the serialized worker.
-- Each `XdnaBuffer` owns one `hrx_buffer_t` and its persistent mapping, released exactly once in
-  `Drop` (the mapping is released together with the buffer; the fork never unmaps first). Buffers
-  are `!Send`/`!Sync`. Allocation releases the buffer on any post-allocation error path (a failed
-  map or a rejected `BufferInfo`), so no handle leaks on error.
+- The process-wide device is initialized once through a `OnceLock` and held in `SharedDevice`; per
+  the fork's model it is never shut down. `SharedDevice` is `unsafe impl Send + Sync` because it is
+  used only as a read-only factory for per-instance streams and executables, and the amdxdna HAL
+  exposes the device as a process-wide singleton.
+- Each `XdnaAccelerator` owns one stream (in `Stream`) and one worker thread. `Drop` sets the ring
+  `stopping` flag, wakes the worker, and **joins it before** the lane (and thus `Stream::drop` →
+  `hrx_stream_release`) runs, so no dispatch can be in progress when the stream is released.
+- Each `XdnaProgram` is an `Arc<ProgramInner>` owning one executable reference, released once in
+  `ProgramInner::drop`. A submission clones the `Arc` into the queued job, so an in-flight dispatch
+  keeps the executable alive even if the caller unloads the program first.
+- Each `XdnaBuffer` owns one `hrx_buffer_t` and its persistent mapping, released once in `Drop` (the
+  mapping is released together with the buffer; the fork never unmaps first). Allocation releases
+  the buffer on any post-allocation error path (a failed map, a rejected `BufferInfo`), and export
+  lookup releases the executable on failure, so no handle leaks on error.
 
 ## Buffers and mappings
 
-`allocate_buffer` requests `HOST_LOCAL | DEVICE_VISIBLE` memory with
-`DEFAULT | MAPPING_PERSISTENT` usage, then establishes one persistent `READ | WRITE` mapping over
-the whole buffer (`hrx_buffer_map_with_mode`). The reported alignment is the largest power of two
-dividing the mapping address, which `BufferInfo::new` checks against the requested alignment. Sizes
-are `usize`-checked; `BufferDesc` guarantees a nonzero size (HRX rejects zero).
+`allocate_buffer` requests `HOST_LOCAL | DEVICE_VISIBLE` memory with `DEFAULT | MAPPING_PERSISTENT`
+usage, then establishes one persistent `READ | WRITE` mapping over the whole buffer. The reported
+alignment is the largest power of two dividing the mapping address, which `BufferInfo::new` checks
+against the request. Host access is bounded: `checked_range` validates `[offset, offset+len)`
+against the mapped length before any `slice::from_raw_parts[_mut]`, and every raw slice is confined
+to that range. `write_buffer` copies into the mapping then `hrx_buffer_flush_range`s the range
+device-ward; `read_buffer` `hrx_buffer_invalidate_range`s the range then copies out. Both enforce
+the buffer's `TRANSFER_DESTINATION`/`TRANSFER_SOURCE` usage.
 
-Host access to the mapping is bounded: `checked_range` validates `[offset, offset+len)` against the
-mapped length before any `slice::from_raw_parts[_mut]`, and every raw slice is confined to that
-validated range. `write_buffer` copies into the mapping then `hrx_buffer_flush_range`s the range
-device-ward; `read_buffer` `hrx_buffer_invalidate_range`s the range then copies out — the explicit
-cache management the persistent mapping requires. An `in_flight` gate (always zero until the
-dispatch path sets it) rejects host access and release while the device may be touching the buffer;
-`free_buffer` returns the live handle via `ReleaseFailure::Rejected` when the gate is set.
+## Concurrency and the dispatch worker
+
+The HRX stream is not safe for concurrent use, so all stream access is serialized by the `Lane`
+stream mutex: `allocate_buffer` locks it briefly, and the worker holds it across
+`hrx_stream_dispatch` + `hrx_stream_synchronize`. `Stream` is `unsafe impl Send` (moved to the
+worker, only ever dereferenced under that mutex).
+
+`submit` validates the bindings (count, per-slot access, ranges, no aliased buffer), then — the
+acceptance boundary — claims a preallocated ring entry and event slot, arms each bound buffer's
+`in_flight` gate, and enqueues a `Job`. A full ring returns `Busy`; submit never blocks. `Job` is
+`unsafe impl Send`: its raw pointers reference caller-owned resources kept alive until the event is
+terminal and destroyed (the `Accelerator` contract), and are dereferenced only on the worker while
+the stream mutex is held. The worker, per job, dispatches, synchronizes, `invalidate_range`s each
+output, clears the `in_flight` gates, and latches the event's terminal state exactly once. While a
+buffer's gate is set, `write_buffer`/`read_buffer`/`free_buffer` reject with `Busy`, so no host
+access or release races the device.
+
+Finite timeouts are rejected before admission (no cancellation exists at any layer). A synchronize
+error latches the event `Failed` (a normal terminal state — the kernel TDR has quiesced the device)
+and then poisons the instance, which refuses further work with `DeviceLost`. `poll_event` reads the
+latched atomic state without touching HRX; a pending event on a poisoned instance reports
+`DeviceLost`. The tier-2 wedge watchdog (a synchronize that never returns) is the fault-paths
+ticket; `EVENT_CANCELLATION` is not advertised.
 
 ## Audited unsafe operations
 
 Every `unsafe` block in `src/native.rs` carries a local `SAFETY:` comment naming the invariant it
-relies on (handle validity, out-pointer locality, status consumption, mapped-range bounds, and
-single-drop ownership). The on-hardware integration tests (`tests/hardware.rs`, `va_xdna` only)
-exercise device info, the allocate / map / write+flush / read+invalidate / release round trip,
-out-of-bounds rejection, and context/queue lifecycle against a live NPU. Unsupported hosts compile
-no native module.
+relies on (handle validity, out-pointer locality, status consumption, mapped-range bounds,
+borrowed-for-the-call executable inputs, and single-drop ownership). The on-hardware integration
+tests (`tests/hardware.rs`, `va_xdna` only) exercise device info, the buffer round trip,
+out-of-bounds and permission rejection, the advertised-limit aggregation, and the full precompiled
+passthrough lifecycle (load → allocate → write+flush → submit → worker dispatch/synchronize →
+poll → invalidate+read → release → teardown) against a live NPU. Unsupported hosts compile no
+native module.

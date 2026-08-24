@@ -12,14 +12,19 @@
 //! loudly) or off (`0`). Hosts without HRX build and unit-test the portable admission surface
 //! (`lower`) plus a compile-only placeholder, and compile no `unsafe` at all.
 //!
-//! **Scope today:** the HRX device/stream owner and `hrx_buffer` primitives (allocate with a
-//! persistent host mapping, range flush/invalidate, release). Program loading and dispatch land
-//! with the execution path; they currently report `Unsupported`.
+//! **Scope today:** the full `Accelerator` lifecycle for a *precompiled* artifact — the HRX
+//! device/stream owner, `hrx_buffer` primitives (persistent mapping, range flush/invalidate,
+//! release), and the serialized dispatch worker bridging `hrx_stream_dispatch`/`synchronize` to a
+//! latched nonblocking `poll_event` (execution-model spec, issue #85). `load_program` accepts the
+//! crate-local precompiled format ([`artifact`]); TOSA compilation is a later ticket, so a
+//! TOSA-format artifact is rejected with `Unsupported`.
 
 #![cfg_attr(not(va_xdna), forbid(unsafe_code))]
 
+pub mod artifact;
 mod lower;
 
+pub use artifact::{PrecompiledArtifact, XDNA_PRECOMPILED_FORMAT};
 pub use lower::{XDNA_TOSA_INTEGER_TARGET, XDNA_TOSA_TARGET};
 
 /// The HRX runtime publishes no finite upper bound for a loaded program's device residency.
