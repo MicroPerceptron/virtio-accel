@@ -298,6 +298,7 @@ dependencies = [
 name = "virtio-accel-xdna"
 version = "0.3.3"
 dependencies = [
+ "virtio-accel-core",
  "virtio-accel-tosa",
 ]
 

@@ -1,13 +1,16 @@
-//! Scaffold example: the native TOSA-to-XDNA execution path is not implemented yet.
+//! Scaffold example: report backend availability.
 //!
-//! It arrives with the HRX FFI, native `Accelerator`, and compiler-helper tickets. For now this
-//! example reports the placeholder state and exits successfully, keeping the example lane green.
+//! Without a detected HRX runtime this prints the placeholder state. With one, it initializes the
+//! device/stream and reports the enumerated NPU. The TOSA execution path (program loading and
+//! dispatch) lands in a later ticket.
 
 fn main() {
     match virtio_accel_xdna::XdnaAccelerator::new() {
-        Ok(_) => unreachable!("the scaffold placeholder never initializes a backend"),
+        Ok(_backend) => {
+            eprintln!("virtio-accel-xdna initialized the HRX device and stream");
+        }
         Err(error) => {
-            eprintln!("virtio-accel-xdna is scaffolded but not yet executing: {error}");
+            eprintln!("virtio-accel-xdna backend unavailable: {error}");
         }
     }
 }

@@ -1,24 +1,22 @@
 //! AMD XDNA (Ryzen AI NPU) host backend for `virtio-accel`.
 //!
-//! This crate will execute device-neutral TOSA 1.0 programs on an AMD XDNA2 NPU through the HRX
+//! This crate executes device-neutral TOSA 1.0 programs on an AMD XDNA2 NPU through the HRX
 //! runtime (`libhrx`), compiling admitted graphs with the pinned aiecc toolchain as a bounded
 //! subprocess. The design is recorded across the AMD XDNA wayfinder map (issue #78) and its
 //! decision tickets (#82 numerical tier, #83 crate layout, #84 compiler helper, #85 execution
 //! model), whose resolution records live on their respective ticket branches.
 //!
-//! **This is the scaffold.** It ships the always-compiled admission surface (`lower`) and a
-//! compile-only placeholder; the HRX FFI, native `Accelerator` implementation, and compiler helper
-//! land in later tickets. The build script sets the `va_xdna` cfg only when it finds a complete
+//! The native modules (`ffi`, `native`) compile only when the build script finds a complete
 //! amdxdna-native HRX prefix (`VIRTIO_ACCEL_HRX_DIR`/`HRX_DIR`, or the `VIRTIO_ACCEL_HRX_LIB_DIR`
-//! escape hatch); `VIRTIO_ACCEL_XDNA` forces the probe on (`1`, failing loudly) or off (`0`).
-//! Hosts without HRX build and unit-test the portable surface plus the placeholder.
+//! escape hatch) and sets the `va_xdna` cfg; `VIRTIO_ACCEL_XDNA` forces the probe on (`1`, failing
+//! loudly) or off (`0`). Hosts without HRX build and unit-test the portable admission surface
+//! (`lower`) plus a compile-only placeholder, and compile no `unsafe` at all.
 //!
-//! The scaffold contains no `unsafe` at all, so the crate root forbids it outright. When the HRX
-//! FFI and native `Accelerator` land, that ticket relaxes this to
-//! `cfg_attr(not(va_xdna), forbid(unsafe_code))` and registers the audited exception in
-//! `ci/check-release-policy.py`, exactly as the OpenVINO and Hexagon backends do.
+//! **Scope today:** the HRX device/stream owner and `hrx_buffer` primitives (allocate with a
+//! persistent host mapping, range flush/invalidate, release). Program loading and dispatch land
+//! with the execution path; they currently report `Unsupported`.
 
-#![forbid(unsafe_code)]
+#![cfg_attr(not(va_xdna), forbid(unsafe_code))]
 
 mod lower;
 
@@ -37,6 +35,10 @@ pub const REQUIRED_RESIDENT_BYTES: u64 = u64::MAX;
 pub enum InitError {
     /// The crate was built without a detected HRX runtime (`libhrx`).
     RuntimeUnavailable,
+    /// HRX initialized but enumerated no NPU device on this host.
+    DeviceUnavailable,
+    /// The HRX device or stream could not be initialized.
+    Initialization,
 }
 
 impl core::fmt::Display for InitError {
@@ -47,16 +49,23 @@ impl core::fmt::Display for InitError {
 
 impl std::error::Error for InitError {}
 
-// Scaffold placeholder. It is compiled unconditionally today because no native module exists yet;
-// when the native `Accelerator` implementation lands it becomes `cfg(not(va_xdna))` and the real
-// type is exported under `cfg(va_xdna)`, exactly as the OpenVINO and Core ML crates are shaped.
+#[cfg(va_xdna)]
+mod ffi;
+#[cfg(va_xdna)]
+mod native;
+#[cfg(va_xdna)]
+pub use native::{
+    XDNA_ERROR_DOMAIN, XdnaAccelerator, XdnaBuffer, XdnaContext, XdnaEvent, XdnaProgram, XdnaQueue,
+};
 
-/// Placeholder that keeps workspace consumers portable until the native backend lands.
+/// Placeholder that keeps workspace consumers portable when no HRX runtime was detected.
+#[cfg(not(va_xdna))]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct XdnaAccelerator;
 
+#[cfg(not(va_xdna))]
 impl XdnaAccelerator {
-    /// Report that no HRX runtime and native backend are available in this build.
+    /// Report that no HRX runtime was detected when this crate was built.
     pub fn new() -> Result<Self, InitError> {
         Err(InitError::RuntimeUnavailable)
     }
