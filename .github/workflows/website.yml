@@ -71,9 +71,13 @@ jobs:
         id: secrets
         env:
           SSH_KEY: ${{ secrets.DO_DEPLOY_SSH_KEY }}
+          DO_DEPLOY_HOST: ${{ secrets.DO_DEPLOY_HOST }}
+          DO_DEPLOY_USER: ${{ secrets.DO_DEPLOY_USER }}
+          DO_DEPLOY_PORT: ${{ secrets.DO_DEPLOY_PORT }}
+          DO_DEPLOY_PATH: ${{ secrets.DO_DEPLOY_PATH }}
         run: |
-          if [ -z "$SSH_KEY" ]; then
-            echo "Deploy secrets are not configured; skipping deploy." >&2
+          if [ -z "$SSH_KEY" ] || [ -z "$DO_DEPLOY_HOST" ] || [ -z "$DO_DEPLOY_USER" ] || [ -z "$DO_DEPLOY_PORT" ] || [ -z "$DO_DEPLOY_PATH" ]; then
+            echo "Deploy secrets are not fully configured; skipping deploy." >&2
             echo "configured=false" >> "$GITHUB_OUTPUT"
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
