@@ -26,6 +26,9 @@ use crate::ffi;
 /// `BackendError::External` domain tag for HRX failures ("XDNA" in ASCII).
 pub const XDNA_ERROR_DOMAIN: u32 = 0x5844_4e41;
 
+/// Upper bound advertised for a loaded TOSA artifact (mirrors the OpenVINO backend).
+const MAX_TOSA_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Consume an HRX status and map it to a `BackendError`.
 ///
 /// A non-NULL `hrx_status_t` is owned by the caller and must be consumed exactly once. This reads
@@ -159,15 +162,18 @@ fn device_info() -> DeviceInfo {
             device_id: 0x17f0,
         },
         capabilities: Capabilities::HOST_VISIBLE_MEMORY | Capabilities::SHARED_MEMORY,
+        // Finite aggregate bounds: the device-state layer checked-multiplies `max_contexts` by each
+        // per-context limit, so `u32::MAX` would overflow and reject the backend. These mirror the
+        // OpenVINO backend's advertised limits.
         limits: DeviceLimits {
-            max_contexts: u32::MAX,
-            max_buffers_per_context: u32::MAX,
-            max_programs_per_context: u32::MAX,
-            max_queues_per_context: u32::MAX,
-            max_events_per_context: u32::MAX,
+            max_contexts: 64,
+            max_buffers_per_context: 1_024,
+            max_programs_per_context: 64,
+            max_queues_per_context: 64,
+            max_events_per_context: 4_096,
             max_bindings_per_submission: 256,
-            max_buffer_bytes: u64::MAX,
-            max_artifact_bytes: u64::MAX,
+            max_buffer_bytes: 16 * 1024 * 1024 * 1024,
+            max_artifact_bytes: MAX_TOSA_ARTIFACT_BYTES,
         },
     }
 }
@@ -370,6 +376,13 @@ impl Accelerator for XdnaAccelerator {
         offset: u64,
         data: &mut dyn ByteSink,
     ) -> Result<(), BackendError> {
+        if !buffer
+            .desc
+            .usage
+            .contains(virtio_accel_core::BufferUsage::TRANSFER_SOURCE)
+        {
+            return Err(BackendError::PermissionDenied);
+        }
         if buffer.in_flight.load(Ordering::Acquire) != 0 {
             return Err(BackendError::Busy);
         }
