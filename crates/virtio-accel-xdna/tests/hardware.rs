@@ -149,6 +149,56 @@ fn out_of_bounds_transfers_are_rejected() {
 }
 
 #[test]
+fn read_requires_transfer_source_permission() {
+    let Some(backend) = backend() else { return };
+    let context = backend
+        .create_context(ContextDesc::default())
+        .expect("context");
+    // A write-only buffer (no TRANSFER_SOURCE) must reject readback with PermissionDenied.
+    let desc = BufferDesc::new(
+        64,
+        4096,
+        MemoryDomain::Shared,
+        BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+    )
+    .expect("valid descriptor");
+    let (buffer, _) = backend
+        .allocate_buffer(&context, desc)
+        .expect("allocate")
+        .into_parts();
+    let mut out = vec![0u8; 8];
+    assert!(matches!(
+        backend.read_buffer(&buffer, 0, &mut SliceMut(&mut out)),
+        Err(BackendError::PermissionDenied)
+    ));
+    backend.free_buffer(buffer).expect("free");
+    backend.destroy_context(context).expect("destroy context");
+}
+
+#[test]
+fn advertised_limits_are_aggregation_safe() {
+    let Some(backend) = backend() else { return };
+    // The device-state layer checked-multiplies `max_contexts` by each per-context limit and
+    // `max_events_per_context` by `max_bindings_per_submission`; the advertised limits must not
+    // overflow those u32 products, or the backend is unusable through the command processor.
+    let limits = backend.device_info().expect("device info").limits;
+    for per_context in [
+        limits.max_buffers_per_context,
+        limits.max_programs_per_context,
+        limits.max_queues_per_context,
+        limits.max_events_per_context,
+    ] {
+        assert!(limits.max_contexts.checked_mul(per_context).is_some());
+    }
+    assert!(
+        limits
+            .max_events_per_context
+            .checked_mul(limits.max_bindings_per_submission)
+            .is_some()
+    );
+}
+
+#[test]
 fn context_and_queue_lifecycle() {
     let Some(backend) = backend() else { return };
     let context = backend
