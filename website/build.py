@@ -44,7 +44,7 @@ GITHUB_BASE = "https://github.com/MicroPerceptron/virtio-accel/blob/main"
 # Custom domain served by GitHub Pages. Emitting a CNAME into the published
 # tree pins the domain to the artifact itself, so it survives regardless of the
 # repository's Pages settings.
-CUSTOM_DOMAIN = "virtio-accel.org"
+CUSTOM_DOMAIN = "docs.virtio-accel.org"
 
 # Repo-relative source path -> site-relative destination path. Order matters:
 # it becomes the order of the generated SUMMARY.md.

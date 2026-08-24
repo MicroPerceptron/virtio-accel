@@ -1,6 +1,8 @@
-# virtio-accel.org website
+# docs.virtio-accel.org website
 
-This module builds and deploys the public site for `virtio-accel.org`. It is
+This module builds and deploys the documentation site for
+`docs.virtio-accel.org`. (The apex `virtio-accel.org` is the separate official
+website, served from its own repository.) It is
 deliberately **not** a Cargo workspace member: it is a Python + mdBook project,
 so it stays out of `cargo fmt --all`, `cargo clippy --workspace`, and
 `cargo doc --workspace` and never affects the crate release pipeline.
@@ -56,7 +58,8 @@ point at GitHub.
 The build job runs `python3 website/build.py`, uploads `website/book/` as a
 Pages artifact (`actions/upload-pages-artifact`), and the deploy job publishes
 it with `actions/deploy-pages`. `build.py` writes a `CNAME` file into the built
-tree so the `virtio-accel.org` custom domain is pinned to the artifact itself.
+tree so the `docs.virtio-accel.org` custom domain is pinned to the artifact
+itself.
 
 No secrets, servers, or SSH keys are required: deployment uses the workflow's
 own OIDC token (`id-token: write`) and Pages permission (`pages: write`), both
@@ -66,28 +69,22 @@ scoped to the `deploy` job.
 
 1. **Settings → Pages → Build and deployment → Source:** select
    **GitHub Actions**.
-2. **Settings → Pages → Custom domain:** enter `virtio-accel.org`. This is
-   already a verified organizational domain, so GitHub will validate it
-   immediately. The workflow also emits a matching `CNAME`, so the two agree.
+2. **Settings → Pages → Custom domain:** enter `docs.virtio-accel.org`. It sits
+   under the verified organizational domain `virtio-accel.org`, so GitHub
+   validates it as soon as DNS resolves. The workflow also emits a matching
+   `CNAME`, so the two agree.
 3. Tick **Enforce HTTPS** once the certificate is provisioned (usually a few
    minutes after the domain check passes).
 
 ### DNS
 
-Point the apex domain at GitHub Pages' anycast addresses (and, optionally, the
-`www` subdomain at the Pages host):
+`docs.virtio-accel.org` is a subdomain, so it takes a single `CNAME` pointing at
+the organization's Pages host (do **not** add apex `A`/`AAAA` records here —
+those belong to the separate official-website repo that owns the apex):
 
 | Type | Name | Value |
 | --- | --- | --- |
-| `A` | `@` | `185.199.108.153` |
-| `A` | `@` | `185.199.109.153` |
-| `A` | `@` | `185.199.110.153` |
-| `A` | `@` | `185.199.111.153` |
-| `AAAA` | `@` | `2606:50c0:8000::153` |
-| `AAAA` | `@` | `2606:50c0:8001::153` |
-| `AAAA` | `@` | `2606:50c0:8002::153` |
-| `AAAA` | `@` | `2606:50c0:8003::153` |
-| `CNAME` | `www` | `microperceptron.github.io.` |
+| `CNAME` | `docs` | `microperceptron.github.io.` |
 
 After DNS propagates and the source is set to GitHub Actions, every push to
 `main` (and every successful `Publish crates` run) rebuilds and republishes the
