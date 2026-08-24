@@ -80,9 +80,9 @@ def is_curated(repo_rel: str) -> bool:
 def resolve_repo_path(source_repo_rel: str, target: str) -> str:
     """Resolve a link target against the source file's repo-relative location."""
     source_dir = Path(source_repo_rel).parent
-    resolved = (source_dir / target).resolve()
+    resolved = (REPO_ROOT / source_dir / target).resolve()
     try:
-        return str(resolved.relative_to(REPO_ROOT))
+        return resolved.relative_to(REPO_ROOT).as_posix()
     except ValueError:
         return target
 
