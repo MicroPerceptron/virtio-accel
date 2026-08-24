@@ -6,11 +6,22 @@
 //! ticket.
 #![cfg(va_xdna)]
 
+use std::time::{Duration, Instant};
+
 use virtio_accel_core::{
-    Accelerator, BackendError, BufferDesc, BufferUsage, ByteSink, ByteSource, ContextDesc,
-    MemoryDomain, QueueDesc,
+    Accelerator, AccessMode, ArtifactRef, BackendError, BindingRef, BufferDesc, BufferRange,
+    BufferUsage, ByteSink, ByteSource, ContextDesc, EventState, MemoryDomain, QueueDesc,
+    TargetIdentity, Timeout,
 };
-use virtio_accel_xdna::{InitError, XdnaAccelerator};
+use virtio_accel_xdna::{InitError, XDNA_PRECOMPILED_FORMAT, XdnaAccelerator};
+
+/// Precompiled DMA passthrough for npu2, built with the pinned toolchain from
+/// `programming_examples/basic/passthrough_dmas` (n=4096 int32; entry `MLIR_AIE`) and packaged with
+/// `virtio_accel_xdna::artifact::encode`. See `tests/data/README.md`. The design declares three
+/// runtime buffers — `a_in`, an unused second input `_b_unused`, and `c_out` — so it binds two
+/// inputs and one output; the DMA copies the first input to the output.
+const PASSTHROUGH: &[u8] = include_bytes!("data/passthrough-dmas-npu2.xdnp");
+const PASSTHROUGH_BYTES: usize = 4096 * 4;
 
 /// Construct a backend, or skip the test when no NPU is accessible on this host.
 fn backend() -> Option<XdnaAccelerator> {
@@ -196,6 +207,127 @@ fn advertised_limits_are_aggregation_safe() {
             .checked_mul(limits.max_bindings_per_submission)
             .is_some()
     );
+}
+
+#[test]
+fn precompiled_passthrough_runs_the_full_lifecycle() {
+    let Some(backend) = backend() else { return };
+    let context = backend
+        .create_context(ContextDesc::default())
+        .expect("context");
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .expect("queue");
+
+    // Load the precompiled DMA passthrough (the precompiled format ignores the target words).
+    let program = backend
+        .load_program(
+            &context,
+            ArtifactRef {
+                format: XDNA_PRECOMPILED_FORMAT,
+                target: TargetIdentity([0; 12]),
+                payload: &Slice(PASSTHROUGH),
+                resident_bytes: u64::MAX,
+            },
+        )
+        .expect("load precompiled passthrough");
+
+    let input_desc = BufferDesc::new(
+        PASSTHROUGH_BYTES as u64,
+        4096,
+        MemoryDomain::Shared,
+        BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+    )
+    .unwrap();
+    let (mut input, _) = backend
+        .allocate_buffer(&context, input_desc)
+        .expect("input buffer")
+        .into_parts();
+    // The design's second input is unused by the DMA copy but still occupies a binding slot.
+    let (unused, _) = backend
+        .allocate_buffer(&context, input_desc)
+        .expect("unused input buffer")
+        .into_parts();
+    let (output, _) = backend
+        .allocate_buffer(
+            &context,
+            BufferDesc::new(
+                PASSTHROUGH_BYTES as u64,
+                4096,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+            )
+            .unwrap(),
+        )
+        .expect("output buffer")
+        .into_parts();
+
+    // Deterministic input pattern.
+    let payload: Vec<u8> = (0..PASSTHROUGH_BYTES).map(|i| (i * 31 + 7) as u8).collect();
+    backend
+        .write_buffer(&mut input, 0, &Slice(&payload))
+        .expect("write input");
+
+    let range = BufferRange::new(0, PASSTHROUGH_BYTES as u64).unwrap();
+    let bindings = [
+        BindingRef {
+            slot: 0,
+            buffer: &input,
+            range,
+            access: AccessMode::Read,
+        },
+        BindingRef {
+            slot: 1,
+            buffer: &unused,
+            range,
+            access: AccessMode::Read,
+        },
+        BindingRef {
+            slot: 2,
+            buffer: &output,
+            range,
+            access: AccessMode::Write,
+        },
+    ];
+
+    let event = match backend.submit(&queue, &program, &bindings, Timeout::Infinite) {
+        Ok(event) => event,
+        Err(failure) => panic!("submit rejected: {failure:?}"),
+    };
+
+    // Poll to a terminal state (nonblocking poll; the worker bridges the blocking synchronize).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let state = loop {
+        match backend.poll_event(&event).expect("poll") {
+            EventState::Pending => {
+                assert!(
+                    Instant::now() < deadline,
+                    "dispatch did not complete in 10s"
+                );
+                std::thread::yield_now();
+            }
+            terminal => break terminal,
+        }
+    };
+    assert!(
+        matches!(state, EventState::Complete),
+        "expected Complete, got {state:?}"
+    );
+
+    // The passthrough copies input to output verbatim.
+    let mut result = vec![0u8; PASSTHROUGH_BYTES];
+    backend
+        .read_buffer(&output, 0, &mut SliceMut(&mut result))
+        .expect("read output");
+    assert_eq!(result, payload, "DMA passthrough must copy input to output");
+
+    backend.destroy_event(event).expect("destroy event");
+    backend.free_buffer(input).expect("free input");
+    backend.free_buffer(unused).expect("free unused");
+    backend.free_buffer(output).expect("free output");
+    backend.unload_program(program).expect("unload");
+    backend.destroy_queue(queue).expect("destroy queue");
+    backend.destroy_context(context).expect("destroy context");
 }
 
 #[test]
