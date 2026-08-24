@@ -14,6 +14,7 @@
   --inline-code-color: #0ea5e9;
   --warning-border: #f59e0b;
   --search-mark-bg: #bae6fd;
+  --sidebar-non-existant: var(--fg);
 }
 
 /* Landing page: hide the sidebar and let the hero span the full width. */
