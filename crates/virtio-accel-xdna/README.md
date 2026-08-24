@@ -1,4 +1,4 @@
-# virtio-accel-amdxdna
+# virtio-accel-xdna
 
 An AMD XDNA (Ryzen AI NPU) host backend for `virtio-accel`, targeting XDNA2/Strix-class parts
 through the HRX runtime (`libhrx`) with no XRT userspace dependency. It will execute device-neutral
@@ -11,12 +11,9 @@ build time; a compile-only unsupported-runtime placeholder elsewhere.
 **This crate is currently the scaffold.** It ships the portable admission surface and a
 placeholder; the HRX FFI, the native `Accelerator` implementation, the compiler helper, and the
 executing numerical tiers land in subsequent tickets of the
-[AMD XDNA wayfinder map](https://github.com/MicroPerceptron/virtio-accel/issues/78). The design is
-recorded in [`docs/research/amdxdna-crate-design.md`](../../docs/research/amdxdna-crate-design.md),
-[`docs/research/amdxdna-compiler-helper-contract.md`](../../docs/research/amdxdna-compiler-helper-contract.md),
-and [`docs/research/amdxdna-execution-model.md`](../../docs/research/amdxdna-execution-model.md);
-the advertised numerical tier is
-[`docs/adr/0001-amdxdna-first-numerical-tier.md`](../../docs/adr/0001-amdxdna-first-numerical-tier.md).
+[AMD XDNA wayfinder map](https://github.com/MicroPerceptron/virtio-accel/issues/78). The design
+decisions live on their ticket branches: crate layout (#83), compiler helper (#84), execution
+model (#85), and the advertised numerical tier (#82).
 
 ## Build-time probe
 
@@ -28,28 +25,28 @@ prefix carries `include/hrx/hrx_runtime.h`, `include/hrx/hrx_amdxdna.h` (declari
 `hrx_amdxdna_executable_create` — its absence marks an older, incompatible libhrx generation), and
 `lib/libhrx.so`.
 
-`VIRTIO_ACCEL_AMDXDNA=1` makes a missing or incomplete runtime a loud build failure, `=0` forces
-the placeholder, and `VIRTIO_ACCEL_HRX_LIB_DIR` links a bare lib directory that ships no headers.
-No standard locations are scanned: silently discovering an unpinned libhrx would defeat the version
+`VIRTIO_ACCEL_XDNA=1` makes a missing or incomplete runtime a loud build failure, `=0` forces the
+placeholder, and `VIRTIO_ACCEL_HRX_LIB_DIR` links a bare lib directory that ships no headers. No
+standard locations are scanned: silently discovering an unpinned libhrx would defeat the version
 pin. Builds without the runtime still compile and unit-test the portable admission surface.
 
 ## Advertised numerical tier
 
-Per [ADR-0001](../../docs/adr/0001-amdxdna-first-numerical-tier.md), the backend will advertise a
-BF16 floating-point tier (TOSA `EXT-BF16`) and a separate integer tier, and reject FP32/FP16 at
-admission rather than silently executing them as BF16. The two `Target` constants
-(`AMDXDNA_TOSA_TARGET`, `AMDXDNA_TOSA_INTEGER_TARGET`) are already declared in `src/lower.rs`;
-graph admission and execution wire onto them in later tickets.
+Per the numerical-tier decision (#82), the backend will advertise a BF16 floating-point tier (TOSA
+`EXT-BF16`) and a separate integer tier, and reject FP32/FP16 at admission rather than silently
+executing them as BF16. The two `Target` constants (`XDNA_TOSA_TARGET`, `XDNA_TOSA_INTEGER_TARGET`)
+are already declared in `src/lower.rs`; graph admission and execution wire onto them in later
+tickets.
 
 ## Running
 
 ```sh
-cargo run -p virtio-accel-amdxdna --example tosa_amdxdna
-cargo test -p virtio-accel-amdxdna
+cargo run -p virtio-accel-xdna --example tosa_xdna
+cargo test -p virtio-accel-xdna
 ```
 
-The example reports the scaffold state and exits successfully; the tests exercise the placeholder
-and the advertised targets on every host.
+The example reports the scaffold state and exits successfully; the tests exercise the advertised
+targets on every host.
 
 Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an
 experimental native-Rust protocol and implementation stack for a transport-neutral virtual

@@ -5,7 +5,7 @@
 //! prefix carries the two headers and the shared library, plus a content check that the amdxdna
 //! header names `hrx_amdxdna_executable_create` — the one function whose absence marks an older,
 //! incompatible libhrx generation (see `docs/research/hrx-runtime-contract.md`). When all checks
-//! pass the `va_amdxdna` cfg enables the native modules; otherwise the crate compiles the portable
+//! pass the `va_xdna` cfg enables the native modules; otherwise the crate compiles the portable
 //! admission surface plus an unsupported-runtime placeholder.
 //!
 //! Discovery is by explicit configuration only. `VIRTIO_ACCEL_HRX_DIR` (highest priority) or
@@ -17,14 +17,14 @@
 
 use std::path::{Path, PathBuf};
 
-const FORCE_ENV: &str = "VIRTIO_ACCEL_AMDXDNA";
+const FORCE_ENV: &str = "VIRTIO_ACCEL_XDNA";
 const DIR_ENV: &str = "VIRTIO_ACCEL_HRX_DIR";
 const LIB_ENV: &str = "VIRTIO_ACCEL_HRX_LIB_DIR";
 
 fn main() {
     // Declared on every build, including placeholder builds: the workspace compiles with
     // `-D warnings` and `unexpected_cfgs` is deny-by-default there.
-    println!("cargo::rustc-check-cfg=cfg(va_amdxdna)");
+    println!("cargo::rustc-check-cfg=cfg(va_xdna)");
     for variable in [FORCE_ENV, DIR_ENV, LIB_ENV, "HRX_DIR"] {
         println!("cargo:rerun-if-env-changed={variable}");
     }
@@ -40,7 +40,7 @@ fn main() {
     if let Ok(dir) = std::env::var(LIB_ENV) {
         println!("cargo:rustc-link-search=native={dir}");
         println!("cargo:rustc-link-lib=dylib=hrx");
-        println!("cargo::rustc-cfg=va_amdxdna");
+        println!("cargo::rustc-cfg=va_xdna");
         return;
     }
 
@@ -75,7 +75,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", amdxdna_header.display());
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=dylib=hrx");
-    println!("cargo::rustc-cfg=va_amdxdna");
+    println!("cargo::rustc-cfg=va_xdna");
 }
 
 /// Reject an older libhrx generation whose amdxdna header predates the native executable API.

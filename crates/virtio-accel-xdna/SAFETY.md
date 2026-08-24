@@ -1,15 +1,15 @@
 # Unsafe-code audit
 
 This crate will become a host-native exception to the portable workspace's `forbid(unsafe_code)`
-rule, on the same terms as `virtio-accel-openvino`: unsafe Rust confined to the `va_amdxdna` build
+rule, on the same terms as `virtio-accel-openvino`: unsafe Rust confined to the `va_xdna` build
 configuration — `src/ffi.rs` (HRX C ABI declarations only) and `src/native.rs` (the calls) — with
-the crate root relaxed to `cfg_attr(not(va_amdxdna), forbid(unsafe_code))` and this file registered
+the crate root relaxed to `cfg_attr(not(va_xdna), forbid(unsafe_code))` and this file registered
 as the audited exception in `ci/check-release-policy.py`.
 
 **Scaffold state.** The native modules do not exist yet. This build compiles **no `unsafe` at
 all** — only the portable admission surface (`src/lower.rs`) and a placeholder — so the crate root
 still forbids unsafe outright. The full audit is authored with the FFI and hardware tickets. Its
-planned structure, transcribed from `docs/research/amdxdna-crate-design.md` §4, is:
+planned structure, transcribed from §4 of the crate-layout design record (issue #83), is:
 
 1. **Boundary statement** — safe admission (`lower.rs`) and safe compiler subprocess
    (`compiler.rs`); unsafe confined to `ffi.rs` declarations and `native.rs` call sites.

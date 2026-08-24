@@ -4,10 +4,10 @@
 //! example reports the placeholder state and exits successfully, keeping the example lane green.
 
 fn main() {
-    match virtio_accel_amdxdna::AmdXdnaAccelerator::new() {
+    match virtio_accel_xdna::XdnaAccelerator::new() {
         Ok(_) => unreachable!("the scaffold placeholder never initializes a backend"),
         Err(error) => {
-            eprintln!("virtio-accel-amdxdna is scaffolded but not yet executing: {error}");
+            eprintln!("virtio-accel-xdna is scaffolded but not yet executing: {error}");
         }
     }
 }
