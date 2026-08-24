@@ -29,6 +29,7 @@ PUBLISH_ORDER = (
     "virtio-accel-device",
     "virtio-accel-conformance",
     "virtio-accel-vaccel",
+    "virtio-accel-amdxdna",
     "virtio-accel-coreml",
     "virtio-accel-openvino",
     "virtio-accel-hexagon",

@@ -1,0 +1,16 @@
+[package]
+name = "virtio-accel-amdxdna"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "AMD XDNA (Ryzen AI NPU) host backend for virtio-accel"
+readme = "README.md"
+
+[dependencies]
+virtio-accel-core.workspace = true
+virtio-accel-tosa.workspace = true
