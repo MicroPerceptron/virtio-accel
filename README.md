@@ -22,7 +22,7 @@ leaves room for GPUs, DSPs, and other program-driven accelerators.
 
 The project claims no Virtio device ID (_yet_). For guest environments, use the `vAccel` adapter; see [crates/virtio-accel-vaccel/README.md](crates/virtio-accel-vaccel/README.md).
 
-This project is pre-standardization, protocol 1.0 is frozen as a versioned review
+This project is pre-standardization; protocol 1.0 is frozen as a versioned review
 input for independent implementation — it is stable enough to build against and to disagree with in
 writing, not an approved Virtio specification.
 
