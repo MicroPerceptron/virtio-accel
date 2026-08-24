@@ -53,59 +53,42 @@ point at GitHub.
 - after a successful `Publish crates` run (via `workflow_run`), so a new
   release refreshes the rustdoc automatically.
 
-The build job runs `python3 website/build.py` and uploads `website/book/` as an
-artifact. The deploy job downloads it and rsyncs it to the droplet over SSH.
+The build job runs `python3 website/build.py`, uploads `website/book/` as a
+Pages artifact (`actions/upload-pages-artifact`), and the deploy job publishes
+it with `actions/deploy-pages`. `build.py` writes a `CNAME` file into the built
+tree so the `virtio-accel.org` custom domain is pinned to the artifact itself.
 
-## DigitalOcean droplet setup
+No secrets, servers, or SSH keys are required: deployment uses the workflow's
+own OIDC token (`id-token: write`) and Pages permission (`pages: write`), both
+scoped to the `deploy` job.
 
-Create a droplet (any size; a 1 GB basic droplet is plenty for a static site)
-running a recent Debian or Ubuntu image, then:
+## One-time GitHub Pages setup
 
-```sh
-# On the droplet, as root:
-apt-get update && apt-get install -y nginx rsync
-mkdir -p /var/www/virtio-accel.org
-chown -R www-data:www-data /var/www/virtio-accel.org
+1. **Settings → Pages → Build and deployment → Source:** select
+   **GitHub Actions**.
+2. **Settings → Pages → Custom domain:** enter `virtio-accel.org`. This is
+   already a verified organizational domain, so GitHub will validate it
+   immediately. The workflow also emits a matching `CNAME`, so the two agree.
+3. Tick **Enforce HTTPS** once the certificate is provisioned (usually a few
+   minutes after the domain check passes).
 
-# Create a dedicated deploy user with an SSH key:
-adduser --disabled-password --gecos "" deploy
-mkdir -p /home/deploy/.ssh
-# Paste the deploy public key into /home/deploy/.ssh/authorized_keys
-chmod 700 /home/deploy/.ssh && chmod 600 /home/deploy/.ssh/authorized_keys
-chown -R deploy:deploy /home/deploy/.ssh
-```
+### DNS
 
-An nginx server block that serves the static tree:
+Point the apex domain at GitHub Pages' anycast addresses (and, optionally, the
+`www` subdomain at the Pages host):
 
-```nginx
-server {
-    listen 80;
-    server_name virtio-accel.org www.virtio-accel.org;
+| Type | Name | Value |
+| --- | --- | --- |
+| `A` | `@` | `185.199.108.153` |
+| `A` | `@` | `185.199.109.153` |
+| `A` | `@` | `185.199.110.153` |
+| `A` | `@` | `185.199.111.153` |
+| `AAAA` | `@` | `2606:50c0:8000::153` |
+| `AAAA` | `@` | `2606:50c0:8001::153` |
+| `AAAA` | `@` | `2606:50c0:8002::153` |
+| `AAAA` | `@` | `2606:50c0:8003::153` |
+| `CNAME` | `www` | `microperceptron.github.io.` |
 
-    root /var/www/virtio-accel.org;
-    index index.html;
-
-    location / {
-        try_files $uri $uri/ =404;
-    }
-}
-```
-
-Enable it with `ln -s /etc/nginx/sites-available/virtio-accel.org
-/etc/nginx/sites-enabled/` and `systemctl reload nginx`. TLS is left to your
-preference (e.g. `certbot --nginx`).
-
-## Required repository secrets
-
-The deploy job reads these GitHub Actions secrets:
-
-| Secret | Description |
-| --- | --- |
-| `DO_DEPLOY_SSH_KEY` | Private key for the `deploy` user on the droplet (no passphrase) |
-| `DO_DEPLOY_HOST` | Droplet IP address or hostname |
-| `DO_DEPLOY_USER` | SSH user, e.g. `deploy` |
-| `DO_DEPLOY_PORT` | SSH port, e.g. `22` |
-| `DO_DEPLOY_PATH` | Absolute target directory, e.g. `/var/www/virtio-accel.org` |
-
-Set them under **Settings → Secrets and variables → Actions**. The deploy job
-uses `rsync` with `--delete` so the remote tree exactly mirrors the build.
+After DNS propagates and the source is set to GitHub Actions, every push to
+`main` (and every successful `Publish crates` run) rebuilds and republishes the
+site automatically.

@@ -41,6 +41,11 @@ TARGET_DOC = REPO_ROOT / "target" / "doc"
 
 GITHUB_BASE = "https://github.com/MicroPerceptron/virtio-accel/blob/main"
 
+# Custom domain served by GitHub Pages. Emitting a CNAME into the published
+# tree pins the domain to the artifact itself, so it survives regardless of the
+# repository's Pages settings.
+CUSTOM_DOMAIN = "virtio-accel.org"
+
 # Repo-relative source path -> site-relative destination path. Order matters:
 # it becomes the order of the generated SUMMARY.md.
 CURATED: list[tuple[str, str]] = [
@@ -234,6 +239,16 @@ def build_mdbook() -> None:
     subprocess.run(["mdbook", "build"], cwd=WEBSITE, check=True)
 
 
+def write_cname() -> None:
+    """Emit the GitHub Pages custom-domain marker into the built site.
+
+    ``mdbook build`` recreates ``book/`` from scratch, so this must run after it
+    to survive.
+    """
+    BOOK.mkdir(parents=True, exist_ok=True)
+    (BOOK / "CNAME").write_text(CUSTOM_DOMAIN + "\n", encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--skip-rustdoc", action="store_true")
@@ -250,6 +265,8 @@ def main() -> int:
 
     if not args.skip_rustdoc:
         build_rustdoc()
+
+    write_cname()
 
     return 0
 
