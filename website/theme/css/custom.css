@@ -1,0 +1,179 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap");
+
+:root {
+  --content-max-width: 900px;
+}
+
+/* Brand accent on top of mdBook's stock navy theme. Only the identity colors
+   are overridden here; surfaces (quotes, tables, search) keep the stock navy
+   values so everything stays internally consistent. */
+.navy {
+  --sidebar-bg: #0f172a;
+  --sidebar-active: #38bdf8;
+  --links: #0ea5e9;
+  --inline-code-color: #0ea5e9;
+  --warning-border: #f59e0b;
+  --search-mark-bg: #bae6fd;
+  --sidebar-non-existant: var(--fg);
+}
+
+/* Landing page: hide the sidebar and let the hero span the full width. */
+body:has(#landing-hero) .sidebar {
+  display: none;
+}
+
+body:has(#landing-hero) .page-wrapper {
+  margin-left: 0;
+}
+
+body:has(#landing-hero) .content {
+  max-width: 1000px;
+}
+
+.landing-hero {
+  padding: 4rem 0 2.5rem;
+  text-align: center;
+}
+
+.landing-hero h1 {
+  font-family: "Space Grotesk", var(--mono-font, sans-serif);
+  font-size: 3.5rem;
+  font-weight: 700;
+  margin: 0.5rem 0;
+  letter-spacing: -0.02em;
+}
+
+.landing-kicker {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.8rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--sidebar-non-existant);
+  margin: 0;
+}
+
+.landing-lede {
+  font-size: 1.2rem;
+  line-height: 1.6;
+  color: var(--fg);
+  max-width: 40rem;
+  margin: 0 auto;
+}
+
+.landing-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  color: var(--sidebar-non-existant);
+  margin-top: 1.25rem;
+}
+
+.landing-status-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--links);
+  display: inline-block;
+}
+
+.landing-sections {
+  max-width: 42rem;
+  margin: 1rem auto 0;
+  text-align: left;
+}
+
+.landing-section {
+  border-top: 1px solid var(--table-border-color);
+  padding: 2rem 0;
+}
+
+.landing-section:first-child {
+  border-top: none;
+}
+
+.landing-section h2 {
+  font-family: "Space Grotesk", var(--mono-font, sans-serif);
+  font-size: 1.4rem;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  margin-top: 0;
+}
+
+.landing-section p {
+  line-height: 1.75;
+  color: var(--fg);
+}
+
+.landing-crates {
+  margin: 1.25rem 0;
+}
+
+.landing-crates > div {
+  display: grid;
+  grid-template-columns: minmax(0, 13rem) minmax(0, 1fr);
+  gap: 0.5rem 1.5rem;
+  padding: 0.6rem 0;
+  border-top: 1px solid var(--table-border-color);
+}
+
+.landing-crates > div:first-child {
+  border-top: none;
+}
+
+.landing-crates dt {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.85rem;
+  color: var(--inline-code-color);
+}
+
+.landing-crates dd {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--sidebar-non-existant);
+  line-height: 1.6;
+}
+
+@media (max-width: 40rem) {
+  .landing-crates > div {
+    grid-template-columns: 1fr;
+    gap: 0.15rem;
+  }
+}
+
+.landing-note {
+  max-width: 42rem;
+  margin: 0 auto;
+  border-left: 4px solid var(--warning-border);
+  background: var(--quote-bg);
+  padding: 1rem 1.25rem;
+  border-radius: 0 0.5rem 0.5rem 0;
+  color: var(--fg);
+}
+
+.landing-links {
+  max-width: 42rem;
+  margin: 2.5rem auto 3rem;
+}
+
+.landing-links ul {
+  list-style: none;
+  padding: 0;
+  margin: 0.75rem 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+}
+
+.landing-links a {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.85rem;
+}
+
+.landing-logo {
+  display: block;
+  margin: 0 auto 1rem;
+  color: var(--links);
+}

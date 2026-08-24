@@ -21,10 +21,10 @@ shipped dependency graph:
 
 ```toml
 [dependencies]
-virtio-accel-core = "0.1"
+virtio-accel-core = "0.3"
 
 [dev-dependencies]
-virtio-accel-conformance = "0.1"
+virtio-accel-conformance = "0.3"
 ```
 
 `virtio-accel-mock` is also published, if a reference backend is useful to compare against while
