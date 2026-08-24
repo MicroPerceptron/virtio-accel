@@ -76,6 +76,11 @@ CRATE_ROOTS = (
 )
 
 UNSAFE_AUDITS = {
+    ROOT / "crates" / "virtio-accel-xdna" / "src" / "lib.rs": (
+        ROOT / "crates" / "virtio-accel-xdna" / "SAFETY.md",
+        "cfg_attr(not(va_xdna), forbid(unsafe_code))",
+        ("HRX C ABI", "persistent mapping", "hrx_status_t"),
+    ),
     ROOT / "crates" / "virtio-accel-coreml" / "src" / "lib.rs": (
         ROOT / "crates" / "virtio-accel-coreml" / "SAFETY.md",
         'cfg_attr(not(target_os = "macos"), forbid(unsafe_code))',

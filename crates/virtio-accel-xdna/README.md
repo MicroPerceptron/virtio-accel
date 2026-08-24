@@ -8,12 +8,15 @@ bounded subprocess (never a Cargo dependency, never in-process Python).
 **Portability tier:** `host-native` — the amdxdna-native HRX runtime (`libhrx`) when detected at
 build time; a compile-only unsupported-runtime placeholder elsewhere.
 
-**This crate is currently the scaffold.** It ships the portable admission surface and a
-placeholder; the HRX FFI, the native `Accelerator` implementation, the compiler helper, and the
-executing numerical tiers land in subsequent tickets of the
-[AMD XDNA wayfinder map](https://github.com/MicroPerceptron/virtio-accel/issues/78). The design
-decisions live on their ticket branches: crate layout (#83), compiler helper (#84), execution
-model (#85), and the advertised numerical tier (#82).
+**This crate is under construction.** In a `va_xdna` build it now provides the HRX device/stream
+owner and the `hrx_buffer` primitives — allocation with a persistent host mapping, range
+flush/invalidate, and release — validated on-device by the `tests/hardware.rs` suite. Program
+loading and dispatch report `Unsupported`; the compiler helper and executing numerical tiers land
+in subsequent tickets of the
+[AMD XDNA wayfinder map](https://github.com/MicroPerceptron/virtio-accel/issues/78). Hosts without
+HRX build the portable admission surface plus a placeholder and compile no `unsafe`. The design
+decisions live on their ticket branches: crate layout (#83), FFI/buffers (#87), compiler helper
+(#84), execution model (#85), and the advertised numerical tier (#82).
 
 ## Build-time probe
 
@@ -45,8 +48,9 @@ cargo run -p virtio-accel-xdna --example tosa_xdna
 cargo test -p virtio-accel-xdna
 ```
 
-The example reports the scaffold state and exits successfully; the tests exercise the advertised
-targets on every host.
+Without HRX the example reports the placeholder state; in a `va_xdna` build it initializes the
+device and stream. The portable tests exercise the advertised targets on every host; the
+`va_xdna` `tests/hardware.rs` suite exercises the buffer primitives against a live NPU.
 
 Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an
 experimental native-Rust protocol and implementation stack for a transport-neutral virtual
