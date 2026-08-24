@@ -14,3 +14,6 @@ readme = "README.md"
 [dependencies]
 virtio-accel-core.workspace = true
 virtio-accel-tosa.workspace = true
+
+[dev-dependencies]
+virtio-accel-tosa-build.workspace = true

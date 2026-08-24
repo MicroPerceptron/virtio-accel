@@ -6,9 +6,10 @@
 //! serialized dispatch worker, a bounded preallocated submission ring and event-slot pool, and the
 //! `hrx_buffer` primitives (persistent host mapping, range flush/invalidate, release).
 //!
-//! Program loading accepts the crate-local precompiled artifact format (`load_program`), builds an
-//! `hrx_amdxdna_executable`, and dispatches it through the worker. TOSA compilation is a later
-//! ticket; a TOSA-format artifact is rejected with `Unsupported`. Finite timeouts are rejected
+//! `load_program` accepts the crate-local precompiled artifact format directly, and a TOSA
+//! artifact by admitting it (`lower`) and compiling it with the bounded helper subprocess
+//! (`compiler`); it builds an `hrx_amdxdna_executable` and dispatches it through the worker.
+//! Finite timeouts are rejected
 //! before admission (no cancellation exists); a synchronize error latches the event `Failed` and
 //! poisons the instance (device-loss tier 1). The tier-2 wedge watchdog is the fault-paths ticket.
 
@@ -30,7 +31,9 @@ use virtio_accel_core::{
 
 use crate::InitError;
 use crate::artifact::{self, PrecompiledArtifact};
+use crate::compiler::Compiler;
 use crate::ffi;
+use crate::lower;
 
 /// `BackendError::External` domain tag for HRX failures ("XDNA" in ASCII).
 pub const XDNA_ERROR_DOMAIN: u32 = 0x5844_4e41;
@@ -297,6 +300,7 @@ pub struct XdnaAccelerator {
     lane: Arc<Lane>,
     worker: Option<JoinHandle<()>>,
     slots: Vec<Arc<EventSlot>>,
+    compiler: Option<Compiler>,
     info: DeviceInfo,
     next_id: AtomicU64,
     _not_send_sync: PhantomData<*mut u8>,
@@ -337,6 +341,7 @@ impl XdnaAccelerator {
             lane,
             worker: Some(worker),
             slots,
+            compiler: Compiler::from_env().ok(),
             info: device_info(),
             next_id: AtomicU64::new(1),
             _not_send_sync: PhantomData,
@@ -403,6 +408,104 @@ fn device_info() -> DeviceInfo {
             max_artifact_bytes: MAX_TOSA_ARTIFACT_BYTES,
         },
     }
+}
+
+/// Create and load an amdxdna executable from a parsed precompiled artifact.
+fn build_executable(
+    device: &SharedDevice,
+    parsed: PrecompiledArtifact<'_>,
+) -> Result<XdnaProgram, BackendError> {
+    // Build the borrowed create-params (valid only for the duration of the create call).
+    let xclbin_span = ffi::hrx_const_byte_span_t {
+        data: parsed.xclbin.as_ptr().cast(),
+        data_length: parsed.xclbin.len(),
+    };
+    let run = ffi::hrx_amdxdna_executable_run_t {
+        record_length: size_of::<ffi::hrx_amdxdna_executable_run_t>() as u32,
+        abi_version: ffi::HRX_AMDXDNA_EXECUTABLE_RUN_ABI_VERSION_0,
+        transaction: ffi::hrx_const_byte_span_t {
+            data: parsed.insts.as_ptr().cast(),
+            data_length: parsed.insts.len(),
+        },
+        data_payload: ffi::hrx_const_byte_span_t {
+            data: ptr::null(),
+            data_length: 0,
+        },
+    };
+    let entry = ffi::hrx_amdxdna_executable_entry_point_t {
+        record_length: size_of::<ffi::hrx_amdxdna_executable_entry_point_t>() as u32,
+        abi_version: ffi::HRX_AMDXDNA_EXECUTABLE_ENTRY_POINT_ABI_VERSION_0,
+        name: ffi::hrx_string_view_t {
+            data: parsed.entry.as_ptr().cast(),
+            size: parsed.entry.len(),
+        },
+        context_mode: ffi::HRX_AMDXDNA_CONTEXT_MODE_CREATE,
+        xclbin_ordinal: 0,
+        pdi_ordinal: 0,
+        source_line: 0,
+        source_file: ffi::hrx_string_view_t {
+            data: ptr::null(),
+            size: 0,
+        },
+        runs: &run,
+        run_count: 1,
+    };
+    let params = ffi::hrx_amdxdna_executable_create_params_t {
+        record_length: size_of::<ffi::hrx_amdxdna_executable_create_params_t>() as u32,
+        abi_version: ffi::HRX_AMDXDNA_EXECUTABLE_CREATE_PARAMS_ABI_VERSION_0,
+        flags: 0,
+        reserved: 0,
+        xclbins: &xclbin_span,
+        xclbin_count: 1,
+        entry_points: &entry,
+        entry_point_count: 1,
+    };
+
+    let mut executable: ffi::hrx_executable_t = ptr::null_mut();
+    // SAFETY: the device is live; every span/record referenced by `params` is borrowed from
+    // `parsed`, which outlives this call; the out-pointer is a valid local; status consumed. HRX
+    // copies what it needs and the borrows may be released after return.
+    let status =
+        unsafe { ffi::hrx_amdxdna_executable_create(device.0.as_ptr(), &params, &mut executable) };
+    check(status)?;
+    let executable = NonNull::new(executable).ok_or(BackendError::External {
+        domain: XDNA_ERROR_DOMAIN,
+        code: 0,
+    })?;
+
+    // Resolve the export ordinal by entry-point name.
+    let ordinal = CString::new(parsed.entry)
+        .map_err(|_| BackendError::InvalidArgument)
+        .and_then(|entry_c| {
+            let mut ordinal: u32 = 0;
+            // SAFETY: the executable is live; `entry_c` is a valid NUL-terminated string; the
+            // out-pointer is a valid local; status consumed.
+            let status = unsafe {
+                ffi::hrx_executable_lookup_export_by_name(
+                    executable.as_ptr(),
+                    entry_c.as_ptr(),
+                    &mut ordinal,
+                )
+            };
+            check(status).map(|()| ordinal)
+        });
+    let ordinal = match ordinal {
+        Ok(ordinal) => ordinal,
+        Err(error) => {
+            // SAFETY: the executable is live and owned here; release it before returning.
+            unsafe { ffi::hrx_executable_release(executable.as_ptr()) };
+            return Err(error);
+        }
+    };
+
+    Ok(XdnaProgram {
+        inner: Arc::new(ProgramInner {
+            executable,
+            ordinal,
+            inputs: parsed.inputs,
+            outputs: parsed.outputs,
+        }),
+    })
 }
 
 /// A logical execution context. HRX holds no per-context state; the id supports accounting.
@@ -668,10 +771,6 @@ impl Accelerator for XdnaAccelerator {
         if self.lane.is_poisoned() {
             return Err(BackendError::DeviceLost);
         }
-        // TOSA compilation is a later ticket; only the crate-local precompiled format loads today.
-        if artifact.format != artifact::XDNA_PRECOMPILED_FORMAT {
-            return Err(BackendError::Unsupported);
-        }
         if artifact.payload.len() > self.info.limits.max_artifact_bytes {
             return Err(BackendError::ResourceLimit);
         }
@@ -684,100 +783,28 @@ impl Accelerator for XdnaAccelerator {
         bytes.resize(len, 0);
         artifact.payload.read_at(0, &mut bytes)?;
 
-        let parsed = PrecompiledArtifact::parse(&bytes)?;
+        // The precompiled format loads directly; a TOSA artifact is admitted and compiled to one.
+        let container = if artifact.format == artifact::XDNA_PRECOMPILED_FORMAT {
+            bytes
+        } else if artifact.format == virtio_accel_tosa::ARTIFACT_FORMAT {
+            let target = virtio_accel_tosa::Target::from_identity(artifact.target)
+                .map_err(|_| BackendError::Incompatible)?;
+            let spec = lower::admit(&bytes, target).map_err(|error| match error {
+                lower::AdmitError::Parse => BackendError::InvalidArgument,
+                lower::AdmitError::Analysis => BackendError::Incompatible,
+                lower::AdmitError::Unsupported => BackendError::Unsupported,
+            })?;
+            self.compiler
+                .as_ref()
+                .ok_or(BackendError::Unsupported)?
+                .compile(spec)?
+        } else {
+            return Err(BackendError::Unsupported);
+        };
+
+        let parsed = PrecompiledArtifact::parse(&container)?;
         let device = shared_device().map_err(|_| BackendError::DeviceLost)?;
-
-        // Build the borrowed create-params (valid only for the duration of the create call).
-        let xclbin_span = ffi::hrx_const_byte_span_t {
-            data: parsed.xclbin.as_ptr().cast(),
-            data_length: parsed.xclbin.len(),
-        };
-        let run = ffi::hrx_amdxdna_executable_run_t {
-            record_length: size_of::<ffi::hrx_amdxdna_executable_run_t>() as u32,
-            abi_version: ffi::HRX_AMDXDNA_EXECUTABLE_RUN_ABI_VERSION_0,
-            transaction: ffi::hrx_const_byte_span_t {
-                data: parsed.insts.as_ptr().cast(),
-                data_length: parsed.insts.len(),
-            },
-            data_payload: ffi::hrx_const_byte_span_t {
-                data: ptr::null(),
-                data_length: 0,
-            },
-        };
-        let entry = ffi::hrx_amdxdna_executable_entry_point_t {
-            record_length: size_of::<ffi::hrx_amdxdna_executable_entry_point_t>() as u32,
-            abi_version: ffi::HRX_AMDXDNA_EXECUTABLE_ENTRY_POINT_ABI_VERSION_0,
-            name: ffi::hrx_string_view_t {
-                data: parsed.entry.as_ptr().cast(),
-                size: parsed.entry.len(),
-            },
-            context_mode: ffi::HRX_AMDXDNA_CONTEXT_MODE_CREATE,
-            xclbin_ordinal: 0,
-            pdi_ordinal: 0,
-            source_line: 0,
-            source_file: ffi::hrx_string_view_t {
-                data: ptr::null(),
-                size: 0,
-            },
-            runs: &run,
-            run_count: 1,
-        };
-        let params = ffi::hrx_amdxdna_executable_create_params_t {
-            record_length: size_of::<ffi::hrx_amdxdna_executable_create_params_t>() as u32,
-            abi_version: ffi::HRX_AMDXDNA_EXECUTABLE_CREATE_PARAMS_ABI_VERSION_0,
-            flags: 0,
-            reserved: 0,
-            xclbins: &xclbin_span,
-            xclbin_count: 1,
-            entry_points: &entry,
-            entry_point_count: 1,
-        };
-
-        let mut executable: ffi::hrx_executable_t = ptr::null_mut();
-        // SAFETY: the device is live; every span/record referenced by `params` is borrowed from
-        // `bytes`/`parsed`, which outlive this call; the out-pointer is a valid local; status
-        // consumed. HRX copies what it needs and the borrows may be released after return.
-        let status = unsafe {
-            ffi::hrx_amdxdna_executable_create(device.0.as_ptr(), &params, &mut executable)
-        };
-        check(status)?;
-        let executable = NonNull::new(executable).ok_or(BackendError::External {
-            domain: XDNA_ERROR_DOMAIN,
-            code: 0,
-        })?;
-
-        // Resolve the export ordinal by entry-point name.
-        let entry_c = CString::new(parsed.entry).map_err(|_| BackendError::InvalidArgument);
-        let ordinal = entry_c.and_then(|entry_c| {
-            let mut ordinal: u32 = 0;
-            // SAFETY: the executable is live; `entry_c` is a valid NUL-terminated string; the
-            // out-pointer is a valid local; status consumed.
-            let status = unsafe {
-                ffi::hrx_executable_lookup_export_by_name(
-                    executable.as_ptr(),
-                    entry_c.as_ptr(),
-                    &mut ordinal,
-                )
-            };
-            check(status).map(|()| ordinal)
-        });
-        let ordinal = match ordinal {
-            Ok(ordinal) => ordinal,
-            Err(error) => {
-                // SAFETY: the executable is live and owned here; release it before returning.
-                unsafe { ffi::hrx_executable_release(executable.as_ptr()) };
-                return Err(error);
-            }
-        };
-
-        Ok(XdnaProgram {
-            inner: Arc::new(ProgramInner {
-                executable,
-                ordinal,
-                inputs: parsed.inputs,
-                outputs: parsed.outputs,
-            }),
-        })
+        build_executable(device, parsed)
     }
 
     fn unload_program(&self, program: Self::Program) -> Result<(), ReleaseFailure<Self::Program>> {

@@ -300,6 +300,7 @@ version = "0.3.3"
 dependencies = [
  "virtio-accel-core",
  "virtio-accel-tosa",
+ "virtio-accel-tosa-build",
 ]
 
 [[package]]
