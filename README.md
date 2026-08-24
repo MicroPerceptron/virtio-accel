@@ -20,7 +20,7 @@ host-pointer tensors, and a Qualcomm backend that lowers strict FP16 and INT8 TO
 executes it on Hexagon HTP with direct client buffers. The first target is NPU execution, while the object model deliberately
 leaves room for GPUs, DSPs, and other program-driven accelerators.
 
-The project claims no Virtio device ID (_yet_), usage in guest environments should utilize the `vAccel` adapter. See more in [here](crates/virtio-accel-vaccel/README.md).
+The project claims no Virtio device ID (_yet_). For guest environments, use the `vAccel` adapter; see [crates/virtio-accel-vaccel/README.md](crates/virtio-accel-vaccel/README.md).
 
 This project is pre-standardization, protocol 1.0 is frozen as a versioned review
 input for independent implementation — it is stable enough to build against and to disagree with in
