@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use virtio-accel, please cite it using the metadata below."
+type: software
+title: "virtio-accel"
+abstract: "Portable Rust protocol and runtime layers for a virtio accelerator device."
+authors:
+  - family-names: Sheng
+    given-names: Cass
+    email: cass@microperceptron.com
+  - family-names: Ravishankar
+    given-names: Aryan
+    email: aryan@microperceptron.com
+  - family-names: Hayes
+    given-names: Colin
+    email: colin@microperceptron.com
+  - family-names: Avar
+    given-names: Julian
+    email: julian@microperceptron.com
+version: 0.3.3
+license: MIT OR Apache-2.0
+repository-code: "https://github.com/MicroPerceptron/virtio-accel"
