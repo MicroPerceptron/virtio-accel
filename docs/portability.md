@@ -38,7 +38,7 @@ directly, and they must keep working on any platform the portable crates support
 | `core-only` | `virtio-accel-cleanroom`, `virtio-accel-proto`, `virtio-accel-transport`, `virtio-accel-core` | `core`; the clean-room codec and transport ports have no normal/build dependencies, while proc-macros used by other crates may execute with `std` on the build host |
 | `alloc-portable` | `virtio-accel-guest`, `virtio-accel-split-queue`, `virtio-accel-device`, `virtio-accel-tosa`, `virtio-accel-tosa-build`, `virtio-accel` | `core + alloc`; no OS, filesystem, sockets, threads, or host synchronization |
 | `std-reference` | `virtio-accel-mock`, `virtio-accel-conformance` | Portable `std`; no host-OS or vendor-specific API |
-| `host-native` | `virtio-accel-coreml`, `virtio-accel-openvino`, `virtio-accel-hexagon`, `virtio-accel-amdxdna` | Core ML/Foundation on macOS 14+, the OpenVINO C runtime (`libopenvino_c` 2026.x), the complete QAIRT/QNN C SDK on Windows ARM64, or the amdxdna-native HRX runtime (`libhrx`) when detected at build time; a compile-only unsupported-platform or unsupported-runtime placeholder elsewhere |
+| `host-native` | `virtio-accel-coreml`, `virtio-accel-openvino`, `virtio-accel-hexagon`, `virtio-accel-xdna` | Core ML/Foundation on macOS 14+, the OpenVINO C runtime (`libopenvino_c` 2026.x), the complete QAIRT/QNN C SDK on Windows ARM64, or the amdxdna-native HRX runtime (`libhrx`) when detected at build time; a compile-only unsupported-platform or unsupported-runtime placeholder elsewhere |
 
 No host-native crate is a dependency of the facade or any portable layer. The Core ML crate's
 Objective-C bridge and TOSA-to-Core ML model compilation are built only when the Cargo target is
@@ -75,8 +75,8 @@ surface (the two advertised `Target` constants) and a placeholder. HRX exposes a
 its build script has no `cc`/CMake step; it enables the native modules only when an amdxdna-native
 HRX prefix (`VIRTIO_ACCEL_HRX_DIR`/`HRX_DIR`) carries both HRX headers — the amdxdna header must
 declare `hrx_amdxdna_executable_create`, whose absence marks an older, incompatible libhrx
-generation — and `lib/libhrx.so`. `VIRTIO_ACCEL_AMDXDNA=0` forces the placeholder,
-`VIRTIO_ACCEL_AMDXDNA=1` makes a missing or incomplete runtime a build failure, and
+generation — and `lib/libhrx.so`. `VIRTIO_ACCEL_XDNA=0` forces the placeholder,
+`VIRTIO_ACCEL_XDNA=1` makes a missing or incomplete runtime a build failure, and
 `VIRTIO_ACCEL_HRX_LIB_DIR` links a bare lib directory. No standard locations are scanned, keeping
 the toolchain pin authoritative. The native `Accelerator`, HRX FFI, and compiler helper land in
 later tickets of the AMD XDNA wayfinder map.

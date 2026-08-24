@@ -1,5 +1,5 @@
 [package]
-name = "virtio-accel-amdxdna"
+name = "virtio-accel-xdna"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,5 +12,4 @@ description = "AMD XDNA (Ryzen AI NPU) host backend for virtio-accel"
 readme = "README.md"
 
 [dependencies]
-virtio-accel-core.workspace = true
 virtio-accel-tosa.workspace = true

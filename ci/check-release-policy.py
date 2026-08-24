@@ -25,7 +25,7 @@ PACKAGE_MANIFESTS = (
 PUBLISHED_PACKAGES = {
     ".": "virtio-accel",
     "conformance/rust-clean-room": "virtio-accel-cleanroom",
-    "crates/virtio-accel-amdxdna": "virtio-accel-amdxdna",
+    "crates/virtio-accel-xdna": "virtio-accel-xdna",
     "crates/virtio-accel-conformance": "virtio-accel-conformance",
     "crates/virtio-accel-core": "virtio-accel-core",
     "crates/virtio-accel-coreml": "virtio-accel-coreml",

@@ -168,14 +168,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "virtio-accel-amdxdna"
-version = "0.3.3"
-dependencies = [
- "virtio-accel-core",
- "virtio-accel-tosa",
-]
-
-[[package]]
 name = "virtio-accel-cleanroom"
 version = "0.3.3"
 
@@ -300,6 +292,13 @@ dependencies = [
  "virtio-accel-conformance",
  "virtio-accel-core",
  "virtio-accel-mock",
+]
+
+[[package]]
+name = "virtio-accel-xdna"
+version = "0.3.3"
+dependencies = [
+ "virtio-accel-tosa",
 ]
 
 [[package]]
