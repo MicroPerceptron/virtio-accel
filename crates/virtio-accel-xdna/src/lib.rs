@@ -26,7 +26,10 @@ pub mod artifact;
 mod lower;
 
 pub use artifact::{PrecompiledArtifact, XDNA_PRECOMPILED_FORMAT};
-pub use lower::{XDNA_TOSA_INTEGER_TARGET, XDNA_TOSA_TARGET};
+pub use lower::{
+    AdmitError, CompilerSpec, IDENTITY_LINE_SIZE, SpecDType, SpecOp, XDNA_TOSA_INTEGER_TARGET,
+    XDNA_TOSA_TARGET, admit,
+};
 
 /// The HRX runtime publishes no finite upper bound for a loaded program's device residency.
 ///
