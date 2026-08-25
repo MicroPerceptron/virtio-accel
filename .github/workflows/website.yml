@@ -34,14 +34,14 @@ name: Website
 permissions:
   contents: read
 
-# Allow one concurrent deployment; do not cancel an in-progress Pages deploy,
-# so a running publish always finishes cleanly. Pull-request builds are keyed
+# One release at a time, and never cancel one in flight -- a half-finished
+# rsync would leave the served tree inconsistent. Pull-request builds are keyed
 # per-ref instead, and superseded pushes to a PR are cancelled.
 concurrency:
   group: >-
     ${{ github.event_name == 'pull_request'
     && format('website-pr-{0}', github.ref)
-    || 'pages' }}
+    || 'website-production' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -50,8 +50,8 @@ env:
 
 jobs:
   # Pull-request validation. Builds exactly what a push to main would publish
-  # and stops there: no Pages configuration, no artifact upload, no deploy, and
-  # no permissions beyond `contents: read`.
+  # and stops there: no artifact, no deploy, and no permissions beyond
+  # `contents: read`.
   check:
     name: check-site
     runs-on: ubuntu-latest
@@ -111,16 +111,19 @@ jobs:
       - name: Check the built tree
         run: python3 website/check.py
 
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
-
-      - name: Upload the Pages artifact
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+      - name: Upload the built site
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          name: website
           path: website/book/
+          if-no-files-found: error
+          retention-days: 7
 
+  # The site is static, so nothing is built on the droplet: the deploy is an
+  # rsync of the tree the build job already produced. The droplet needs nginx
+  # and rsync, and no Rust, mdBook, Python, or Docker.
   deploy:
-    name: deploy-pages
+    name: deploy-droplet
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: build
@@ -128,15 +131,100 @@ jobs:
       github.event_name != 'pull_request'
       && (github.event_name != 'workflow_run'
       || github.event.workflow_run.conclusion == 'success')
-    # The deploy job needs write access to Pages and an OIDC token to prove the
-    # artifact came from this workflow run.
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+    environment: production
+    env:
+      DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+      DEPLOY_SSH_USERNAME: ${{ secrets.DEPLOY_SSH_USERNAME }}
+      DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT || vars.DEPLOY_SSH_PORT || 22 }}
+      # Deliberately has no default. The previous droplet workflow hardcoded
+      # one, which is how a deploy can quietly land in the wrong directory.
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || vars.DEPLOY_PATH }}
     steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
+      - name: Verify deploy configuration
+        env:
+          DEPLOY_SSH_SECRET: ${{ secrets.DEPLOY_SSH_SECRET }}
+        run: |
+          missing=0
+          for name in DEPLOY_SSH_HOST DEPLOY_SSH_USERNAME DEPLOY_SSH_SECRET DEPLOY_PATH; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing required GitHub Actions config: ${name}"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Add these under Settings -> Secrets and variables -> Actions," >&2
+            echo "either repository-wide or on the 'production' environment:" >&2
+            echo "  DEPLOY_SSH_HOST      droplet IP or hostname" >&2
+            echo "  DEPLOY_SSH_USERNAME  SSH login user, e.g. deploy" >&2
+            echo "  DEPLOY_SSH_SECRET    private key PEM for that user, no passphrase" >&2
+            echo "  DEPLOY_PATH          absolute web root, e.g. /var/www/virtio-accel.org" >&2
+            echo "DEPLOY_PATH and DEPLOY_SSH_PORT may be variables instead of secrets." >&2
+            exit 1
+          fi
+          case "$DEPLOY_PATH" in
+            /*) ;;
+            *) echo "::error::DEPLOY_PATH must be absolute, got: ${DEPLOY_PATH}"; exit 1 ;;
+          esac
+
+      - name: Download the built site
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: website
+          path: book/
+
+      - name: Authorize the droplet
+        env:
+          DEPLOY_SSH_SECRET: ${{ secrets.DEPLOY_SSH_SECRET }}
+          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_SECRET" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          if [ -n "$DEPLOY_SSH_KNOWN_HOSTS" ]; then
+            # Pinned host key: the run fails rather than trusting a substituted
+            # host. Get the value with `ssh-keyscan -p <port> <host>`.
+            printf '%s\n' "$DEPLOY_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            echo "::warning::DEPLOY_SSH_KNOWN_HOSTS is not set; trusting the host key on first sight."
+            ssh-keyscan -p "$DEPLOY_SSH_PORT" "$DEPLOY_SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Check the target directory
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_SSH_PORT" -o IdentitiesOnly=yes \
+            "${DEPLOY_SSH_USERNAME}@${DEPLOY_SSH_HOST}" \
+            "set -eu
+             if [ ! -d '${DEPLOY_PATH}' ]; then
+               echo \"DEPLOY_PATH does not exist: ${DEPLOY_PATH}\" >&2
+               echo \"On the droplet, as root: mkdir -p '${DEPLOY_PATH}' && chown -R \$(whoami): '${DEPLOY_PATH}'\" >&2
+               exit 1
+             fi
+             if [ ! -w '${DEPLOY_PATH}' ] || [ ! -x '${DEPLOY_PATH}' ]; then
+               echo \"DEPLOY_PATH is not writable by \$(whoami): ${DEPLOY_PATH}\" >&2
+               exit 1
+             fi"
+
+      # `--delete` makes the served tree exactly mirror the build, so a page
+      # removed from SUMMARY.md stops being served instead of lingering.
+      # `.well-known` is excluded because certbot writes ACME challenges there
+      # and --delete would race them.
+      - name: Sync the site to the droplet
+        run: |
+          rsync -az --delete --checksum \
+            --exclude '.well-known' \
+            -e "ssh -i ~/.ssh/deploy_key -p ${DEPLOY_SSH_PORT} -o IdentitiesOnly=yes" \
+            book/ "${DEPLOY_SSH_USERNAME}@${DEPLOY_SSH_HOST}:${DEPLOY_PATH}/"
+
+      - name: Verify the deployed site responds
+        run: |
+          for attempt in 1 2 3; do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 https://virtio-accel.org/ || echo 000)"
+            if [ "$code" = "200" ]; then
+              echo "virtio-accel.org returned 200"
+              exit 0
+            fi
+            echo "attempt ${attempt}: HTTP ${code}"
+            sleep 5
+          done
+          echo "::warning::virtio-accel.org did not return 200 after the deploy (last status ${code}). The files synced; check nginx and DNS."

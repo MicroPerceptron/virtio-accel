@@ -11,7 +11,7 @@ so it stays out of `cargo fmt --all`, `cargo clippy --workspace`, and
 | --- | --- |
 | `book.toml` | mdBook configuration (pinned to mdBook 0.5.x) |
 | `build.py` | Single build entry point: curates docs, rewrites links, generates `SUMMARY.md`, builds rustdoc + mdBook, overlays the landing page |
-| `check.py` | Validates the built tree: required pages, the landing overlay, dangling links, `CNAME` |
+| `check.py` | Validates the built tree: required pages, the landing overlay, dangling links |
 | `content/index.html` | The landing page &mdash; a standalone document, not an mdBook chapter |
 | `content/api.md` | The API reference index chapter |
 | `theme/` | Favicon, docs-reader stylesheet, sidebar brand script |
@@ -89,50 +89,117 @@ if the two drift apart.
 `website/**`, `README.md`, `crates/**`, or the manifests. It builds exactly what
 a push to `main` would publish and then runs `check.py`, so a doc edit that
 breaks a cross-link, deletes a page something still points at, or fails rustdoc
-fails the PR rather than reaching the live site. It uploads nothing, configures
-no Pages state, and holds no permission beyond `contents: read`.
+fails the PR rather than reaching the live site. It uploads nothing, deploys
+nothing, and holds no permission beyond `contents: read`.
 
-`build-site` and `deploy-pages` run on pushes to `main` and after a successful
-`Publish crates` run (via `workflow_run`), so a release refreshes the rustdoc
-automatically. The build job runs `build.py`, runs `check.py`, and uploads
-`website/book/` as a Pages artifact; the deploy job publishes it. `build.py`
-writes a `CNAME` file into the built tree so the `virtio-accel.org` custom
-domain is pinned to the artifact itself.
+`build-site` runs on pushes to `main`, after a successful `Publish crates` run
+(via `workflow_run`, so a release refreshes the rustdoc automatically), and on
+manual dispatch. It builds, checks, and uploads `website/book/` as a workflow
+artifact.
 
-No secrets, servers, or SSH keys are required: deployment uses the workflow's
-own OIDC token (`id-token: write`) and Pages permission (`pages: write`), both
-scoped to the `deploy` job.
+`deploy-droplet` downloads that artifact and `rsync`s it to the droplet over
+SSH. It runs in the `production` environment, so the deploy can be gated behind
+required reviewers if you want that. The site is static, so **nothing is built
+on the droplet** -- it needs `nginx` and `rsync`, and no Rust, mdBook, Python,
+or Docker.
 
 Because the site is generated from `docs/` and `README.md` on every run, a
 merged documentation PR republishes the docs with no separate step.
 
-## One-time GitHub Pages setup
+### Required repository configuration
 
-1. **Settings → Pages → Build and deployment → Source:** select
-   **GitHub Actions**.
-2. **Settings → Pages → Custom domain:** enter `virtio-accel.org`. This is
-   already a verified organizational domain, so GitHub will validate it
-   immediately. The workflow also emits a matching `CNAME`, so the two agree.
-3. Tick **Enforce HTTPS** once the certificate is provisioned (usually a few
-   minutes after the domain check passes).
+Set these under **Settings -> Secrets and variables -> Actions**, either
+repository-wide or on the `production` environment. The deploy job checks all
+four up front and fails with a list of what is missing, rather than half-running.
+
+| Secret | Purpose |
+| --- | --- |
+| `DEPLOY_SSH_HOST` | Droplet IP address or hostname |
+| `DEPLOY_SSH_USERNAME` | SSH login user, e.g. `deploy` |
+| `DEPLOY_SSH_SECRET` | Private key PEM for that user, no passphrase (include the `-----BEGIN…-----` / `-----END…-----` lines) |
+| `DEPLOY_PATH` | Absolute web root on the droplet, e.g. `/var/www/virtio-accel.org` |
+
+Optional:
+
+| Name | Default | Purpose |
+| --- | --- | --- |
+| `DEPLOY_SSH_PORT` | `22` | SSH port |
+| `DEPLOY_SSH_KNOWN_HOSTS` | *(unset)* | Pinned host key. Without it the workflow trusts the droplet's key on first sight and logs a warning. Get the value with `ssh-keyscan -p <port> <host>`. |
+
+`DEPLOY_PATH` and `DEPLOY_SSH_PORT` may be repository **variables** instead of
+secrets; the workflow accepts either.
+
+`DEPLOY_PATH` deliberately has **no default**. An earlier version of this
+workflow hardcoded one, which is how a deploy can quietly land in a directory
+nothing serves.
+
+## Droplet setup
+
+Any small droplet is plenty for a static site. On a recent Debian or Ubuntu
+image:
+
+```sh
+# As root.
+apt-get update && apt-get install -y nginx rsync
+
+# A dedicated deploy user that owns the web root and nothing else.
+adduser --disabled-password --gecos "" deploy
+mkdir -p /var/www/virtio-accel.org
+chown -R deploy:deploy /var/www/virtio-accel.org
+
+# Install the deploy public key (the pair whose private half is DEPLOY_SSH_SECRET).
+mkdir -p /home/deploy/.ssh
+printf '%s\n' 'ssh-ed25519 AAAA... deploy@virtio-accel' >> /home/deploy/.ssh/authorized_keys
+chmod 700 /home/deploy/.ssh && chmod 600 /home/deploy/.ssh/authorized_keys
+chown -R deploy:deploy /home/deploy/.ssh
+```
+
+nginx needs to be able to read the tree, so either add it to the group or serve
+as `deploy`; `chmod 755 /var/www/virtio-accel.org` is usually enough.
+
+An nginx server block:
+
+```nginx
+server {
+    listen 80;
+    listen [::]:80;
+    server_name virtio-accel.org www.virtio-accel.org;
+
+    root /var/www/virtio-accel.org;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    # Content-addressed assets mdBook emits with a hash in the filename.
+    location ~* -[0-9a-f]{8}\.(css|js|svg)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    error_page 404 /404.html;
+}
+```
+
+Enable and reload:
+
+```sh
+ln -s /etc/nginx/sites-available/virtio-accel.org /etc/nginx/sites-enabled/
+nginx -t && systemctl reload nginx
+certbot --nginx -d virtio-accel.org -d www.virtio-accel.org
+```
+
+The deploy `rsync`s with `--delete`, so the served tree exactly mirrors the
+build and a page removed from `SUMMARY.md` stops being served. `.well-known` is
+excluded so it cannot race certbot's ACME challenges.
 
 ### DNS
 
-Point the apex domain at GitHub Pages' anycast addresses (and, optionally, the
-`www` subdomain at the Pages host):
+Point the domain at the droplet:
 
 | Type | Name | Value |
 | --- | --- | --- |
-| `A` | `@` | `185.199.108.153` |
-| `A` | `@` | `185.199.109.153` |
-| `A` | `@` | `185.199.110.153` |
-| `A` | `@` | `185.199.111.153` |
-| `AAAA` | `@` | `2606:50c0:8000::153` |
-| `AAAA` | `@` | `2606:50c0:8001::153` |
-| `AAAA` | `@` | `2606:50c0:8002::153` |
-| `AAAA` | `@` | `2606:50c0:8003::153` |
-| `CNAME` | `www` | `microperceptron.github.io.` |
-
-After DNS propagates and the source is set to GitHub Actions, every push to
-`main` (and every successful `Publish crates` run) rebuilds and republishes the
-site automatically.
+| `A` | `@` | *droplet IPv4* |
+| `AAAA` | `@` | *droplet IPv6* |
+| `CNAME` | `www` | `virtio-accel.org.` |
