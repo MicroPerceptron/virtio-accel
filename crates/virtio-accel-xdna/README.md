@@ -15,11 +15,14 @@ flush/invalidate, release), and a serialized dispatch worker bridging
 the crate-local precompiled artifact format directly, and a TOSA artifact by admitting it and
 compiling it with the bounded aiecc helper subprocess (`compiler/xdna_compile.py`, run under the
 pinned toolchain venv in a cleared environment, content-addressed in a cache). The compilable TOSA
-subset today is the BF16 IDENTITY (a DMA copy); the compute tiers grow on top of it. All of this is
-validated on-device by `tests/hardware.rs` (a DMA passthrough and a compiled TOSA IDENTITY on the
-NPU). Hosts without HRX build the portable admission surface plus a placeholder, compile no
-`unsafe`, and still unit-test admission and the artifact codec. The remaining executing numerical
-tiers land in subsequent tickets of the
+subset today is the BF16 IDENTITY (a DMA copy) and the BF16 → FP32 MATMUL (the spec-mandated
+FP32-accumulator shape, batch 1, at multiples of the tested compute tile); the further compute
+tiers grow on top of it. All of this is validated on-device by `tests/hardware.rs` (a DMA
+passthrough, a compiled TOSA IDENTITY, and a bit-exact non-square MATMUL on the NPU) and by
+`tests/conformance.rs` (the shared semantic suite, including the direct-binding copy-path
+diagnostics, on the device). Hosts without HRX build the portable admission surface plus a
+placeholder, compile no `unsafe`, and still unit-test admission and the artifact codec. The
+remaining executing numerical tiers land in subsequent tickets of the
 [AMD XDNA wayfinder map](https://github.com/MicroPerceptron/virtio-accel/issues/78); the design
 decisions live on their ticket branches: crate layout (#83), FFI/buffers (#87), execution model
 (#85), compiler helper (#84), and the advertised numerical tier (#82).

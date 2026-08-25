@@ -63,9 +63,13 @@ stream mutex: `allocate_buffer` locks it briefly, and the worker holds it across
 `hrx_stream_dispatch` + `hrx_stream_synchronize`. `Stream` is `unsafe impl Send` (moved to the
 worker, only ever dereferenced under that mutex).
 
-`submit` validates the bindings (count, per-slot access, ranges, no aliased buffer), then — the
-acceptance boundary — claims a preallocated ring entry and event slot, arms each bound buffer's
-`in_flight` gate, and enqueues a `Job`. A full ring returns `Busy`; submit never blocks. `Job` is
+`submit` validates the bindings (a nonempty, within-limit list; a queue, program, and every buffer
+from one context; per-slot access; ranges; no aliased buffer), then — the acceptance boundary —
+claims a preallocated ring entry and event slot, arms each bound buffer's `in_flight` gate, and
+enqueues a `Job`. The cross-context rejection is load-bearing for the release/dispatch race: a job
+only ever references buffers whose owning context also owns the queue, so a valid submission cannot
+outlive its buffers through a foreign context. A full ring returns `Busy`; submit never blocks.
+`Job` is
 `unsafe impl Send`: its raw pointers reference caller-owned resources kept alive until the event is
 terminal and destroyed (the `Accelerator` contract), and are dereferenced only on the worker while
 the stream mutex is held. The worker, per job, dispatches, synchronizes, `invalidate_range`s each
@@ -86,7 +90,9 @@ Every `unsafe` block in `src/native.rs` carries a local `SAFETY:` comment naming
 relies on (handle validity, out-pointer locality, status consumption, mapped-range bounds,
 borrowed-for-the-call executable inputs, and single-drop ownership). The on-hardware integration
 tests (`tests/hardware.rs`, `va_xdna` only) exercise device info, the buffer round trip,
-out-of-bounds and permission rejection, the advertised-limit aggregation, and the full precompiled
+out-of-bounds and permission rejection, the advertised-limit aggregation, the full precompiled
 passthrough lifecycle (load → allocate → write+flush → submit → worker dispatch/synchronize →
-poll → invalidate+read → release → teardown) against a live NPU. Unsupported hosts compile no
-native module.
+poll → invalidate+read → release → teardown), and a compiled BF16 → FP32 MATMUL that runs
+bit-exact against an integer oracle — all against a live NPU. `tests/conformance.rs` runs the shared
+`virtio-accel-conformance` semantic suite on the device, including the direct-binding copy-path
+diagnostics case. Unsupported hosts compile no native module.
