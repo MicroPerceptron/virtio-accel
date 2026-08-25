@@ -70,9 +70,10 @@ advertised operators plus INT8 identity and zero-point-aware INT8 MATMUL through
 by the reusable semantic suite. A public hardware CI lane remains unavailable, so the README
 publishes the exact manual replacement commands.
 
-The AMD XDNA crate compiles its portable admission surface (`lower`, including the TOSA IDENTITY
-admission and the two advertised `Target` constants), the portable precompiled-artifact codec, and
-a placeholder on every host; portable CI unit-tests admission. HRX exposes a plain C ABI, so its
+The AMD XDNA crate compiles its portable admission surface (`lower`, including the TOSA IDENTITY,
+MATMUL, and MAX_POOL2D admissions and the two advertised `Target` constants), the portable
+precompiled-artifact codec, and a placeholder on every host; portable CI unit-tests admission. HRX
+exposes a plain C ABI, so its
 build script has no `cc`/CMake step; it enables the native modules (HRX FFI, the `Accelerator`
 implementation with its serialized dispatch worker, and the compiler-helper subprocess) only when
 an amdxdna-native HRX prefix (`VIRTIO_ACCEL_HRX_DIR`/`HRX_DIR`) carries both HRX headers — the
@@ -82,9 +83,12 @@ incompatible libhrx generation — and `lib/libhrx.so`. `VIRTIO_ACCEL_XDNA=0` fo
 `VIRTIO_ACCEL_HRX_LIB_DIR` links a bare lib directory. No standard locations are scanned, keeping
 the toolchain pin authoritative. On the reference machine with the pinned toolchain
 (`VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN`) and an NPU, backend-local tests run a DMA passthrough, a
-compiled TOSA BF16 IDENTITY, a bit-exact BF16 → FP32 MATMUL, and the shared semantic conformance
-suite end to end; compilation invokes the aiecc helper as a bounded subprocess (never a Cargo
-dependency). A public hardware CI lane remains unavailable.
+compiled TOSA BF16 IDENTITY, a bit-exact BF16 → FP32 MATMUL, BF16 NHWC MAX_POOL2D against the
+shared bit-exact oracle, and the shared semantic conformance suite end to end; compilation invokes
+the aiecc helper as a bounded subprocess (never a Cargo dependency). MAX_POOL2D mirrors OpenVINO's
+propagating-NaN and zero-padding semantics, but XDNA admission is deliberately narrower: batch 1,
+kernel and stride dimensions at most 8, and at most 8,192 input-plus-output elements so the full
+tensors fit in the AIE2P worker's local memory. A public hardware CI lane remains unavailable.
 
 Concrete VMM, kernel, OS, and vendor adapters are outside the portable-v1 milestone and must not
 become default dependencies of a portable crate.

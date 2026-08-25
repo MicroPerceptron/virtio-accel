@@ -11,6 +11,7 @@ use std::time::Duration;
 mod common;
 use common::{bf16_identity_tosa, bf16_matmul_tosa, poll_to_terminal};
 
+use virtio_accel_conformance::numerics::MAX_POOL2D_BF16;
 use virtio_accel_core::{
     Accelerator, AccessMode, ArtifactRef, BackendError, BindingRef, BufferDesc, BufferRange,
     BufferUsage, ByteSink, ByteSource, ContextDesc, EventState, MemoryDomain, QueueDesc,
@@ -478,6 +479,169 @@ fn tosa_bf16_identity_runs_on_the_npu() {
     assert_eq!(result, payload, "TOSA IDENTITY must copy input to output");
 
     backend.destroy_event(event).expect("destroy event");
+    backend.free_buffer(input).expect("free input");
+    backend.free_buffer(output).expect("free output");
+    backend.unload_program(program).expect("unload");
+    backend.destroy_queue(queue).expect("destroy queue");
+    backend.destroy_context(context).expect("destroy context");
+}
+
+#[test]
+fn tosa_bf16_max_pool2d_compiles_to_a_wellformed_artifact() {
+    if !toolchain_present() {
+        eprintln!("no XDNA toolchain configured; skipping compiler test");
+        return;
+    }
+    let container = compile_artifact(MAX_POOL2D_BF16.artifact, XDNA_TOSA_TARGET)
+        .expect("compile TOSA max pool2d");
+    let parsed =
+        virtio_accel_xdna::PrecompiledArtifact::parse(&container).expect("valid container");
+    assert!(parsed.xclbin.starts_with(b"xclbin2"));
+    assert!(!parsed.insts.is_empty() && parsed.insts.len() % 4 == 0);
+    assert_eq!((parsed.inputs, parsed.outputs), (1, 1));
+    assert_eq!(parsed.slot_bytes, [4 * 4 * 2 * 2, 2 * 2 * 2 * 2]);
+    assert_eq!(parsed.entry, "MLIR_AIE");
+}
+
+#[test]
+fn tosa_bf16_max_pool2d_matches_the_shared_oracle_on_the_npu() {
+    let Some(backend) = backend() else { return };
+    if !toolchain_present() {
+        eprintln!("no XDNA toolchain configured; skipping TOSA execution test");
+        return;
+    }
+
+    let context = backend
+        .create_context(ContextDesc::default())
+        .expect("context");
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .expect("queue");
+    let program = backend
+        .load_program(
+            &context,
+            ArtifactRef {
+                format: ARTIFACT_FORMAT,
+                target: XDNA_TOSA_TARGET.to_identity(),
+                payload: &Slice(MAX_POOL2D_BF16.artifact),
+                resident_bytes: u64::MAX,
+            },
+        )
+        .expect("load + compile TOSA max pool2d");
+
+    let mut input_bits = MAX_POOL2D_BF16.inputs[0].bits.to_vec();
+    let input_bytes = |bits: &[u16]| {
+        bits.iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>()
+    };
+    let input_len = input_bits.len() * 2;
+    let output_len = MAX_POOL2D_BF16.outputs[0].bits.len() * 2;
+    let (mut input, _) = backend
+        .allocate_buffer(
+            &context,
+            BufferDesc::new(
+                input_len as u64,
+                4096,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+            )
+            .unwrap(),
+        )
+        .expect("input buffer")
+        .into_parts();
+    let (output, _) = backend
+        .allocate_buffer(
+            &context,
+            BufferDesc::new(
+                output_len as u64,
+                4096,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+            )
+            .unwrap(),
+        )
+        .expect("output buffer")
+        .into_parts();
+
+    let bytes = input_bytes(&input_bits);
+    backend
+        .write_buffer(&mut input, 0, &Slice(&bytes))
+        .expect("write corpus input");
+    let event = backend
+        .submit(
+            &queue,
+            &program,
+            &[
+                BindingRef {
+                    slot: 0,
+                    buffer: &input,
+                    range: BufferRange::new(0, input_len as u64).unwrap(),
+                    access: AccessMode::Read,
+                },
+                BindingRef {
+                    slot: 1,
+                    buffer: &output,
+                    range: BufferRange::new(0, output_len as u64).unwrap(),
+                    access: AccessMode::Write,
+                },
+            ],
+            Timeout::Infinite,
+        )
+        .expect("submit max pool2d");
+    let state = poll_to_terminal(&backend, &event, Duration::from_secs(30))
+        .expect("max pool2d did not complete");
+    assert!(matches!(state, EventState::Complete), "got {state:?}");
+    let mut result = vec![0u8; output_len];
+    backend
+        .read_buffer(&output, 0, &mut SliceMut(&mut result))
+        .expect("read corpus output");
+    let result_bits: Vec<_> = result
+        .chunks_exact(2)
+        .map(|bytes| u16::from_le_bytes(bytes.try_into().expect("two-byte chunk")))
+        .collect();
+    assert!(MAX_POOL2D_BF16.output_matches(0, &result_bits));
+    backend.destroy_event(event).expect("destroy event");
+
+    // The advertised PROPAGATING_NAN constraint is executable behavior, not metadata only.
+    input_bits[0] = 0x7fc1;
+    let bytes = input_bytes(&input_bits);
+    backend
+        .write_buffer(&mut input, 0, &Slice(&bytes))
+        .expect("write NaN input");
+    let event = backend
+        .submit(
+            &queue,
+            &program,
+            &[
+                BindingRef {
+                    slot: 0,
+                    buffer: &input,
+                    range: BufferRange::new(0, input_len as u64).unwrap(),
+                    access: AccessMode::Read,
+                },
+                BindingRef {
+                    slot: 1,
+                    buffer: &output,
+                    range: BufferRange::new(0, output_len as u64).unwrap(),
+                    access: AccessMode::Write,
+                },
+            ],
+            Timeout::Infinite,
+        )
+        .expect("submit NaN max pool2d");
+    let state = poll_to_terminal(&backend, &event, Duration::from_secs(30))
+        .expect("NaN max pool2d did not complete");
+    assert!(matches!(state, EventState::Complete), "got {state:?}");
+    backend
+        .read_buffer(&output, 0, &mut SliceMut(&mut result))
+        .expect("read NaN output");
+    let first = u16::from_le_bytes(result[0..2].try_into().expect("first bf16"));
+    assert_eq!(first & 0x7f80, 0x7f80, "expected a BF16 NaN: {first:#06x}");
+    assert_ne!(first & 0x007f, 0, "expected a BF16 NaN: {first:#06x}");
+    backend.destroy_event(event).expect("destroy event");
+
+    assert_eq!(backend.direct_binding_admissions(), 4);
     backend.free_buffer(input).expect("free input");
     backend.free_buffer(output).expect("free output");
     backend.unload_program(program).expect("unload");

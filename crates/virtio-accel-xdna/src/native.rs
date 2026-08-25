@@ -857,7 +857,7 @@ impl Accelerator for XdnaAccelerator {
         } else if artifact.format == virtio_accel_tosa::ARTIFACT_FORMAT {
             let target = virtio_accel_tosa::Target::from_identity(artifact.target)
                 .map_err(|_| BackendError::Incompatible)?;
-            let spec = lower::admit(&bytes, target)?;
+            let spec = lower::admit(bytes, target)?;
             let compiler = match &self.compiler {
                 CompilerState::Ready(compiler) => compiler,
                 CompilerState::Unconfigured => return Err(BackendError::Unsupported),

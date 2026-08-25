@@ -4,7 +4,7 @@
 
 #[cfg(not(va_xdna))]
 use virtio_accel_tosa::TosaCapabilityProvider;
-use virtio_accel_tosa::{ExtensionSet, Op, ProfileSet, Target};
+use virtio_accel_tosa::{ExtensionSet, Op, OperatorConstraints, ProfileSet, Target};
 #[cfg(not(va_xdna))]
 use virtio_accel_xdna::XdnaAccelerator;
 use virtio_accel_xdna::{
@@ -58,7 +58,14 @@ fn bf16_capability_matches_the_implemented_surface() {
     assert_eq!(XDNA_TOSA_CAPABILITY.target, XDNA_TOSA_TARGET);
     assert!(XDNA_TOSA_CAPABILITY.supports_operator(Op::IDENTITY));
     assert!(XDNA_TOSA_CAPABILITY.supports_operator(Op::MATMUL));
-    assert!(!XDNA_TOSA_CAPABILITY.supports_operator(Op::MAX_POOL2D));
+    let pool = XDNA_TOSA_CAPABILITY
+        .operator(Op::MAX_POOL2D)
+        .expect("MAX_POOL2D capability");
+    assert!(
+        pool.constraints
+            .contains(OperatorConstraints::PROPAGATING_NAN)
+    );
+    assert!(pool.constraints.contains(OperatorConstraints::ZERO_PADDING));
 }
 
 #[cfg(not(va_xdna))]

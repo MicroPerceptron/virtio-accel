@@ -1916,6 +1916,15 @@ fn max_pool2d_fixture_is_semantically_valid() {
             ))
             .unwrap();
     }
+    parse(&max_pool2d_float_bytes(wire::DType::BF16))
+        .unwrap()
+        .validate_for(Target::new(
+            Version::TOSA_1_0,
+            ProfileSet::FLOATING_POINT,
+            Level::Level8K,
+            ExtensionSet::BF16,
+        ))
+        .unwrap();
 }
 
 #[test]
@@ -1956,6 +1965,14 @@ fn regenerate_max_pool2d_fp16_fixture() {
     let destination = std::env::var_os("VIRTIO_ACCEL_TOSA_FIXTURE_OUT")
         .expect("set VIRTIO_ACCEL_TOSA_FIXTURE_OUT to the exact output path");
     std::fs::write(destination, max_pool2d_float_bytes(wire::DType::FP16)).unwrap();
+}
+
+#[test]
+#[ignore = "writes a requested checked-in test fixture"]
+fn regenerate_max_pool2d_bf16_fixture() {
+    let destination = std::env::var_os("VIRTIO_ACCEL_TOSA_FIXTURE_OUT")
+        .expect("set VIRTIO_ACCEL_TOSA_FIXTURE_OUT to the exact output path");
+    std::fs::write(destination, max_pool2d_float_bytes(wire::DType::BF16)).unwrap();
 }
 
 fn regenerate_binary_fp16_fixture(op: wire::Op) {

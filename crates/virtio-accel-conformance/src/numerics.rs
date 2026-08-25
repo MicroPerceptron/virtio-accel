@@ -49,6 +49,45 @@ impl TosaFloat16Case {
     }
 }
 
+/// One immutable bfloat16 tensor represented by exact storage bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bfloat16Tensor {
+    /// Static row-major shape.
+    pub shape: &'static [usize],
+    /// Row-major IEEE-754 bfloat16 element bits.
+    pub bits: &'static [u16],
+}
+
+/// A stable TOSA EXT-BF16 graph and bit-exact bfloat16 numerical oracle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TosaBfloat16Case {
+    /// Diagnostic case name.
+    pub name: &'static str,
+    /// TOSA 1.0 FlatBuffer payload.
+    pub artifact: &'static [u8],
+    /// Block inputs in declared slot order.
+    pub inputs: &'static [Bfloat16Tensor],
+    /// Block outputs in declared slot order.
+    pub outputs: &'static [Bfloat16Tensor],
+}
+
+impl TosaBfloat16Case {
+    /// Compare one backend output bit-for-bit, allowing only NaN payload canonicalization.
+    pub fn output_matches(&self, output: usize, actual: &[u16]) -> bool {
+        let Some(expected) = self.outputs.get(output).map(|tensor| tensor.bits) else {
+            return false;
+        };
+        expected.len() == actual.len()
+            && expected.iter().zip(actual).all(|(expected, actual)| {
+                if is_bfloat16_nan(*expected) {
+                    is_bfloat16_nan(*actual)
+                } else {
+                    expected == actual
+                }
+            })
+    }
+}
+
 /// Raw tensor storage used by mixed-type Hexagon operator-parity cases.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RawTensor {
@@ -137,6 +176,10 @@ impl TosaRawCase {
 
 const fn is_binary16_nan(bits: u16) -> bool {
     bits & 0x7c00 == 0x7c00 && bits & 0x03ff != 0
+}
+
+const fn is_bfloat16_nan(bits: u16) -> bool {
+    bits & 0x7f80 == 0x7f80 && bits & 0x007f != 0
 }
 
 /// Packed scalar encoding used by a low-precision TOSA acceptance case.
@@ -345,6 +388,32 @@ pub const MAX_POOL2D_FP32: TosaFloat32Case = TosaFloat32Case {
     outputs: MAX_POOL2D_OUTPUTS,
     absolute_tolerance: 0.0,
     relative_tolerance: 0.0,
+};
+
+const MAX_POOL2D_INPUT_BF16_BITS: &[u16] = &[
+    0x3f80, 0x42ca, 0x4000, 0x42cc, 0x4040, 0x42ce, 0x4080, 0x42d0, 0x40a0, 0x42d2, 0x40c0, 0x42d4,
+    0x40e0, 0x42d6, 0x4100, 0x42d8, 0x4110, 0x42da, 0x4120, 0x42dc, 0x4130, 0x42de, 0x4140, 0x42e0,
+    0x4150, 0x42e2, 0x4160, 0x42e4, 0x4170, 0x42e6, 0x4180, 0x42e8,
+];
+const MAX_POOL2D_OUTPUT_BF16_BITS: &[u16] = &[
+    0x40c0, 0x42d4, 0x4100, 0x42d8, 0x4160, 0x42e4, 0x4180, 0x42e8,
+];
+const MAX_POOL2D_INPUTS_BF16: &[Bfloat16Tensor] = &[Bfloat16Tensor {
+    shape: &[1, 4, 4, 2],
+    bits: MAX_POOL2D_INPUT_BF16_BITS,
+}];
+const MAX_POOL2D_OUTPUTS_BF16: &[Bfloat16Tensor] = &[Bfloat16Tensor {
+    shape: &[1, 2, 2, 2],
+    bits: MAX_POOL2D_OUTPUT_BF16_BITS,
+}];
+
+/// BF16 two-channel NHWC max pooling with a 2x2 kernel, stride two, zero padding, and an exact
+/// integer-valued oracle.
+pub const MAX_POOL2D_BF16: TosaBfloat16Case = TosaBfloat16Case {
+    name: "max-pool2d-bf16",
+    artifact: include_bytes!("data/max-pool2d-bf16-v1.0.0.tosa"),
+    inputs: MAX_POOL2D_INPUTS_BF16,
+    outputs: MAX_POOL2D_OUTPUTS_BF16,
 };
 
 const IDENTITY_EDGE_VALUES: &[f32] = &[
@@ -932,6 +1001,26 @@ mod tests {
         assert!(
             !MAX_POOL2D_FP32.output_matches(0, &[6.0, 8.0, 14.0, 16.0, 106.0, 108.0, 114.0, 116.0])
         );
+    }
+
+    #[test]
+    fn bf16_max_pool_oracle_is_exact_and_nhwc_ordered() {
+        assert!(MAX_POOL2D_BF16.output_matches(0, MAX_POOL2D_OUTPUT_BF16_BITS));
+        assert!(!MAX_POOL2D_BF16.output_matches(
+            0,
+            &[
+                0x40c0, 0x4100, 0x4160, 0x4180, 0x42d4, 0x42d8, 0x42e4, 0x42e8
+            ]
+        ));
+        parse(MAX_POOL2D_BF16.artifact)
+            .unwrap()
+            .validate_for(Target::new(
+                Version::TOSA_1_0,
+                ProfileSet::FLOATING_POINT,
+                Level::Level8K,
+                ExtensionSet::BF16,
+            ))
+            .unwrap();
     }
 
     #[test]
