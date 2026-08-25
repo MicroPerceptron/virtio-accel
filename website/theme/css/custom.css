@@ -299,6 +299,128 @@ body {
   padding-inline: 10px;
 }
 
+/* ------------------------------------------------- "on this page" rail */
+
+/* theme/js/site.js moves mdBook's heading tree out of the sidebar and into
+ * #va-toc. Keeping it out of the chapter list is what stops the sidebar
+ * jumping on every navigation -- see the comment in that file. */
+
+:root { --va-toc-width: 248px; }
+
+#va-toc {
+  margin-block: 0 1.6em;
+  border: 1px solid var(--va-rule);
+  border-radius: 10px;
+  padding: 4px 14px 12px;
+  background: var(--va-raised);
+}
+
+#va-toc > summary {
+  font-family: var(--va-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--va-dim);
+  padding-block: 10px;
+  cursor: pointer;
+}
+
+#va-toc .on-this-page ol {
+  list-style: none;
+  margin: 0;
+  padding-inline-start: 0;
+}
+
+/* Nested heading levels indent; the outermost does not. */
+#va-toc .on-this-page ol ol { padding-inline-start: 12px; }
+
+#va-toc .header-item { margin-block: 1px; }
+
+#va-toc .chapter-link-wrapper { display: flex; align-items: baseline; gap: 4px; }
+
+#va-toc a.header-in-summary {
+  display: block;
+  flex: 1 1 auto;
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 5px 8px;
+  border-radius: 5px;
+  color: var(--sidebar-fg);
+  text-decoration: none;
+  border: none;
+}
+#va-toc a.header-in-summary:hover {
+  background: var(--theme-hover);
+  color: var(--fg);
+}
+#va-toc a.header-in-summary.current-header {
+  color: var(--sidebar-active);
+  background: color-mix(in oklab, var(--sidebar-active) 12%, transparent);
+}
+
+#va-toc .chapter-fold-toggle {
+  flex: none;
+  cursor: pointer;
+  color: var(--va-dim);
+  font-size: 9px;
+  padding: 4px;
+  line-height: 1;
+}
+#va-toc .chapter-fold-toggle div { transition: transform 0.15s; }
+#va-toc .header-item.expanded > .chapter-link-wrapper > .chapter-fold-toggle div {
+  transform: rotate(90deg);
+}
+#va-toc .header-item:not(.expanded) > ol { display: none; }
+
+/* Wide screens: the rail gets its own column beside the content and sticks.
+ * Below this it stays a plain collapsible block above the content. */
+@media (min-width: 1280px) {
+  #mdbook-content.va-has-toc {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) var(--va-toc-width);
+    column-gap: 40px;
+    align-items: start;
+    /* mdBook sets `overflow-y: auto` here, which makes this element the
+     * sticky containing block for the rail -- and since it has no height of
+     * its own it never scrolls, so the rail would just scroll away with the
+     * page. Long code blocks and wide tables carry their own overflow-x. */
+    overflow: visible;
+  }
+
+  #mdbook-content.va-has-toc > main { grid-column: 1; grid-row: 1; }
+
+  #va-toc {
+    grid-column: 2;
+    grid-row: 1;
+    position: sticky;
+    top: calc(var(--menu-bar-height) + 18px);
+    max-height: calc(100vh - var(--menu-bar-height) - 46px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    margin-block: 0;
+  }
+
+  /* Always open in rail form, so the summary is a title rather than a control. */
+  #va-toc > summary {
+    list-style: none;
+    cursor: default;
+    pointer-events: none;
+  }
+  #va-toc > summary::-webkit-details-marker { display: none; }
+  #va-toc > summary::marker { content: ""; }
+
+  #mdbook-content.va-has-toc > .nav-wrapper { grid-column: 1 / -1; }
+}
+
+/* The `va-has-toc` class is set synchronously by site.js before first paint,
+ * so the column is reserved up front rather than when the tree arrives at
+ * DOMContentLoaded -- the content never visibly narrows on load, and a page
+ * with no headings keeps the full width. */
+
+@media print {
+  #va-toc { display: none; }
+}
+
 /* ----------------------------------------------------------------- code */
 
 .content code {
