@@ -68,6 +68,9 @@ pub struct Compiler {
     interpreter: PathBuf,
     cache_dir: PathBuf,
     timeout: Duration,
+    /// Measured toolchain identity (the helper's `identity` mode output), computed once per driver
+    /// and mixed into the cache key so an in-place toolchain update cannot serve stale artifacts.
+    identity: std::sync::OnceLock<String>,
 }
 
 impl Compiler {
@@ -87,6 +90,38 @@ impl Compiler {
             interpreter,
             cache_dir,
             timeout: DEFAULT_TIMEOUT,
+            identity: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// The installed toolchain's measured identity: the embedded helper's `identity` mode reports
+    /// the key package versions (`mlir_aie`, `llvm-aie`) as JSON. Computed lazily, once per driver.
+    /// If the probe fails the marker still keys the cache on the failure itself, so a
+    /// half-installed toolchain never shares entries with a working one.
+    fn toolchain_identity(&self) -> &str {
+        self.identity.get_or_init(|| {
+            let probe = || -> Option<String> {
+                fs::create_dir_all(&self.cache_dir).ok()?;
+                let helper = self.cache_dir.join(format!(
+                    ".identity-{}-{}.py",
+                    std::process::id(),
+                    unique_suffix()
+                ));
+                fs::write(&helper, HELPER_SOURCE).ok()?;
+                let output = Command::new(&self.interpreter)
+                    .arg(&helper)
+                    .arg("identity")
+                    .env_clear()
+                    .env("PATH", "/usr/bin:/bin")
+                    .output();
+                let _ = fs::remove_file(&helper);
+                let output = output.ok()?;
+                if !output.status.success() {
+                    return None;
+                }
+                String::from_utf8(output.stdout).ok()
+            };
+            probe().unwrap_or_else(|| "identity-unavailable".to_owned())
         })
     }
 
@@ -104,23 +139,29 @@ impl Compiler {
         // never observes a partial file.
         artifact::PrecompiledArtifact::parse(&bytes).map_err(|_| external(code::BAD_OUTPUT))?;
         fs::create_dir_all(&self.cache_dir).map_err(|_| external(code::IO))?;
-        let staging = self
-            .cache_dir
-            .join(format!("{key}.{}.tmp", unique_suffix()));
+        // The staging name carries the pid: two processes compiling the same key must not share a
+        // staging path (each process's counter starts at zero).
+        let staging = self.cache_dir.join(format!(
+            "{key}.{}-{}.tmp",
+            std::process::id(),
+            unique_suffix()
+        ));
         if fs::write(&staging, &bytes).is_ok() {
             let _ = fs::rename(&staging, &cached);
         }
         Ok(bytes)
     }
 
-    /// Content-address the artifact: spec ‖ toolchain prefix ‖ embedded helper source. Two graphs
-    /// with the same op/dtype/element count compile to the same artifact, so the spec is a complete
-    /// key; the prefix and helper source invalidate on a toolchain or helper change.
+    /// Content-address the artifact: spec ‖ toolchain prefix ‖ measured toolchain identity ‖
+    /// embedded helper source. Two graphs with the same spec compile to the same artifact, so the
+    /// spec is a complete key; the prefix, the measured package versions (so an in-place toolchain
+    /// update invalidates), and the helper source invalidate on any compiler change.
     fn cache_key(&self, spec: CompilerSpec) -> String {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        1u32.hash(&mut hasher); // key schema version
+        2u32.hash(&mut hasher); // key schema version
         spec.hash(&mut hasher);
         self.toolchain.hash(&mut hasher);
+        self.toolchain_identity().hash(&mut hasher);
         HELPER_SOURCE.hash(&mut hasher);
         format!("{:016x}", hasher.finish())
     }
