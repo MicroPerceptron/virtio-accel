@@ -273,7 +273,7 @@ section { border-bottom: 1px solid var(--rule); }
 
 /* backend cards */
 .backends {
-  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px;
+  display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 16px;
 }
 .backend {
   border: 1px solid var(--rule); border-radius: 10px;
@@ -294,6 +294,7 @@ section { border-bottom: 1px solid var(--rule); }
 .tag-ok    { color: var(--accent); border-color: var(--accent-line); }
 .tag-exp   { color: var(--amber);  border-color: oklch(0.80 0.16 75 / 0.4); }
 .tag-plan  { color: var(--fg-dim); border-color: var(--rule-strong); }
+@media (max-width: 1180px) { .backends { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 1000px) { .backends { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 560px)  { .backends { grid-template-columns: minmax(0, 1fr); } }
 
@@ -422,8 +423,8 @@ footer { padding-block: 44px 52px; }
 <section>
   <div class="stats-shell">
     <div class="stats">
-      <div class="stat"><b>16</b><span>crates, one release train</span></div>
-      <div class="stat"><b style="color: var(--accent)">0</b><span>lines of unsafe</span></div>
+      <div class="stat"><b>17</b><span>crates, one release train</span></div>
+      <div class="stat"><b style="color: var(--accent)">12</b><span>forbid unsafe outright</span></div>
       <div class="stat"><b>3</b><span>bare-metal CI targets</span></div>
       <div class="stat"><b>1.85</b><span>minimum rustc</span></div>
     </div>
@@ -449,6 +450,11 @@ footer { padding-block: 44px 52px; }
           <code style="font-size: 0.9em">riscv64gc-unknown-none-elf</code> and
           <code style="font-size: 0.9em">wasm32-unknown-unknown</code>, so a crate cannot quietly
           acquire a host dependency.</p>
+        <p style="margin-top: 16px;">Twelve of the seventeen crates forbid <code style="font-size: 0.9em">unsafe</code>
+          outright. The rest quarantine it: <code style="font-size: 0.9em">virtio-accel-tosa</code> to
+          flatc-generated schema accessors, and the four host backends to their FFI shims, which
+          compile only when the native runtime is present &mdash; every other build of them forbids
+          <code style="font-size: 0.9em">unsafe</code> too.</p>
         <p style="margin-top: 18px;"><a href="docs/architecture.html" style="font-family: var(--mono); font-size: 13px;">Architecture &rarr;</a></p>
       </div>
     </div>
@@ -505,9 +511,13 @@ footer { padding-block: 44px 52px; }
         <div class="backend-top"><b>Hexagon</b><span class="tag tag-exp">experimental</span></div>
         <p>Strict FP16 and INT8 TOSA subsets lowered to QNN and executed on Hexagon HTP.</p>
       </div>
+      <div class="backend">
+        <div class="backend-top"><b>AMD XDNA/2</b><span class="tag tag-exp">in progress</span></div>
+        <p>Ryzen AI NPU over the HRX runtime; build probe and scaffold today.</p>
+      </div>
       <div class="backend planned">
-        <div class="backend-top"><b>AMD XDNA</b><span class="tag tag-plan">planned</span></div>
-        <p>Not implemented.</p>
+        <div class="backend-top"><b>Vulkan</b><span class="tag tag-plan">planned</span></div>
+        <p>Placeholder for a future compute backend. No crate or build probe yet.</p>
       </div>
     </div>
     <p style="margin-top: 18px; font-size: 14px; color: var(--fg-dim);">None of these silently
@@ -520,7 +530,7 @@ footer { padding-block: 44px 52px; }
 <section>
   <div class="shell sec">
     <div class="sec-head">
-      <h2>Sixteen crates, one release train</h2>
+      <h2>Seventeen crates, one release train</h2>
       <a href="api.html">Full crate reference &rarr;</a>
     </div>
     <div class="crates">
@@ -535,6 +545,7 @@ footer { padding-block: 44px 52px; }
       <div class="crate-row"><div>virtio-accel-coreml</div><div class="tier">macOS std</div><div class="role">TOSA-to-Core ML lowering and ANE-capable prediction</div></div>
       <div class="crate-row"><div>virtio-accel-openvino</div><div class="tier">Linux std</div><div class="role">TOSA-to-OpenVINO IR lowering and NPU/GPU/CPU inference</div></div>
       <div class="crate-row"><div>virtio-accel-hexagon</div><div class="tier">Windows ARM64 std</div><div class="role">Strict FP16/INT8 TOSA-to-QNN lowering</div></div>
+      <div class="crate-row"><div>virtio-accel-xdna</div><div class="tier">std</div><div class="role">AMD XDNA2 NPU backend over the HRX runtime; scaffold today</div></div>
       <div class="crate-row"><div>virtio-accel-split-queue</div><div class="tier">core + alloc</div><div class="role">Bounded in-memory split-ring reference model</div></div>
       <div class="crate-row"><div>virtio-accel-guest</div><div class="tier">core + alloc</div><div class="role">Typed reference client with bounded request tracking</div></div>
       <div class="crate-row"><div>virtio-accel-device</div><div class="tier">core + alloc</div><div class="role">Device-owned state with generational IDs</div></div>
