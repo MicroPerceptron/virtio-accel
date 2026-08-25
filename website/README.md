@@ -135,60 +135,55 @@ nothing serves.
 
 ## Droplet setup
 
-Any small droplet is plenty for a static site. On a recent Debian or Ubuntu
-image:
+The droplet serves the synced tree with nginx. It needs `nginx` and `rsync`
+installed, a deploy user that owns the web root, and that user's public key in
+its `authorized_keys`. Nothing else: no Rust, mdBook, Python, or Docker.
 
 ```sh
 # As root.
 apt-get update && apt-get install -y nginx rsync
 
-# A dedicated deploy user that owns the web root and nothing else.
+# A deploy user that owns the web root and nothing else.
 adduser --disabled-password --gecos "" deploy
-mkdir -p /var/www/virtio-accel.org
-chown -R deploy:deploy /var/www/virtio-accel.org
+install -d -o deploy -g deploy -m 755 /var/www/virtio-accel.org
 
-# Install the deploy public key (the pair whose private half is DEPLOY_SSH_SECRET).
-mkdir -p /home/deploy/.ssh
-printf '%s\n' 'ssh-ed25519 AAAA... deploy@virtio-accel' >> /home/deploy/.ssh/authorized_keys
-chmod 700 /home/deploy/.ssh && chmod 600 /home/deploy/.ssh/authorized_keys
-chown -R deploy:deploy /home/deploy/.ssh
+# The public half of the key stored as DEPLOY_SSH_SECRET.
+install -d -o deploy -g deploy -m 700 /home/deploy/.ssh
+printf '%s\n' 'ssh-ed25519 AAAA... deploy@virtio-accel' \
+  >> /home/deploy/.ssh/authorized_keys
+chown deploy:deploy /home/deploy/.ssh/authorized_keys
+chmod 600 /home/deploy/.ssh/authorized_keys
 ```
 
-nginx needs to be able to read the tree, so either add it to the group or serve
-as `deploy`; `chmod 755 /var/www/virtio-accel.org` is usually enough.
+The deploy pins modes itself (`--chmod=D755,F644`), so nginx can always read
+the tree no matter what the CI artifact round-trip did to permissions.
 
-An nginx server block:
+### What the nginx server block must do
+
+`root` points at `DEPLOY_PATH`, and mdBook's hashed assets can be cached hard
+because their names change whenever their contents do:
 
 ```nginx
-server {
-    listen 80;
-    listen [::]:80;
-    server_name virtio-accel.org www.virtio-accel.org;
+root /var/www/virtio-accel.org;
+index index.html;
 
-    root /var/www/virtio-accel.org;
-    index index.html;
-
-    location / {
-        try_files $uri $uri/ =404;
-    }
-
-    # Content-addressed assets mdBook emits with a hash in the filename.
-    location ~* -[0-9a-f]{8}\.(css|js|svg)$ {
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-    }
-
-    error_page 404 /404.html;
+location / {
+    try_files $uri $uri/ =404;
 }
+
+# Content-addressed assets mdBook emits with a hash in the filename.
+location ~* -[0-9a-f]{8}\.(css|js|svg)$ {
+    expires 1y;
+    add_header Cache-Control "public, immutable";
+}
+
+error_page 404 /404.html;
 ```
 
-Enable and reload:
-
-```sh
-ln -s /etc/nginx/sites-available/virtio-accel.org /etc/nginx/sites-enabled/
-nginx -t && systemctl reload nginx
-certbot --nginx -d virtio-accel.org -d www.virtio-accel.org
-```
+Leave TLS to certbot (`certbot --nginx -d virtio-accel.org`); it writes and
+renews the `listen 443 ssl`, `ssl_certificate`, and HTTP-to-HTTPS redirect lines
+in the same server block. Edit `root` in place rather than replacing the file,
+or those lines are lost. `nginx -t && systemctl reload nginx` after any change.
 
 The deploy `rsync`s with `--delete`, so the served tree exactly mirrors the
 build and a page removed from `SUMMARY.md` stops being served. `.well-known` is
@@ -196,10 +191,17 @@ excluded so it cannot race certbot's ACME challenges.
 
 ### DNS
 
-Point the domain at the droplet:
+The apex points at the droplet's **reserved** IP, not its public IPv4, so the
+droplet can be rebuilt or replaced without a DNS change:
 
 | Type | Name | Value |
 | --- | --- | --- |
-| `A` | `@` | *droplet IPv4* |
-| `AAAA` | `@` | *droplet IPv6* |
+| `A` | `@` | reserved IPv4 (`178.128.132.33`) |
+| `AAAA` | `@` | droplet IPv6 |
 | `CNAME` | `www` | `virtio-accel.org.` |
+
+`DEPLOY_SSH_HOST` should be that same reserved IP for the same reason.
+
+If `www` is served, it needs both the DNS record above and a certificate
+covering it (`certbot --nginx -d virtio-accel.org -d www.virtio-accel.org`) --
+a cert issued for the apex alone will fail the TLS handshake on `www`.
