@@ -253,9 +253,25 @@ body {
 
 /* -------------------------------------------------------------- sidebar */
 
-.sidebar { border-inline-end: 1px solid var(--va-rule); }
+.sidebar {
+  border-inline-end: 1px solid var(--va-rule);
+  /* Stock mdBook stacks the brand and the table of contents on top of each
+   * other: .sidebar-scrollbox is `position: absolute; inset: 0`, so it covers
+   * the whole sidebar and swallows clicks on anything behind it. Lay the
+   * sidebar out as a column and put the scrollbox back in flow instead.
+   * The resize handle stays absolutely positioned and is unaffected, and the
+   * show/hide transform still applies to .sidebar itself. */
+  display: flex;
+  flex-direction: column;
+}
 
-.sidebar .sidebar-scrollbox { padding: 14px 12px 40px; }
+.sidebar .sidebar-scrollbox {
+  position: relative;
+  inset: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 14px 12px 40px;
+}
 
 .chapter li.chapter-item {
   font-size: 14.5px;
