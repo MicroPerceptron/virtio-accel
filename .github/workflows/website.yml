@@ -209,9 +209,14 @@ jobs:
       # removed from SUMMARY.md stops being served instead of lingering.
       # `.well-known` is excluded because certbot writes ACME challenges there
       # and --delete would race them.
+      #
+      # `--chmod` rather than the artifact's own modes: upload-artifact and
+      # download-artifact do not round-trip file permissions faithfully, so the
+      # modes nginx sees are pinned here instead of inherited from the runner.
       - name: Sync the site to the droplet
         run: |
           rsync -az --delete --checksum \
+            --chmod=D755,F644 \
             --exclude '.well-known' \
             -e "ssh -i ~/.ssh/deploy_key -p ${DEPLOY_SSH_PORT} -o IdentitiesOnly=yes" \
             book/ "${DEPLOY_SSH_USERNAME}@${DEPLOY_SSH_HOST}:${DEPLOY_PATH}/"
