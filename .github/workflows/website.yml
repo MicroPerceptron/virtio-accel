@@ -40,8 +40,8 @@ permissions:
 concurrency:
   group: >-
     ${{ github.event_name == 'pull_request'
-        && format('website-pr-{0}', github.ref)
-        || 'pages' }}
+    && format('website-pr-{0}', github.ref)
+    || 'pages' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -87,7 +87,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request'
       && (github.event_name != 'workflow_run'
-          || github.event.workflow_run.conclusion == 'success')
+      || github.event.workflow_run.conclusion == 'success')
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -127,7 +127,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request'
       && (github.event_name != 'workflow_run'
-          || github.event.workflow_run.conclusion == 'success')
+      || github.event.workflow_run.conclusion == 'success')
     # The deploy job needs write access to Pages and an OIDC token to prove the
     # artifact came from this workflow run.
     permissions:
