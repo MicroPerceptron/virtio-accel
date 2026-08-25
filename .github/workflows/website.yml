@@ -197,11 +197,11 @@ jobs:
             "set -eu
              if [ ! -d '${DEPLOY_PATH}' ]; then
                echo \"DEPLOY_PATH does not exist: ${DEPLOY_PATH}\" >&2
-               echo \"On the droplet, as root: mkdir -p '${DEPLOY_PATH}' && chown -R \$(whoami): '${DEPLOY_PATH}'\" >&2
+               echo \"On the droplet, as root: mkdir -p '${DEPLOY_PATH}' && chown -R ${DEPLOY_SSH_USERNAME}:${DEPLOY_SSH_USERNAME} '${DEPLOY_PATH}'\" >&2
                exit 1
              fi
              if [ ! -w '${DEPLOY_PATH}' ] || [ ! -x '${DEPLOY_PATH}' ]; then
-               echo \"DEPLOY_PATH is not writable by \$(whoami): ${DEPLOY_PATH}\" >&2
+               echo \"DEPLOY_PATH is not writable by ${DEPLOY_SSH_USERNAME}: ${DEPLOY_PATH}\" >&2
                exit 1
              fi"
 
