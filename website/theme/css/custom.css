@@ -243,7 +243,20 @@ body {
   border-block-end: 1px solid var(--sidebar-spacer);
 }
 .va-brand:hover { color: var(--sidebar-active); }
-.va-brand svg { display: block; flex: none; color: var(--va-accent); }
+
+/* The logo mark, traced from assets/logo/logo-v2.png. Applied as a mask rather
+ * than an <img> so it paints in currentColor and stays legible when the reader
+ * switches to the light theme. The URL resolves against this stylesheet, which
+ * mdBook serves from theme/css/, so it is the same from any page depth. */
+.va-brand .va-mark {
+  display: block;
+  flex: none;
+  width: 21px;
+  height: 18px;
+  background: var(--va-accent);
+  -webkit-mask: url("../../logo-mark.svg") no-repeat center / contain;
+  mask: url("../../logo-mark.svg") no-repeat center / contain;
+}
 .va-brand b {
   font-family: var(--va-mono);
   font-size: 13.5px;

@@ -92,7 +92,17 @@ code, pre, kbd { font-family: var(--mono); }
   gap: 24px; min-height: 62px;
 }
 .brand { display: flex; align-items: center; gap: 11px; color: var(--fg); }
-.brand svg { display: block; flex: none; }
+.brand .va-mark { display: block; flex: none; }
+
+/* The logo mark, traced from assets/logo/logo-v2.png and applied as a mask so
+   it paints in currentColor rather than a baked-in fill. */
+.va-mark {
+  display: inline-block;
+  flex: none;
+  background: var(--accent);
+  -webkit-mask: url("logo-mark.svg") no-repeat center / contain;
+  mask: url("logo-mark.svg") no-repeat center / contain;
+}
 .brand span { font-family: var(--mono); font-weight: 700; font-size: 14px; letter-spacing: -0.01em; }
 
 .nav-links { display: flex; align-items: center; gap: 28px; font-size: 14.5px; }
@@ -367,10 +377,7 @@ footer { padding-block: 44px 52px; }
 <nav class="nav">
   <div class="shell nav-inner">
     <a class="brand" href="/" aria-label="virtio-accel home">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" style="color: var(--accent)" aria-hidden="true">
-        <path d="M12 3 3 7.5v9L12 21l9-4.5v-9L12 3Z"/>
-        <path d="M12 12 3 7.5M12 12l9-4.5M12 12v9" opacity="0.55"/>
-      </svg>
+      <i class="va-mark" style="width: 23px; height: 20px"></i>
       <span>virtio-accel</span>
     </a>
     <div class="nav-links">
@@ -581,10 +588,7 @@ footer { padding-block: 44px 52px; }
   <div class="shell foot">
     <div>
       <a class="brand" href="/" style="margin-bottom: 14px;">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" style="color: var(--accent)" aria-hidden="true">
-          <path d="M12 3 3 7.5v9L12 21l9-4.5v-9L12 3Z"/>
-          <path d="M12 12 3 7.5M12 12l9-4.5M12 12v9" opacity="0.55"/>
-        </svg>
+        <i class="va-mark" style="width: 23px; height: 20px"></i>
         <span>virtio-accel</span>
       </a>
       <p class="foot-note">Dual-licensed <code>MIT OR Apache-2.0</code>.<br>

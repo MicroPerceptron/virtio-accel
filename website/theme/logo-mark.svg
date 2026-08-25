@@ -1,6 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-<rect width="64" height="64" rx="14" fill="#22262f"/>
-<g transform="translate(8.00,52.47) scale(0.003101,-0.003101)" fill="#3ce0a5"><path d="M3455 13090 c-121 -5 -242 -13 -270 -18 -27 -6 -52 -9 -56 -6 -8 5
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1548 1320">
+<!-- Traced from assets/logo/logo-v2.png. Used as a CSS mask, so the fill
+     is irrelevant: the alpha channel is what carries the shape. -->
+<g transform="translate(0,1320) scale(0.1,-0.1)" fill="#000"><path d="M3455 13090 c-121 -5 -242 -13 -270 -18 -27 -6 -52 -9 -56 -6 -8 5
 -267 -23 -320 -35 -24 -5 -80 -17 -124 -26 -361 -77 -575 -150 -880 -302 -156
 -78 -203 -110 -423 -289 -300 -243 -495 -571 -552 -929 -42 -259 -24 -471 64
 -770 8 -27 20 -68 26 -90 41 -140 121 -329 189 -445 21 -36 70 -121 110 -190

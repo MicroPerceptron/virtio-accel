@@ -78,6 +78,7 @@ CONTENT_PAGES: list[tuple[str, str]] = [
 STANDALONE_PAGES: list[tuple[Path, str]] = [
     (CONTENT / "index.html", "index.html"),
     (WEBSITE / "theme" / "favicon.svg", "favicon.svg"),
+    (WEBSITE / "theme" / "logo-mark.svg", "logo-mark.svg"),
 ]
 
 LINK_RE = re.compile(r"(\[[^\]]*\]\()([^)\s]+)(\))")
@@ -266,6 +267,12 @@ header {{ border-bottom: 1px solid var(--rule); margin-bottom: 40px; }}
   display: flex; align-items: center; gap: 10px;
 }}
 .bar a {{ display: flex; align-items: center; gap: 10px; color: var(--fg); }}
+.mark {{
+  display: block; flex: none; width: 23px; height: 20px;
+  background: var(--accent);
+  -webkit-mask: url("../logo-mark.svg") no-repeat center / contain;
+  mask: url("../logo-mark.svg") no-repeat center / contain;
+}}
 .bar b {{ font-family: var(--mono); font-size: 14px; letter-spacing: -0.01em; }}
 h1 {{ font-size: clamp(28px, 4vw, 38px); letter-spacing: -0.03em; margin: 40px 0 12px; }}
 .lede {{ color: var(--dim); margin: 0 0 36px; max-width: 40rem; }}
@@ -285,11 +292,7 @@ li span {{ font-family: var(--mono); font-size: 11.5px; color: var(--dim); }}
 <header>
   <div class="bar">
     <a href="../index.html" aria-label="virtio-accel home">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-           stroke-width="1.7" stroke-linejoin="round" style="color: var(--accent)" aria-hidden="true">
-        <path d="M12 3 3 7.5v9L12 21l9-4.5v-9L12 3Z"/>
-        <path d="M12 12 3 7.5M12 12l9-4.5M12 12v9" opacity="0.55"/>
-      </svg>
+      <i class="mark" aria-hidden="true"></i>
       <b>virtio-accel</b>
     </a>
   </div>
