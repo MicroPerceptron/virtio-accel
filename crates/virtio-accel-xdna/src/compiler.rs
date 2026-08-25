@@ -24,6 +24,7 @@ use crate::XDNA_ERROR_DOMAIN;
 use crate::artifact;
 use crate::lower::{
     CompilerSpec, IDENTITY_LINE_SIZE, MATMUL_MAX_DIM, MATMUL_TILE_K, MATMUL_TILE_M, MATMUL_TILE_N,
+    MAX_POOL_MAX_KERNEL, MAX_POOL_MAX_STRIDE, MAX_POOL_MAX_TOTAL_ELEMENTS,
 };
 
 /// The embedded compiler helper; written into each private workdir before invocation.
@@ -65,6 +66,26 @@ fn spec_json(spec: CompilerSpec) -> String {
              \"m\":{m},\"k\":{k},\"n\":{n},\"tile_m\":{MATMUL_TILE_M},\
              \"tile_k\":{MATMUL_TILE_K},\"tile_n\":{MATMUL_TILE_N},\
              \"max_dim\":{MATMUL_MAX_DIM},{device}}}"
+        ),
+        CompilerSpec::MaxPool2d {
+            input_h,
+            input_w,
+            channels,
+            output_h,
+            output_w,
+            kernel_h,
+            kernel_w,
+            stride_h,
+            stride_w,
+        } => format!(
+            "{{\"op\":\"MAX_POOL2D\",\"dtype\":\"bf16\",\"layout\":\"NHWC\",\
+             \"batch\":1,\"input_h\":{input_h},\"input_w\":{input_w},\
+             \"channels\":{channels},\"output_h\":{output_h},\"output_w\":{output_w},\
+             \"kernel_h\":{kernel_h},\"kernel_w\":{kernel_w},\
+             \"stride_h\":{stride_h},\"stride_w\":{stride_w},\
+             \"pad\":[0,0,0,0],\"nan_mode\":\"PROPAGATE\",\
+             \"max_kernel\":{MAX_POOL_MAX_KERNEL},\"max_stride\":{MAX_POOL_MAX_STRIDE},\
+             \"max_total_elements\":{MAX_POOL_MAX_TOTAL_ELEMENTS},{device}}}"
         ),
     }
 }
@@ -324,6 +345,32 @@ mod tests {
             "\"tile_k\":64",
             "\"tile_n\":32",
             "\"max_dim\":512",
+        ] {
+            assert!(json.contains(field), "missing {field} in {json}");
+        }
+    }
+
+    #[test]
+    fn max_pool_spec_carries_shape_attributes_and_memory_envelope() {
+        let json = spec_json(CompilerSpec::MaxPool2d {
+            input_h: 4,
+            input_w: 4,
+            channels: 2,
+            output_h: 2,
+            output_w: 2,
+            kernel_h: 2,
+            kernel_w: 2,
+            stride_h: 2,
+            stride_w: 2,
+        });
+        for field in [
+            "\"layout\":\"NHWC\"",
+            "\"input_h\":4",
+            "\"output_h\":2",
+            "\"kernel_h\":2",
+            "\"stride_h\":2",
+            "\"nan_mode\":\"PROPAGATE\"",
+            "\"max_total_elements\":8192",
         ] {
             assert!(json.contains(field), "missing {field} in {json}");
         }

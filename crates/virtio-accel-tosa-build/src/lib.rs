@@ -60,6 +60,10 @@ mod slot {
     pub const VERSION_DRAFT: u16 = 10;
 
     pub const NAN_MODE: u16 = 4;
+    pub const MAX_POOL_KERNEL: u16 = 4;
+    pub const MAX_POOL_STRIDE: u16 = 6;
+    pub const MAX_POOL_PAD: u16 = 8;
+    pub const MAX_POOL_NAN_MODE: u16 = 10;
 }
 
 /// A serialized compile-time shape value.
@@ -123,14 +127,24 @@ impl<'a> Tensor<'a> {
 #[non_exhaustive]
 pub enum OperatorKind {
     MatMul,
+    MaxPool2d {
+        kernel: [i32; 2],
+        stride: [i32; 2],
+        pad: [i32; 4],
+        nan_mode: NanPropagationMode,
+    },
     Sigmoid,
     Tanh,
     Add,
     LogicalAnd,
     LogicalOr,
     LogicalXor,
-    Maximum { nan_mode: NanPropagationMode },
-    Minimum { nan_mode: NanPropagationMode },
+    Maximum {
+        nan_mode: NanPropagationMode,
+    },
+    Minimum {
+        nan_mode: NanPropagationMode,
+    },
     Mul,
     Pow,
     Sub,
@@ -159,6 +173,7 @@ impl OperatorKind {
     pub const fn op(self) -> Op {
         match self {
             Self::MatMul => Op::MATMUL,
+            Self::MaxPool2d { .. } => Op::MAX_POOL2D,
             Self::Sigmoid => Op::SIGMOID,
             Self::Tanh => Op::TANH,
             Self::Add => Op::ADD,
@@ -649,11 +664,33 @@ fn tensor_table(builder: &mut FlatBufferBuilder<'_>, tensor: Tensor<'_>) -> Tabl
 fn operator_table(builder: &mut FlatBufferBuilder<'_>, operator: Operator<'_>) -> Table {
     let inputs = string_vector(builder, operator.inputs);
     let outputs = string_vector(builder, operator.outputs);
+    let max_pool = match operator.kind {
+        OperatorKind::MaxPool2d {
+            kernel,
+            stride,
+            pad,
+            nan_mode,
+        } => Some((
+            builder.create_vector(&kernel),
+            builder.create_vector(&stride),
+            builder.create_vector(&pad),
+            nan_mode,
+        )),
+        _ => None,
+    };
     let attribute = {
         let table = builder.start_table();
         match operator.kind {
             OperatorKind::Maximum { nan_mode } | OperatorKind::Minimum { nan_mode } => {
                 builder.push_slot::<u32>(slot::NAN_MODE, nan_mode.get(), 0);
+            }
+            OperatorKind::MaxPool2d { .. } => {
+                let (kernel, stride, pad, nan_mode) =
+                    max_pool.expect("MAX_POOL2D vectors were constructed");
+                builder.push_slot_always(slot::MAX_POOL_KERNEL, kernel);
+                builder.push_slot_always(slot::MAX_POOL_STRIDE, stride);
+                builder.push_slot_always(slot::MAX_POOL_PAD, pad);
+                builder.push_slot::<u32>(slot::MAX_POOL_NAN_MODE, nan_mode.get(), 0);
             }
             _ => {}
         }
@@ -942,6 +979,16 @@ mod tests {
     fn every_operator_kind_serializes_its_pinned_opcode_and_union_tag() {
         let cases = [
             (OperatorKind::MatMul, Op::MATMUL, 7),
+            (
+                OperatorKind::MaxPool2d {
+                    kernel: [2, 2],
+                    stride: [2, 2],
+                    pad: [0; 4],
+                    nan_mode: NanPropagationMode::PROPAGATE,
+                },
+                Op::MAX_POOL2D,
+                8,
+            ),
             (OperatorKind::Sigmoid, Op::SIGMOID, 13),
             (OperatorKind::Tanh, Op::TANH, 14),
             (OperatorKind::Add, Op::ADD, 15),

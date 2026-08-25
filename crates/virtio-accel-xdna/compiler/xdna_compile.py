@@ -17,12 +17,17 @@ Two modes:
      "fold_ddr_addr_offset": false}
     {"op": "MATMUL", "in_dtype": "bf16", "out_dtype": "f32", "m": <M>, "k": <K>, "n": <N>,
      "device": "npu2", "fold_ddr_addr_offset": false}
+    {"op": "MAX_POOL2D", "dtype": "bf16", "layout": "NHWC", "batch": 1,
+     "input_h": <H>, "input_w": <W>, "channels": <C>, "output_h": <OH>, "output_w": <OW>,
+     "kernel_h": <KH>, "kernel_w": <KW>, "stride_h": <SH>, "stride_w": <SW>,
+     "pad": [0, 0, 0, 0], "nan_mode": "PROPAGATE", ...}
 
 ``result.json``: ``{"schema": 2, "ok": true, "stage": "...", "entry": "MLIR_AIE",
 "input_bytes": [..], "output_bytes": [..]}`` or ``{"schema": 2, "ok": false, "stage": "...",
 "message": "..."}``. The byte arrays are the per-slot binding plan (exact tensor sizes the compiled
 transaction stream transfers). IDENTITY binds one input and one output; MATMUL binds two inputs
-(A, B) and one output (C) — the zero-points are compile-time constants, not runtime bindings.
+(A, B) and one output (C) — the zero-points are compile-time constants, not runtime bindings;
+MAX_POOL2D binds one NHWC input and one NHWC output.
 
 The environment is pinned by the caller (cleared, with PEANO_INSTALL_DIR / AIE_XCLBINUTIL / PATH
 and a private HOME/TMPDIR/NPU_CACHE_HOME); this script sets no ambient state and never dispatches.
@@ -246,6 +251,79 @@ def _build_matmul(tile_m: int, tile_k: int, tile_n: int):
     return matmul_bf16_f32
 
 
+def _build_max_pool2d():
+    """Return a batch-1 BF16 NHWC MAX_POOL2D design with propagating NaNs.
+
+    The complete bounded tensors are double-buffered in one compute core. The worker walks output
+    positions and channels with compact SCF loops, while the at-most-8x8 window is statically
+    unrolled. ``arith.maximumf`` implements the TOSA propagating-NaN maximum and preserves the
+    required floating-point max behavior without converting BF16 storage to another dtype.
+    """
+    import aie.iron as iron
+    import ml_dtypes
+    import numpy as np
+    from aie.extras.dialects import arith
+    from aie.iron import CompileTime, In, ObjectFifo, Out, Program, Runtime, Worker
+    from aie.iron.controlflow import range_
+
+    @iron.jit
+    def max_pool2d_bf16(
+        input_tensor: In,
+        output_tensor: Out,
+        *,
+        input_h: CompileTime[int],
+        input_w: CompileTime[int],
+        channels: CompileTime[int],
+        output_h: CompileTime[int],
+        output_w: CompileTime[int],
+        kernel_h: CompileTime[int],
+        kernel_w: CompileTime[int],
+        stride_h: CompileTime[int],
+        stride_w: CompileTime[int],
+    ):
+        input_elements = input_h * input_w * channels
+        output_elements = output_h * output_w * channels
+        input_ty = np.ndarray[(input_elements,), np.dtype[ml_dtypes.bfloat16]]
+        output_ty = np.ndarray[(output_elements,), np.dtype[ml_dtypes.bfloat16]]
+        of_in = ObjectFifo(input_ty, name="pool_in")
+        of_out = ObjectFifo(output_ty, name="pool_out")
+
+        def core_fn(in_fifo, out_fifo):
+            source = in_fifo.acquire(1)
+            destination = out_fifo.acquire(1)
+            for oy in range_(output_h):
+                for ox in range_(output_w):
+                    for channel in range_(channels):
+                        input_y = oy * stride_h
+                        input_x = ox * stride_w
+                        first = (input_y * input_w + input_x) * channels + channel
+                        maximum = source[first]
+                        for ky in range(kernel_h):
+                            for kx in range(kernel_w):
+                                if ky == 0 and kx == 0:
+                                    continue
+                                index = (
+                                    ((input_y + ky) * input_w + input_x + kx) * channels
+                                    + channel
+                                )
+                                maximum = arith.maximumf(maximum, source[index])
+                        output_index = (oy * output_w + ox) * channels + channel
+                        destination[output_index] = maximum
+            in_fifo.release(1)
+            out_fifo.release(1)
+
+        worker = Worker(core_fn, [of_in.cons(), of_out.prod()])
+
+        def sequence(source, destination, in_prod, out_cons):
+            in_prod.fill(source)
+            out_cons.drain(destination, wait=True)
+
+        rt = Runtime(sequence, [input_ty, output_ty, of_in.prod(), of_out.cons()])
+        return Program(iron.get_current_device(), rt, workers=[worker]).resolve_program()
+
+    return max_pool2d_bf16
+
+
 def _compile(workdir: Path) -> int:
     try:
         spec = json.loads((workdir / "spec.json").read_text())
@@ -300,6 +378,75 @@ def _compile(workdir: Path) -> int:
 
         def build():
             return _build_matmul(tile_m, tile_k, tile_n).specialize(M=m, K=k, N=n)
+    elif op == "MAX_POOL2D":
+        dtype = spec.get("dtype")
+        layout = spec.get("layout")
+        batch = spec.get("batch")
+        input_h, input_w = spec.get("input_h"), spec.get("input_w")
+        channels = spec.get("channels")
+        output_h, output_w = spec.get("output_h"), spec.get("output_w")
+        kernel_h, kernel_w = spec.get("kernel_h"), spec.get("kernel_w")
+        stride_h, stride_w = spec.get("stride_h"), spec.get("stride_w")
+        max_kernel = spec.get("max_kernel")
+        max_stride = spec.get("max_stride")
+        max_total_elements = spec.get("max_total_elements")
+        if (
+            dtype != "bf16"
+            or layout != "NHWC"
+            or batch != 1
+            or spec.get("pad") != [0, 0, 0, 0]
+            or spec.get("nan_mode") != "PROPAGATE"
+        ):
+            return _fail(workdir, "spec-rejected", "unsupported MAX_POOL2D semantic envelope")
+        dimensions = {
+            "input_h": input_h,
+            "input_w": input_w,
+            "channels": channels,
+            "output_h": output_h,
+            "output_w": output_w,
+            "kernel_h": kernel_h,
+            "kernel_w": kernel_w,
+            "stride_h": stride_h,
+            "stride_w": stride_w,
+        }
+        for name, value in dimensions.items():
+            if not isinstance(value, int) or value <= 0:
+                return _fail(workdir, "spec-rejected", f"invalid {name}: {value}")
+        for name, value in (
+            ("max_kernel", max_kernel),
+            ("max_stride", max_stride),
+            ("max_total_elements", max_total_elements),
+        ):
+            if not isinstance(value, int) or value <= 0:
+                return _fail(workdir, "spec-rejected", f"invalid {name}: {value}")
+        if kernel_h > max_kernel or kernel_w > max_kernel:
+            return _fail(workdir, "spec-rejected", "MAX_POOL2D kernel exceeds admission bound")
+        if stride_h > max_stride or stride_w > max_stride:
+            return _fail(workdir, "spec-rejected", "MAX_POOL2D stride exceeds admission bound")
+        if kernel_h > input_h or kernel_w > input_w:
+            return _fail(workdir, "spec-rejected", "MAX_POOL2D kernel exceeds input")
+        expected_h = (input_h - kernel_h) // stride_h + 1
+        expected_w = (input_w - kernel_w) // stride_w + 1
+        if output_h != expected_h or output_w != expected_w:
+            return _fail(workdir, "spec-rejected", "MAX_POOL2D output shape is inconsistent")
+        input_elements = input_h * input_w * channels
+        output_elements = output_h * output_w * channels
+        if input_elements + output_elements > max_total_elements:
+            return _fail(workdir, "spec-rejected", "MAX_POOL2D local-memory bound exceeded")
+        input_bytes, output_bytes = [input_elements * 2], [output_elements * 2]
+
+        def build():
+            return _build_max_pool2d().specialize(
+                input_h=input_h,
+                input_w=input_w,
+                channels=channels,
+                output_h=output_h,
+                output_w=output_w,
+                kernel_h=kernel_h,
+                kernel_w=kernel_w,
+                stride_h=stride_h,
+                stride_w=stride_w,
+            )
     else:
         return _fail(workdir, "spec-rejected", f"unsupported op: {op}")
 

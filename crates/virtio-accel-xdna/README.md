@@ -15,10 +15,12 @@ flush/invalidate, release), and a serialized dispatch worker bridging
 the crate-local precompiled artifact format directly, and a TOSA artifact by admitting it and
 compiling it with the bounded aiecc helper subprocess (`compiler/xdna_compile.py`, run under the
 pinned toolchain venv in a cleared environment, content-addressed in a cache). The compilable TOSA
-subset today is the BF16 IDENTITY (a DMA copy) and the BF16 → FP32 MATMUL (the spec-mandated
-FP32-accumulator shape, batch 1, at multiples of the tested compute tile); the further compute
-tiers grow on top of it. All of this is validated on-device by `tests/hardware.rs` (a DMA
-passthrough, a compiled TOSA IDENTITY, and a bit-exact non-square MATMUL on the NPU) and by
+subset today is BF16 IDENTITY (a DMA copy), BF16 → FP32 MATMUL (the spec-mandated FP32-accumulator
+shape, batch 1, at multiples of the tested compute tile), and BF16 NHWC MAX_POOL2D. MAX_POOL2D is
+deliberately bounded to batch 1, zero padding, propagating NaNs, kernel and stride dimensions no
+larger than 8, and at most 8,192 input-plus-output elements so both tensors fit in the worker's
+local-memory budget. All of this is exercised by `tests/hardware.rs` (a DMA passthrough, compiled
+TOSA IDENTITY, bit-exact non-square MATMUL, and the shared MAX_POOL2D oracle) and by
 `tests/conformance.rs` (the shared semantic suite, including the direct-binding copy-path
 diagnostics, on the device). Hosts without HRX build the portable admission surface plus a
 placeholder, compile no `unsafe`, and still unit-test admission and the artifact codec. The
@@ -52,9 +54,12 @@ pin. Builds without the runtime still compile and unit-test the portable admissi
 
 Per the numerical-tier decision (#82), the crate defines a BF16 floating-point target (TOSA
 `EXT-BF16`) and a separate future integer target, and rejects FP32/FP16 compute at admission rather
-than silently executing it as BF16. Native builds expose the implemented BF16 IDENTITY/MATMUL
-surface through `TosaCapabilityProvider`; placeholder builds expose an empty capability list, and
-the integer target is not advertised through the provider until its execution tier lands.
+than silently executing it as BF16. Native builds expose the implemented BF16 IDENTITY, MATMUL,
+and MAX_POOL2D surface through `TosaCapabilityProvider`; placeholder builds expose an empty
+capability list, and the integer target is not advertised through the provider until its execution
+tier lands. MAX_POOL2D advertises the same propagating-NaN and zero-padding semantic constraints as
+the OpenVINO reference backend, while admission applies the narrower XDNA2 shape and local-memory
+envelope described above.
 
 ## Running
 

@@ -5,12 +5,13 @@
 //! validated, integers-and-enums-only description the compiler helper (issue #84) turns into an
 //! amdxdna artifact. Anything outside the advertised subset is rejected here, before any subprocess
 //! runs. Graph lowering for compute tiers grows on top of this; the compilable subsets today are
-//! the BF16 IDENTITY (a DMA copy) and the BF16 → FP32 MATMUL (issue #90).
+//! the BF16 IDENTITY (a DMA copy), BF16 → FP32 MATMUL (issue #90), and BF16 NHWC
+//! MAX_POOL2D (issue #91).
 
 use virtio_accel_tosa::{
     AnalyzedValueKind, CapabilityDescriptor, DType, DTypeCapability, ExtensionSet,
-    GraphCapabilities, Level, Op, OperatorCapability, OperatorConstraints, ProfileSet,
-    RuntimeConditionSupport, Target, ValueRoles, Version, parse,
+    GraphCapabilities, Level, NanPropagationMode, Op, OpAttributes, OperatorCapability,
+    OperatorConstraints, ProfileSet, RuntimeConditionSupport, Target, ValueRoles, Version, parse,
 };
 
 /// The BF16 floating-point tier: TOSA 1.0, floating-point profile, level 8K, BF16 extension.
@@ -44,6 +45,10 @@ const BF16_OPERATORS: &[OperatorCapability] = &[
     OperatorCapability::new(Op::CONST),
     OperatorCapability::new(Op::IDENTITY),
     OperatorCapability::constrained(Op::MATMUL, OperatorConstraints::ZERO_ZERO_POINTS),
+    OperatorCapability::constrained(
+        Op::MAX_POOL2D,
+        OperatorConstraints::PROPAGATING_NAN.union(OperatorConstraints::ZERO_PADDING),
+    ),
 ];
 
 /// Conservative capability boundary for the implemented XDNA BF16 execution tier.
@@ -79,6 +84,17 @@ pub(crate) const MATMUL_TILE_N: usize = 32;
 /// but only within this envelope; larger shapes are a later generalization and are rejected now.
 pub(crate) const MATMUL_MAX_DIM: usize = 512;
 
+/// Maximum admitted pooling kernel and stride dimensions. Larger windows are unproven on the
+/// scalar AIE2P kernel and are rejected before the compiler subprocess runs.
+pub(crate) const MAX_POOL_MAX_KERNEL: usize = 8;
+pub(crate) const MAX_POOL_MAX_STRIDE: usize = 8;
+
+/// Maximum combined input/output BF16 elements for one pooling specialization.
+///
+/// The worker keeps depth-two input and output objects in a compute core's roughly 64 KiB local
+/// memory. Capping the undoubled footprint at 16 KiB leaves half of L1 for code and bookkeeping.
+pub(crate) const MAX_POOL_MAX_TOTAL_ELEMENTS: usize = 8 * 1024;
+
 /// A validated operator specialization ready for the compiler helper. Each variant names its input
 /// and output dtypes; the closed shape is integers only, so no guest bytes cross the boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -90,6 +106,19 @@ pub enum CompilerSpec {
     /// `k`, `n` is a positive multiple of the corresponding MATMUL tile dimension and at most
     /// 512. The FP32 output is the TOSA-mandated accumulator (issue #82).
     Matmul { m: usize, k: usize, n: usize },
+    /// Batch-1 BF16 NHWC MAX_POOL2D with zero padding and propagating NaNs. The complete static
+    /// specialization is carried to the helper so no TOSA bytes cross the subprocess boundary.
+    MaxPool2d {
+        input_h: usize,
+        input_w: usize,
+        channels: usize,
+        output_h: usize,
+        output_w: usize,
+        kernel_h: usize,
+        kernel_w: usize,
+        stride_h: usize,
+        stride_w: usize,
+    },
 }
 
 /// Why a TOSA artifact is not admissible to the compilable subset.
@@ -119,8 +148,8 @@ impl From<AdmitError> for virtio_accel_core::BackendError {
 
 /// Admit a TOSA artifact for `target`, returning the specialization the helper compiles.
 ///
-/// Two subsets are compilable today, both on the BF16 target: the BF16 IDENTITY (a DMA copy) and
-/// the BF16 → FP32 MATMUL. Everything else is rejected without running the compiler. Each template
+/// Three subsets are compilable today, all on the BF16 target: BF16 IDENTITY (a DMA copy), BF16 →
+/// FP32 MATMUL, and BF16 NHWC MAX_POOL2D. Everything else is rejected without running the compiler. Each template
 /// admits only graphs whose **dataflow** matches what the compiled kernel executes — the IDENTITY
 /// template requires every operator to be IDENTITY (no constants: with a single block input, every
 /// value then provably carries that input's bytes), and the MATMUL template requires the operator's
@@ -152,6 +181,7 @@ pub fn admit(bytes: &[u8], target: Target) -> Result<CompilerSpec, AdmitError> {
     // tolerates exactly one MATMUL plus CONST operators, which `admit_matmul` then pins down to
     // the two zero-points.
     let mut matmul = None;
+    let mut max_pool = None;
     let mut identities = 0usize;
     let mut constants = 0usize;
     for operator in analysis.execution_order(block) {
@@ -159,14 +189,16 @@ pub fn admit(bytes: &[u8], target: Target) -> Result<CompilerSpec, AdmitError> {
             Op::IDENTITY => identities += 1,
             Op::CONST => constants += 1,
             Op::MATMUL if matmul.is_none() => matmul = Some(*operator),
+            Op::MAX_POOL2D if max_pool.is_none() => max_pool = Some(*operator),
             _ => return Err(AdmitError::Unsupported),
         }
     }
-    match (matmul, identities, constants) {
+    match (matmul, max_pool, identities, constants) {
         // All-IDENTITY (zero operators included: the block output then *is* the block input, and a
         // DMA copy is exact for it).
-        (None, _, 0) => admit_identity(&analysis, block),
-        (Some(matmul), 0, _) => admit_matmul(&analysis, block, matmul),
+        (None, None, _, 0) => admit_identity(&analysis, block),
+        (Some(matmul), None, 0, _) => admit_matmul(&analysis, block, matmul),
+        (None, Some(max_pool), 0, 0) => admit_max_pool2d(&analysis, block, max_pool),
         _ => Err(AdmitError::Unsupported),
     }
 }
@@ -301,6 +333,114 @@ fn tile_admissible(dim: usize, tile: usize) -> bool {
     dim > 0 && dim % tile == 0 && dim <= MATMUL_MAX_DIM
 }
 
+/// Admit one batch-1 BF16 NHWC MAX_POOL2D directly connecting the block input and output.
+///
+/// OpenVINO accepts the same propagating-NaN and zero-padding semantic envelope. XDNA narrows it
+/// further to bounded static tensors and small positive kernels/strides because each complete
+/// tensor is double-buffered in one AIE2P compute core's local memory.
+fn admit_max_pool2d(
+    analysis: &virtio_accel_tosa::TosaAnalysis<'_>,
+    block: virtio_accel_tosa::BlockId,
+    max_pool: virtio_accel_tosa::OperatorId,
+) -> Result<CompilerSpec, AdmitError> {
+    let inputs = analysis.operator_inputs(max_pool);
+    let outputs = analysis.operator_outputs(max_pool);
+    if inputs.len() != 1
+        || outputs.len() != 1
+        || analysis.block_inputs(block) != [inputs[0]]
+        || analysis.block_outputs(block) != [outputs[0]]
+    {
+        return Err(AdmitError::Unsupported);
+    }
+
+    let OpAttributes::MaxPool2d {
+        kernel,
+        stride,
+        pad,
+        nan_mode,
+    } = analysis.operator(max_pool).source().attributes()
+    else {
+        return Err(AdmitError::Unsupported);
+    };
+    if nan_mode != NanPropagationMode::PROPAGATE {
+        return Err(AdmitError::Unsupported);
+    }
+    let kernel = exact_positive_pair(kernel.iter(), MAX_POOL_MAX_KERNEL)?;
+    let stride = exact_positive_pair(stride.iter(), MAX_POOL_MAX_STRIDE)?;
+    let pad: Vec<_> = pad.iter().collect();
+    if pad != [0, 0, 0, 0] {
+        return Err(AdmitError::Unsupported);
+    }
+
+    let [batch, input_h, input_w, channels] = pool_dims(analysis, inputs[0])?;
+    let [output_batch, output_h, output_w, output_channels] = pool_dims(analysis, outputs[0])?;
+    if batch != 1 || output_batch != 1 || channels != output_channels {
+        return Err(AdmitError::Unsupported);
+    }
+    let input_elements = input_h
+        .checked_mul(input_w)
+        .and_then(|elements| elements.checked_mul(channels))
+        .ok_or(AdmitError::Unsupported)?;
+    let output_elements = output_h
+        .checked_mul(output_w)
+        .and_then(|elements| elements.checked_mul(channels))
+        .ok_or(AdmitError::Unsupported)?;
+    if input_elements
+        .checked_add(output_elements)
+        .is_none_or(|total| total > MAX_POOL_MAX_TOTAL_ELEMENTS)
+    {
+        return Err(AdmitError::Unsupported);
+    }
+
+    Ok(CompilerSpec::MaxPool2d {
+        input_h,
+        input_w,
+        channels,
+        output_h,
+        output_w,
+        kernel_h: kernel[0],
+        kernel_w: kernel[1],
+        stride_h: stride[0],
+        stride_w: stride[1],
+    })
+}
+
+fn exact_positive_pair(
+    values: impl Iterator<Item = i32>,
+    maximum: usize,
+) -> Result<[usize; 2], AdmitError> {
+    let values: Vec<_> = values.collect();
+    let [first, second] = values.as_slice() else {
+        return Err(AdmitError::Unsupported);
+    };
+    let first = usize::try_from(*first).map_err(|_| AdmitError::Unsupported)?;
+    let second = usize::try_from(*second).map_err(|_| AdmitError::Unsupported)?;
+    if first == 0 || second == 0 || first > maximum || second > maximum {
+        return Err(AdmitError::Unsupported);
+    }
+    Ok([first, second])
+}
+
+fn pool_dims(
+    analysis: &virtio_accel_tosa::TosaAnalysis<'_>,
+    value: virtio_accel_tosa::ValueId,
+) -> Result<[usize; 4], AdmitError> {
+    let AnalyzedValueKind::Tensor(tensor) = analysis.value(value).kind() else {
+        return Err(AdmitError::Unsupported);
+    };
+    if tensor.dtype() != DType::BF16 || tensor.rank() != Some(4) {
+        return Err(AdmitError::Unsupported);
+    }
+    let mut dims = [0usize; 4];
+    for (slot, dimension) in dims.iter_mut().zip(tensor.dimensions()) {
+        *slot = usize::try_from(dimension).map_err(|_| AdmitError::Unsupported)?;
+        if *slot == 0 {
+            return Err(AdmitError::Unsupported);
+        }
+    }
+    Ok(dims)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,6 +513,46 @@ mod tests {
         graph
     }
 
+    struct MaxPoolCase {
+        input: [i32; 3],
+        kernel: [i32; 2],
+        stride: [i32; 2],
+        pad: [i32; 4],
+        dtype: DType,
+        nan_mode: NanPropagationMode,
+    }
+
+    fn max_pool_graph(case: MaxPoolCase) -> OwnedGraph<'static> {
+        let [input_h, input_w, channels] = case.input;
+        let output_h = (input_h + case.pad[0] + case.pad[1] - case.kernel[0]) / case.stride[0] + 1;
+        let output_w = (input_w + case.pad[2] + case.pad[3] - case.kernel[1]) / case.stride[1] + 1;
+        let mut graph = OwnedGraph::new("main");
+        graph
+            .push_tensor(OwnedTensor::new(
+                "input",
+                vec![1, input_h, input_w, channels],
+                case.dtype,
+            ))
+            .push_tensor(OwnedTensor::new(
+                "output",
+                vec![1, output_h, output_w, channels],
+                case.dtype,
+            ))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::MaxPool2d {
+                    kernel: case.kernel,
+                    stride: case.stride,
+                    pad: case.pad,
+                    nan_mode: case.nan_mode,
+                },
+                vec!["input".into()],
+                vec!["output".into()],
+            ))
+            .push_input("input")
+            .push_output("output");
+        graph
+    }
+
     #[test]
     fn both_targets_are_coherent_and_distinct() {
         assert_eq!(XDNA_TOSA_TARGET.validate(), Ok(XDNA_TOSA_TARGET));
@@ -410,6 +590,89 @@ mod tests {
                     k: k as usize,
                     n: n as usize,
                 }
+            );
+        }
+    }
+
+    #[test]
+    fn admits_bf16_nhwc_max_pool2d_corpus_shape() {
+        let bytes = max_pool_graph(MaxPoolCase {
+            input: [4, 4, 2],
+            kernel: [2, 2],
+            stride: [2, 2],
+            pad: [0; 4],
+            dtype: DType::BF16,
+            nan_mode: NanPropagationMode::PROPAGATE,
+        })
+        .build(XDNA_TOSA_TARGET)
+        .expect("build bf16 max pool2d");
+        assert_eq!(
+            admit(&bytes, XDNA_TOSA_TARGET),
+            Ok(CompilerSpec::MaxPool2d {
+                input_h: 4,
+                input_w: 4,
+                channels: 2,
+                output_h: 2,
+                output_w: 2,
+                kernel_h: 2,
+                kernel_w: 2,
+                stride_h: 2,
+                stride_w: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_max_pool2d_outside_the_proven_envelope() {
+        let cases = [
+            max_pool_graph(MaxPoolCase {
+                input: [4, 4, 2],
+                kernel: [2, 2],
+                stride: [2, 2],
+                pad: [0; 4],
+                dtype: DType::FP32,
+                nan_mode: NanPropagationMode::PROPAGATE,
+            }),
+            max_pool_graph(MaxPoolCase {
+                input: [4, 4, 2],
+                kernel: [2, 2],
+                stride: [2, 2],
+                pad: [0; 4],
+                dtype: DType::BF16,
+                nan_mode: NanPropagationMode::IGNORE,
+            }),
+            max_pool_graph(MaxPoolCase {
+                input: [4, 4, 2],
+                kernel: [2, 2],
+                stride: [2, 2],
+                pad: [1; 4],
+                dtype: DType::BF16,
+                nan_mode: NanPropagationMode::PROPAGATE,
+            }),
+            max_pool_graph(MaxPoolCase {
+                input: [16, 16, 2],
+                kernel: [9, 2],
+                stride: [1, 1],
+                pad: [0; 4],
+                dtype: DType::BF16,
+                nan_mode: NanPropagationMode::PROPAGATE,
+            }),
+            max_pool_graph(MaxPoolCase {
+                input: [64, 64, 2],
+                kernel: [2, 2],
+                stride: [2, 2],
+                pad: [0; 4],
+                dtype: DType::BF16,
+                nan_mode: NanPropagationMode::PROPAGATE,
+            }),
+        ];
+        for graph in cases {
+            let bytes = graph
+                .build(XDNA_TOSA_TARGET)
+                .expect("build semantically valid max pool2d");
+            assert_eq!(
+                admit(&bytes, XDNA_TOSA_TARGET),
+                Err(AdmitError::Unsupported)
             );
         }
     }
