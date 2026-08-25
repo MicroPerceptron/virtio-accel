@@ -20,9 +20,9 @@ use std::time::{Duration, Instant};
 
 use virtio_accel_core::BackendError;
 
+use crate::XDNA_ERROR_DOMAIN;
 use crate::artifact;
 use crate::lower::CompilerSpec;
-use crate::native::XDNA_ERROR_DOMAIN;
 
 /// The embedded compiler helper; written into each private workdir before invocation.
 const HELPER_SOURCE: &str = include_str!("../compiler/xdna_compile.py");
@@ -135,8 +135,14 @@ impl Compiler {
     }
 
     fn run_helper_in(&self, spec: CompilerSpec, workdir: &Path) -> Result<Vec<u8>, BackendError> {
-        let cache = workdir.join("cache");
-        fs::create_dir_all(&cache).map_err(|_| external(code::IO))?;
+        // The kernel-object cache (NPU_CACHE_HOME) persists across compiles: the compute kernel is
+        // byte-identical for every admitted shape of one template, so a per-run cache would re-run
+        // the full Peano kernel build inside every cold compile. The spec is integers and closed
+        // enums only, so no guest bytes ever enter this cache; a toolchain change moves the whole
+        // artifact-cache key, and IRON keys its own entries by content underneath.
+        let kernel_cache = self.cache_dir.join("npu-cache");
+        fs::create_dir_all(&kernel_cache).map_err(|_| external(code::IO))?;
+        fs::create_dir_all(workdir).map_err(|_| external(code::IO))?;
         fs::write(workdir.join("spec.json"), spec_json(spec)).map_err(|_| external(code::IO))?;
         let helper = workdir.join("xdna_compile.py");
         fs::write(&helper, HELPER_SOURCE).map_err(|_| external(code::IO))?;
@@ -151,7 +157,7 @@ impl Compiler {
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", workdir)
             .env("TMPDIR", workdir)
-            .env("NPU_CACHE_HOME", &cache)
+            .env("NPU_CACHE_HOME", &kernel_cache)
             .process_group(0)
             .spawn()
             .map_err(|_| external(code::SPAWN))?;
@@ -167,6 +173,14 @@ impl Compiler {
                 }
                 Ok(None) => {
                     if Instant::now() >= deadline {
+                        // Bound the whole aiecc tree, not just the interpreter: the helper runs in
+                        // its own process group (`process_group(0)` above, so pgid == child pid)
+                        // precisely so a wedged grandchild (Peano, xclbinutil) dies with it. std
+                        // exposes no killpg, so signal the group with kill(1); the un-reaped child
+                        // keeps the pid (and thus the pgid) reserved until `wait` below.
+                        let _ = Command::new("kill")
+                            .args(["-s", "KILL", "--", &format!("-{}", child.id())])
+                            .status();
                         let _ = child.kill();
                         let _ = child.wait();
                         return Err(external(code::TIMEOUT));
@@ -177,29 +191,46 @@ impl Compiler {
             }
         }
 
-        // The helper reports its I/O plan in result.json; read the artifacts and package them.
+        // The helper reports its per-slot binding plan in result.json; read the artifacts and
+        // package them.
         let xclbin =
             fs::read(workdir.join("final.xclbin")).map_err(|_| external(code::BAD_OUTPUT))?;
         let insts = fs::read(workdir.join("insts.bin")).map_err(|_| external(code::BAD_OUTPUT))?;
-        let (inputs, outputs) = read_io_counts(&workdir.join("result.json"))?;
+        let (input_bytes, output_bytes) = read_binding_plan(&workdir.join("result.json"))?;
         Ok(artifact::encode(
-            "MLIR_AIE", inputs, outputs, &xclbin, &insts,
+            "MLIR_AIE",
+            &input_bytes,
+            &output_bytes,
+            &xclbin,
+            &insts,
         ))
     }
 }
 
-/// Parse `inputs`/`outputs` from the helper's `result.json` (a tiny, helper-authored file).
-fn read_io_counts(path: &Path) -> Result<(u32, u32), BackendError> {
+/// Parse the binding plan (`ok`, `input_bytes`, `output_bytes`) from the helper's `result.json` —
+/// a tiny file whose exact shape the embedded helper controls.
+fn read_binding_plan(path: &Path) -> Result<(Vec<u64>, Vec<u64>), BackendError> {
     let text = fs::read_to_string(path).map_err(|_| external(code::BAD_OUTPUT))?;
-    let field = |name: &str| -> Option<u32> {
+    let field = |name: &str| -> Option<&str> {
         let needle = format!("\"{name}\"");
         let start = text.find(&needle)? + needle.len();
-        let rest = text[start..].trim_start().strip_prefix(':')?.trim_start();
-        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-        digits.parse().ok()
+        Some(text[start..].trim_start().strip_prefix(':')?.trim_start())
     };
-    match (field("inputs"), field("outputs")) {
-        (Some(inputs), Some(outputs)) if inputs > 0 => Ok((inputs, outputs)),
+    // The exit status already gates on success; re-check the helper's own verdict as well.
+    if !field("ok").is_some_and(|rest| rest.starts_with("true")) {
+        return Err(external(code::BAD_OUTPUT));
+    }
+    let array = |name: &str| -> Option<Vec<u64>> {
+        let rest = field(name)?.strip_prefix('[')?;
+        let body = &rest[..rest.find(']')?];
+        body.split(',')
+            .map(|item| item.trim().parse::<u64>().ok().filter(|size| *size > 0))
+            .collect()
+    };
+    match (array("input_bytes"), array("output_bytes")) {
+        (Some(inputs), Some(outputs)) if !inputs.is_empty() && !outputs.is_empty() => {
+            Ok((inputs, outputs))
+        }
         _ => Err(external(code::BAD_OUTPUT)),
     }
 }

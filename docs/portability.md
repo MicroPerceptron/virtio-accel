@@ -81,9 +81,10 @@ incompatible libhrx generation — and `lib/libhrx.so`. `VIRTIO_ACCEL_XDNA=0` fo
 `VIRTIO_ACCEL_XDNA=1` makes a missing or incomplete runtime a build failure, and
 `VIRTIO_ACCEL_HRX_LIB_DIR` links a bare lib directory. No standard locations are scanned, keeping
 the toolchain pin authoritative. On the reference machine with the pinned toolchain
-(`VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN`) and an NPU, backend-local tests run a DMA passthrough and a
-compiled TOSA BF16 IDENTITY end to end; compilation invokes the aiecc helper as a bounded
-subprocess (never a Cargo dependency). A public hardware CI lane remains unavailable.
+(`VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN`) and an NPU, backend-local tests run a DMA passthrough, a
+compiled TOSA BF16 IDENTITY, a bit-exact BF16 → FP32 MATMUL, and the shared semantic conformance
+suite end to end; compilation invokes the aiecc helper as a bounded subprocess (never a Cargo
+dependency). A public hardware CI lane remains unavailable.
 
 Concrete VMM, kernel, OS, and vendor adapters are outside the portable-v1 milestone and must not
 become default dependencies of a portable crate.

@@ -77,13 +77,33 @@ pub enum AdmitError {
     Unsupported,
 }
 
+/// The one authoritative mapping to wire-level error codes, shared by `load_program` and
+/// `compile_artifact` so the two paths can never drift. The codes match the OpenVINO backend's
+/// classification of the same failure classes (its `lowering_error`): a malformed or semantically
+/// invalid artifact is the guest's mistake (`InvalidArgument`); a valid graph this backend cannot
+/// execute is `Unsupported`.
+impl From<AdmitError> for virtio_accel_core::BackendError {
+    fn from(error: AdmitError) -> Self {
+        match error {
+            AdmitError::Parse | AdmitError::Analysis => Self::InvalidArgument,
+            AdmitError::Unsupported => Self::Unsupported,
+        }
+    }
+}
+
 /// Admit a TOSA artifact for `target`, returning the specialization the helper compiles.
 ///
 /// Two subsets are compilable today, both on the BF16 target: the BF16 IDENTITY (a DMA copy) and
-/// the BF16 → FP32 MATMUL. Everything else is rejected without running the compiler. The compute
-/// operator selects the template; `CONST` operators (a MATMUL's zero-points) are not compute and do
-/// not. Semantic and target validity — including that BF16 MATMUL zero-points are constant zero — is
-/// enforced by [`analyze_for`](virtio_accel_tosa::Model::analyze_for) before these structural checks.
+/// the BF16 → FP32 MATMUL. Everything else is rejected without running the compiler. Each template
+/// admits only graphs whose **dataflow** matches what the compiled kernel executes — the IDENTITY
+/// template requires every operator to be IDENTITY (no constants: with a single block input, every
+/// value then provably carries that input's bytes), and the MATMUL template requires the operator's
+/// operands to be exactly the block inputs (constants may exist only as the two zero-points).
+/// Without these checks a semantically different graph (say, a constant-output IDENTITY or a
+/// constant-weights MATMUL) would compile to a kernel that reads runtime buffers the graph never
+/// asked for, returning well-formed but wrong data. Semantic and target validity — including that
+/// BF16 MATMUL zero-points are constant zero — is enforced by
+/// [`analyze_for`](virtio_accel_tosa::Model::analyze_for) before these structural checks.
 pub fn admit(bytes: &[u8], target: Target) -> Result<CompilerSpec, AdmitError> {
     if target != XDNA_TOSA_TARGET {
         // The integer tier and other targets are later tickets.
@@ -102,32 +122,33 @@ pub fn admit(bytes: &[u8], target: Target) -> Result<CompilerSpec, AdmitError> {
     }
     let block = analysis.blocks()[0].id();
 
-    // The compute operators (everything but the CONST operators that materialize a MATMUL's
-    // zero-points) select the template.
-    let compute: Vec<Op> = analysis
-        .execution_order(block)
-        .iter()
-        .map(|operator| analysis.operator(*operator).op())
-        .filter(|op| *op != Op::CONST)
-        .collect();
-
-    if !compute.is_empty() && compute.iter().all(|op| *op == Op::IDENTITY) {
-        admit_identity(&analysis, block)
-    } else if compute.as_slice() == [Op::MATMUL] {
-        let matmul = analysis
-            .execution_order(block)
-            .iter()
-            .copied()
-            .find(|operator| analysis.operator(*operator).op() == Op::MATMUL)
-            .ok_or(AdmitError::Unsupported)?;
-        admit_matmul(&analysis, matmul)
-    } else {
-        Err(AdmitError::Unsupported)
+    // Classify in one pass. IDENTITY tolerates no other operator kind (not even CONST); MATMUL
+    // tolerates exactly one MATMUL plus CONST operators, which `admit_matmul` then pins down to
+    // the two zero-points.
+    let mut matmul = None;
+    let mut identities = 0usize;
+    let mut constants = 0usize;
+    for operator in analysis.execution_order(block) {
+        match analysis.operator(*operator).op() {
+            Op::IDENTITY => identities += 1,
+            Op::CONST => constants += 1,
+            Op::MATMUL if matmul.is_none() => matmul = Some(*operator),
+            _ => return Err(AdmitError::Unsupported),
+        }
+    }
+    match (matmul, identities, constants) {
+        // All-IDENTITY (zero operators included: the block output then *is* the block input, and a
+        // DMA copy is exact for it).
+        (None, _, 0) => admit_identity(&analysis, block),
+        (Some(matmul), 0, _) => admit_matmul(&analysis, block, matmul),
+        _ => Err(AdmitError::Unsupported),
     }
 }
 
-/// Admit the BF16 IDENTITY subset: one BF16 input and output, IDENTITY operators only, every tensor
-/// BF16, and an element count that is a positive multiple of [`IDENTITY_LINE_SIZE`].
+/// Admit the BF16 IDENTITY subset: one BF16 input and output, IDENTITY operators only (already
+/// established by the caller — with no constants and one block input, every value in the block
+/// carries the input's bytes, so the output equals the input under any operator arrangement),
+/// every tensor BF16, and an element count that is a positive multiple of [`IDENTITY_LINE_SIZE`].
 fn admit_identity(
     analysis: &virtio_accel_tosa::TosaAnalysis<'_>,
     block: virtio_accel_tosa::BlockId,
@@ -151,8 +172,10 @@ fn admit_identity(
     output.rank().ok_or(AdmitError::Unsupported)?;
     let mut elements: usize = 1;
     for dimension in output.dimensions() {
+        // Negative (dynamic) dimensions must not sign-extend into a huge count.
+        let dimension = usize::try_from(dimension).map_err(|_| AdmitError::Unsupported)?;
         elements = elements
-            .checked_mul(dimension as usize)
+            .checked_mul(dimension)
             .ok_or(AdmitError::Unsupported)?;
     }
     if elements == 0 || elements % IDENTITY_LINE_SIZE != 0 {
@@ -166,14 +189,40 @@ fn admit_identity(
 /// FP32 rank-3 `[1, M, N]`, and each of `M`, `K`, `N` a positive multiple of the tested tile within
 /// [`MATMUL_MAX_DIM`]. TOSA's MATMUL carries four inputs — `lhs`, `rhs`, and the two zero-points —
 /// and one output; the zero-points' constant-zero requirement was already enforced by analysis.
+///
+/// The dataflow must be exactly the compiled kernel's: `lhs`/`rhs` are the block inputs (in slot
+/// order — the runtime binds A to slot 0 and B to slot 1), the MATMUL output is the block output,
+/// and every CONST in the graph produces only the two zero-points. A CONST-produced operand (baked
+/// weights) or a CONST-produced block output is a semantically different program and is rejected.
 fn admit_matmul(
     analysis: &virtio_accel_tosa::TosaAnalysis<'_>,
+    block: virtio_accel_tosa::BlockId,
     matmul: virtio_accel_tosa::OperatorId,
 ) -> Result<CompilerSpec, AdmitError> {
     let inputs = analysis.operator_inputs(matmul);
     let outputs = analysis.operator_outputs(matmul);
     if inputs.len() != 4 || outputs.len() != 1 {
         return Err(AdmitError::Unsupported);
+    }
+
+    // The operator's dataflow must be the block's: lhs/rhs are the block inputs in binding order,
+    // and the MATMUL result is the block output.
+    if analysis.block_inputs(block) != [inputs[0], inputs[1]]
+        || analysis.block_outputs(block) != [outputs[0]]
+    {
+        return Err(AdmitError::Unsupported);
+    }
+    // Every CONST feeds only the zero-points (operands 2 and 3); any other constant value would be
+    // graph state the compiled kernel cannot reproduce.
+    for operator in analysis.execution_order(block) {
+        if analysis.operator(*operator).op() != Op::CONST {
+            continue;
+        }
+        for produced in analysis.operator_outputs(*operator) {
+            if *produced != inputs[2] && *produced != inputs[3] {
+                return Err(AdmitError::Unsupported);
+            }
+        }
     }
 
     let lhs = matmul_dims(analysis, inputs[0], DType::BF16)?;
@@ -337,6 +386,137 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn admits_zero_operator_passthrough() {
+        // The block output *is* the block input; a DMA copy is exact for it.
+        let mut graph = OwnedGraph::new("main");
+        graph.push_tensor(OwnedTensor::new("x", vec![1, 4, 1024], DType::BF16));
+        graph.push_input("x");
+        graph.push_output("x");
+        let bytes = graph.build(XDNA_TOSA_TARGET).expect("build passthrough");
+        assert_eq!(
+            admit(&bytes, XDNA_TOSA_TARGET),
+            Ok(CompilerSpec::Identity { elements: 4 * 1024 })
+        );
+    }
+
+    #[test]
+    fn rejects_constant_output_identity() {
+        // TOSA semantics: the output equals the constant. The compiled IDENTITY kernel would copy
+        // the runtime input instead — silently wrong results — so the graph must not admit.
+        let shape = vec![1i32, 4, 1024];
+        let mut graph = OwnedGraph::new("main");
+        graph
+            .push_tensor(OwnedTensor::new("x", shape.clone(), DType::BF16))
+            .push_tensor(OwnedTensor::constant(
+                "c",
+                shape.clone(),
+                DType::BF16,
+                vec![0u8; 4 * 1024 * 2],
+            ))
+            .push_tensor(OwnedTensor::new("y", shape.clone(), DType::BF16))
+            .push_tensor(OwnedTensor::new("dead", shape, DType::BF16))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::Const,
+                vec![],
+                vec!["c".into()],
+            ))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::Identity,
+                vec!["c".into()],
+                vec!["y".into()],
+            ))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::Identity,
+                vec!["x".into()],
+                vec!["dead".into()],
+            ))
+            .push_input("x")
+            .push_output("y");
+        let bytes = graph
+            .build(XDNA_TOSA_TARGET)
+            .expect("build constant identity");
+        assert_eq!(
+            admit(&bytes, XDNA_TOSA_TARGET),
+            Err(AdmitError::Unsupported)
+        );
+    }
+
+    #[test]
+    fn rejects_constant_weights_matmul() {
+        // A CONST-produced lhs (baked weights) is a different program from the two-runtime-input
+        // kernel the helper compiles; admitting it would matmul against whatever lands in slot 0.
+        let (m, k, n) = (32i32, 64i32, 32i32);
+        let mut graph = OwnedGraph::new("main");
+        graph
+            .push_tensor(OwnedTensor::constant(
+                "lhs",
+                vec![1, m, k],
+                DType::BF16,
+                vec![0u8; (m * k * 2) as usize],
+            ))
+            .push_tensor(OwnedTensor::new("rhs", vec![1, k, n], DType::BF16))
+            .push_tensor(OwnedTensor::constant(
+                "lhs_zp",
+                vec![1],
+                DType::BF16,
+                vec![0u8; 2],
+            ))
+            .push_tensor(OwnedTensor::constant(
+                "rhs_zp",
+                vec![1],
+                DType::BF16,
+                vec![0u8; 2],
+            ))
+            .push_tensor(OwnedTensor::new("output", vec![1, m, n], DType::FP32))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::Const,
+                vec![],
+                vec!["lhs".into()],
+            ))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::Const,
+                vec![],
+                vec!["lhs_zp".into()],
+            ))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::Const,
+                vec![],
+                vec!["rhs_zp".into()],
+            ))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::MatMul,
+                vec!["lhs".into(), "rhs".into(), "lhs_zp".into(), "rhs_zp".into()],
+                vec!["output".into()],
+            ))
+            .push_input("rhs")
+            .push_output("output");
+        let bytes = graph
+            .build(XDNA_TOSA_TARGET)
+            .expect("build constant-weights matmul");
+        assert_eq!(
+            admit(&bytes, XDNA_TOSA_TARGET),
+            Err(AdmitError::Unsupported)
+        );
+    }
+
+    #[test]
+    fn admit_error_maps_to_the_reference_backend_error_codes() {
+        use virtio_accel_core::BackendError;
+        assert_eq!(
+            BackendError::from(AdmitError::Parse),
+            BackendError::InvalidArgument
+        );
+        assert_eq!(
+            BackendError::from(AdmitError::Analysis),
+            BackendError::InvalidArgument
+        );
+        assert_eq!(
+            BackendError::from(AdmitError::Unsupported),
+            BackendError::Unsupported
+        );
     }
 
     #[test]

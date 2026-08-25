@@ -164,7 +164,7 @@ source.
 | 10 | `virtio-accel-device` | `core`, `proto`, `transport` | `mock` |
 | 11 | `virtio-accel-conformance` | `core` | `mock`, `tosa` |
 | 12 | `virtio-accel-vaccel` | `core` | `conformance` |
-| 13 | `virtio-accel-xdna` | `core`, `tosa` | `tosa-build` |
+| 13 | `virtio-accel-xdna` | `core`, `tosa` | `conformance`, `tosa-build` |
 | 14 | `virtio-accel-coreml` | `core`, `tosa` | `conformance` |
 | 15 | `virtio-accel-openvino` | `core`, `tosa` | `conformance` |
 | 16 | `virtio-accel-hexagon` | `core`, `tosa` | `conformance` |

@@ -9,16 +9,18 @@
 //! The native modules (`ffi`, `native`) compile only when the build script finds a complete
 //! amdxdna-native HRX prefix (`VIRTIO_ACCEL_HRX_DIR`/`HRX_DIR`, or the `VIRTIO_ACCEL_HRX_LIB_DIR`
 //! escape hatch) and sets the `va_xdna` cfg; `VIRTIO_ACCEL_XDNA` forces the probe on (`1`, failing
-//! loudly) or off (`0`). Hosts without HRX build and unit-test the portable admission surface
-//! (`lower`) plus a compile-only placeholder, and compile no `unsafe` at all.
+//! loudly) or off (`0`). Hosts without HRX build the portable admission surface (`lower`), the
+//! artifact codec, the offline compiler driver ([`compile_artifact`], unix), and a placeholder —
+//! and compile no `unsafe` at all.
 //!
 //! **Scope today:** the full `Accelerator` lifecycle — the HRX device/stream owner, `hrx_buffer`
 //! primitives (persistent mapping, range flush/invalidate, release), and the serialized dispatch
 //! worker bridging `hrx_stream_dispatch`/`synchronize` to a latched nonblocking `poll_event`
 //! (execution-model spec, issue #85). `load_program` accepts the crate-local precompiled format
 //! ([`artifact`]) directly, and a TOSA artifact by admitting it and compiling it with the bounded
-//! aiecc helper subprocess (issue #84). The compilable TOSA subset today is the BF16 IDENTITY (a
-//! DMA copy); the compute tiers grow on top of it. Admission (`lower`) unit-tests on every host.
+//! aiecc helper subprocess (issue #84). The compilable TOSA subsets today are the BF16 IDENTITY (a
+//! DMA copy) and the BF16 → FP32 MATMUL (issue #90); the further compute tiers grow on top.
+//! Admission (`lower`) unit-tests on every host.
 
 #![cfg_attr(not(va_xdna), forbid(unsafe_code))]
 
@@ -39,6 +41,10 @@ pub use lower::{
 /// has the same property.
 pub const REQUIRED_RESIDENT_BYTES: u64 = u64::MAX;
 
+/// `BackendError::External` domain tag for this backend's failures ("XDNA" in ASCII), covering
+/// both HRX runtime errors and compiler-helper failures.
+pub const XDNA_ERROR_DOMAIN: u32 = 0x5844_4e41;
+
 /// Failure to initialize an XDNA backend instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InitError {
@@ -58,34 +64,32 @@ impl core::fmt::Display for InitError {
 
 impl std::error::Error for InitError {}
 
-#[cfg(va_xdna)]
+// The compiler-helper driver is pure safe subprocess code: it needs the pinned toolchain at run
+// time, never HRX, so it compiles on every unix host — the offline catalog-population host is
+// exactly a build machine *without* libhrx. (Unix-only: it drives the helper in its own process
+// group, a unix notion.)
+#[cfg(unix)]
 mod compiler;
 #[cfg(va_xdna)]
 mod ffi;
 #[cfg(va_xdna)]
 mod native;
 #[cfg(va_xdna)]
-pub use native::{
-    XDNA_ERROR_DOMAIN, XdnaAccelerator, XdnaBuffer, XdnaContext, XdnaEvent, XdnaProgram, XdnaQueue,
-};
+pub use native::{XdnaAccelerator, XdnaBuffer, XdnaContext, XdnaEvent, XdnaProgram, XdnaQueue};
 
 /// Admit a TOSA artifact and compile it to a precompiled-artifact container ([`artifact`]) with
 /// the pinned toolchain, without touching the device.
 ///
 /// This is the offline / catalog-population path (compiler-helper contract, issue #84): a build
 /// host produces artifacts that a device-less serving host later loads through the precompiled
-/// format. Requires the toolchain (`VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN`); it never initializes HRX.
-#[cfg(va_xdna)]
+/// format. Requires the toolchain (`VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN`) at run time and no HRX at
+/// all — it is available on any unix build, with or without the `va_xdna` native modules.
+#[cfg(unix)]
 pub fn compile_artifact(
     tosa: &[u8],
     target: virtio_accel_tosa::Target,
 ) -> Result<Vec<u8>, virtio_accel_core::BackendError> {
-    use virtio_accel_core::BackendError;
-    let spec = lower::admit(tosa, target).map_err(|error| match error {
-        lower::AdmitError::Parse => BackendError::InvalidArgument,
-        lower::AdmitError::Analysis => BackendError::Incompatible,
-        lower::AdmitError::Unsupported => BackendError::Unsupported,
-    })?;
+    let spec = lower::admit(tosa, target)?;
     compiler::Compiler::from_env()?.compile(spec)
 }
 

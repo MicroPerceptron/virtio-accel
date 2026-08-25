@@ -46,3 +46,47 @@ fn targets_survive_an_identity_round_trip() {
         assert_eq!(Target::from_identity(target.to_identity()), Ok(target));
     }
 }
+
+/// The offline / catalog-population path works without HRX: `compile_artifact` is available in
+/// every unix build (including the no-HRX placeholder), needing only the pinned toolchain at run
+/// time. This is the workflow where a build host populates a precompiled catalog for device-less
+/// (and compiler-less) serving hosts.
+#[cfg(unix)]
+#[test]
+fn compile_artifact_works_without_hrx() {
+    use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
+    use virtio_accel_xdna::compile_artifact;
+
+    if std::env::var_os("VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN").is_none() {
+        eprintln!("no XDNA toolchain configured; skipping offline compile test");
+        return;
+    }
+    const ELEMENTS: usize = 1024;
+    let mut graph = OwnedGraph::new("main");
+    graph
+        .push_tensor(OwnedTensor::new(
+            "x",
+            vec![1, 1, ELEMENTS as i32],
+            virtio_accel_tosa::DType::BF16,
+        ))
+        .push_tensor(OwnedTensor::new(
+            "y",
+            vec![1, 1, ELEMENTS as i32],
+            virtio_accel_tosa::DType::BF16,
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Identity,
+            vec!["x".into()],
+            vec!["y".into()],
+        ))
+        .push_input("x")
+        .push_output("y");
+    let tosa = graph.build(XDNA_TOSA_TARGET).expect("build bf16 identity");
+
+    let container = compile_artifact(&tosa, XDNA_TOSA_TARGET).expect("offline compile");
+    let parsed =
+        virtio_accel_xdna::PrecompiledArtifact::parse(&container).expect("valid container");
+    assert_eq!((parsed.inputs, parsed.outputs), (1, 1));
+    assert_eq!(parsed.slot_bytes, [(ELEMENTS * 2) as u64; 2]);
+    assert!(parsed.xclbin.starts_with(b"xclbin2"));
+}

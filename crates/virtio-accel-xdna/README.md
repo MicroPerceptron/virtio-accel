@@ -29,7 +29,9 @@ decisions live on their ticket branches: crate layout (#83), FFI/buffers (#87), 
 
 The compiler is never a Cargo dependency and never runs in-process. `compile_artifact` exposes the
 admit-then-compile path without a device (the offline / catalog-population use), so a build host can
-produce precompiled artifacts that a device-less serving host later loads.
+produce precompiled artifacts that a device-less serving host later loads. It is available on any
+unix build — with or without HRX — since the offline build host is exactly a machine without
+libhrx; only the pinned toolchain (`VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN`) is needed at run time.
 
 ## Build-time probe
 

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use virtio_accel_core::{
     Accelerator, AccessMode, ArtifactRef, BackendError, BindingRef, BufferDesc, BufferRange,
     BufferUsage, ByteSink, ByteSource, ContextDesc, EventState, MemoryDomain, QueueDesc,
-    TargetIdentity, Timeout,
+    SubmitFailure, TargetIdentity, Timeout,
 };
 use virtio_accel_tosa::{ARTIFACT_FORMAT, DType};
 use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
@@ -718,6 +718,226 @@ fn tosa_bf16_matmul_runs_on_the_npu() {
     backend.destroy_event(event).expect("destroy event");
     backend.free_buffer(lhs).expect("free lhs");
     backend.free_buffer(rhs).expect("free rhs");
+    backend.free_buffer(output).expect("free output");
+    backend.unload_program(program).expect("unload");
+    backend.destroy_queue(queue).expect("destroy queue");
+    backend.destroy_context(context).expect("destroy context");
+}
+
+#[test]
+fn tosa_matmul_with_a_shared_input_buffer_runs_on_the_npu() {
+    // X·X: one caller buffer bound to both read slots. Read-read aliasing is admitted (the kernel
+    // only loads from the buffer; the OpenVINO backend admits the same), and the result must still
+    // be bit-exact.
+    let Some(backend) = backend() else { return };
+    if !toolchain_present() {
+        eprintln!("no XDNA toolchain configured; skipping TOSA execution test");
+        return;
+    }
+    const DIM: usize = 64;
+    const IN_BYTES: usize = DIM * DIM * 2;
+    const OUT_BYTES: usize = DIM * DIM * 4;
+
+    let context = backend
+        .create_context(ContextDesc::default())
+        .expect("context");
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .expect("queue");
+    let tosa = bf16_matmul_tosa(DIM as i32, DIM as i32, DIM as i32);
+    let program = backend
+        .load_program(
+            &context,
+            ArtifactRef {
+                format: ARTIFACT_FORMAT,
+                target: XDNA_TOSA_TARGET.to_identity(),
+                payload: &Slice(&tosa),
+                resident_bytes: u64::MAX,
+            },
+        )
+        .expect("load + compile square matmul");
+
+    let x: Vec<f32> = (0..DIM * DIM).map(|i| (i % 5) as f32).collect();
+    let x_bytes: Vec<u8> = x.iter().flat_map(|&value| bf16_le(value)).collect();
+    let (mut shared, _) = backend
+        .allocate_buffer(
+            &context,
+            BufferDesc::new(
+                IN_BYTES as u64,
+                4096,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+            )
+            .unwrap(),
+        )
+        .expect("shared input buffer")
+        .into_parts();
+    let (output, _) = backend
+        .allocate_buffer(
+            &context,
+            BufferDesc::new(
+                OUT_BYTES as u64,
+                4096,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+            )
+            .unwrap(),
+        )
+        .expect("output buffer")
+        .into_parts();
+    backend
+        .write_buffer(&mut shared, 0, &Slice(&x_bytes))
+        .expect("write shared input");
+
+    let in_range = BufferRange::new(0, IN_BYTES as u64).unwrap();
+    let bindings = [
+        BindingRef {
+            slot: 0,
+            buffer: &shared,
+            range: in_range,
+            access: AccessMode::Read,
+        },
+        BindingRef {
+            slot: 1,
+            buffer: &shared,
+            range: in_range,
+            access: AccessMode::Read,
+        },
+        BindingRef {
+            slot: 2,
+            buffer: &output,
+            range: BufferRange::new(0, OUT_BYTES as u64).unwrap(),
+            access: AccessMode::Write,
+        },
+    ];
+    let event = backend
+        .submit(&queue, &program, &bindings, Timeout::Infinite)
+        .expect("submit with shared input");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let state = loop {
+        match backend.poll_event(&event).expect("poll") {
+            EventState::Pending => {
+                assert!(Instant::now() < deadline, "shared-input matmul stalled");
+                std::thread::yield_now();
+            }
+            terminal => break terminal,
+        }
+    };
+    assert!(matches!(state, EventState::Complete), "got {state:?}");
+
+    let mut result = vec![0u8; OUT_BYTES];
+    backend
+        .read_buffer(&output, 0, &mut SliceMut(&mut result))
+        .expect("read output");
+    for i in 0..DIM {
+        for j in 0..DIM {
+            let mut expected = 0.0f32;
+            for kk in 0..DIM {
+                expected += x[i * DIM + kk] * x[kk * DIM + j];
+            }
+            let got = f32_le(&result[(i * DIM + j) * 4..(i * DIM + j) * 4 + 4]);
+            assert_eq!(got.to_bits(), expected.to_bits(), "X·X C[{i},{j}] mismatch");
+        }
+    }
+
+    backend.destroy_event(event).expect("destroy event");
+    backend.free_buffer(shared).expect("free shared");
+    backend.free_buffer(output).expect("free output");
+    backend.unload_program(program).expect("unload");
+    backend.destroy_queue(queue).expect("destroy queue");
+    backend.destroy_context(context).expect("destroy context");
+}
+
+#[test]
+fn submit_enforces_the_per_slot_binding_plan_and_load_enforces_residency() {
+    let Some(backend) = backend() else { return };
+    let context = backend
+        .create_context(ContextDesc::default())
+        .expect("context");
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .expect("queue");
+
+    // A finite residency charge cannot be honored (HRX publishes no bound); reject at load.
+    assert!(matches!(
+        backend.load_program(
+            &context,
+            ArtifactRef {
+                format: XDNA_PRECOMPILED_FORMAT,
+                target: TargetIdentity([0; 12]),
+                payload: &Slice(PASSTHROUGH),
+                resident_bytes: 4096,
+            },
+        ),
+        Err(BackendError::ResourceLimit)
+    ));
+
+    let program = backend
+        .load_program(
+            &context,
+            ArtifactRef {
+                format: XDNA_PRECOMPILED_FORMAT,
+                target: TargetIdentity([0; 12]),
+                payload: &Slice(PASSTHROUGH),
+                resident_bytes: u64::MAX,
+            },
+        )
+        .expect("load precompiled passthrough");
+
+    // Oversized buffers so a short range stays in bounds: the rejection must come from the
+    // program's per-slot byte plan (Incompatible), not the buffer bounds (OutOfBounds).
+    let desc = |usage| {
+        BufferDesc::new(
+            2 * PASSTHROUGH_BYTES as u64,
+            4096,
+            MemoryDomain::Shared,
+            usage,
+        )
+        .unwrap()
+    };
+    let (input, _) = backend
+        .allocate_buffer(
+            &context,
+            desc(BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT),
+        )
+        .expect("input")
+        .into_parts();
+    let (unused, _) = backend
+        .allocate_buffer(
+            &context,
+            desc(BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT),
+        )
+        .expect("unused")
+        .into_parts();
+    let (output, _) = backend
+        .allocate_buffer(
+            &context,
+            desc(BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT),
+        )
+        .expect("output")
+        .into_parts();
+
+    let full = BufferRange::new(0, PASSTHROUGH_BYTES as u64).unwrap();
+    let short = BufferRange::new(0, 64).unwrap();
+    let binding = |slot, buffer, range, access| BindingRef {
+        slot,
+        buffer,
+        range,
+        access,
+    };
+    // A short input range: in bounds, but not the tensor size the TXN stream transfers.
+    let wrong_length = [
+        binding(0, &input, short, AccessMode::Read),
+        binding(1, &unused, full, AccessMode::Read),
+        binding(2, &output, full, AccessMode::Write),
+    ];
+    assert!(matches!(
+        backend.submit(&queue, &program, &wrong_length, Timeout::Infinite),
+        Err(SubmitFailure::Rejected(BackendError::Incompatible))
+    ));
+
+    backend.free_buffer(input).expect("free input");
+    backend.free_buffer(unused).expect("free unused");
     backend.free_buffer(output).expect("free output");
     backend.unload_program(program).expect("unload");
     backend.destroy_queue(queue).expect("destroy queue");

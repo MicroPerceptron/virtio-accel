@@ -18,10 +18,11 @@ Two modes:
     {"op": "MATMUL", "in_dtype": "bf16", "out_dtype": "f32", "m": <M>, "k": <K>, "n": <N>,
      "device": "npu2", "fold_ddr_addr_offset": false}
 
-``result.json``: ``{"schema": 1, "ok": true, "stage": "...", "entry": "MLIR_AIE",
-"inputs": <i>, "outputs": <o>}`` or ``{"schema": 1, "ok": false, "stage": "...", "message": "..."}``.
-IDENTITY binds one input and one output; MATMUL binds two inputs (A, B) and one output (C) — the
-zero-points are compile-time constants, not runtime bindings.
+``result.json``: ``{"schema": 2, "ok": true, "stage": "...", "entry": "MLIR_AIE",
+"input_bytes": [..], "output_bytes": [..]}`` or ``{"schema": 2, "ok": false, "stage": "...",
+"message": "..."}``. The byte arrays are the per-slot binding plan (exact tensor sizes the compiled
+transaction stream transfers). IDENTITY binds one input and one output; MATMUL binds two inputs
+(A, B) and one output (C) — the zero-points are compile-time constants, not runtime bindings.
 
 The environment is pinned by the caller (cleared, with PEANO_INSTALL_DIR / AIE_XCLBINUTIL / PATH
 and a private HOME/TMPDIR/NPU_CACHE_HOME); this script sets no ambient state and never dispatches.
@@ -44,7 +45,7 @@ MATMUL_MAX_DIM = 512
 
 def _fail(workdir: Path, stage: str, message: str) -> int:
     (workdir / "result.json").write_text(
-        json.dumps({"schema": 1, "ok": False, "stage": stage, "message": message})
+        json.dumps({"schema": 2, "ok": False, "stage": stage, "message": message})
     )
     print(f"xdna_compile: {stage}: {message}", file=sys.stderr)
     return 1
@@ -277,7 +278,8 @@ def _compile(workdir: Path) -> int:
             return _fail(
                 workdir, "spec-rejected", f"elements must be a positive multiple of {LINE_SIZE}"
             )
-        inputs, outputs = 1, 1
+        # The binding plan: exact per-slot byte sizes (bf16 = 2 B/element).
+        input_bytes, output_bytes = [elements * 2], [elements * 2]
 
         def build():
             return _build_identity(elements).specialize(n=elements)
@@ -294,7 +296,8 @@ def _compile(workdir: Path) -> int:
                 return _fail(
                     workdir, "spec-rejected", f"{name}={dim} must be a positive multiple of {tile} <= {MATMUL_MAX_DIM}"
                 )
-        inputs, outputs = 2, 1
+        # The binding plan: A[M,K] and B[K,N] are bf16 (2 B), C[M,N] is the fp32 accumulator (4 B).
+        input_bytes, output_bytes = [m * k * 2, k * n * 2], [m * n * 4]
 
         def build():
             return _build_matmul(m, k, n).specialize(M=m, K=k, N=n)
@@ -324,12 +327,12 @@ def _compile(workdir: Path) -> int:
     (workdir / "result.json").write_text(
         json.dumps(
             {
-                "schema": 1,
+                "schema": 2,
                 "ok": True,
                 "stage": "done",
                 "entry": "MLIR_AIE",
-                "inputs": inputs,
-                "outputs": outputs,
+                "input_bytes": input_bytes,
+                "output_bytes": output_bytes,
             }
         )
     )

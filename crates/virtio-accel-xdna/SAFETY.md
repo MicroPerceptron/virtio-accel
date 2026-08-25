@@ -4,7 +4,9 @@ This crate is a host-native exception to the portable workspace's `forbid(unsafe
 the same terms as `virtio-accel-openvino`. Unsafe Rust is confined to the `va_xdna` build
 configuration — `src/ffi.rs` (HRX C ABI declarations only) and `src/native.rs` (the calls) — and
 the crate root carries `cfg_attr(not(va_xdna), forbid(unsafe_code))`. The compiler-helper driver
-(`src/compiler.rs`) is safe code — it spawns the aiecc helper as a subprocess and touches no FFI.
+(`src/compiler.rs`) is safe code — it spawns the aiecc helper as a subprocess (bounding the
+helper's whole process group on timeout via `kill(1)`, not FFI) and therefore compiles on every
+unix host, HRX or not, under the placeholder build's `forbid(unsafe_code)`.
 Builds without a detected HRX runtime compile no `unsafe` at all: only the portable admission
 surface (`src/lower.rs`), the portable precompiled-artifact codec (`src/artifact.rs`), and a
 placeholder.
@@ -63,19 +65,26 @@ stream mutex: `allocate_buffer` locks it briefly, and the worker holds it across
 `hrx_stream_dispatch` + `hrx_stream_synchronize`. `Stream` is `unsafe impl Send` (moved to the
 worker, only ever dereferenced under that mutex).
 
-`submit` validates the bindings (a nonempty, within-limit list; a queue, program, and every buffer
-from one context; per-slot access; ranges; no aliased buffer), then — the acceptance boundary —
+`submit` validates the bindings in one pass (a nonempty, within-limit list; a queue, program, and
+every buffer from one context; unique slots via a 256-bit occupancy mask; per-slot access; ranges;
+an exact byte-length match against the program's per-slot plan, since the compiled TXN stream DMAs
+fixed tensor extents regardless of the bound length; and no alias involving a write slot — one
+buffer in several read slots is admitted, as OpenVINO admits it), then — the acceptance boundary —
 claims a preallocated ring entry and event slot, arms each bound buffer's `in_flight` gate, and
 enqueues a `Job`. The cross-context rejection is load-bearing for the release/dispatch race: a job
 only ever references buffers whose owning context also owns the queue, so a valid submission cannot
 outlive its buffers through a foreign context. A full ring returns `Busy`; submit never blocks.
 `Job` is
-`unsafe impl Send`: its raw pointers reference caller-owned resources kept alive until the event is
-terminal and destroyed (the `Accelerator` contract), and are dereferenced only on the worker while
-the stream mutex is held. The worker, per job, dispatches, synchronizes, `invalidate_range`s each
-output, clears the `in_flight` gates, and latches the event's terminal state exactly once. While a
-buffer's gate is set, `write_buffer`/`read_buffer`/`free_buffer` reject with `Busy`, so no host
-access or release races the device.
+`unsafe impl Send`: its raw pointers are HRX buffer/executable handles — heap objects owned by the
+HRX runtime, whose addresses are independent of where the caller's Rust handle values live — kept
+referenced until the event is terminal and destroyed (the `Accelerator` contract), and dereferenced
+only on the worker while the stream mutex is held. The in-flight gates are **`Arc`s, not pointers
+into caller structs**: the contract requires the caller keep handles *alive* until the event is
+terminal, not address-stable, so a caller may legally move an `XdnaBuffer` mid-flight; the shared
+`Arc` keeps the gate valid regardless. The worker, per job, dispatches, synchronizes,
+`invalidate_range`s each output, clears the `in_flight` gates, and latches the event's terminal
+state exactly once. While a buffer's gate is set, `write_buffer`/`read_buffer`/`free_buffer` reject
+with `Busy`, so no host access or release races the device.
 
 Finite timeouts are rejected before admission (no cancellation exists at any layer). A synchronize
 error latches the event `Failed` (a normal terminal state — the kernel TDR has quiesced the device)
