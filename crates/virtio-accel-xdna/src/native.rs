@@ -29,14 +29,11 @@ use virtio_accel_core::{
     QueueDesc, ReleaseFailure, SubmitFailure, Timeout,
 };
 
-use crate::InitError;
 use crate::artifact::{self, PrecompiledArtifact};
 use crate::compiler::Compiler;
 use crate::ffi;
 use crate::lower;
-
-/// `BackendError::External` domain tag for HRX failures ("XDNA" in ASCII).
-pub const XDNA_ERROR_DOMAIN: u32 = 0x5844_4e41;
+use crate::{InitError, XDNA_ERROR_DOMAIN};
 
 /// Upper bound advertised for a loaded artifact (mirrors the OpenVINO backend).
 const MAX_TOSA_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
@@ -175,21 +172,26 @@ impl EventSlot {
     }
 }
 
-/// One queued dispatch handed to the worker. All raw pointers reference resources the caller keeps
-/// alive until the event is terminal and destroyed (the `Accelerator` contract), and are touched
-/// only by the worker while the stream mutex is held.
+/// One queued dispatch handed to the worker. The raw pointers are HRX handles — heap objects HRX
+/// owns, whose addresses are independent of where the caller's `XdnaBuffer`/`XdnaProgram` values
+/// live — kept referenced until the event is terminal and destroyed (the `Accelerator` contract),
+/// and touched only by the worker while the stream mutex is held. The in-flight gates are `Arc`s,
+/// not pointers into the caller's structs: the caller may legally *move* a buffer while its job is
+/// in flight (the contract requires liveness, not address stability), so the gate must be
+/// address-stable on its own.
 struct Job {
     program: XdnaProgram,
     bindings: Vec<ffi::hrx_buffer_ref_t>,
     outputs: Vec<(ffi::hrx_buffer_t, usize, usize)>,
-    in_flight: Vec<*const AtomicU64>,
+    in_flight: Vec<Arc<AtomicU64>>,
     slot: Arc<EventSlot>,
 }
 
-// SAFETY: the raw pointers in a `Job` (buffer handles, in-flight gates) reference caller-owned
-// resources kept live until the event is terminal and destroyed, and are dereferenced only on the
+// SAFETY: the raw pointers in a `Job` are HRX buffer/executable handles: heap objects owned by the
+// HRX runtime whose addresses do not change when the caller moves its Rust-side handle values.
+// They stay referenced until the event is terminal and destroyed, and are dereferenced only on the
 // worker thread while the stream mutex is held. Moving the job to the worker transfers that
-// exclusive access.
+// exclusive access. Everything else in the job (`Arc`s) is `Send` on its own.
 unsafe impl Send for Job {}
 
 /// The bounded submission ring.
@@ -277,11 +279,10 @@ impl Lane {
 
         let failed = result.is_err();
         // Clear the in-flight gates before publishing the terminal state, so a caller that observes
-        // completion may immediately read or free the buffers.
-        for &gate in &job.in_flight {
-            // SAFETY: each gate points into a live buffer's `in_flight` atomic (kept alive by the
-            // caller until the event is terminal and destroyed).
-            unsafe { (*gate).store(0, Ordering::Release) };
+        // completion may immediately read or free the buffers. The gates are shared `Arc`s, valid
+        // regardless of where (or whether) the caller's buffer values still live.
+        for gate in &job.in_flight {
+            gate.store(0, Ordering::Release);
         }
         // Latch the terminal state before poisoning, so this event reports its real error rather
         // than the instance-level `DeviceLost`.
@@ -525,6 +526,7 @@ fn build_executable(
             ordinal,
             inputs: parsed.inputs,
             outputs: parsed.outputs,
+            slot_bytes: parsed.slot_bytes,
         }),
         context_id,
     })
@@ -550,6 +552,9 @@ struct ProgramInner {
     ordinal: u32,
     inputs: usize,
     outputs: usize,
+    /// Exact per-slot byte sizes (inputs `0..inputs`, then outputs). The compiled TXN stream DMAs
+    /// these extents regardless of the bound range length, so submit must enforce an exact match.
+    slot_bytes: Vec<u64>,
 }
 
 // SAFETY: the executable is refcounted and used only by the worker under the stream mutex, plus
@@ -589,7 +594,9 @@ pub struct XdnaBuffer {
     /// The context that allocated this buffer; a submission may only bind buffers from its own.
     context_id: u64,
     /// Set while the device may be reading or writing this buffer; guards host access and release.
-    in_flight: AtomicU64,
+    /// Heap-allocated (`Arc`) so a queued job's clone stays valid even if the caller moves this
+    /// struct while the job is in flight — the contract requires liveness, not address stability.
+    in_flight: Arc<AtomicU64>,
     _not_send_sync: PhantomData<*mut u8>,
 }
 
@@ -718,7 +725,7 @@ impl Accelerator for XdnaAccelerator {
                 len: size,
                 desc,
                 context_id: context.id,
-                in_flight: AtomicU64::new(0),
+                in_flight: Arc::new(AtomicU64::new(0)),
                 _not_send_sync: PhantomData,
             },
             info,
@@ -748,10 +755,12 @@ impl Accelerator for XdnaAccelerator {
         let dst =
             unsafe { core::slice::from_raw_parts_mut(buffer.mapped.as_ptr().add(start), len) };
         data.read_at(0, dst)?;
+        // SAFETY: the buffer is live and currently mapped; the range is validated; status consumed.
+        check(unsafe { ffi::hrx_buffer_flush_range(buffer.buffer.as_ptr(), start, end - start) })?;
+        // Count only completed transfers, so the diagnostics never include a failed write.
         self.explicit_transfer_bytes
             .fetch_add(len as u64, Ordering::Relaxed);
-        // SAFETY: the buffer is live and currently mapped; the range is validated; status consumed.
-        check(unsafe { ffi::hrx_buffer_flush_range(buffer.buffer.as_ptr(), start, end - start) })
+        Ok(())
     }
 
     fn read_buffer(
@@ -804,6 +813,11 @@ impl Accelerator for XdnaAccelerator {
         if artifact.payload.len() > self.info.limits.max_artifact_bytes {
             return Err(BackendError::ResourceLimit);
         }
+        // HRX publishes no finite residency bound for a loaded executable, so only the maximal
+        // charge keeps the caller's program-residency accounting truthful (mirrors OpenVINO).
+        if artifact.resident_bytes != crate::REQUIRED_RESIDENT_BYTES {
+            return Err(BackendError::ResourceLimit);
+        }
         let len =
             usize::try_from(artifact.payload.len()).map_err(|_| BackendError::ResourceLimit)?;
         let mut bytes = Vec::new();
@@ -819,11 +833,7 @@ impl Accelerator for XdnaAccelerator {
         } else if artifact.format == virtio_accel_tosa::ARTIFACT_FORMAT {
             let target = virtio_accel_tosa::Target::from_identity(artifact.target)
                 .map_err(|_| BackendError::Incompatible)?;
-            let spec = lower::admit(&bytes, target).map_err(|error| match error {
-                lower::AdmitError::Parse => BackendError::InvalidArgument,
-                lower::AdmitError::Analysis => BackendError::Incompatible,
-                lower::AdmitError::Unsupported => BackendError::Unsupported,
-            })?;
+            let spec = lower::admit(&bytes, target)?;
             self.compiler
                 .as_ref()
                 .ok_or(BackendError::Unsupported)?
@@ -896,18 +906,36 @@ impl Accelerator for XdnaAccelerator {
             return reject(BackendError::InvalidArgument);
         }
 
-        // Order the bindings by slot: inputs occupy slots `0..inputs`, outputs `inputs..total`.
-        let mut refs: Vec<ffi::hrx_buffer_ref_t> = Vec::with_capacity(total);
+        // One pass over the caller's bindings, writing each into its slot-indexed position:
+        // inputs occupy slots `0..inputs`, outputs `inputs..total`. A 256-bit occupancy mask
+        // rejects duplicate slots; with `bindings.len() == total` that also proves full coverage.
+        let mut refs: Vec<ffi::hrx_buffer_ref_t> = (0..total)
+            .map(|_| ffi::hrx_buffer_ref_t {
+                buffer: ptr::null_mut(),
+                offset: 0,
+                length: 0,
+            })
+            .collect();
         let mut output_ranges: Vec<(ffi::hrx_buffer_t, usize, usize)> = Vec::with_capacity(outputs);
-        let mut gates: Vec<*const AtomicU64> = Vec::with_capacity(total);
-        for slot in 0..total {
-            let Some(binding) = bindings.iter().find(|b| b.slot as usize == slot) else {
+        let mut gates: Vec<Arc<AtomicU64>> = Vec::with_capacity(total);
+        // (buffer handle, bound-for-write) pairs for the aliasing rule below.
+        let mut bound: Vec<(ffi::hrx_buffer_t, bool)> = Vec::with_capacity(total);
+        let mut occupied = [0u64; 4]; // total <= max_bindings_per_submission = 256
+        for binding in bindings {
+            let slot = binding.slot as usize;
+            if slot >= total {
                 return reject(BackendError::InvalidArgument);
-            };
-            let expected = if slot < inputs {
-                AccessMode::Read
-            } else {
+            }
+            let bit = 1u64 << (slot % 64);
+            if occupied[slot / 64] & bit != 0 {
+                return reject(BackendError::InvalidArgument);
+            }
+            occupied[slot / 64] |= bit;
+            let is_output = slot >= inputs;
+            let expected = if is_output {
                 AccessMode::Write
+            } else {
+                AccessMode::Read
             };
             if binding.access != expected {
                 // The access is incompatible with the program's slot plan (mirrors OpenVINO).
@@ -922,21 +950,30 @@ impl Accelerator for XdnaAccelerator {
             if buffer.checked_range(binding.range.offset, length).is_err() {
                 return reject(BackendError::OutOfBounds);
             }
-            refs.push(ffi::hrx_buffer_ref_t {
-                buffer: buffer.buffer.as_ptr(),
+            // The compiled TXN stream DMAs the slot's exact tensor extent regardless of the bound
+            // length, so anything but an exact match would read or write past the caller's declared
+            // range (mirrors OpenVINO's per-slot byte_len check).
+            if binding.range.bytes() != program.inner.slot_bytes[slot] {
+                return reject(BackendError::Incompatible);
+            }
+            // Aliasing rule: binding one buffer to several read slots is sound (the kernel only
+            // loads from it; OpenVINO admits the same). Any alias involving a write slot has
+            // kernel-order-dependent results and is rejected.
+            let handle = buffer.buffer.as_ptr();
+            for &(other, other_writes) in &bound {
+                if core::ptr::eq(other, handle) && (is_output || other_writes) {
+                    return reject(BackendError::InvalidArgument);
+                }
+            }
+            bound.push((handle, is_output));
+            refs[slot] = ffi::hrx_buffer_ref_t {
+                buffer: handle,
                 offset,
                 length,
-            });
-            gates.push(&buffer.in_flight as *const AtomicU64);
-            if slot >= inputs {
-                output_ranges.push((buffer.buffer.as_ptr(), offset, length));
-            }
-        }
-
-        // Reject an aliased binding conflict (any buffer bound more than once).
-        for (index, gate) in gates.iter().enumerate() {
-            if gates[..index].contains(gate) {
-                return reject(BackendError::InvalidArgument);
+            };
+            gates.push(Arc::clone(&buffer.in_flight));
+            if is_output {
+                output_ranges.push((handle, offset, length));
             }
         }
 
@@ -949,9 +986,8 @@ impl Accelerator for XdnaAccelerator {
             let Some(slot) = self.claim_slot() else {
                 return reject(BackendError::Busy);
             };
-            for &gate in &gates {
-                // SAFETY: each gate points into a live bound buffer's `in_flight` atomic.
-                unsafe { (*gate).store(1, Ordering::Release) };
+            for gate in &gates {
+                gate.store(1, Ordering::Release);
             }
             ring.queue.push_back(Job {
                 program: program.clone(),

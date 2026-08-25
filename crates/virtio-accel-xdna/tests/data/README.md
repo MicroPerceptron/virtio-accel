@@ -10,7 +10,8 @@ A precompiled XDNA artifact (crate-local `XDNP` container format; see
 The design (`programming_examples/basic/passthrough_dmas`) is pure shim-DMA loopback — no compute
 kernel. It declares three runtime buffers: `a_in`, an unused second input `_b_unused`, and `c_out`
 (n = 4096 `int32` = 16 KiB each). The DMA copies the first input to the output; the container
-records `inputs = 2, outputs = 1`, entry point `MLIR_AIE`.
+(format version 2) records `inputs = 2, outputs = 1`, per-slot byte sizes `[16384, 16384, 16384]`,
+entry point `MLIR_AIE`.
 
 ### Reproducing it
 
@@ -26,5 +27,6 @@ NPU_RUNTIME=hrx python3 passthrough_dmas.py -d npu2
 ```
 
 Then package the cached `final.xclbin` + `insts.bin` with `virtio_accel_xdna::artifact::encode`
-(entry `MLIR_AIE`, inputs 2, outputs 1). The artifact is device- and toolchain-specific; regenerate
-it when the pinned toolchain or the target device changes.
+(entry `MLIR_AIE`, input sizes `[16384, 16384]`, output sizes `[16384]`). The artifact is device-
+and toolchain-specific; regenerate it when the pinned toolchain, the target device, or the `XDNP`
+format version changes.
