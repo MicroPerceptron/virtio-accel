@@ -303,6 +303,10 @@ pub struct XdnaAccelerator {
     compiler: Option<Compiler>,
     info: DeviceInfo,
     next_id: AtomicU64,
+    /// Cumulative count of buffers admitted as direct bindings (no submission-time staging copy).
+    direct_binding_admissions: AtomicU64,
+    /// Cumulative bytes moved by explicit `write_buffer`/`read_buffer` transfers.
+    explicit_transfer_bytes: AtomicU64,
     _not_send_sync: PhantomData<*mut u8>,
 }
 
@@ -344,12 +348,28 @@ impl XdnaAccelerator {
             compiler: Compiler::from_env().ok(),
             info: device_info(),
             next_id: AtomicU64::new(1),
+            direct_binding_admissions: AtomicU64::new(0),
+            explicit_transfer_bytes: AtomicU64::new(0),
             _not_send_sync: PhantomData,
         })
     }
 
     fn next_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Cumulative count of buffers admitted as direct bindings (no submission-time staging copy).
+    ///
+    /// Every XDNA buffer is a persistently mapped, device-visible allocation bound straight into
+    /// the dispatch with no bounce buffer, so a submission admits `bindings.len()` direct bindings
+    /// and stages none. Surfaced to the conformance transfer/staging diagnostics hook (issue #90).
+    pub fn direct_binding_admissions(&self) -> u64 {
+        self.direct_binding_admissions.load(Ordering::Relaxed)
+    }
+
+    /// Cumulative bytes moved by explicit `write_buffer`/`read_buffer` transfers.
+    pub fn explicit_transfer_bytes(&self) -> u64 {
+        self.explicit_transfer_bytes.load(Ordering::Relaxed)
     }
 
     /// Claim a free event slot, transitioning it to `PENDING`.
@@ -723,6 +743,8 @@ impl Accelerator for XdnaAccelerator {
         let dst =
             unsafe { core::slice::from_raw_parts_mut(buffer.mapped.as_ptr().add(start), len) };
         data.read_at(0, dst)?;
+        self.explicit_transfer_bytes
+            .fetch_add(len as u64, Ordering::Relaxed);
         // SAFETY: the buffer is live and currently mapped; the range is validated; status consumed.
         check(unsafe { ffi::hrx_buffer_flush_range(buffer.buffer.as_ptr(), start, end - start) })
     }
@@ -748,7 +770,10 @@ impl Accelerator for XdnaAccelerator {
         // SAFETY: the mapping is valid for `buffer.len` bytes and `[start,end)` is within it; the
         // shared borrow with the in-flight gate rules out concurrent device writes.
         let src = unsafe { core::slice::from_raw_parts(buffer.mapped.as_ptr().add(start), len) };
-        data.write_at(0, src)
+        data.write_at(0, src)?;
+        self.explicit_transfer_bytes
+            .fetch_add(len as u64, Ordering::Relaxed);
+        Ok(())
     }
 
     fn free_buffer(&self, buffer: Self::Buffer) -> Result<(), ReleaseFailure<Self::Buffer>> {
@@ -918,6 +943,9 @@ impl Accelerator for XdnaAccelerator {
             slot
         };
         self.lane.signal.notify_one();
+        // Every binding was bound directly (persistent device-visible mapping, no bounce buffer).
+        self.direct_binding_admissions
+            .fetch_add(total as u64, Ordering::Relaxed);
         Ok(XdnaEvent { slot })
     }
 

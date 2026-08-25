@@ -4,8 +4,8 @@
 //! `Target` constants (issue #82) and [`admit`]s a TOSA artifact into a [`CompilerSpec`] — the
 //! validated, integers-and-enums-only description the compiler helper (issue #84) turns into an
 //! amdxdna artifact. Anything outside the advertised subset is rejected here, before any subprocess
-//! runs. Graph lowering for compute tiers grows on top of this; today the compilable op is the
-//! BF16 IDENTITY (a DMA copy).
+//! runs. Graph lowering for compute tiers grows on top of this; the compilable subsets today are
+//! the BF16 IDENTITY (a DMA copy) and the BF16 → FP32 MATMUL (issue #90).
 
 use virtio_accel_tosa::{
     AnalyzedValueKind, DType, ExtensionSet, Level, Op, ProfileSet, Target, Version, parse,
@@ -37,23 +37,33 @@ pub const XDNA_TOSA_INTEGER_TARGET: Target = Target::new(
 /// positive multiple of it. Kept in sync with `compiler/xdna_compile.py`.
 pub const IDENTITY_LINE_SIZE: usize = 1024;
 
-/// A validated operator specialization ready for the compiler helper.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct CompilerSpec {
-    pub op: SpecOp,
-    pub dtype: SpecDType,
-    /// Total element count (a positive multiple of [`IDENTITY_LINE_SIZE`]).
-    pub elements: usize,
-}
+/// The one tested MATMUL compute tile (`m`, `k`, `n`), proven on npu2 (AIE2P).
+///
+/// The bf16→fp32 kernel's micro-tile is (4, 8, 8); this L1-fitting macro-tile is a multiple of it,
+/// and every admitted `(M, K, N)` is a positive multiple of this tile — the single tiling the
+/// helper compiles and the hardware tests exercise. Untested shapes are rejected (issue #90).
+/// The FP32 output is 4 B/element, so this tile is smaller than a same-shape bf16 tile would be, to
+/// keep the double-buffered C tile plus the A/B tiles inside the compute core's ~64 KiB L1. Kept in
+/// sync with `compiler/xdna_compile.py`.
+pub const MATMUL_TILE_M: usize = 32;
+pub const MATMUL_TILE_K: usize = 64;
+pub const MATMUL_TILE_N: usize = 32;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum SpecOp {
-    Identity,
-}
+/// Largest admitted MATMUL dimension. The tested tiling generalizes across multiples of the tile,
+/// but only within this envelope; larger shapes are a later generalization and are rejected now.
+pub const MATMUL_MAX_DIM: usize = 512;
 
+/// A validated operator specialization ready for the compiler helper. Each variant names its input
+/// and output dtypes; the closed shape is integers only, so no guest bytes cross the boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum SpecDType {
-    Bf16,
+pub enum CompilerSpec {
+    /// BF16 → BF16 elementwise copy of `elements` values (a positive multiple of
+    /// [`IDENTITY_LINE_SIZE`]).
+    Identity { elements: usize },
+    /// BF16 × BF16 → FP32 matrix multiply `C[M, N] = A[M, K] · B[K, N]` (batch 1). Each of `m`,
+    /// `k`, `n` is a positive multiple of the corresponding MATMUL tile dimension and at most
+    /// [`MATMUL_MAX_DIM`]. The FP32 output is the TOSA-mandated accumulator (issue #82).
+    Matmul { m: usize, k: usize, n: usize },
 }
 
 /// Why a TOSA artifact is not admissible to the compilable subset.
@@ -69,9 +79,11 @@ pub enum AdmitError {
 
 /// Admit a TOSA artifact for `target`, returning the specialization the helper compiles.
 ///
-/// Only the BF16 IDENTITY subset is compilable today: one region and block, a single BF16 input
-/// and output, IDENTITY operators only, every tensor BF16, and an element count that is a positive
-/// multiple of [`IDENTITY_LINE_SIZE`]. Everything else is rejected without running the compiler.
+/// Two subsets are compilable today, both on the BF16 target: the BF16 IDENTITY (a DMA copy) and
+/// the BF16 → FP32 MATMUL. Everything else is rejected without running the compiler. The compute
+/// operator selects the template; `CONST` operators (a MATMUL's zero-points) are not compute and do
+/// not. Semantic and target validity — including that BF16 MATMUL zero-points are constant zero — is
+/// enforced by [`analyze_for`](virtio_accel_tosa::Model::analyze_for) before these structural checks.
 pub fn admit(bytes: &[u8], target: Target) -> Result<CompilerSpec, AdmitError> {
     if target != XDNA_TOSA_TARGET {
         // The integer tier and other targets are later tickets.
@@ -89,17 +101,41 @@ pub fn admit(bytes: &[u8], target: Target) -> Result<CompilerSpec, AdmitError> {
         return Err(AdmitError::Unsupported);
     }
     let block = analysis.blocks()[0].id();
+
+    // The compute operators (everything but the CONST operators that materialize a MATMUL's
+    // zero-points) select the template.
+    let compute: Vec<Op> = analysis
+        .execution_order(block)
+        .iter()
+        .map(|operator| analysis.operator(*operator).op())
+        .filter(|op| *op != Op::CONST)
+        .collect();
+
+    if !compute.is_empty() && compute.iter().all(|op| *op == Op::IDENTITY) {
+        admit_identity(&analysis, block)
+    } else if compute.as_slice() == [Op::MATMUL] {
+        let matmul = analysis
+            .execution_order(block)
+            .iter()
+            .copied()
+            .find(|operator| analysis.operator(*operator).op() == Op::MATMUL)
+            .ok_or(AdmitError::Unsupported)?;
+        admit_matmul(&analysis, matmul)
+    } else {
+        Err(AdmitError::Unsupported)
+    }
+}
+
+/// Admit the BF16 IDENTITY subset: one BF16 input and output, IDENTITY operators only, every tensor
+/// BF16, and an element count that is a positive multiple of [`IDENTITY_LINE_SIZE`].
+fn admit_identity(
+    analysis: &virtio_accel_tosa::TosaAnalysis<'_>,
+    block: virtio_accel_tosa::BlockId,
+) -> Result<CompilerSpec, AdmitError> {
     let inputs = analysis.block_inputs(block);
     let outputs = analysis.block_outputs(block);
     if inputs.len() != 1 || outputs.len() != 1 {
         return Err(AdmitError::Unsupported);
-    }
-
-    // Only IDENTITY operators, and every tensor value BF16.
-    for operator in analysis.execution_order(block) {
-        if analysis.operator(*operator).op() != Op::IDENTITY {
-            return Err(AdmitError::Unsupported);
-        }
     }
     for value in analysis.values() {
         if let AnalyzedValueKind::Tensor(tensor) = value.kind() {
@@ -123,11 +159,71 @@ pub fn admit(bytes: &[u8], target: Target) -> Result<CompilerSpec, AdmitError> {
         return Err(AdmitError::Unsupported);
     }
 
-    Ok(CompilerSpec {
-        op: SpecOp::Identity,
-        dtype: SpecDType::Bf16,
-        elements,
-    })
+    Ok(CompilerSpec::Identity { elements })
+}
+
+/// Admit the BF16 → FP32 MATMUL subset: `lhs`/`rhs` BF16 rank-3 `[1, M, K]`/`[1, K, N]`, output
+/// FP32 rank-3 `[1, M, N]`, and each of `M`, `K`, `N` a positive multiple of the tested tile within
+/// [`MATMUL_MAX_DIM`]. TOSA's MATMUL carries four inputs — `lhs`, `rhs`, and the two zero-points —
+/// and one output; the zero-points' constant-zero requirement was already enforced by analysis.
+fn admit_matmul(
+    analysis: &virtio_accel_tosa::TosaAnalysis<'_>,
+    matmul: virtio_accel_tosa::OperatorId,
+) -> Result<CompilerSpec, AdmitError> {
+    let inputs = analysis.operator_inputs(matmul);
+    let outputs = analysis.operator_outputs(matmul);
+    if inputs.len() != 4 || outputs.len() != 1 {
+        return Err(AdmitError::Unsupported);
+    }
+
+    let lhs = matmul_dims(analysis, inputs[0], DType::BF16)?;
+    let rhs = matmul_dims(analysis, inputs[1], DType::BF16)?;
+    let out = matmul_dims(analysis, outputs[0], DType::FP32)?;
+
+    // Batch 1 only (the tested tiling), and the shared dimensions must agree: A[1,M,K], B[1,K,N],
+    // C[1,M,N].
+    let ([1, m, k], [1, k2, n], [1, m2, n2]) = (lhs, rhs, out) else {
+        return Err(AdmitError::Unsupported);
+    };
+    if k != k2 || m != m2 || n != n2 {
+        return Err(AdmitError::Unsupported);
+    }
+    if !tile_admissible(m, MATMUL_TILE_M)
+        || !tile_admissible(k, MATMUL_TILE_K)
+        || !tile_admissible(n, MATMUL_TILE_N)
+    {
+        return Err(AdmitError::Unsupported);
+    }
+
+    Ok(CompilerSpec::Matmul { m, k, n })
+}
+
+/// The rank-3 dimensions of `value`, requiring the given dtype and every dimension statically
+/// positive. Dynamic (non-positive) dimensions and non-tensor or wrong-dtype values are rejected.
+fn matmul_dims(
+    analysis: &virtio_accel_tosa::TosaAnalysis<'_>,
+    value: virtio_accel_tosa::ValueId,
+    dtype: DType,
+) -> Result<[usize; 3], AdmitError> {
+    let AnalyzedValueKind::Tensor(tensor) = analysis.value(value).kind() else {
+        return Err(AdmitError::Unsupported);
+    };
+    if tensor.dtype() != dtype || tensor.rank() != Some(3) {
+        return Err(AdmitError::Unsupported);
+    }
+    let mut dims = [0usize; 3];
+    for (slot, dimension) in dims.iter_mut().zip(tensor.dimensions()) {
+        *slot = usize::try_from(dimension).map_err(|_| AdmitError::Unsupported)?;
+        if *slot == 0 {
+            return Err(AdmitError::Unsupported);
+        }
+    }
+    Ok(dims)
+}
+
+/// A dimension is admissible when it is a positive multiple of the tested tile within the envelope.
+fn tile_admissible(dim: usize, tile: usize) -> bool {
+    dim > 0 && dim % tile == 0 && dim <= MATMUL_MAX_DIM
 }
 
 #[cfg(test)]
@@ -150,6 +246,58 @@ mod tests {
         graph
     }
 
+    /// A batch-1 MATMUL `C[1,M,N] = A[1,M,K] · B[1,K,N]` with the two constant-zero zero-points.
+    fn matmul_graph(
+        m: i32,
+        k: i32,
+        n: i32,
+        in_dtype: DType,
+        out_dtype: DType,
+    ) -> OwnedGraph<'static> {
+        // A BF16 zero (0x0000) and an FP32 zero (0x0000_0000); the zero-point dtype tracks the
+        // input dtype, so two bytes suffice for every dtype used here.
+        let zero = |dtype: DType| match dtype {
+            DType::FP32 => vec![0u8; 4],
+            _ => vec![0u8; 2],
+        };
+        let mut graph = OwnedGraph::new("main");
+        graph
+            .push_tensor(OwnedTensor::new("lhs", vec![1, m, k], in_dtype))
+            .push_tensor(OwnedTensor::new("rhs", vec![1, k, n], in_dtype))
+            .push_tensor(OwnedTensor::constant(
+                "lhs_zp",
+                vec![1],
+                in_dtype,
+                zero(in_dtype),
+            ))
+            .push_tensor(OwnedTensor::constant(
+                "rhs_zp",
+                vec![1],
+                in_dtype,
+                zero(in_dtype),
+            ))
+            .push_tensor(OwnedTensor::new("output", vec![1, m, n], out_dtype))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::Const,
+                vec![],
+                vec!["lhs_zp".into()],
+            ))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::Const,
+                vec![],
+                vec!["rhs_zp".into()],
+            ))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::MatMul,
+                vec!["lhs".into(), "rhs".into(), "lhs_zp".into(), "rhs_zp".into()],
+                vec!["output".into()],
+            ))
+            .push_input("lhs")
+            .push_input("rhs")
+            .push_output("output");
+        graph
+    }
+
     #[test]
     fn both_targets_are_coherent_and_distinct() {
         assert_eq!(XDNA_TOSA_TARGET.validate(), Ok(XDNA_TOSA_TARGET));
@@ -169,9 +317,52 @@ mod tests {
             .build(XDNA_TOSA_TARGET)
             .expect("build bf16 identity");
         let spec = admit(&bytes, XDNA_TOSA_TARGET).expect("admit");
-        assert_eq!(spec.op, SpecOp::Identity);
-        assert_eq!(spec.dtype, SpecDType::Bf16);
-        assert_eq!(spec.elements, 4 * 1024);
+        assert_eq!(spec, CompilerSpec::Identity { elements: 4 * 1024 });
+    }
+
+    #[test]
+    fn admits_bf16_matmul_at_tile_multiples() {
+        // Single tile, and a larger non-square multiple of the tested tile.
+        for (m, k, n) in [(32, 64, 32), (64, 128, 96)] {
+            let bytes = matmul_graph(m, k, n, DType::BF16, DType::FP32)
+                .build(XDNA_TOSA_TARGET)
+                .expect("build bf16 matmul");
+            let spec = admit(&bytes, XDNA_TOSA_TARGET).expect("admit");
+            assert_eq!(
+                spec,
+                CompilerSpec::Matmul {
+                    m: m as usize,
+                    k: k as usize,
+                    n: n as usize,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_fp32_matmul_inputs() {
+        // FP32-input MATMUL is admissible TOSA but has no compute path on this hardware.
+        let bytes = matmul_graph(32, 64, 32, DType::FP32, DType::FP32)
+            .build(XDNA_TOSA_TARGET)
+            .expect("build fp32 matmul");
+        assert_eq!(
+            admit(&bytes, XDNA_TOSA_TARGET),
+            Err(AdmitError::Unsupported)
+        );
+    }
+
+    #[test]
+    fn rejects_matmul_shape_off_the_tested_tiling() {
+        // M not a multiple of the tile, and a dimension past the tested envelope.
+        for (m, k, n) in [(48, 64, 32), (32, 64, MATMUL_MAX_DIM as i32 + 32)] {
+            let bytes = matmul_graph(m, k, n, DType::BF16, DType::FP32)
+                .build(XDNA_TOSA_TARGET)
+                .expect("build matmul");
+            assert_eq!(
+                admit(&bytes, XDNA_TOSA_TARGET),
+                Err(AdmitError::Unsupported)
+            );
+        }
     }
 
     #[test]

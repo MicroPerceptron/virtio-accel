@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use virtio_accel_core::BackendError;
 
 use crate::artifact;
-use crate::lower::{CompilerSpec, SpecDType, SpecOp};
+use crate::lower::CompilerSpec;
 use crate::native::XDNA_ERROR_DOMAIN;
 
 /// The embedded compiler helper; written into each private workdir before invocation.
@@ -49,17 +49,17 @@ fn external(code: i64) -> BackendError {
 
 /// The `spec.json` the helper reads: integers and closed enums only.
 fn spec_json(spec: CompilerSpec) -> String {
-    let op = match spec.op {
-        SpecOp::Identity => "IDENTITY",
-    };
-    let dtype = match spec.dtype {
-        SpecDType::Bf16 => "bf16",
-    };
-    format!(
-        "{{\"op\":\"{op}\",\"dtype\":\"{dtype}\",\"elements\":{},\"device\":\"npu2\",\
-         \"fold_ddr_addr_offset\":false}}",
-        spec.elements,
-    )
+    // Common trailer: every spec targets npu2 in the unfolded-DDR ABI.
+    let device = "\"device\":\"npu2\",\"fold_ddr_addr_offset\":false";
+    match spec {
+        CompilerSpec::Identity { elements } => {
+            format!("{{\"op\":\"IDENTITY\",\"dtype\":\"bf16\",\"elements\":{elements},{device}}}")
+        }
+        CompilerSpec::Matmul { m, k, n } => format!(
+            "{{\"op\":\"MATMUL\",\"in_dtype\":\"bf16\",\"out_dtype\":\"f32\",\
+             \"m\":{m},\"k\":{k},\"n\":{n},{device}}}"
+        ),
+    }
 }
 
 /// The compiler-helper driver: a pinned toolchain prefix and a content-addressed artifact cache.

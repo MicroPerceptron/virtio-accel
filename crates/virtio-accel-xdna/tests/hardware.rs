@@ -40,6 +40,58 @@ fn bf16_identity_tosa(elements: usize) -> Vec<u8> {
     graph.build(XDNA_TOSA_TARGET).expect("build bf16 identity")
 }
 
+/// Author a batch-1 BF16 → FP32 MATMUL `C[1,M,N] = A[1,M,K] · B[1,K,N]` for the advertised target.
+/// The two zero-points are constant-zero (TOSA requires floating-point zero-points to be zero).
+fn bf16_matmul_tosa(m: i32, k: i32, n: i32) -> Vec<u8> {
+    let mut graph = OwnedGraph::new("main");
+    graph
+        .push_tensor(OwnedTensor::new("lhs", vec![1, m, k], DType::BF16))
+        .push_tensor(OwnedTensor::new("rhs", vec![1, k, n], DType::BF16))
+        .push_tensor(OwnedTensor::constant(
+            "lhs_zp",
+            vec![1],
+            DType::BF16,
+            vec![0u8; 2],
+        ))
+        .push_tensor(OwnedTensor::constant(
+            "rhs_zp",
+            vec![1],
+            DType::BF16,
+            vec![0u8; 2],
+        ))
+        .push_tensor(OwnedTensor::new("output", vec![1, m, n], DType::FP32))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Const,
+            vec![],
+            vec!["lhs_zp".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Const,
+            vec![],
+            vec!["rhs_zp".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::MatMul,
+            vec!["lhs".into(), "rhs".into(), "lhs_zp".into(), "rhs_zp".into()],
+            vec!["output".into()],
+        ))
+        .push_input("lhs")
+        .push_input("rhs")
+        .push_output("output");
+    graph.build(XDNA_TOSA_TARGET).expect("build bf16 matmul")
+}
+
+/// Encode an exactly-representable value as a little-endian BF16 (truncate the FP32 low half; exact
+/// for small integers, whose low mantissa bits are zero).
+fn bf16_le(value: f32) -> [u8; 2] {
+    ((value.to_bits() >> 16) as u16).to_le_bytes()
+}
+
+/// Decode a little-endian FP32 element.
+fn f32_le(bytes: &[u8]) -> f32 {
+    f32::from_le_bytes(bytes.try_into().expect("4 bytes"))
+}
+
 /// Precompiled DMA passthrough for npu2, built with the pinned toolchain from
 /// `programming_examples/basic/passthrough_dmas` (n=4096 int32; entry `MLIR_AIE`) and packaged with
 /// `virtio_accel_xdna::artifact::encode`. See `tests/data/README.md`. The design declares three
@@ -494,6 +546,178 @@ fn tosa_bf16_identity_runs_on_the_npu() {
 
     backend.destroy_event(event).expect("destroy event");
     backend.free_buffer(input).expect("free input");
+    backend.free_buffer(output).expect("free output");
+    backend.unload_program(program).expect("unload");
+    backend.destroy_queue(queue).expect("destroy queue");
+    backend.destroy_context(context).expect("destroy context");
+}
+
+#[test]
+fn tosa_bf16_matmul_compiles_to_a_wellformed_artifact() {
+    // Hardware-free: needs the compiler toolchain but never initializes a device.
+    if !toolchain_present() {
+        eprintln!("no XDNA toolchain configured; skipping compiler test");
+        return;
+    }
+    let tosa = bf16_matmul_tosa(32, 64, 32);
+    let container = compile_artifact(&tosa, XDNA_TOSA_TARGET).expect("compile TOSA matmul");
+    let parsed =
+        virtio_accel_xdna::PrecompiledArtifact::parse(&container).expect("valid container");
+    assert!(
+        parsed.xclbin.starts_with(b"xclbin2"),
+        "expected xclbin2 magic"
+    );
+    assert!(!parsed.insts.is_empty() && parsed.insts.len() % 4 == 0);
+    // A/B are runtime inputs; C is the output. The zero-points are compile-time constants.
+    assert_eq!((parsed.inputs, parsed.outputs), (2, 1));
+    assert_eq!(parsed.entry, "MLIR_AIE");
+
+    // A shape off the tested tiling is rejected before any compile runs.
+    let untiled = bf16_matmul_tosa(48, 64, 32);
+    assert!(matches!(
+        compile_artifact(&untiled, XDNA_TOSA_TARGET),
+        Err(BackendError::Unsupported)
+    ));
+}
+
+#[test]
+fn tosa_bf16_matmul_runs_on_the_npu() {
+    let Some(backend) = backend() else { return };
+    if !toolchain_present() {
+        eprintln!("no XDNA toolchain configured; skipping TOSA execution test");
+        return;
+    }
+    // Non-square, multi-tile in every dimension (M/32=2, K/64=2, N/32=3).
+    const M: usize = 64;
+    const K: usize = 128;
+    const N: usize = 96;
+
+    let context = backend
+        .create_context(ContextDesc::default())
+        .expect("context");
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .expect("queue");
+    let tosa = bf16_matmul_tosa(M as i32, K as i32, N as i32);
+    let program = backend
+        .load_program(
+            &context,
+            ArtifactRef {
+                format: ARTIFACT_FORMAT,
+                target: XDNA_TOSA_TARGET.to_identity(),
+                payload: &Slice(&tosa),
+                resident_bytes: u64::MAX,
+            },
+        )
+        .expect("load + compile TOSA matmul");
+
+    // Small-integer inputs: exact in BF16, and every FP32 partial sum is exact, so the result is
+    // bit-exact regardless of the kernel's tiling/summation order (bit-exact by construction).
+    let a: Vec<f32> = (0..M * K).map(|i| (i % 7) as f32).collect();
+    let b: Vec<f32> = (0..K * N).map(|i| (i % 5) as f32).collect();
+    let a_bytes: Vec<u8> = a.iter().flat_map(|&x| bf16_le(x)).collect();
+    let b_bytes: Vec<u8> = b.iter().flat_map(|&x| bf16_le(x)).collect();
+
+    let in_desc = |bytes: usize| {
+        BufferDesc::new(
+            bytes as u64,
+            4096,
+            MemoryDomain::Shared,
+            BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+        )
+        .unwrap()
+    };
+    let (mut lhs, _) = backend
+        .allocate_buffer(&context, in_desc(a_bytes.len()))
+        .expect("lhs buffer")
+        .into_parts();
+    let (mut rhs, _) = backend
+        .allocate_buffer(&context, in_desc(b_bytes.len()))
+        .expect("rhs buffer")
+        .into_parts();
+    let (output, _) = backend
+        .allocate_buffer(
+            &context,
+            BufferDesc::new(
+                (M * N * 4) as u64,
+                4096,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+            )
+            .unwrap(),
+        )
+        .expect("output buffer")
+        .into_parts();
+
+    backend
+        .write_buffer(&mut lhs, 0, &Slice(&a_bytes))
+        .expect("write lhs");
+    backend
+        .write_buffer(&mut rhs, 0, &Slice(&b_bytes))
+        .expect("write rhs");
+
+    let bindings = [
+        BindingRef {
+            slot: 0,
+            buffer: &lhs,
+            range: BufferRange::new(0, a_bytes.len() as u64).unwrap(),
+            access: AccessMode::Read,
+        },
+        BindingRef {
+            slot: 1,
+            buffer: &rhs,
+            range: BufferRange::new(0, b_bytes.len() as u64).unwrap(),
+            access: AccessMode::Read,
+        },
+        BindingRef {
+            slot: 2,
+            buffer: &output,
+            range: BufferRange::new(0, (M * N * 4) as u64).unwrap(),
+            access: AccessMode::Write,
+        },
+    ];
+    let event = backend
+        .submit(&queue, &program, &bindings, Timeout::Infinite)
+        .expect("submit");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let state = loop {
+        match backend.poll_event(&event).expect("poll") {
+            EventState::Pending => {
+                assert!(Instant::now() < deadline, "matmul did not complete");
+                std::thread::yield_now();
+            }
+            terminal => break terminal,
+        }
+    };
+    assert!(matches!(state, EventState::Complete), "got {state:?}");
+
+    let mut result = vec![0u8; M * N * 4];
+    backend
+        .read_buffer(&output, 0, &mut SliceMut(&mut result))
+        .expect("read output");
+
+    // Exact integer oracle: C[i,j] = sum_k A[i,k] * B[k,j].
+    for i in 0..M {
+        for j in 0..N {
+            let mut expected = 0.0f32;
+            for kk in 0..K {
+                expected += a[i * K + kk] * b[kk * N + j];
+            }
+            let got = f32_le(&result[(i * N + j) * 4..(i * N + j) * 4 + 4]);
+            assert_eq!(
+                got.to_bits(),
+                expected.to_bits(),
+                "matmul C[{i},{j}] mismatch: got {got}, want {expected}"
+            );
+        }
+    }
+
+    // The submission bound all three buffers directly, with no submission-time staging copy.
+    assert_eq!(backend.direct_binding_admissions(), bindings.len() as u64);
+
+    backend.destroy_event(event).expect("destroy event");
+    backend.free_buffer(lhs).expect("free lhs");
+    backend.free_buffer(rhs).expect("free rhs");
     backend.free_buffer(output).expect("free output");
     backend.unload_program(program).expect("unload");
     backend.destroy_queue(queue).expect("destroy queue");
