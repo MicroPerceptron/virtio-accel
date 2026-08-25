@@ -43,6 +43,7 @@ SRC = WEBSITE / "src"
 BOOK = WEBSITE / "book"
 CONTENT = WEBSITE / "content"
 DOCS = REPO_ROOT / "docs"
+ASSETS = REPO_ROOT / "assets"
 TARGET_DOC = REPO_ROOT / "target" / "doc"
 
 GITHUB_BASE = "https://github.com/MicroPerceptron/virtio-accel/blob/main"
@@ -325,6 +326,26 @@ def copy_standalone() -> None:
         shutil.copyfile(source, dest)
 
 
+def copy_assets() -> None:
+    """Copy the repository's image and video assets into the built site.
+
+    The README embeds its logo and demo stills with raw HTML (``<img src>``,
+    ``<source srcset>``) rather than Markdown links, which the link rewriter in
+    this file never sees -- it only matches ``[text](target)``. Rather than
+    teach the rewriter HTML, the assets are published at the same relative path
+    the README already uses, so those references resolve as-is.
+
+    The whole tree is copied rather than only what is currently referenced: it
+    is a few megabytes, and it means a newly-referenced asset needs no change
+    here. ``check.py`` is what catches a reference with no file behind it.
+
+    ``mdbook build`` recreates ``book/`` from scratch, so this must run after it.
+    """
+    if not ASSETS.is_dir():
+        return
+    shutil.copytree(ASSETS, BOOK / "assets", dirs_exist_ok=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--skip-rustdoc", action="store_true")
@@ -343,6 +364,7 @@ def main() -> int:
         build_rustdoc()
 
     copy_standalone()
+    copy_assets()
 
     return 0
 
