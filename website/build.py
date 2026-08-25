@@ -16,6 +16,9 @@ This script is the single entry point for producing the public site. It:
      ``book/index.html``. The landing page is a standalone document rather than
      an mdBook chapter, so it is not constrained by the book's chrome.
 
+The result in ``book/`` is a plain static tree, served by nginx on the droplet.
+Nothing in it is host-specific.
+
 The generated ``src/`` and ``book/`` trees are git-ignored; only the curated
 inputs, the theme, and this script are checked in.
 
@@ -43,11 +46,6 @@ DOCS = REPO_ROOT / "docs"
 TARGET_DOC = REPO_ROOT / "target" / "doc"
 
 GITHUB_BASE = "https://github.com/MicroPerceptron/virtio-accel/blob/main"
-
-# Custom domain served by GitHub Pages. Emitting a CNAME into the published
-# tree pins the domain to the artifact itself, so it survives regardless of the
-# repository's Pages settings.
-CUSTOM_DOMAIN = "docs.virtio-accel.org"
 
 # Repo-relative source path -> site-relative destination path. Order matters:
 # it becomes the order of the generated SUMMARY.md.
@@ -327,16 +325,6 @@ def copy_standalone() -> None:
         shutil.copyfile(source, dest)
 
 
-def write_cname() -> None:
-    """Emit the GitHub Pages custom-domain marker into the built site.
-
-    ``mdbook build`` recreates ``book/`` from scratch, so this must run after it
-    to survive.
-    """
-    BOOK.mkdir(parents=True, exist_ok=True)
-    (BOOK / "CNAME").write_text(CUSTOM_DOMAIN + "\n", encoding="utf-8")
-
-
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--skip-rustdoc", action="store_true")
@@ -355,7 +343,6 @@ def main() -> int:
         build_rustdoc()
 
     copy_standalone()
-    write_cname()
 
     return 0
 
