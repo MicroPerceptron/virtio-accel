@@ -434,6 +434,7 @@ fn device_info() -> DeviceInfo {
 fn build_executable(
     device: &SharedDevice,
     parsed: PrecompiledArtifact<'_>,
+    context_id: u64,
 ) -> Result<XdnaProgram, BackendError> {
     // Build the borrowed create-params (valid only for the duration of the create call).
     let xclbin_span = ffi::hrx_const_byte_span_t {
@@ -525,19 +526,21 @@ fn build_executable(
             inputs: parsed.inputs,
             outputs: parsed.outputs,
         }),
+        context_id,
     })
 }
 
-/// A logical execution context. HRX holds no per-context state; the id supports accounting.
+/// A logical execution context. HRX holds no per-context state; the id gives resources a home so
+/// cross-context admission can be rejected (queues, programs, and buffers carry their context id).
 #[derive(Debug)]
 pub struct XdnaContext {
-    _id: u64,
+    id: u64,
 }
 
 /// A logical execution queue funnelling into the instance's single stream lane.
 #[derive(Debug)]
 pub struct XdnaQueue {
-    _id: u64,
+    context_id: u64,
 }
 
 /// A loaded, refcounted amdxdna executable and its dispatch plan.
@@ -563,10 +566,11 @@ impl Drop for ProgramInner {
     }
 }
 
-/// A loaded program: a cheap handle over the shared [`ProgramInner`].
+/// A loaded program: a cheap handle over the shared [`ProgramInner`], tagged with its context.
 #[derive(Clone, Debug)]
 pub struct XdnaProgram {
     inner: Arc<ProgramInner>,
+    context_id: u64,
 }
 
 /// A submission event: a handle over one preallocated [`EventSlot`].
@@ -582,6 +586,8 @@ pub struct XdnaBuffer {
     mapped: NonNull<u8>,
     len: usize,
     desc: BufferDesc,
+    /// The context that allocated this buffer; a submission may only bind buffers from its own.
+    context_id: u64,
     /// Set while the device may be reading or writing this buffer; guards host access and release.
     in_flight: AtomicU64,
     _not_send_sync: PhantomData<*mut u8>,
@@ -620,9 +626,7 @@ impl Accelerator for XdnaAccelerator {
 
     fn create_context(&self, desc: ContextDesc) -> Result<Self::Context, BackendError> {
         self.info.validate_context_desc(desc)?;
-        Ok(XdnaContext {
-            _id: self.next_id(),
-        })
+        Ok(XdnaContext { id: self.next_id() })
     }
 
     fn destroy_context(
@@ -634,7 +638,7 @@ impl Accelerator for XdnaAccelerator {
 
     fn allocate_buffer(
         &self,
-        _context: &Self::Context,
+        context: &Self::Context,
         desc: BufferDesc,
     ) -> Result<AllocatedBuffer<Self::Buffer>, BackendError> {
         self.info.validate_buffer_desc(desc)?;
@@ -713,6 +717,7 @@ impl Accelerator for XdnaAccelerator {
                 mapped,
                 len: size,
                 desc,
+                context_id: context.id,
                 in_flight: AtomicU64::new(0),
                 _not_send_sync: PhantomData,
             },
@@ -790,7 +795,7 @@ impl Accelerator for XdnaAccelerator {
 
     fn load_program(
         &self,
-        _context: &Self::Context,
+        context: &Self::Context,
         artifact: ArtifactRef<'_>,
     ) -> Result<Self::Program, BackendError> {
         if self.lane.is_poisoned() {
@@ -829,7 +834,7 @@ impl Accelerator for XdnaAccelerator {
 
         let parsed = PrecompiledArtifact::parse(&container)?;
         let device = shared_device().map_err(|_| BackendError::DeviceLost)?;
-        build_executable(device, parsed)
+        build_executable(device, parsed, context.id)
     }
 
     fn unload_program(&self, program: Self::Program) -> Result<(), ReleaseFailure<Self::Program>> {
@@ -840,14 +845,14 @@ impl Accelerator for XdnaAccelerator {
 
     fn create_queue(
         &self,
-        _context: &Self::Context,
+        context: &Self::Context,
         desc: QueueDesc,
     ) -> Result<Self::Queue, BackendError> {
         if !desc.flags.is_empty() {
             return Err(BackendError::Unsupported);
         }
         Ok(XdnaQueue {
-            _id: self.next_id(),
+            context_id: context.id,
         })
     }
 
@@ -857,7 +862,7 @@ impl Accelerator for XdnaAccelerator {
 
     fn submit(
         &self,
-        _queue: &Self::Queue,
+        queue: &Self::Queue,
         program: &Self::Program,
         bindings: &[BindingRef<'_, Self::Buffer>],
         timeout: Timeout,
@@ -871,6 +876,17 @@ impl Accelerator for XdnaAccelerator {
         // reaches the device; reject it before admission (issue #85).
         if matches!(timeout, Timeout::AfterNs(_)) {
             return reject(BackendError::DeadlineExpired);
+        }
+        // An empty or over-limit binding list is a resource-limit violation (mirrors OpenVINO).
+        if bindings.is_empty()
+            || bindings.len() > self.info.limits.max_bindings_per_submission as usize
+        {
+            return reject(BackendError::ResourceLimit);
+        }
+        // Cross-context admission is rejected: the queue, the program, and every bound buffer must
+        // belong to one context.
+        if queue.context_id != program.context_id {
+            return reject(BackendError::InvalidArgument);
         }
 
         let inputs = program.inner.inputs;
@@ -894,9 +910,13 @@ impl Accelerator for XdnaAccelerator {
                 AccessMode::Write
             };
             if binding.access != expected {
-                return reject(BackendError::PermissionDenied);
+                // The access is incompatible with the program's slot plan (mirrors OpenVINO).
+                return reject(BackendError::Incompatible);
             }
             let buffer = binding.buffer;
+            if buffer.context_id != queue.context_id {
+                return reject(BackendError::InvalidArgument);
+            }
             let offset = usize::try_from(binding.range.offset).unwrap_or(usize::MAX);
             let length = usize::try_from(binding.range.bytes()).unwrap_or(usize::MAX);
             if buffer.checked_range(binding.range.offset, length).is_err() {
