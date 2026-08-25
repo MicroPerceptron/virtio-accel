@@ -50,11 +50,11 @@ pin. Builds without the runtime still compile and unit-test the portable admissi
 
 ## Advertised numerical tier
 
-Per the numerical-tier decision (#82), the backend will advertise a BF16 floating-point tier (TOSA
-`EXT-BF16`) and a separate integer tier, and reject FP32/FP16 at admission rather than silently
-executing them as BF16. The two `Target` constants (`XDNA_TOSA_TARGET`, `XDNA_TOSA_INTEGER_TARGET`)
-are already declared in `src/lower.rs`; graph admission and execution wire onto them in later
-tickets.
+Per the numerical-tier decision (#82), the crate defines a BF16 floating-point target (TOSA
+`EXT-BF16`) and a separate future integer target, and rejects FP32/FP16 compute at admission rather
+than silently executing it as BF16. Native builds expose the implemented BF16 IDENTITY/MATMUL
+surface through `TosaCapabilityProvider`; placeholder builds expose an empty capability list, and
+the integer target is not advertised through the provider until its execution tier lands.
 
 ## Running
 

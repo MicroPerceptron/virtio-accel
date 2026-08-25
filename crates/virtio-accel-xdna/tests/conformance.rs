@@ -7,15 +7,17 @@
 //! BF16 IDENTITY that `load_program` compiles); it skips cleanly when either is absent.
 #![cfg(va_xdna)]
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+mod common;
+use common::{bf16_identity_tosa, poll_to_terminal};
 
 use virtio_accel_conformance::{
     BindingFixture, ConformanceHooks, ProgramFixture, SubmissionPathDiagnostics, TargetDescription,
     run,
 };
-use virtio_accel_core::{Accelerator, AccessMode, BackendError, EventState, MemoryDomain};
-use virtio_accel_tosa::{ARTIFACT_FORMAT, DType};
-use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
+use virtio_accel_core::{AccessMode, BackendError, EventState, MemoryDomain};
+use virtio_accel_tosa::ARTIFACT_FORMAT;
 use virtio_accel_xdna::{
     InitError, REQUIRED_RESIDENT_BYTES, XDNA_TOSA_TARGET, XdnaAccelerator, XdnaEvent,
 };
@@ -37,22 +39,6 @@ fn device_present() -> bool {
     }
 }
 
-/// A BF16 IDENTITY TOSA artifact of `ELEMENTS` for the advertised target.
-fn bf16_identity_tosa() -> Vec<u8> {
-    let shape = vec![1, 1, ELEMENTS as i32];
-    let mut graph = OwnedGraph::new("main");
-    graph.push_tensor(OwnedTensor::new("x", shape.clone(), DType::BF16));
-    graph.push_tensor(OwnedTensor::new("y", shape, DType::BF16));
-    graph.push_operator(OwnedOperator::new(
-        OperatorKind::Identity,
-        vec!["x".into()],
-        vec!["y".into()],
-    ));
-    graph.push_input("x");
-    graph.push_output("y");
-    graph.build(XDNA_TOSA_TARGET).expect("build bf16 identity")
-}
-
 struct Hooks;
 
 impl ConformanceHooks<XdnaAccelerator> for Hooks {
@@ -62,19 +48,11 @@ impl ConformanceHooks<XdnaAccelerator> for Hooks {
         event: &XdnaEvent,
     ) -> Result<(), BackendError> {
         // The dispatch worker drives completion; poll the latched state to a terminal.
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            match backend.poll_event(event)? {
-                EventState::Pending => {
-                    if Instant::now() >= deadline {
-                        return Err(BackendError::DeadlineExpired);
-                    }
-                    std::thread::yield_now();
-                }
-                EventState::Complete => return Ok(()),
-                EventState::Failed(error) => return Err(error),
-                EventState::Cancelled => return Err(BackendError::Busy),
-            }
+        match poll_to_terminal(backend, event, Duration::from_secs(30))? {
+            EventState::Complete => Ok(()),
+            EventState::Failed(error) => Err(error),
+            EventState::Cancelled => Err(BackendError::Busy),
+            EventState::Pending => unreachable!("poll_to_terminal never returns Pending"),
         }
     }
 
@@ -99,7 +77,7 @@ fn conformance_target() -> TargetDescription {
     let program = ProgramFixture::new(
         ARTIFACT_FORMAT,
         XDNA_TOSA_TARGET.to_identity(),
-        bf16_identity_tosa(),
+        bf16_identity_tosa(ELEMENTS),
         REQUIRED_RESIDENT_BYTES,
     )
     .unwrap();

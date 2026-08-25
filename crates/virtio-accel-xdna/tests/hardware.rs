@@ -6,14 +6,17 @@
 //! ticket.
 #![cfg(va_xdna)]
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+mod common;
+use common::{bf16_identity_tosa, bf16_matmul_tosa, poll_to_terminal};
 
 use virtio_accel_core::{
     Accelerator, AccessMode, ArtifactRef, BackendError, BindingRef, BufferDesc, BufferRange,
     BufferUsage, ByteSink, ByteSource, ContextDesc, EventState, MemoryDomain, QueueDesc,
     SubmitFailure, TargetIdentity, Timeout,
 };
-use virtio_accel_tosa::{ARTIFACT_FORMAT, DType};
+use virtio_accel_tosa::{ARTIFACT_FORMAT, DType, TosaCapabilityProvider};
 use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
 use virtio_accel_xdna::{
     InitError, XDNA_PRECOMPILED_FORMAT, XDNA_TOSA_TARGET, XdnaAccelerator, compile_artifact,
@@ -22,63 +25,6 @@ use virtio_accel_xdna::{
 /// Whether the pinned compiler toolchain is configured (the compiler tests need it, not a device).
 fn toolchain_present() -> bool {
     std::env::var_os("VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN").is_some()
-}
-
-/// Author a BF16 IDENTITY TOSA artifact of `elements` for the advertised target.
-fn bf16_identity_tosa(elements: usize) -> Vec<u8> {
-    let shape = vec![1, 1, elements as i32];
-    let mut graph = OwnedGraph::new("main");
-    graph.push_tensor(OwnedTensor::new("x", shape.clone(), DType::BF16));
-    graph.push_tensor(OwnedTensor::new("y", shape, DType::BF16));
-    graph.push_operator(OwnedOperator::new(
-        OperatorKind::Identity,
-        vec!["x".into()],
-        vec!["y".into()],
-    ));
-    graph.push_input("x");
-    graph.push_output("y");
-    graph.build(XDNA_TOSA_TARGET).expect("build bf16 identity")
-}
-
-/// Author a batch-1 BF16 → FP32 MATMUL `C[1,M,N] = A[1,M,K] · B[1,K,N]` for the advertised target.
-/// The two zero-points are constant-zero (TOSA requires floating-point zero-points to be zero).
-fn bf16_matmul_tosa(m: i32, k: i32, n: i32) -> Vec<u8> {
-    let mut graph = OwnedGraph::new("main");
-    graph
-        .push_tensor(OwnedTensor::new("lhs", vec![1, m, k], DType::BF16))
-        .push_tensor(OwnedTensor::new("rhs", vec![1, k, n], DType::BF16))
-        .push_tensor(OwnedTensor::constant(
-            "lhs_zp",
-            vec![1],
-            DType::BF16,
-            vec![0u8; 2],
-        ))
-        .push_tensor(OwnedTensor::constant(
-            "rhs_zp",
-            vec![1],
-            DType::BF16,
-            vec![0u8; 2],
-        ))
-        .push_tensor(OwnedTensor::new("output", vec![1, m, n], DType::FP32))
-        .push_operator(OwnedOperator::new(
-            OperatorKind::Const,
-            vec![],
-            vec!["lhs_zp".into()],
-        ))
-        .push_operator(OwnedOperator::new(
-            OperatorKind::Const,
-            vec![],
-            vec!["rhs_zp".into()],
-        ))
-        .push_operator(OwnedOperator::new(
-            OperatorKind::MatMul,
-            vec!["lhs".into(), "rhs".into(), "lhs_zp".into(), "rhs_zp".into()],
-            vec!["output".into()],
-        ))
-        .push_input("lhs")
-        .push_input("rhs")
-        .push_output("output");
-    graph.build(XDNA_TOSA_TARGET).expect("build bf16 matmul")
 }
 
 /// Encode an exactly-representable value as a little-endian BF16 (truncate the FP32 low half; exact
@@ -119,6 +65,7 @@ impl ByteSource for Slice<'_> {
     fn len(&self) -> u64 {
         self.0.len() as u64
     }
+
     fn read_at(&self, offset: u64, target: &mut [u8]) -> Result<(), BackendError> {
         let start = usize::try_from(offset).map_err(|_| BackendError::OutOfBounds)?;
         let end = start
@@ -128,6 +75,7 @@ impl ByteSource for Slice<'_> {
         target.copy_from_slice(&self.0[start..end]);
         Ok(())
     }
+
     fn as_contiguous(&self) -> Option<&[u8]> {
         Some(self.0)
     }
@@ -140,6 +88,7 @@ impl ByteSink for SliceMut<'_> {
     fn len(&self) -> u64 {
         self.0.len() as u64
     }
+
     fn write_at(&mut self, offset: u64, source: &[u8]) -> Result<(), BackendError> {
         let start = usize::try_from(offset).map_err(|_| BackendError::OutOfBounds)?;
         let end = start
@@ -149,6 +98,7 @@ impl ByteSink for SliceMut<'_> {
         self.0[start..end].copy_from_slice(source);
         Ok(())
     }
+
     fn as_contiguous_mut(&mut self) -> Option<&mut [u8]> {
         Some(self.0)
     }
@@ -172,6 +122,8 @@ fn device_info_reports_the_npu() {
     let info = backend.device_info().expect("device info");
     assert_eq!(info.identity.vendor_id, 0x1022);
     assert_eq!(info.identity.device_id, 0x17f0);
+    assert_eq!(backend.tosa_capabilities().len(), 1);
+    assert_eq!(backend.tosa_capabilities()[0].target, XDNA_TOSA_TARGET);
 }
 
 #[test]
@@ -373,19 +325,8 @@ fn precompiled_passthrough_runs_the_full_lifecycle() {
     };
 
     // Poll to a terminal state (nonblocking poll; the worker bridges the blocking synchronize).
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let state = loop {
-        match backend.poll_event(&event).expect("poll") {
-            EventState::Pending => {
-                assert!(
-                    Instant::now() < deadline,
-                    "dispatch did not complete in 10s"
-                );
-                std::thread::yield_now();
-            }
-            terminal => break terminal,
-        }
-    };
+    let state = poll_to_terminal(&backend, &event, Duration::from_secs(10))
+        .expect("dispatch did not complete in 10s");
     assert!(
         matches!(state, EventState::Complete),
         "expected Complete, got {state:?}"
@@ -526,16 +467,8 @@ fn tosa_bf16_identity_runs_on_the_npu() {
     let event = backend
         .submit(&queue, &program, &bindings, Timeout::Infinite)
         .expect("submit");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let state = loop {
-        match backend.poll_event(&event).expect("poll") {
-            EventState::Pending => {
-                assert!(Instant::now() < deadline, "identity did not complete");
-                std::thread::yield_now();
-            }
-            terminal => break terminal,
-        }
-    };
+    let state = poll_to_terminal(&backend, &event, Duration::from_secs(10))
+        .expect("identity did not complete");
     assert!(matches!(state, EventState::Complete), "got {state:?}");
 
     let mut result = vec![0u8; BYTES];
@@ -679,16 +612,8 @@ fn tosa_bf16_matmul_runs_on_the_npu() {
     let event = backend
         .submit(&queue, &program, &bindings, Timeout::Infinite)
         .expect("submit");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let state = loop {
-        match backend.poll_event(&event).expect("poll") {
-            EventState::Pending => {
-                assert!(Instant::now() < deadline, "matmul did not complete");
-                std::thread::yield_now();
-            }
-            terminal => break terminal,
-        }
-    };
+    let state = poll_to_terminal(&backend, &event, Duration::from_secs(30))
+        .expect("matmul did not complete");
     assert!(matches!(state, EventState::Complete), "got {state:?}");
 
     let mut result = vec![0u8; M * N * 4];
@@ -813,16 +738,8 @@ fn tosa_matmul_with_a_shared_input_buffer_runs_on_the_npu() {
     let event = backend
         .submit(&queue, &program, &bindings, Timeout::Infinite)
         .expect("submit with shared input");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let state = loop {
-        match backend.poll_event(&event).expect("poll") {
-            EventState::Pending => {
-                assert!(Instant::now() < deadline, "shared-input matmul stalled");
-                std::thread::yield_now();
-            }
-            terminal => break terminal,
-        }
-    };
+    let state = poll_to_terminal(&backend, &event, Duration::from_secs(30))
+        .expect("shared-input matmul stalled");
     assert!(matches!(state, EventState::Complete), "got {state:?}");
 
     let mut result = vec![0u8; OUT_BYTES];

@@ -8,7 +8,9 @@
 //! the BF16 IDENTITY (a DMA copy) and the BF16 → FP32 MATMUL (issue #90).
 
 use virtio_accel_tosa::{
-    AnalyzedValueKind, DType, ExtensionSet, Level, Op, ProfileSet, Target, Version, parse,
+    AnalyzedValueKind, CapabilityDescriptor, DType, DTypeCapability, ExtensionSet,
+    GraphCapabilities, Level, Op, OperatorCapability, OperatorConstraints, ProfileSet,
+    RuntimeConditionSupport, Target, ValueRoles, Version, parse,
 };
 
 /// The BF16 floating-point tier: TOSA 1.0, floating-point profile, level 8K, BF16 extension.
@@ -33,9 +35,33 @@ pub const XDNA_TOSA_INTEGER_TARGET: Target = Target::new(
     ExtensionSet::NONE,
 );
 
+const BF16_DTYPES: &[DTypeCapability] = &[
+    DTypeCapability::new(DType::BF16, ValueRoles::ALL),
+    DTypeCapability::new(DType::FP32, ValueRoles::OUTPUT),
+];
+
+const BF16_OPERATORS: &[OperatorCapability] = &[
+    OperatorCapability::new(Op::CONST),
+    OperatorCapability::new(Op::IDENTITY),
+    OperatorCapability::constrained(Op::MATMUL, OperatorConstraints::ZERO_ZERO_POINTS),
+];
+
+/// Conservative capability boundary for the implemented XDNA BF16 execution tier.
+pub const XDNA_TOSA_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
+    target: XDNA_TOSA_TARGET,
+    dtypes: BF16_DTYPES,
+    operators: BF16_OPERATORS,
+    graph: GraphCapabilities {
+        max_regions: 1,
+        max_blocks: 1,
+        dynamic_shapes: false,
+        runtime_conditions: RuntimeConditionSupport::None,
+    },
+};
+
 /// The DMA line size the IDENTITY template transfers in; an admitted element count must be a
-/// positive multiple of it. Kept in sync with `compiler/xdna_compile.py`.
-pub const IDENTITY_LINE_SIZE: usize = 1024;
+/// positive multiple of it. The Rust compiler driver carries this value into the helper spec.
+pub(crate) const IDENTITY_LINE_SIZE: usize = 1024;
 
 /// The one tested MATMUL compute tile (`m`, `k`, `n`), proven on npu2 (AIE2P).
 ///
@@ -43,26 +69,26 @@ pub const IDENTITY_LINE_SIZE: usize = 1024;
 /// and every admitted `(M, K, N)` is a positive multiple of this tile — the single tiling the
 /// helper compiles and the hardware tests exercise. Untested shapes are rejected (issue #90).
 /// The FP32 output is 4 B/element, so this tile is smaller than a same-shape bf16 tile would be, to
-/// keep the double-buffered C tile plus the A/B tiles inside the compute core's ~64 KiB L1. Kept in
-/// sync with `compiler/xdna_compile.py`.
-pub const MATMUL_TILE_M: usize = 32;
-pub const MATMUL_TILE_K: usize = 64;
-pub const MATMUL_TILE_N: usize = 32;
+/// keep the double-buffered C tile plus the A/B tiles inside the compute core's ~64 KiB L1. The
+/// Rust compiler driver carries this tested tile into the helper spec.
+pub(crate) const MATMUL_TILE_M: usize = 32;
+pub(crate) const MATMUL_TILE_K: usize = 64;
+pub(crate) const MATMUL_TILE_N: usize = 32;
 
 /// Largest admitted MATMUL dimension. The tested tiling generalizes across multiples of the tile,
 /// but only within this envelope; larger shapes are a later generalization and are rejected now.
-pub const MATMUL_MAX_DIM: usize = 512;
+pub(crate) const MATMUL_MAX_DIM: usize = 512;
 
 /// A validated operator specialization ready for the compiler helper. Each variant names its input
 /// and output dtypes; the closed shape is integers only, so no guest bytes cross the boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CompilerSpec {
     /// BF16 → BF16 elementwise copy of `elements` values (a positive multiple of
-    /// [`IDENTITY_LINE_SIZE`]).
+    /// 1,024 values).
     Identity { elements: usize },
     /// BF16 × BF16 → FP32 matrix multiply `C[M, N] = A[M, K] · B[K, N]` (batch 1). Each of `m`,
     /// `k`, `n` is a positive multiple of the corresponding MATMUL tile dimension and at most
-    /// [`MATMUL_MAX_DIM`]. The FP32 output is the TOSA-mandated accumulator (issue #82).
+    /// 512. The FP32 output is the TOSA-mandated accumulator (issue #82).
     Matmul { m: usize, k: usize, n: usize },
 }
 
