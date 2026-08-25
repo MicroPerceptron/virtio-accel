@@ -44,8 +44,9 @@ const DEFAULT_RING_DEPTH: usize = 1;
 /// Consume an HRX status and map it to a `BackendError`.
 ///
 /// A non-NULL `hrx_status_t` is owned by the caller and must be consumed exactly once. This reads
-/// its code, then ignores it (freeing it); on error it also renders and frees the message for
-/// host-side context before discarding it. `NULL` is success.
+/// its code, then ignores it (freeing it); on error it also renders and frees the message so the
+/// message allocation is released (it is not logged — no logging facility exists at this layer).
+/// `NULL` is success.
 fn check(status: ffi::hrx_status_t) -> Result<(), BackendError> {
     if status.is_null() {
         return Ok(());
@@ -944,6 +945,11 @@ impl Accelerator for XdnaAccelerator {
             let buffer = binding.buffer;
             if buffer.context_id != queue.context_id {
                 return reject(BackendError::InvalidArgument);
+            }
+            // The host is required to enforce usage-vs-access before submit (Wire ABI 4.4); repeat
+            // it as defense in depth for in-process consumers, exactly as OpenVINO does.
+            if !buffer.desc.allows_access(binding.access) {
+                return reject(BackendError::PermissionDenied);
             }
             let offset = usize::try_from(binding.range.offset).unwrap_or(usize::MAX);
             let length = usize::try_from(binding.range.bytes()).unwrap_or(usize::MAX);
