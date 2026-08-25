@@ -22,7 +22,9 @@ use virtio_accel_core::BackendError;
 
 use crate::XDNA_ERROR_DOMAIN;
 use crate::artifact;
-use crate::lower::CompilerSpec;
+use crate::lower::{
+    CompilerSpec, IDENTITY_LINE_SIZE, MATMUL_MAX_DIM, MATMUL_TILE_K, MATMUL_TILE_M, MATMUL_TILE_N,
+};
 
 /// The embedded compiler helper; written into each private workdir before invocation.
 const HELPER_SOURCE: &str = include_str!("../compiler/xdna_compile.py");
@@ -53,11 +55,16 @@ fn spec_json(spec: CompilerSpec) -> String {
     let device = "\"device\":\"npu2\",\"fold_ddr_addr_offset\":false";
     match spec {
         CompilerSpec::Identity { elements } => {
-            format!("{{\"op\":\"IDENTITY\",\"dtype\":\"bf16\",\"elements\":{elements},{device}}}")
+            format!(
+                "{{\"op\":\"IDENTITY\",\"dtype\":\"bf16\",\"elements\":{elements},\
+                 \"line_size\":{IDENTITY_LINE_SIZE},{device}}}"
+            )
         }
         CompilerSpec::Matmul { m, k, n } => format!(
             "{{\"op\":\"MATMUL\",\"in_dtype\":\"bf16\",\"out_dtype\":\"f32\",\
-             \"m\":{m},\"k\":{k},\"n\":{n},{device}}}"
+             \"m\":{m},\"k\":{k},\"n\":{n},\"tile_m\":{MATMUL_TILE_M},\
+             \"tile_k\":{MATMUL_TILE_K},\"tile_n\":{MATMUL_TILE_N},\
+             \"max_dim\":{MATMUL_MAX_DIM},{device}}}"
         ),
     }
 }
@@ -204,6 +211,7 @@ impl Compiler {
             .map_err(|_| external(code::SPAWN))?;
 
         let deadline = Instant::now() + self.timeout;
+        let mut poll_interval = Duration::from_millis(20);
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -226,7 +234,9 @@ impl Compiler {
                         let _ = child.wait();
                         return Err(external(code::TIMEOUT));
                     }
-                    std::thread::sleep(Duration::from_millis(20));
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    std::thread::sleep(poll_interval.min(remaining));
+                    poll_interval = (poll_interval + poll_interval).min(Duration::from_secs(1));
                 }
                 Err(_) => return Err(external(code::HELPER_FAILED)),
             }
@@ -290,4 +300,32 @@ fn cache_root() -> Result<PathBuf, BackendError> {
 fn unique_suffix() -> u64 {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_spec_carries_the_authoritative_line_size() {
+        let json = spec_json(CompilerSpec::Identity { elements: 4096 });
+        assert!(json.contains("\"line_size\":1024"));
+    }
+
+    #[test]
+    fn matmul_spec_carries_the_authoritative_tiling_envelope() {
+        let json = spec_json(CompilerSpec::Matmul {
+            m: 64,
+            k: 128,
+            n: 96,
+        });
+        for field in [
+            "\"tile_m\":32",
+            "\"tile_k\":64",
+            "\"tile_n\":32",
+            "\"max_dim\":512",
+        ] {
+            assert!(json.contains(field), "missing {field} in {json}");
+        }
+    }
 }

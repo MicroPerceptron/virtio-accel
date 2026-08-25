@@ -2,8 +2,14 @@
 //!
 //! Native lifecycle tests arrive with the HRX FFI and hardware tickets. These run on every host.
 
-use virtio_accel_tosa::{ExtensionSet, ProfileSet, Target};
-use virtio_accel_xdna::{REQUIRED_RESIDENT_BYTES, XDNA_TOSA_INTEGER_TARGET, XDNA_TOSA_TARGET};
+#[cfg(not(va_xdna))]
+use virtio_accel_tosa::TosaCapabilityProvider;
+use virtio_accel_tosa::{ExtensionSet, Op, ProfileSet, Target};
+#[cfg(not(va_xdna))]
+use virtio_accel_xdna::XdnaAccelerator;
+use virtio_accel_xdna::{
+    REQUIRED_RESIDENT_BYTES, XDNA_TOSA_CAPABILITY, XDNA_TOSA_INTEGER_TARGET, XDNA_TOSA_TARGET,
+};
 
 #[test]
 fn required_resident_bytes_is_maximal() {
@@ -45,6 +51,20 @@ fn targets_survive_an_identity_round_trip() {
     for target in [XDNA_TOSA_TARGET, XDNA_TOSA_INTEGER_TARGET] {
         assert_eq!(Target::from_identity(target.to_identity()), Ok(target));
     }
+}
+
+#[test]
+fn bf16_capability_matches_the_implemented_surface() {
+    assert_eq!(XDNA_TOSA_CAPABILITY.target, XDNA_TOSA_TARGET);
+    assert!(XDNA_TOSA_CAPABILITY.supports_operator(Op::IDENTITY));
+    assert!(XDNA_TOSA_CAPABILITY.supports_operator(Op::MATMUL));
+    assert!(!XDNA_TOSA_CAPABILITY.supports_operator(Op::MAX_POOL2D));
+}
+
+#[cfg(not(va_xdna))]
+#[test]
+fn placeholder_advertises_no_runtime_capabilities() {
+    assert!(XdnaAccelerator.tosa_capabilities().is_empty());
 }
 
 /// The offline / catalog-population path works without HRX: `compile_artifact` is available in

@@ -41,6 +41,9 @@ const MAX_TOSA_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
 /// Default submission-ring depth (issue #85: one admitted request, matching the Hexagon backend).
 const DEFAULT_RING_DEPTH: usize = 1;
 
+/// Internal state-machine failure: a live event handle observed a free/unknown slot state.
+const INVALID_EVENT_STATE_CODE: i64 = 200;
+
 /// Consume an HRX status and map it to a `BackendError`.
 ///
 /// A non-NULL `hrx_status_t` is owned by the caller and must be consumed exactly once. This reads
@@ -302,7 +305,7 @@ pub struct XdnaAccelerator {
     lane: Arc<Lane>,
     worker: Option<JoinHandle<()>>,
     slots: Vec<Arc<EventSlot>>,
-    compiler: Option<Compiler>,
+    compiler: CompilerState,
     info: DeviceInfo,
     next_id: AtomicU64,
     /// Cumulative count of buffers admitted as direct bindings (no submission-time staging copy).
@@ -310,6 +313,12 @@ pub struct XdnaAccelerator {
     /// Cumulative bytes moved by explicit `write_buffer`/`read_buffer` transfers.
     explicit_transfer_bytes: AtomicU64,
     _not_send_sync: PhantomData<*mut u8>,
+}
+
+enum CompilerState {
+    Ready(Compiler),
+    Unconfigured,
+    Failed(BackendError),
 }
 
 impl XdnaAccelerator {
@@ -343,11 +352,19 @@ impl XdnaAccelerator {
             .spawn(move || worker_lane.run_worker())
             .map_err(|_| InitError::Initialization)?;
 
+        let compiler = match Compiler::from_env() {
+            Ok(compiler) => CompilerState::Ready(compiler),
+            Err(_error) if std::env::var_os("VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN").is_none() => {
+                CompilerState::Unconfigured
+            }
+            Err(error) => CompilerState::Failed(error),
+        };
+
         Ok(Self {
             lane,
             worker: Some(worker),
             slots,
-            compiler: Compiler::from_env().ok(),
+            compiler,
             info: device_info(),
             next_id: AtomicU64::new(1),
             direct_binding_admissions: AtomicU64::new(0),
@@ -819,31 +836,39 @@ impl Accelerator for XdnaAccelerator {
         if artifact.resident_bytes != crate::REQUIRED_RESIDENT_BYTES {
             return Err(BackendError::ResourceLimit);
         }
-        let len =
-            usize::try_from(artifact.payload.len()).map_err(|_| BackendError::ResourceLimit)?;
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(len)
-            .map_err(|_| BackendError::OutOfMemory)?;
-        bytes.resize(len, 0);
-        artifact.payload.read_at(0, &mut bytes)?;
+        let mut owned = Vec::new();
+        let bytes = match artifact.payload.as_contiguous() {
+            Some(bytes) => bytes,
+            None => {
+                let len = usize::try_from(artifact.payload.len())
+                    .map_err(|_| BackendError::ResourceLimit)?;
+                owned
+                    .try_reserve_exact(len)
+                    .map_err(|_| BackendError::OutOfMemory)?;
+                owned.resize(len, 0);
+                artifact.payload.read_at(0, &mut owned)?;
+                &owned
+            }
+        };
 
         // The precompiled format loads directly; a TOSA artifact is admitted and compiled to one.
         let container = if artifact.format == artifact::XDNA_PRECOMPILED_FORMAT {
-            bytes
+            std::borrow::Cow::Borrowed(bytes)
         } else if artifact.format == virtio_accel_tosa::ARTIFACT_FORMAT {
             let target = virtio_accel_tosa::Target::from_identity(artifact.target)
                 .map_err(|_| BackendError::Incompatible)?;
             let spec = lower::admit(&bytes, target)?;
-            self.compiler
-                .as_ref()
-                .ok_or(BackendError::Unsupported)?
-                .compile(spec)?
+            let compiler = match &self.compiler {
+                CompilerState::Ready(compiler) => compiler,
+                CompilerState::Unconfigured => return Err(BackendError::Unsupported),
+                CompilerState::Failed(error) => return Err(*error),
+            };
+            std::borrow::Cow::Owned(compiler.compile(spec)?)
         } else {
             return Err(BackendError::Unsupported);
         };
 
-        let parsed = PrecompiledArtifact::parse(&container)?;
+        let parsed = PrecompiledArtifact::parse(container.as_ref())?;
         let device = shared_device().map_err(|_| BackendError::DeviceLost)?;
         build_executable(device, parsed, context.id)
     }
@@ -1035,7 +1060,10 @@ impl Accelerator for XdnaAccelerator {
                     });
                 Ok(EventState::Failed(error))
             }
-            _ => Ok(EventState::Pending),
+            _ => Err(BackendError::External {
+                domain: XDNA_ERROR_DOMAIN,
+                code: INVALID_EVENT_STATE_CODE,
+            }),
         }
     }
 

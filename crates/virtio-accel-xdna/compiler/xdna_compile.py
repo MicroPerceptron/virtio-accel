@@ -33,16 +33,6 @@ import sys
 import traceback
 from pathlib import Path
 
-LINE_SIZE = 1024
-
-# The one tested MATMUL compute tile (m, k, n), matching `MATMUL_TILE_{M,K,N}` in `src/lower.rs`.
-# Every admitted dimension is a positive multiple of the matching tile. The FP32 output tile is
-# 4 B/element, so the tile is kept small enough that the double-buffered C tile plus the A/B tiles
-# fit the AIE2P compute core's ~64 KiB L1.
-MATMUL_TILE_M, MATMUL_TILE_K, MATMUL_TILE_N = 32, 64, 32
-MATMUL_MAX_DIM = 512
-
-
 def _fail(workdir: Path, stage: str, message: str) -> int:
     (workdir / "result.json").write_text(
         json.dumps({"schema": 2, "ok": False, "stage": stage, "message": message})
@@ -129,7 +119,7 @@ def _find_hrx_dir(prefix: Path) -> Path | None:
     return None
 
 
-def _build_identity(elements: int):
+def _build_identity(line_size: int):
     """Return the @iron.jit IDENTITY design (a bf16 DMA copy: shim -> memtile -> shim)."""
     import aie.iron as iron
     import ml_dtypes
@@ -138,9 +128,9 @@ def _build_identity(elements: int):
     from aie.iron.device import AnyShimTile
 
     @iron.jit
-    def identity_bf16(x_in: In, y_out: Out, *, n: CompileTime[int] = elements):
+    def identity_bf16(x_in: In, y_out: Out, *, n: CompileTime[int]):
         vector_ty = np.ndarray[(n,), np.dtype[ml_dtypes.bfloat16]]
-        line_ty = np.ndarray[(LINE_SIZE,), np.dtype[ml_dtypes.bfloat16]]
+        line_ty = np.ndarray[(line_size,), np.dtype[ml_dtypes.bfloat16]]
         of_in = ObjectFifo(line_ty, name="in")
         of_out = of_in.cons().forward()
 
@@ -162,7 +152,7 @@ def _build_identity(elements: int):
     return identity_bf16
 
 
-def _build_matmul(m: int, k: int, n: int):
+def _build_matmul(tile_m: int, tile_k: int, tile_n: int):
     """Return the @iron.jit BF16 -> FP32 single-core MATMUL design (`C[M,N] = A[M,K] . B[K,N]`).
 
     Structurally the fork's ``matrix_multiplication_single_core`` design, specialized to a bf16
@@ -179,7 +169,7 @@ def _build_matmul(m: int, k: int, n: int):
 
     in_ty = ml_dtypes.bfloat16
     out_ty = np.float32
-    tm, tk, tn = MATMUL_TILE_M, MATMUL_TILE_K, MATMUL_TILE_N
+    tm, tk, tn = tile_m, tile_k, tile_n
 
     @iron.jit
     def matmul_bf16_f32(
@@ -187,9 +177,9 @@ def _build_matmul(m: int, k: int, n: int):
         input1: In,
         output: Out,
         *,
-        M: CompileTime[int] = m,
-        K: CompileTime[int] = k,
-        N: CompileTime[int] = n,
+        M: CompileTime[int],
+        K: CompileTime[int],
+        N: CompileTime[int],
     ):
         matmul_kernel = kernels.mm(
             dim_m=tm, dim_k=tk, dim_n=tn,
@@ -272,35 +262,44 @@ def _compile(workdir: Path) -> int:
     if op == "IDENTITY":
         dtype = spec.get("dtype")
         elements = spec.get("elements")
+        line_size = spec.get("line_size")
         if dtype != "bf16":
             return _fail(workdir, "spec-rejected", f"unsupported dtype: {dtype}")
-        if not isinstance(elements, int) or elements <= 0 or elements % LINE_SIZE != 0:
+        if not isinstance(line_size, int) or line_size <= 0:
+            return _fail(workdir, "spec-rejected", f"invalid line_size: {line_size}")
+        if not isinstance(elements, int) or elements <= 0 or elements % line_size != 0:
             return _fail(
-                workdir, "spec-rejected", f"elements must be a positive multiple of {LINE_SIZE}"
+                workdir, "spec-rejected", f"elements must be a positive multiple of {line_size}"
             )
         # The binding plan: exact per-slot byte sizes (bf16 = 2 B/element).
         input_bytes, output_bytes = [elements * 2], [elements * 2]
 
         def build():
-            return _build_identity(elements).specialize(n=elements)
+            return _build_identity(line_size).specialize(n=elements)
     elif op == "MATMUL":
         in_dtype = spec.get("in_dtype")
         out_dtype = spec.get("out_dtype")
         m, k, n = spec.get("m"), spec.get("k"), spec.get("n")
+        tile_m, tile_k, tile_n = spec.get("tile_m"), spec.get("tile_k"), spec.get("tile_n")
+        max_dim = spec.get("max_dim")
         if in_dtype != "bf16" or out_dtype != "f32":
             return _fail(
                 workdir, "spec-rejected", f"unsupported dtype pair: {in_dtype}->{out_dtype}"
             )
-        for name, dim, tile in (("m", m, MATMUL_TILE_M), ("k", k, MATMUL_TILE_K), ("n", n, MATMUL_TILE_N)):
-            if not isinstance(dim, int) or dim <= 0 or dim % tile != 0 or dim > MATMUL_MAX_DIM:
+        if not isinstance(max_dim, int) or max_dim <= 0:
+            return _fail(workdir, "spec-rejected", f"invalid max_dim: {max_dim}")
+        for name, dim, tile in (("m", m, tile_m), ("k", k, tile_k), ("n", n, tile_n)):
+            if not isinstance(tile, int) or tile <= 0:
+                return _fail(workdir, "spec-rejected", f"invalid tile_{name}: {tile}")
+            if not isinstance(dim, int) or dim <= 0 or dim % tile != 0 or dim > max_dim:
                 return _fail(
-                    workdir, "spec-rejected", f"{name}={dim} must be a positive multiple of {tile} <= {MATMUL_MAX_DIM}"
+                    workdir, "spec-rejected", f"{name}={dim} must be a positive multiple of {tile} <= {max_dim}"
                 )
         # The binding plan: A[M,K] and B[K,N] are bf16 (2 B), C[M,N] is the fp32 accumulator (4 B).
         input_bytes, output_bytes = [m * k * 2, k * n * 2], [m * n * 4]
 
         def build():
-            return _build_matmul(m, k, n).specialize(M=m, K=k, N=n)
+            return _build_matmul(tile_m, tile_k, tile_n).specialize(M=m, K=k, N=n)
     else:
         return _fail(workdir, "spec-rejected", f"unsupported op: {op}")
 

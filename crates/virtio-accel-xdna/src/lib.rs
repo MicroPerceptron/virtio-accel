@@ -29,9 +29,16 @@ mod lower;
 
 pub use artifact::{PrecompiledArtifact, XDNA_PRECOMPILED_FORMAT};
 pub use lower::{
-    AdmitError, CompilerSpec, IDENTITY_LINE_SIZE, MATMUL_MAX_DIM, MATMUL_TILE_K, MATMUL_TILE_M,
-    MATMUL_TILE_N, XDNA_TOSA_INTEGER_TARGET, XDNA_TOSA_TARGET, admit,
+    AdmitError, CompilerSpec, XDNA_TOSA_CAPABILITY, XDNA_TOSA_INTEGER_TARGET, XDNA_TOSA_TARGET,
+    admit,
 };
+
+use virtio_accel_tosa::{CapabilityDescriptor, TosaCapabilityProvider};
+
+#[cfg(va_xdna)]
+const TOSA_CAPABILITIES: &[CapabilityDescriptor] = &[XDNA_TOSA_CAPABILITY];
+#[cfg(not(va_xdna))]
+const TOSA_CAPABILITIES: &[CapabilityDescriptor] = &[];
 
 /// The HRX runtime publishes no finite upper bound for a loaded program's device residency.
 ///
@@ -103,5 +110,11 @@ impl XdnaAccelerator {
     /// Report that no HRX runtime was detected when this crate was built.
     pub fn new() -> Result<Self, InitError> {
         Err(InitError::RuntimeUnavailable)
+    }
+}
+
+impl TosaCapabilityProvider for XdnaAccelerator {
+    fn tosa_capabilities(&self) -> &'static [CapabilityDescriptor] {
+        TOSA_CAPABILITIES
     }
 }
