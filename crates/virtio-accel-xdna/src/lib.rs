@@ -19,7 +19,8 @@
 //! (execution-model spec, issue #85). `load_program` accepts the crate-local precompiled format
 //! ([`artifact`]) directly, and a TOSA artifact by admitting it and compiling it with the bounded
 //! aiecc helper subprocess (issue #84). The compilable TOSA subsets today are BF16 IDENTITY,
-//! BF16 → FP32 MATMUL, BF16 MAX_POOL2D, and explicit FP8 → BF16 storage conversion.
+//! BF16 → FP32 MATMUL, BF16 MAX_POOL2D, explicit FP8 → BF16 storage conversion, and exact INT8
+//! IDENTITY plus zero-point-aware INT8 → INT32 MATMUL.
 //! Admission (`lower`) unit-tests on every host.
 
 #![cfg_attr(not(va_xdna), forbid(unsafe_code))]
@@ -30,14 +31,18 @@ mod lower;
 pub use artifact::{PrecompiledArtifact, XDNA_PRECOMPILED_FORMAT};
 pub use lower::{
     AdmitError, CompilerSpec, Fp8Format, XDNA_TOSA_CAPABILITY, XDNA_TOSA_FP8_CAPABILITY,
-    XDNA_TOSA_FP8_TARGET, XDNA_TOSA_INTEGER_TARGET, XDNA_TOSA_TARGET, admit,
+    XDNA_TOSA_FP8_TARGET, XDNA_TOSA_INTEGER_CAPABILITY, XDNA_TOSA_INTEGER_TARGET, XDNA_TOSA_TARGET,
+    admit,
 };
 
 use virtio_accel_tosa::{CapabilityDescriptor, TosaCapabilityProvider};
 
 #[cfg(va_xdna)]
-const TOSA_CAPABILITIES: &[CapabilityDescriptor] =
-    &[XDNA_TOSA_CAPABILITY, XDNA_TOSA_FP8_CAPABILITY];
+const TOSA_CAPABILITIES: &[CapabilityDescriptor] = &[
+    XDNA_TOSA_CAPABILITY,
+    XDNA_TOSA_FP8_CAPABILITY,
+    XDNA_TOSA_INTEGER_CAPABILITY,
+];
 #[cfg(not(va_xdna))]
 const TOSA_CAPABILITIES: &[CapabilityDescriptor] = &[];
 

@@ -9,7 +9,7 @@ use virtio_accel_tosa::{ExtensionSet, Op, OperatorConstraints, ProfileSet, Targe
 use virtio_accel_xdna::XdnaAccelerator;
 use virtio_accel_xdna::{
     REQUIRED_RESIDENT_BYTES, XDNA_TOSA_CAPABILITY, XDNA_TOSA_FP8_CAPABILITY, XDNA_TOSA_FP8_TARGET,
-    XDNA_TOSA_INTEGER_TARGET, XDNA_TOSA_TARGET,
+    XDNA_TOSA_INTEGER_CAPABILITY, XDNA_TOSA_INTEGER_TARGET, XDNA_TOSA_TARGET,
 };
 
 #[test]
@@ -101,6 +101,22 @@ fn bf16_capability_matches_the_implemented_surface() {
             .contains(OperatorConstraints::PROPAGATING_NAN)
     );
     assert!(pool.constraints.contains(OperatorConstraints::ZERO_PADDING));
+}
+
+#[test]
+fn integer_capability_matches_the_openvino_semantic_surface() {
+    use virtio_accel_tosa::DType;
+
+    assert_eq!(
+        XDNA_TOSA_INTEGER_CAPABILITY.target,
+        XDNA_TOSA_INTEGER_TARGET
+    );
+    for op in [Op::CONST, Op::IDENTITY, Op::MATMUL] {
+        assert!(XDNA_TOSA_INTEGER_CAPABILITY.supports_operator(op));
+    }
+    assert!(XDNA_TOSA_INTEGER_CAPABILITY.supports_dtype(DType::INT8, ValueRoles::ALL));
+    assert!(XDNA_TOSA_INTEGER_CAPABILITY.supports_dtype(DType::INT32, ValueRoles::OUTPUT));
+    assert!(!XDNA_TOSA_INTEGER_CAPABILITY.supports_dtype(DType::INT32, ValueRoles::INPUT));
 }
 
 #[cfg(not(va_xdna))]

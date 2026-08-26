@@ -6,7 +6,8 @@
 //! amdxdna artifact. Anything outside the advertised subset is rejected here, before any subprocess
 //! runs. Graph lowering for compute tiers grows on top of this; the compilable subsets today are
 //! the BF16 IDENTITY (a DMA copy), BF16 → FP32 MATMUL (issue #90), BF16 NHWC MAX_POOL2D
-//! (issue #91), and explicit FP8 → BF16 CAST storage conversion (issue #109).
+//! (issue #91), explicit FP8 → BF16 CAST storage conversion (issue #109), and exact INT8
+//! IDENTITY plus zero-point-aware INT8 → INT32 MATMUL (issue #144).
 
 use virtio_accel_tosa::{
     AnalyzedValueKind, CapabilityDescriptor, DType, DTypeCapability, ExtensionSet,
@@ -41,7 +42,7 @@ pub const XDNA_TOSA_FP8_TARGET: Target = Target::new(
 
 /// The integer tier: TOSA 1.0, integer profile, level 8K, no extensions.
 ///
-/// Native i8/i16 matmul with exact (bit-for-bit) results, kept on a separate target from the
+/// INT8 identity and zero-point-aware MATMUL with exact INT32 results, kept on a separate target from the
 /// floating-point tier exactly as the OpenVINO backend separates its FP and INTEGER targets.
 pub const XDNA_TOSA_INTEGER_TARGET: Target = Target::new(
     Version::TOSA_1_0,
@@ -99,12 +100,54 @@ pub const XDNA_TOSA_FP8_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor 
     },
 };
 
+// This is deliberately the same semantic surface OpenVINO advertises for its integer target.
+// XDNA's admission functions below impose an additional, hardware-specific static-memory envelope.
+const INTEGER_DTYPES: &[DTypeCapability] = &[
+    DTypeCapability::new(DType::INT8, ValueRoles::ALL),
+    DTypeCapability::new(
+        DType::INT32,
+        ValueRoles::OUTPUT
+            .union(ValueRoles::CONSTANT)
+            .union(ValueRoles::INTERMEDIATE),
+    ),
+];
+
+const INTEGER_OPERATORS: &[OperatorCapability] = &[
+    OperatorCapability::new(Op::CONST),
+    OperatorCapability::new(Op::IDENTITY),
+    OperatorCapability::new(Op::MATMUL),
+];
+
+/// Conservative exact integer-profile capability boundary for XDNA lowering.
+///
+/// This mirrors OpenVINO's dtype and operator declaration. XDNA additionally admits only bounded,
+/// static specializations that fit the proven one-core implementation; this is a hardware
+/// envelope, not a semantic fallback.
+pub const XDNA_TOSA_INTEGER_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
+    target: XDNA_TOSA_INTEGER_TARGET,
+    dtypes: INTEGER_DTYPES,
+    operators: INTEGER_OPERATORS,
+    graph: GraphCapabilities {
+        max_regions: 1,
+        max_blocks: 1,
+        dynamic_shapes: false,
+        runtime_conditions: RuntimeConditionSupport::None,
+    },
+};
+
 /// The DMA line size the IDENTITY template transfers in; an admitted element count must be a
 /// positive multiple of it. The Rust compiler driver carries this value into the helper spec.
 pub(crate) const IDENTITY_LINE_SIZE: usize = 1024;
 
 /// The fixed element tile converted by the FP8 → BF16 kernel.
 pub(crate) const FP8_CAST_LINE_SIZE: usize = 1024;
+
+/// Largest direct-DMA line used by the INT8 IDENTITY template.
+///
+/// Small corpus tensors use one shorter line. Every line is four-byte aligned because the AIE DMA
+/// rejects shorter granularity; larger tensors must divide into complete 1,024-byte lines so the
+/// runtime sequence never needs a hidden tail copy.
+pub(crate) const INT8_IDENTITY_MAX_LINE_SIZE: usize = 1024;
 
 /// The one tested MATMUL compute tile (`m`, `k`, `n`), proven on npu2 (AIE2P).
 ///
@@ -121,6 +164,13 @@ pub(crate) const MATMUL_TILE_N: usize = 32;
 /// Largest admitted MATMUL dimension. The tested tiling generalizes across multiples of the tile,
 /// but only within this envelope; larger shapes are a later generalization and are rejected now.
 pub(crate) const MATMUL_MAX_DIM: usize = 512;
+
+/// Largest combined input/output footprint for the exact INT8 MATMUL specialization.
+///
+/// The initial kernel keeps complete A, B, and C tensors in one AIE2P core. Limiting their
+/// undoubled footprint to 16 KiB leaves room for depth-two FIFOs, code, and bookkeeping in its
+/// roughly 64 KiB local memory. This is stricter than OpenVINO because it is an XDNA memory limit.
+pub(crate) const INT8_MATMUL_MAX_TOTAL_BYTES: usize = 16 * 1024;
 
 /// Maximum admitted pooling kernel and stride dimensions. Larger windows are unproven on the
 /// scalar AIE2P kernel and are rejected before the compiler subprocess runs.
@@ -140,6 +190,9 @@ pub enum CompilerSpec {
     /// BF16 → BF16 elementwise copy of `elements` values (a positive multiple of
     /// 1,024 values).
     Identity { elements: usize },
+    /// Exact INT8 → INT8 elementwise copy. `line_size` is the complete DMA line selected by
+    /// admission; no tail staging or dtype conversion is permitted.
+    Int8Identity { elements: usize, line_size: usize },
     /// Explicit FP8 storage conversion to BF16. Every finite source value is exactly
     /// representable, so the output is bit-exact except for permitted NaN canonicalization.
     Fp8ToBf16 { format: Fp8Format, elements: usize },
@@ -147,6 +200,17 @@ pub enum CompilerSpec {
     /// `k`, `n` is a positive multiple of the corresponding MATMUL tile dimension and at most
     /// 512. The FP32 output is the TOSA-mandated accumulator (issue #82).
     Matmul { m: usize, k: usize, n: usize },
+    /// Exact zero-point-aware INT8 × INT8 → INT32 matrix multiply (batch 1).
+    ///
+    /// The serialized TOSA zero points are part of the specialization and therefore also part of
+    /// the compiler cache key. Arithmetic is `(a - a_zp) * (b - b_zp)` accumulated in INT32.
+    Int8Matmul {
+        m: usize,
+        k: usize,
+        n: usize,
+        left_zero_point: i8,
+        right_zero_point: i8,
+    },
     /// Batch-1 BF16 NHWC MAX_POOL2D with zero padding and propagating NaNs. The complete static
     /// specialization is carried to the helper so no TOSA bytes cross the subprocess boundary.
     MaxPool2d {
@@ -197,7 +261,8 @@ impl From<AdmitError> for virtio_accel_core::BackendError {
 /// Admit a TOSA artifact for `target`, returning the specialization the helper compiles.
 ///
 /// The BF16 target admits IDENTITY (a DMA copy), BF16 → FP32 MATMUL, and BF16 NHWC MAX_POOL2D.
-/// The separate FP8 storage target admits one explicit FP8 → BF16 CAST. Everything else is rejected
+/// The separate FP8 storage target admits one explicit FP8 → BF16 CAST. The integer target admits
+/// exact INT8 IDENTITY and zero-point-aware INT8 → INT32 MATMUL. Everything else is rejected
 /// without running the compiler. Each template admits only graphs whose **dataflow** matches what
 /// the compiled kernel executes — the IDENTITY
 /// template requires every operator to be IDENTITY (no constants: with a single block input, every
@@ -209,8 +274,10 @@ impl From<AdmitError> for virtio_accel_core::BackendError {
 /// BF16 MATMUL zero-points are constant zero — is enforced by
 /// [`analyze_for`](virtio_accel_tosa::Model::analyze_for) before these structural checks.
 pub fn admit(bytes: &[u8], target: Target) -> Result<CompilerSpec, AdmitError> {
-    if target != XDNA_TOSA_TARGET && target != XDNA_TOSA_FP8_TARGET {
-        // The integer tier and other targets are later tickets.
+    if target != XDNA_TOSA_TARGET
+        && target != XDNA_TOSA_FP8_TARGET
+        && target != XDNA_TOSA_INTEGER_TARGET
+    {
         return Err(AdmitError::Unsupported);
     }
     let model = parse(bytes).map_err(|_| AdmitError::Parse)?;
@@ -257,8 +324,155 @@ pub fn admit(bytes: &[u8], target: Target) -> Result<CompilerSpec, AdmitError> {
         (XDNA_TOSA_FP8_TARGET, None, None, Some(cast), 0, 0) => {
             admit_fp8_to_bf16(&analysis, block, cast)
         }
+        (XDNA_TOSA_INTEGER_TARGET, None, None, None, _, 0) => admit_int8_identity(&analysis, block),
+        (XDNA_TOSA_INTEGER_TARGET, Some(matmul), None, None, 0, _) => {
+            admit_int8_matmul(&analysis, block, matmul)
+        }
         _ => Err(AdmitError::Unsupported),
     }
+}
+
+/// Admit exact INT8 IDENTITY, including the shared eight-byte corpus fixture.
+///
+/// Unlike BF16's established 1,024-element template, a small INT8 tensor is one complete DMA line.
+/// Larger tensors must be an exact multiple of the maximum line so no tail is staged on the host.
+fn admit_int8_identity(
+    analysis: &virtio_accel_tosa::TosaAnalysis<'_>,
+    block: virtio_accel_tosa::BlockId,
+) -> Result<CompilerSpec, AdmitError> {
+    let inputs = analysis.block_inputs(block);
+    let outputs = analysis.block_outputs(block);
+    if inputs.len() != 1 || outputs.len() != 1 {
+        return Err(AdmitError::Unsupported);
+    }
+    for value in analysis.values() {
+        if let AnalyzedValueKind::Tensor(tensor) = value.kind() {
+            if tensor.dtype() != DType::INT8 {
+                return Err(AdmitError::Unsupported);
+            }
+        }
+    }
+
+    let elements = tensor_elements(analysis, outputs[0])?;
+    let line_size = elements.min(INT8_IDENTITY_MAX_LINE_SIZE);
+    if line_size % 4 != 0 || (elements > INT8_IDENTITY_MAX_LINE_SIZE && elements % line_size != 0) {
+        return Err(AdmitError::Unsupported);
+    }
+    Ok(CompilerSpec::Int8Identity {
+        elements,
+        line_size,
+    })
+}
+
+/// Admit exact zero-point-aware INT8 MATMUL with the same graph semantics as OpenVINO.
+///
+/// XDNA specializes the two serialized rank-1 INT8 zero points into the device kernel because the
+/// AIE kernel API has no provider graph in which to insert OpenVINO's widen-and-subtract nodes.
+/// Both paths compute the same TOSA expression; XDNA never adjusts values on the host.
+fn admit_int8_matmul(
+    analysis: &virtio_accel_tosa::TosaAnalysis<'_>,
+    block: virtio_accel_tosa::BlockId,
+    matmul: virtio_accel_tosa::OperatorId,
+) -> Result<CompilerSpec, AdmitError> {
+    let inputs = analysis.operator_inputs(matmul);
+    let outputs = analysis.operator_outputs(matmul);
+    if inputs.len() != 4
+        || outputs.len() != 1
+        || analysis.block_inputs(block) != [inputs[0], inputs[1]]
+        || analysis.block_outputs(block) != [outputs[0]]
+    {
+        return Err(AdmitError::Unsupported);
+    }
+    for operator in analysis.execution_order(block) {
+        if analysis.operator(*operator).op() != Op::CONST {
+            continue;
+        }
+        for produced in analysis.operator_outputs(*operator) {
+            if *produced != inputs[2] && *produced != inputs[3] {
+                return Err(AdmitError::Unsupported);
+            }
+        }
+    }
+
+    let lhs = matmul_dims(analysis, inputs[0], DType::INT8)?;
+    let rhs = matmul_dims(analysis, inputs[1], DType::INT8)?;
+    let out = matmul_dims(analysis, outputs[0], DType::INT32)?;
+    let ([1, m, k], [1, k2, n], [1, m2, n2]) = (lhs, rhs, out) else {
+        return Err(AdmitError::Unsupported);
+    };
+    if k != k2 || m != m2 || n != n2 || [m, k, n].iter().any(|dim| *dim > MATMUL_MAX_DIM) {
+        return Err(AdmitError::Unsupported);
+    }
+
+    // AIE DMA descriptors transfer whole 32-bit words. The direct-binding ABI therefore rounds
+    // each INT8 input slot up to four bytes; the kernel ignores those explicit padding bytes.
+    let lhs_bytes = align_to_four(m.checked_mul(k).ok_or(AdmitError::Unsupported)?)?;
+    let rhs_bytes = align_to_four(k.checked_mul(n).ok_or(AdmitError::Unsupported)?)?;
+    let output_bytes = m
+        .checked_mul(n)
+        .and_then(|elements| elements.checked_mul(4))
+        .ok_or(AdmitError::Unsupported)?;
+    if lhs_bytes
+        .checked_add(rhs_bytes)
+        .and_then(|bytes| bytes.checked_add(output_bytes))
+        .is_none_or(|bytes| bytes > INT8_MATMUL_MAX_TOTAL_BYTES)
+    {
+        return Err(AdmitError::Unsupported);
+    }
+
+    Ok(CompilerSpec::Int8Matmul {
+        m,
+        k,
+        n,
+        left_zero_point: int8_zero_point(analysis, inputs[2])?,
+        right_zero_point: int8_zero_point(analysis, inputs[3])?,
+    })
+}
+
+fn align_to_four(bytes: usize) -> Result<usize, AdmitError> {
+    bytes
+        .checked_add(3)
+        .map(|bytes| bytes & !3)
+        .ok_or(AdmitError::Unsupported)
+}
+
+fn int8_zero_point(
+    analysis: &virtio_accel_tosa::TosaAnalysis<'_>,
+    value: virtio_accel_tosa::ValueId,
+) -> Result<i8, AdmitError> {
+    let AnalyzedValueKind::Tensor(tensor) = analysis.value(value).kind() else {
+        return Err(AdmitError::Unsupported);
+    };
+    if tensor.dtype() != DType::INT8 || tensor.dimensions().ne([1]) {
+        return Err(AdmitError::Unsupported);
+    }
+    let [byte] = analysis
+        .serialized_constant(value)
+        .ok_or(AdmitError::Unsupported)?
+    else {
+        return Err(AdmitError::Unsupported);
+    };
+    Ok(*byte as i8)
+}
+
+fn tensor_elements(
+    analysis: &virtio_accel_tosa::TosaAnalysis<'_>,
+    value: virtio_accel_tosa::ValueId,
+) -> Result<usize, AdmitError> {
+    let AnalyzedValueKind::Tensor(tensor) = analysis.value(value).kind() else {
+        return Err(AdmitError::Unsupported);
+    };
+    let mut elements = 1usize;
+    for dimension in tensor.dimensions() {
+        let dimension = usize::try_from(dimension).map_err(|_| AdmitError::Unsupported)?;
+        if dimension == 0 {
+            return Err(AdmitError::Unsupported);
+        }
+        elements = elements
+            .checked_mul(dimension)
+            .ok_or(AdmitError::Unsupported)?;
+    }
+    Ok(elements)
 }
 
 /// Admit one explicit FP8 → BF16 CAST directly connecting the block input and output.
@@ -594,11 +808,23 @@ mod tests {
         in_dtype: DType,
         out_dtype: DType,
     ) -> OwnedGraph<'static> {
-        // A BF16 zero (0x0000) and an FP32 zero (0x0000_0000); the zero-point dtype tracks the
-        // input dtype, so two bytes suffice for every dtype used here.
-        let zero = |dtype: DType| match dtype {
+        matmul_graph_with_zero_points(m, k, n, in_dtype, out_dtype, 0, 0)
+    }
+
+    fn matmul_graph_with_zero_points(
+        m: i32,
+        k: i32,
+        n: i32,
+        in_dtype: DType,
+        out_dtype: DType,
+        left_zero_point: i8,
+        right_zero_point: i8,
+    ) -> OwnedGraph<'static> {
+        let zero_point = |dtype: DType, value: i8| match dtype {
+            DType::INT8 => vec![value as u8],
+            DType::BF16 => vec![0u8; 2],
             DType::FP32 => vec![0u8; 4],
-            _ => vec![0u8; 2],
+            _ => Vec::new(),
         };
         let mut graph = OwnedGraph::new("main");
         graph
@@ -608,13 +834,13 @@ mod tests {
                 "lhs_zp",
                 vec![1],
                 in_dtype,
-                zero(in_dtype),
+                zero_point(in_dtype, left_zero_point),
             ))
             .push_tensor(OwnedTensor::constant(
                 "rhs_zp",
                 vec![1],
                 in_dtype,
-                zero(in_dtype),
+                zero_point(in_dtype, right_zero_point),
             ))
             .push_tensor(OwnedTensor::new("output", vec![1, m, n], out_dtype))
             .push_operator(OwnedOperator::new(
@@ -702,6 +928,81 @@ mod tests {
             .expect("build bf16 identity");
         let spec = admit(&bytes, XDNA_TOSA_TARGET).expect("admit");
         assert_eq!(spec, CompilerSpec::Identity { elements: 4 * 1024 });
+    }
+
+    #[test]
+    fn integer_capability_matches_the_openvino_precedent() {
+        assert_eq!(
+            XDNA_TOSA_INTEGER_CAPABILITY.target,
+            XDNA_TOSA_INTEGER_TARGET
+        );
+        assert_eq!(XDNA_TOSA_INTEGER_CAPABILITY.dtypes, INTEGER_DTYPES);
+        assert_eq!(XDNA_TOSA_INTEGER_CAPABILITY.operators, INTEGER_OPERATORS);
+        assert_eq!(XDNA_TOSA_INTEGER_CAPABILITY.graph.max_regions, 1);
+        assert_eq!(XDNA_TOSA_INTEGER_CAPABILITY.graph.max_blocks, 1);
+        assert_eq!(
+            XDNA_TOSA_INTEGER_CAPABILITY.graph.runtime_conditions,
+            RuntimeConditionSupport::None
+        );
+    }
+
+    #[test]
+    fn admits_shared_int8_identity_shape() {
+        let bytes = identity_graph(DType::INT8, vec![8])
+            .build(XDNA_TOSA_INTEGER_TARGET)
+            .expect("build int8 identity");
+        assert_eq!(
+            admit(&bytes, XDNA_TOSA_INTEGER_TARGET),
+            Ok(CompilerSpec::Int8Identity {
+                elements: 8,
+                line_size: 8,
+            })
+        );
+    }
+
+    #[test]
+    fn admits_zero_point_aware_int8_matmul() {
+        let bytes = matmul_graph_with_zero_points(2, 3, 2, DType::INT8, DType::INT32, -2, 3)
+            .build(XDNA_TOSA_INTEGER_TARGET)
+            .expect("build int8 matmul");
+        assert_eq!(
+            admit(&bytes, XDNA_TOSA_INTEGER_TARGET),
+            Ok(CompilerSpec::Int8Matmul {
+                m: 2,
+                k: 3,
+                n: 2,
+                left_zero_point: -2,
+                right_zero_point: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_int8_shapes_outside_the_one_core_envelope() {
+        let non_word_identity = identity_graph(DType::INT8, vec![6])
+            .build(XDNA_TOSA_INTEGER_TARGET)
+            .expect("build int8 identity");
+        assert_eq!(
+            admit(&non_word_identity, XDNA_TOSA_INTEGER_TARGET),
+            Err(AdmitError::Unsupported)
+        );
+
+        let non_divisible_identity = identity_graph(DType::INT8, vec![1025])
+            .build(XDNA_TOSA_INTEGER_TARGET)
+            .expect("build int8 identity");
+        assert_eq!(
+            admit(&non_divisible_identity, XDNA_TOSA_INTEGER_TARGET),
+            Err(AdmitError::Unsupported)
+        );
+
+        let oversized_matmul =
+            matmul_graph_with_zero_points(64, 64, 64, DType::INT8, DType::INT32, -2, 3)
+                .build(XDNA_TOSA_INTEGER_TARGET)
+                .expect("build int8 matmul");
+        assert_eq!(
+            admit(&oversized_matmul, XDNA_TOSA_INTEGER_TARGET),
+            Err(AdmitError::Unsupported)
+        );
     }
 
     #[test]
@@ -1027,13 +1328,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_wrong_target() {
+    fn rejects_bf16_artifact_under_integer_target() {
         let bytes = identity_graph(DType::BF16, vec![1, 4, 1024])
             .build(XDNA_TOSA_TARGET)
             .expect("build");
         assert_eq!(
             admit(&bytes, XDNA_TOSA_INTEGER_TARGET),
-            Err(AdmitError::Unsupported)
+            Err(AdmitError::Analysis)
         );
     }
 }

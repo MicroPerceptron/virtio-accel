@@ -13,12 +13,15 @@ Two modes:
 
 ``spec.json`` (all fields validated integers or closed enums; no guest bytes reach this process):
 
-    {"op": "IDENTITY", "dtype": "bf16", "elements": <n>, "device": "npu2",
+    {"op": "IDENTITY", "dtype": "bf16" | "i8", "elements": <n>, "device": "npu2",
      "fold_ddr_addr_offset": false}
     {"op": "CAST", "in_dtype": "fp8e4m3" | "fp8e5m2", "out_dtype": "bf16",
      "elements": <n>, "device": "npu2", "fold_ddr_addr_offset": false}
     {"op": "MATMUL", "in_dtype": "bf16", "out_dtype": "f32", "m": <M>, "k": <K>, "n": <N>,
      "device": "npu2", "fold_ddr_addr_offset": false}
+    {"op": "MATMUL", "in_dtype": "i8", "out_dtype": "i32", "m": <M>, "k": <K>, "n": <N>,
+     "left_zero_point": <i8>, "right_zero_point": <i8>, "device": "npu2",
+     "fold_ddr_addr_offset": false}
     {"op": "MAX_POOL2D", "dtype": "bf16", "layout": "NHWC", "batch": 1,
      "input_h": <H>, "input_w": <W>, "channels": <C>, "output_h": <OH>, "output_w": <OW>,
      "kernel_h": <KH>, "kernel_w": <KW>, "stride_h": <SH>, "stride_w": <SW>,
@@ -178,18 +181,20 @@ extern "C" void cast_fp8e5m2_to_bf16(
 """
 
 
-def _build_identity(line_size: int):
-    """Return the @iron.jit IDENTITY design (a bf16 DMA copy: shim -> memtile -> shim)."""
+def _build_identity(line_size: int, dtype: str):
+    """Return the @iron.jit direct-DMA IDENTITY design (shim -> memtile -> shim)."""
     import aie.iron as iron
     import ml_dtypes
     import numpy as np
     from aie.iron import CompileTime, In, ObjectFifo, Out, Program, Runtime
     from aie.iron.device import AnyShimTile
 
+    element_type = ml_dtypes.bfloat16 if dtype == "bf16" else np.int8
+
     @iron.jit
-    def identity_bf16(x_in: In, y_out: Out, *, n: CompileTime[int]):
-        vector_ty = np.ndarray[(n,), np.dtype[ml_dtypes.bfloat16]]
-        line_ty = np.ndarray[(line_size,), np.dtype[ml_dtypes.bfloat16]]
+    def identity(x_in: In, y_out: Out, *, n: CompileTime[int]):
+        vector_ty = np.ndarray[(n,), np.dtype[element_type]]
+        line_ty = np.ndarray[(line_size,), np.dtype[element_type]]
         of_in = ObjectFifo(line_ty, name="in")
         of_out = of_in.cons().forward()
 
@@ -208,7 +213,7 @@ def _build_identity(line_size: int):
         )
         return Program(iron.get_current_device(), rt).resolve_program()
 
-    return identity_bf16
+    return identity
 
 
 def _build_fp8_to_bf16(line_size: int, in_dtype: str):
@@ -357,6 +362,173 @@ def _build_matmul(tile_m: int, tile_k: int, tile_n: int):
     return matmul_bf16_f32
 
 
+def _int8_matmul_kernel_source(
+    m: int, k: int, n: int, left_zero_point: int, right_zero_point: int
+) -> str:
+    """Generate the exact fixed-shape TOSA INT8 MATMUL device kernel.
+
+    OpenVINO expresses zero-point handling as INT32 widen/subtract nodes before MatMul. IRON has no
+    equivalent provider graph, so XDNA specializes the same arithmetic into the AIE core kernel.
+    The caller has already bounded K so every exact dot product fits INT32.
+    """
+    if m % 4 == 0 and k % 4 == 0 and n % 8 == 0:
+        # XDNA2's AIE2P INT16 MMUL is 4x4x8. Widening after zero-point subtraction is exact for
+        # every INT8 value (the adjusted range is -255..255), and avoids the overflow that would
+        # occur if adjusted values were squeezed back into INT8. Packing costs scalar loads, while
+        # the dominant multiply-accumulate work stays on the native vector unit.
+        return f"""
+#include <cstdint>
+#include <aie_api/aie.hpp>
+
+extern "C" void matmul_i8_i32_zp(
+    const int8_t *__restrict lhs,
+    const int8_t *__restrict rhs,
+    int32_t *__restrict output) {{
+    constexpr unsigned M = {m};
+    constexpr unsigned K = {k};
+    constexpr unsigned N = {n};
+    constexpr int32_t LEFT_ZERO_POINT = {left_zero_point};
+    constexpr int32_t RIGHT_ZERO_POINT = {right_zero_point};
+    using MMUL = aie::mmul<4, 4, 8, int16, int16, acc32>;
+    alignas(aie::vector_decl_align) int16 left_tile[MMUL::size_A];
+    alignas(aie::vector_decl_align) int16 right_tile[MMUL::size_B];
+    alignas(aie::vector_decl_align) int32 output_tile[MMUL::size_C];
+
+    for (unsigned row_base = 0; row_base < M; row_base += 4) {{
+        for (unsigned column_base = 0; column_base < N; column_base += 8) {{
+            MMUL accumulator;
+            for (unsigned inner_base = 0; inner_base < K; inner_base += 4) {{
+                for (unsigned row = 0; row < 4; ++row) {{
+                    for (unsigned inner = 0; inner < 4; ++inner) {{
+                        left_tile[row * 4 + inner] = static_cast<int16>(
+                            static_cast<int32_t>(lhs[(row_base + row) * K + inner_base + inner])
+                            - LEFT_ZERO_POINT);
+                    }}
+                }}
+                for (unsigned inner = 0; inner < 4; ++inner) {{
+                    for (unsigned column = 0; column < 8; ++column) {{
+                        right_tile[inner * 8 + column] = static_cast<int16>(
+                            static_cast<int32_t>(rhs[(inner_base + inner) * N + column_base + column])
+                            - RIGHT_ZERO_POINT);
+                    }}
+                }}
+                accumulator.mac(
+                    aie::load_v<MMUL::size_A>(left_tile),
+                    aie::load_v<MMUL::size_B>(right_tile));
+            }}
+            aie::store_v(output_tile, accumulator.to_vector<int32>());
+            for (unsigned row = 0; row < 4; ++row) {{
+                for (unsigned column = 0; column < 8; ++column) {{
+                    output[(row_base + row) * N + column_base + column] =
+                        output_tile[row * 8 + column];
+                }}
+            }}
+        }}
+    }}
+}}
+"""
+
+    # Arbitrary small shapes (including the shared 2x3x2 corpus case) cannot use a complete MMUL
+    # tile. Keep this fallback scalar and explicitly disable Peano's unsupported generic vector
+    # legalization; no host fallback is involved.
+    return f"""
+#include <cstdint>
+
+extern "C" void matmul_i8_i32_zp(
+    const int8_t *__restrict lhs,
+    const int8_t *__restrict rhs,
+    int32_t *__restrict output) {{
+    constexpr unsigned M = {m};
+    constexpr unsigned K = {k};
+    constexpr unsigned N = {n};
+    constexpr int32_t LEFT_ZERO_POINT = {left_zero_point};
+    constexpr int32_t RIGHT_ZERO_POINT = {right_zero_point};
+    for (unsigned row = 0; row < M; ++row) {{
+        for (unsigned column = 0; column < N; ++column) {{
+            int32_t accumulator = 0;
+#pragma clang loop vectorize(disable) interleave(disable)
+            for (unsigned inner = 0; inner < K; ++inner) {{
+                const int32_t left = static_cast<int32_t>(lhs[row * K + inner]);
+                const int32_t right = static_cast<int32_t>(rhs[inner * N + column]);
+                accumulator +=
+                    (left - LEFT_ZERO_POINT) * (right - RIGHT_ZERO_POINT);
+            }}
+            output[row * N + column] = accumulator;
+        }}
+    }}
+}}
+"""
+
+
+def _build_int8_matmul(
+    m: int, k: int, n: int, left_zero_point: int, right_zero_point: int
+):
+    """Return the exact one-core INT8 -> INT32 MATMUL design.
+
+    Complete bounded tensors are direct-DMA'd into depth-two object FIFOs. The worker invokes one
+    Peano-compiled AIE kernel; no host staging, host arithmetic, or floating-point conversion occurs.
+    """
+    import aie.iron as iron
+    import numpy as np
+    from aie.iron import In, ObjectFifo, Out, Program, Runtime, Worker
+    from aie.iron.kernel import ExternalFunction
+
+    lhs_transport_elements = (m * k + 3) & ~3
+    rhs_transport_elements = (k * n + 3) & ~3
+
+    @iron.jit
+    def matmul_int8_int32(lhs_in: In, rhs_in: In, output_out: Out):
+        # AIE DMA lengths are 32-bit granular. Padding is part of the declared direct-binding ABI,
+        # and the kernel's M/K/N loops never inspect it.
+        lhs_ty = np.ndarray[(lhs_transport_elements,), np.dtype[np.int8]]
+        rhs_ty = np.ndarray[(rhs_transport_elements,), np.dtype[np.int8]]
+        output_ty = np.ndarray[(m * n,), np.dtype[np.int32]]
+        kernel = ExternalFunction(
+            "matmul_i8_i32_zp",
+            source_string=_int8_matmul_kernel_source(
+                m, k, n, left_zero_point, right_zero_point
+            ),
+            arg_types=[lhs_ty, rhs_ty, output_ty],
+        )
+        lhs_fifo = ObjectFifo(lhs_ty, name="int8_lhs")
+        rhs_fifo = ObjectFifo(rhs_ty, name="int8_rhs")
+        output_fifo = ObjectFifo(output_ty, name="int32_output")
+
+        def core_fn(lhs_source, rhs_source, output_destination, matmul):
+            lhs = lhs_source.acquire(1)
+            rhs = rhs_source.acquire(1)
+            output = output_destination.acquire(1)
+            matmul(lhs, rhs, output)
+            lhs_source.release(1)
+            rhs_source.release(1)
+            output_destination.release(1)
+
+        worker = Worker(
+            core_fn,
+            [lhs_fifo.cons(), rhs_fifo.cons(), output_fifo.prod(), kernel],
+        )
+
+        def sequence(lhs, rhs, output, lhs_prod, rhs_prod, output_cons):
+            lhs_prod.fill(lhs)
+            rhs_prod.fill(rhs)
+            output_cons.drain(output, wait=True)
+
+        rt = Runtime(
+            sequence,
+            [
+                lhs_ty,
+                rhs_ty,
+                output_ty,
+                lhs_fifo.prod(),
+                rhs_fifo.prod(),
+                output_fifo.cons(),
+            ],
+        )
+        return Program(iron.get_current_device(), rt, workers=[worker]).resolve_program()
+
+    return matmul_int8_int32
+
+
 def _build_max_pool2d():
     """Return a batch-1 BF16 NHWC MAX_POOL2D design with propagating NaNs.
 
@@ -447,7 +619,7 @@ def _compile(workdir: Path) -> int:
         dtype = spec.get("dtype")
         elements = spec.get("elements")
         line_size = spec.get("line_size")
-        if dtype != "bf16":
+        if dtype not in ("bf16", "i8"):
             return _fail(workdir, "spec-rejected", f"unsupported dtype: {dtype}")
         if not isinstance(line_size, int) or line_size <= 0:
             return _fail(workdir, "spec-rejected", f"invalid line_size: {line_size}")
@@ -455,11 +627,15 @@ def _compile(workdir: Path) -> int:
             return _fail(
                 workdir, "spec-rejected", f"elements must be a positive multiple of {line_size}"
             )
-        # The binding plan: exact per-slot byte sizes (bf16 = 2 B/element).
-        input_bytes, output_bytes = [elements * 2], [elements * 2]
+        element_bytes = 2 if dtype == "bf16" else 1
+        if dtype == "i8":
+            max_line_size = spec.get("max_line_size")
+            if max_line_size != 1024 or line_size > max_line_size:
+                return _fail(workdir, "spec-rejected", "unsupported INT8 IDENTITY line size")
+        input_bytes, output_bytes = [elements * element_bytes], [elements * element_bytes]
 
         def build():
-            return _build_identity(line_size).specialize(n=elements)
+            return _build_identity(line_size, dtype).specialize(n=elements)
     elif op == "CAST":
         in_dtype = spec.get("in_dtype")
         out_dtype = spec.get("out_dtype")
@@ -483,26 +659,61 @@ def _compile(workdir: Path) -> int:
         in_dtype = spec.get("in_dtype")
         out_dtype = spec.get("out_dtype")
         m, k, n = spec.get("m"), spec.get("k"), spec.get("n")
-        tile_m, tile_k, tile_n = spec.get("tile_m"), spec.get("tile_k"), spec.get("tile_n")
         max_dim = spec.get("max_dim")
-        if in_dtype != "bf16" or out_dtype != "f32":
+        if (in_dtype, out_dtype) not in (("bf16", "f32"), ("i8", "i32")):
             return _fail(
                 workdir, "spec-rejected", f"unsupported dtype pair: {in_dtype}->{out_dtype}"
             )
         if not isinstance(max_dim, int) or max_dim <= 0:
             return _fail(workdir, "spec-rejected", f"invalid max_dim: {max_dim}")
-        for name, dim, tile in (("m", m, tile_m), ("k", k, tile_k), ("n", n, tile_n)):
-            if not isinstance(tile, int) or tile <= 0:
-                return _fail(workdir, "spec-rejected", f"invalid tile_{name}: {tile}")
-            if not isinstance(dim, int) or dim <= 0 or dim % tile != 0 or dim > max_dim:
+        for name, dim in (("m", m), ("k", k), ("n", n)):
+            if not isinstance(dim, int) or dim <= 0 or dim > max_dim:
                 return _fail(
-                    workdir, "spec-rejected", f"{name}={dim} must be a positive multiple of {tile} <= {max_dim}"
+                    workdir, "spec-rejected", f"{name}={dim} must be positive and <= {max_dim}"
                 )
-        # The binding plan: A[M,K] and B[K,N] are bf16 (2 B), C[M,N] is the fp32 accumulator (4 B).
-        input_bytes, output_bytes = [m * k * 2, k * n * 2], [m * n * 4]
+        if in_dtype == "bf16":
+            tile_m, tile_k, tile_n = (
+                spec.get("tile_m"),
+                spec.get("tile_k"),
+                spec.get("tile_n"),
+            )
+            for name, dim, tile in (("m", m, tile_m), ("k", k, tile_k), ("n", n, tile_n)):
+                if not isinstance(tile, int) or tile <= 0:
+                    return _fail(workdir, "spec-rejected", f"invalid tile_{name}: {tile}")
+                if dim % tile != 0:
+                    return _fail(
+                        workdir,
+                        "spec-rejected",
+                        f"{name}={dim} must be a multiple of {tile}",
+                    )
+            input_bytes, output_bytes = [m * k * 2, k * n * 2], [m * n * 4]
 
-        def build():
-            return _build_matmul(tile_m, tile_k, tile_n).specialize(M=m, K=k, N=n)
+            def build():
+                return _build_matmul(tile_m, tile_k, tile_n).specialize(M=m, K=k, N=n)
+        else:
+            left_zero_point = spec.get("left_zero_point")
+            right_zero_point = spec.get("right_zero_point")
+            max_total_bytes = spec.get("max_total_bytes")
+            if (
+                not isinstance(left_zero_point, int)
+                or not -128 <= left_zero_point <= 127
+                or not isinstance(right_zero_point, int)
+                or not -128 <= right_zero_point <= 127
+            ):
+                return _fail(workdir, "spec-rejected", "INT8 zero point is out of range")
+            if not isinstance(max_total_bytes, int) or max_total_bytes <= 0:
+                return _fail(workdir, "spec-rejected", "invalid INT8 local-memory bound")
+            lhs_bytes = (m * k + 3) & ~3
+            rhs_bytes = (k * n + 3) & ~3
+            total_bytes = lhs_bytes + rhs_bytes + m * n * 4
+            if total_bytes > max_total_bytes:
+                return _fail(workdir, "spec-rejected", "INT8 MATMUL local-memory bound exceeded")
+            input_bytes, output_bytes = [lhs_bytes, rhs_bytes], [m * n * 4]
+
+            def build():
+                return _build_int8_matmul(
+                    m, k, n, left_zero_point, right_zero_point
+                ).specialize()
     elif op == "MAX_POOL2D":
         dtype = spec.get("dtype")
         layout = spec.get("layout")
