@@ -7,12 +7,14 @@
 //! runs. Graph lowering for compute tiers grows on top of this; the compilable subsets today are
 //! the BF16 IDENTITY (a DMA copy), BF16 → FP32 MATMUL (issue #90), BF16 NHWC MAX_POOL2D
 //! (issue #91), explicit FP8 → BF16 CAST storage conversion (issue #109), and exact INT8
-//! IDENTITY plus zero-point-aware INT8 → INT32 MATMUL (issue #144).
+//! IDENTITY, zero-point-aware INT8 → INT32 MATMUL (issue #144), and exact static
+//! INT32 → INT8 RESCALE (issue #147).
 
 use virtio_accel_tosa::{
     AnalyzedValueKind, CapabilityDescriptor, DType, DTypeCapability, ExtensionSet,
     GraphCapabilities, Level, NanPropagationMode, Op, OpAttributes, OperatorCapability,
-    OperatorConstraints, ProfileSet, RuntimeConditionSupport, Target, ValueRoles, Version, parse,
+    OperatorConstraints, ProfileSet, RoundingMode, RuntimeConditionSupport, Target, ValueRoles,
+    Version, parse,
 };
 
 /// The BF16 floating-point tier: TOSA 1.0, floating-point profile, level 8K, BF16 extension.
@@ -116,6 +118,7 @@ const INTEGER_OPERATORS: &[OperatorCapability] = &[
     OperatorCapability::new(Op::CONST),
     OperatorCapability::new(Op::IDENTITY),
     OperatorCapability::new(Op::MATMUL),
+    OperatorCapability::new(Op::RESCALE),
 ];
 
 /// Conservative exact integer-profile capability boundary for XDNA lowering.
@@ -172,6 +175,12 @@ pub(crate) const MATMUL_MAX_DIM: usize = 512;
 /// roughly 64 KiB local memory. This is stricter than OpenVINO because it is an XDNA memory limit.
 pub(crate) const INT8_MATMUL_MAX_TOTAL_BYTES: usize = 16 * 1024;
 
+/// Largest combined direct-bound INT32 input and padded INT8 output for one RESCALE worker.
+///
+/// Like the first INT8 MATMUL path, the worker keeps complete depth-two objects in one AIE2P
+/// core. This bound leaves room for code and bookkeeping and is rejected before compilation.
+pub(crate) const INT8_RESCALE_MAX_TOTAL_BYTES: usize = 16 * 1024;
+
 /// Maximum admitted pooling kernel and stride dimensions. Larger windows are unproven on the
 /// scalar AIE2P kernel and are rejected before the compiler subprocess runs.
 pub(crate) const MAX_POOL_MAX_KERNEL: usize = 8;
@@ -210,6 +219,13 @@ pub enum CompilerSpec {
         n: usize,
         left_zero_point: i8,
         right_zero_point: i8,
+    },
+    /// Exact signed INT32 → INT8 scale32 RESCALE with one shared multiplier and shift.
+    Int32ToInt8Rescale {
+        elements: usize,
+        multiplier: i32,
+        shift: i8,
+        output_zero_point: i8,
     },
     /// Batch-1 BF16 NHWC MAX_POOL2D with zero padding and propagating NaNs. The complete static
     /// specialization is carried to the helper so no TOSA bytes cross the subprocess boundary.
@@ -262,8 +278,9 @@ impl From<AdmitError> for virtio_accel_core::BackendError {
 ///
 /// The BF16 target admits IDENTITY (a DMA copy), BF16 → FP32 MATMUL, and BF16 NHWC MAX_POOL2D.
 /// The separate FP8 storage target admits one explicit FP8 → BF16 CAST. The integer target admits
-/// exact INT8 IDENTITY and zero-point-aware INT8 → INT32 MATMUL. Everything else is rejected
-/// without running the compiler. Each template admits only graphs whose **dataflow** matches what
+/// exact INT8 IDENTITY, zero-point-aware INT8 → INT32 MATMUL, and static signed INT32 → INT8
+/// RESCALE. Everything else is rejected without running the compiler. Each template admits only
+/// graphs whose **dataflow** matches what
 /// the compiled kernel executes — the IDENTITY
 /// template requires every operator to be IDENTITY (no constants: with a single block input, every
 /// value then provably carries that input's bytes), and the MATMUL template requires the operator's
@@ -299,6 +316,7 @@ pub fn admit(bytes: &[u8], target: Target) -> Result<CompilerSpec, AdmitError> {
     let mut matmul = None;
     let mut max_pool = None;
     let mut cast = None;
+    let mut rescale = None;
     let mut identities = 0usize;
     let mut constants = 0usize;
     for operator in analysis.execution_order(block) {
@@ -308,25 +326,33 @@ pub fn admit(bytes: &[u8], target: Target) -> Result<CompilerSpec, AdmitError> {
             Op::MATMUL if matmul.is_none() => matmul = Some(*operator),
             Op::MAX_POOL2D if max_pool.is_none() => max_pool = Some(*operator),
             Op::CAST if cast.is_none() => cast = Some(*operator),
+            Op::RESCALE if rescale.is_none() => rescale = Some(*operator),
             _ => return Err(AdmitError::Unsupported),
         }
     }
-    match (target, matmul, max_pool, cast, identities, constants) {
+    match (
+        target, matmul, max_pool, cast, rescale, identities, constants,
+    ) {
         // All-IDENTITY (zero operators included: the block output then *is* the block input, and a
         // DMA copy is exact for it).
-        (XDNA_TOSA_TARGET, None, None, None, _, 0) => admit_identity(&analysis, block),
-        (XDNA_TOSA_TARGET, Some(matmul), None, None, 0, _) => {
+        (XDNA_TOSA_TARGET, None, None, None, None, _, 0) => admit_identity(&analysis, block),
+        (XDNA_TOSA_TARGET, Some(matmul), None, None, None, 0, _) => {
             admit_matmul(&analysis, block, matmul)
         }
-        (XDNA_TOSA_TARGET, None, Some(max_pool), None, 0, 0) => {
+        (XDNA_TOSA_TARGET, None, Some(max_pool), None, None, 0, 0) => {
             admit_max_pool2d(&analysis, block, max_pool)
         }
-        (XDNA_TOSA_FP8_TARGET, None, None, Some(cast), 0, 0) => {
+        (XDNA_TOSA_FP8_TARGET, None, None, Some(cast), None, 0, 0) => {
             admit_fp8_to_bf16(&analysis, block, cast)
         }
-        (XDNA_TOSA_INTEGER_TARGET, None, None, None, _, 0) => admit_int8_identity(&analysis, block),
-        (XDNA_TOSA_INTEGER_TARGET, Some(matmul), None, None, 0, _) => {
+        (XDNA_TOSA_INTEGER_TARGET, None, None, None, None, _, 0) => {
+            admit_int8_identity(&analysis, block)
+        }
+        (XDNA_TOSA_INTEGER_TARGET, Some(matmul), None, None, None, 0, _) => {
             admit_int8_matmul(&analysis, block, matmul)
+        }
+        (XDNA_TOSA_INTEGER_TARGET, None, None, None, Some(rescale), 0, 4) => {
+            admit_int32_to_int8_rescale(&analysis, block, rescale)
         }
         _ => Err(AdmitError::Unsupported),
     }
@@ -429,11 +455,116 @@ fn admit_int8_matmul(
     })
 }
 
+/// Admit the released signed scale32 RESCALE row without OpenVINO-style implicit conversion.
+///
+/// OpenVINO does not advertise RESCALE in its conservative integer tier. XDNA deliberately extends
+/// the operator surface here, while retaining the same separate target, static lowering boundary,
+/// direct binding, and reject-don't-fallback behavior. Per-channel, unsigned, double-round, and
+/// inexact-round forms remain unsupported until they have separate kernels and corpus proof.
+fn admit_int32_to_int8_rescale(
+    analysis: &virtio_accel_tosa::TosaAnalysis<'_>,
+    block: virtio_accel_tosa::BlockId,
+    rescale: virtio_accel_tosa::OperatorId,
+) -> Result<CompilerSpec, AdmitError> {
+    let inputs = analysis.operator_inputs(rescale);
+    let outputs = analysis.operator_outputs(rescale);
+    if inputs.len() != 5
+        || outputs.len() != 1
+        || analysis.block_inputs(block) != [inputs[0]]
+        || analysis.block_outputs(block) != [outputs[0]]
+    {
+        return Err(AdmitError::Unsupported);
+    }
+    for operator in analysis.execution_order(block) {
+        if analysis.operator(*operator).op() != Op::CONST {
+            continue;
+        }
+        for produced in analysis.operator_outputs(*operator) {
+            if !inputs[1..].contains(produced) {
+                return Err(AdmitError::Unsupported);
+            }
+        }
+    }
+
+    let AnalyzedValueKind::Tensor(input) = analysis.value(inputs[0]).kind() else {
+        return Err(AdmitError::Unsupported);
+    };
+    let AnalyzedValueKind::Tensor(output) = analysis.value(outputs[0]).kind() else {
+        return Err(AdmitError::Unsupported);
+    };
+    if input.dtype() != DType::INT32
+        || output.dtype() != DType::INT8
+        || !input.dimensions().eq(output.dimensions())
+    {
+        return Err(AdmitError::Unsupported);
+    }
+    let OpAttributes::Rescale {
+        scale32,
+        rounding_mode,
+        per_channel,
+        input_unsigned,
+        output_unsigned,
+    } = analysis.operator(rescale).source().attributes()
+    else {
+        return Err(AdmitError::Unsupported);
+    };
+    if !scale32
+        || rounding_mode != RoundingMode::SINGLE_ROUND
+        || per_channel
+        || input_unsigned
+        || output_unsigned
+    {
+        return Err(AdmitError::Unsupported);
+    }
+
+    let multiplier = int32_constant(analysis, inputs[1])?;
+    let shift = int8_zero_point(analysis, inputs[2])?;
+    let input_zero_point = int32_constant(analysis, inputs[3])?;
+    let output_zero_point = int8_zero_point(analysis, inputs[4])?;
+    if multiplier < 0 || !(2..=62).contains(&shift) || input_zero_point != 0 {
+        return Err(AdmitError::Unsupported);
+    }
+
+    let elements = tensor_elements(analysis, inputs[0])?;
+    let input_bytes = elements.checked_mul(4).ok_or(AdmitError::Unsupported)?;
+    let output_bytes = align_to_four(elements)?;
+    if input_bytes
+        .checked_add(output_bytes)
+        .is_none_or(|bytes| bytes > INT8_RESCALE_MAX_TOTAL_BYTES)
+    {
+        return Err(AdmitError::Unsupported);
+    }
+    Ok(CompilerSpec::Int32ToInt8Rescale {
+        elements,
+        multiplier,
+        shift,
+        output_zero_point,
+    })
+}
+
 fn align_to_four(bytes: usize) -> Result<usize, AdmitError> {
     bytes
         .checked_add(3)
         .map(|bytes| bytes & !3)
         .ok_or(AdmitError::Unsupported)
+}
+
+fn int32_constant(
+    analysis: &virtio_accel_tosa::TosaAnalysis<'_>,
+    value: virtio_accel_tosa::ValueId,
+) -> Result<i32, AdmitError> {
+    let AnalyzedValueKind::Tensor(tensor) = analysis.value(value).kind() else {
+        return Err(AdmitError::Unsupported);
+    };
+    if tensor.dtype() != DType::INT32 || tensor.dimensions().ne([1]) {
+        return Err(AdmitError::Unsupported);
+    }
+    let bytes: [u8; 4] = analysis
+        .serialized_constant(value)
+        .ok_or(AdmitError::Unsupported)?
+        .try_into()
+        .map_err(|_| AdmitError::Unsupported)?;
+    Ok(i32::from_le_bytes(bytes))
 }
 
 fn int8_zero_point(
@@ -768,6 +899,7 @@ fn pool_dims(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use virtio_accel_conformance::numerics::RESCALE_INT32_TO_INT8;
     use virtio_accel_tosa::Target;
     use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
 
@@ -864,6 +996,71 @@ mod tests {
         graph
     }
 
+    fn rescale_graph(
+        elements: i32,
+        multiplier: i32,
+        shift: i8,
+        per_channel: bool,
+        rounding_mode: RoundingMode,
+    ) -> OwnedGraph<'static> {
+        let mut graph = OwnedGraph::new("main");
+        graph
+            .push_tensor(OwnedTensor::new("input", vec![elements], DType::INT32))
+            .push_tensor(OwnedTensor::constant(
+                "multiplier",
+                vec![1],
+                DType::INT32,
+                multiplier.to_le_bytes().to_vec(),
+            ))
+            .push_tensor(OwnedTensor::constant(
+                "shift",
+                vec![1],
+                DType::INT8,
+                vec![shift as u8],
+            ))
+            .push_tensor(OwnedTensor::constant(
+                "input_zp",
+                vec![1],
+                DType::INT32,
+                0_i32.to_le_bytes().to_vec(),
+            ))
+            .push_tensor(OwnedTensor::constant(
+                "output_zp",
+                vec![1],
+                DType::INT8,
+                vec![(-3_i8) as u8],
+            ))
+            .push_tensor(OwnedTensor::new("output", vec![elements], DType::INT8));
+        for parameter in ["multiplier", "shift", "input_zp", "output_zp"] {
+            graph.push_operator(OwnedOperator::new(
+                OperatorKind::Const,
+                vec![],
+                vec![parameter.into()],
+            ));
+        }
+        graph
+            .push_operator(OwnedOperator::new(
+                OperatorKind::Rescale {
+                    scale32: true,
+                    rounding_mode,
+                    per_channel,
+                    input_unsigned: false,
+                    output_unsigned: false,
+                },
+                vec![
+                    "input".into(),
+                    "multiplier".into(),
+                    "shift".into(),
+                    "input_zp".into(),
+                    "output_zp".into(),
+                ],
+                vec!["output".into()],
+            ))
+            .push_input("input")
+            .push_output("output");
+        graph
+    }
+
     struct MaxPoolCase {
         input: [i32; 3],
         kernel: [i32; 2],
@@ -931,13 +1128,16 @@ mod tests {
     }
 
     #[test]
-    fn integer_capability_matches_the_openvino_precedent() {
+    fn integer_capability_preserves_the_openvino_base_and_adds_rescale() {
         assert_eq!(
             XDNA_TOSA_INTEGER_CAPABILITY.target,
             XDNA_TOSA_INTEGER_TARGET
         );
         assert_eq!(XDNA_TOSA_INTEGER_CAPABILITY.dtypes, INTEGER_DTYPES);
         assert_eq!(XDNA_TOSA_INTEGER_CAPABILITY.operators, INTEGER_OPERATORS);
+        for op in [Op::CONST, Op::IDENTITY, Op::MATMUL, Op::RESCALE] {
+            assert!(XDNA_TOSA_INTEGER_CAPABILITY.supports_operator(op));
+        }
         assert_eq!(XDNA_TOSA_INTEGER_CAPABILITY.graph.max_regions, 1);
         assert_eq!(XDNA_TOSA_INTEGER_CAPABILITY.graph.max_blocks, 1);
         assert_eq!(
@@ -974,6 +1174,44 @@ mod tests {
                 left_zero_point: -2,
                 right_zero_point: 3,
             })
+        );
+    }
+
+    #[test]
+    fn admits_shared_exact_int32_to_int8_rescale() {
+        assert_eq!(
+            admit(RESCALE_INT32_TO_INT8.artifact, XDNA_TOSA_INTEGER_TARGET),
+            Ok(CompilerSpec::Int32ToInt8Rescale {
+                elements: 16,
+                multiplier: 1 << 29,
+                shift: 30,
+                output_zero_point: -3,
+            })
+        );
+    }
+
+    #[test]
+    fn rescale_rejects_unimplemented_modes_and_invalid_parameters() {
+        let per_channel = rescale_graph(1, 1 << 29, 30, true, RoundingMode::SINGLE_ROUND)
+            .build(XDNA_TOSA_INTEGER_TARGET)
+            .expect("per-channel one-element RESCALE is valid TOSA");
+        assert_eq!(
+            admit(&per_channel, XDNA_TOSA_INTEGER_TARGET),
+            Err(AdmitError::Unsupported)
+        );
+
+        assert!(
+            rescale_graph(16, 1 << 29, 1, false, RoundingMode::SINGLE_ROUND)
+                .build(XDNA_TOSA_INTEGER_TARGET)
+                .is_err(),
+            "shift 1 violates the released RESCALE range"
+        );
+
+        assert!(
+            rescale_graph(16, 1 << 29, 30, false, RoundingMode::DOUBLE_ROUND)
+                .build(XDNA_TOSA_INTEGER_TARGET)
+                .is_err(),
+            "DOUBLE_ROUND requires an extension absent from the integer target"
         );
     }
 

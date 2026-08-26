@@ -71,7 +71,7 @@ by the reusable semantic suite. A public hardware CI lane remains unavailable, s
 publishes the exact manual replacement commands.
 
 The AMD XDNA crate compiles its portable admission surface (`lower`, including the TOSA IDENTITY,
-MATMUL, MAX_POOL2D, explicit FP8-to-BF16 CAST, and exact INT8 admissions and its advertised `Target`
+MATMUL, MAX_POOL2D, explicit FP8-to-BF16 CAST, and exact INT8 IDENTITY/MATMUL/RESCALE admissions and its advertised `Target`
 constants), the portable
 precompiled-artifact codec, and a placeholder on every host; portable CI unit-tests admission. HRX
 exposes a plain C ABI, so its
@@ -88,7 +88,8 @@ the separately pinned `VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN`. On the reference machine
 toolchain and an NPU, backend-local tests run a DMA passthrough, a
 compiled TOSA BF16 IDENTITY, a bit-exact BF16 → FP32 MATMUL, BF16 NHWC MAX_POOL2D against the
 shared bit-exact oracle, both FP8E4M3/E5M2 → BF16 CASTs against shared bit-exact oracles, and the
-shared exact INT8 identity and nonzero-zero-point MATMUL oracles, plus the shared semantic
+shared exact INT8 identity, nonzero-zero-point MATMUL, and signed INT32-to-INT8 RESCALE oracles,
+plus the shared semantic
 conformance suite end to end; compilation invokes
 the aiecc helper as a bounded subprocess (never a Cargo dependency). The conformance run includes
 provider-resource accounting and direct-binding diagnostics; a feature-gated on-metal fault suite
@@ -98,11 +99,15 @@ discard. MAX_POOL2D mirrors OpenVINO's
 propagating-NaN and zero-padding semantics, but XDNA admission is deliberately narrower: batch 1,
 kernel and stride dimensions at most 8, and at most 8,192 input-plus-output elements so the full
 tensors fit in the AIE2P worker's local memory. A public hardware CI lane remains unavailable.
-The INT8 capability mirrors OpenVINO's exact `CONST`/`IDENTITY`/`MATMUL` semantic surface but adds
-an XDNA-specific one-core memory envelope. AIE DMA's four-byte transfer granularity is represented
-as explicit per-slot padding in the compiled artifact, never as hidden submission-time staging.
-Tile-compatible MATMUL shapes widen/subtract zero points on the NPU and use the native 4x4x8 INT16
-matrix unit; smaller shapes use an exact scalar on-NPU kernel.
+The INT8 capability preserves OpenVINO's exact `CONST`/`IDENTITY`/`MATMUL` semantic baseline and
+adds `RESCALE` as a documented operator-surface expansion. The expansion uses released TOSA
+semantics and is needed to return an INT32 accumulator to signed INT8 without host arithmetic;
+XDNA admits only per-tensor `scale32`/`SINGLE_ROUND` forms proven against the shared exact oracle.
+An XDNA-specific one-core memory envelope still applies. AIE DMA's four-byte transfer granularity
+is represented as explicit per-slot padding in the compiled artifact, never as hidden
+submission-time staging. Tile-compatible MATMUL shapes widen/subtract zero points on the NPU and
+use the native 4x4x8 INT16 matrix unit; smaller shapes and exact 64-bit RESCALE arithmetic use
+scalar on-NPU kernels. RESCALE clears the at-most-three-byte padded output tail on the NPU.
 
 Concrete VMM, kernel, OS, and vendor adapters are outside the portable-v1 milestone and must not
 become default dependencies of a portable crate.

@@ -15,7 +15,7 @@ use common::{
 
 use virtio_accel_conformance::numerics::{
     CAST_FP8E4M3_TO_BF16, CAST_FP8E5M2_TO_BF16, IDENTITY_INT8, MATMUL_INT8, MAX_POOL2D_BF16,
-    TosaFp8ToBfloat16Case,
+    RESCALE_INT32_TO_INT8, TosaFp8ToBfloat16Case,
 };
 use virtio_accel_core::{
     Accelerator, AccessMode, ArtifactFormat, ArtifactRef, BackendError, BindingRef, BufferDesc,
@@ -851,7 +851,7 @@ fn tosa_bf16_identity_runs_on_the_npu() {
 }
 
 #[test]
-fn tosa_int8_corpus_compiles_to_wellformed_artifacts() {
+fn tosa_integer_corpus_compiles_to_wellformed_artifacts() {
     if !toolchain_present() {
         eprintln!("no XDNA toolchain configured; skipping compiler test");
         return;
@@ -859,6 +859,11 @@ fn tosa_int8_corpus_compiles_to_wellformed_artifacts() {
     for (case_name, artifact, expected_slots) in [
         (IDENTITY_INT8.name, IDENTITY_INT8.artifact, &[8, 8][..]),
         (MATMUL_INT8.name, MATMUL_INT8.artifact, &[8, 8, 16][..]),
+        (
+            RESCALE_INT32_TO_INT8.name,
+            RESCALE_INT32_TO_INT8.artifact,
+            &[64, 16][..],
+        ),
     ] {
         let container = compile_artifact(artifact, XDNA_TOSA_INTEGER_TARGET)
             .unwrap_or_else(|error| panic!("compile {case_name}: {error:?}"));
@@ -1086,6 +1091,110 @@ fn tosa_int8_matmul_matches_the_shared_exact_oracle_on_the_npu() {
     backend.destroy_event(event).expect("destroy event");
     backend.free_buffer(lhs).expect("free lhs");
     backend.free_buffer(rhs).expect("free rhs");
+    backend.free_buffer(output).expect("free output");
+    backend.unload_program(program).expect("unload program");
+    backend.destroy_queue(queue).expect("destroy queue");
+    backend.destroy_context(context).expect("destroy context");
+}
+
+#[test]
+fn tosa_int32_to_int8_rescale_matches_the_shared_exact_oracle_on_the_npu() {
+    let Some(backend) = backend() else { return };
+    if !toolchain_present() {
+        eprintln!("no XDNA toolchain configured; skipping TOSA execution test");
+        return;
+    }
+    let context = backend
+        .create_context(ContextDesc::default())
+        .expect("context");
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .expect("queue");
+    let program = backend
+        .load_program(
+            &context,
+            ArtifactRef {
+                format: ARTIFACT_FORMAT,
+                target: XDNA_TOSA_INTEGER_TARGET.to_identity(),
+                payload: &Slice(RESCALE_INT32_TO_INT8.artifact),
+                resident_bytes: u64::MAX,
+            },
+        )
+        .expect("load INT32-to-INT8 rescale");
+    let input_bytes: Vec<_> = RESCALE_INT32_TO_INT8
+        .input
+        .values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    let output_len = RESCALE_INT32_TO_INT8.output.bytes.len();
+    let (mut input, _) = backend
+        .allocate_buffer(
+            &context,
+            BufferDesc::new(
+                input_bytes.len() as u64,
+                4096,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+            )
+            .unwrap(),
+        )
+        .expect("input buffer")
+        .into_parts();
+    let (output, _) = backend
+        .allocate_buffer(
+            &context,
+            BufferDesc::new(
+                output_len as u64,
+                4096,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+            )
+            .unwrap(),
+        )
+        .expect("output buffer")
+        .into_parts();
+    backend
+        .write_buffer(&mut input, 0, &Slice(&input_bytes))
+        .expect("write INT32 input");
+
+    let direct_before = backend.direct_binding_admissions();
+    let transfer_before = backend.explicit_transfer_bytes();
+    let event = backend
+        .submit(
+            &queue,
+            &program,
+            &[
+                BindingRef {
+                    slot: 0,
+                    buffer: &input,
+                    range: BufferRange::new(0, input_bytes.len() as u64).unwrap(),
+                    access: AccessMode::Read,
+                },
+                BindingRef {
+                    slot: 1,
+                    buffer: &output,
+                    range: BufferRange::new(0, output_len as u64).unwrap(),
+                    access: AccessMode::Write,
+                },
+            ],
+            Timeout::Infinite,
+        )
+        .expect("submit INT32-to-INT8 rescale");
+    let state = poll_to_terminal(&backend, &event, Duration::from_secs(30))
+        .expect("INT32-to-INT8 rescale did not complete");
+    assert!(matches!(state, EventState::Complete), "got {state:?}");
+    assert_eq!(backend.direct_binding_admissions() - direct_before, 2);
+    assert_eq!(backend.explicit_transfer_bytes() - transfer_before, 0);
+
+    let mut result = vec![0u8; output_len];
+    backend
+        .read_buffer(&output, 0, &mut SliceMut(&mut result))
+        .expect("read INT8 output");
+    assert!(RESCALE_INT32_TO_INT8.output_matches(&result));
+
+    backend.destroy_event(event).expect("destroy event");
+    backend.free_buffer(input).expect("free input");
     backend.free_buffer(output).expect("free output");
     backend.unload_program(program).expect("unload program");
     backend.destroy_queue(queue).expect("destroy queue");

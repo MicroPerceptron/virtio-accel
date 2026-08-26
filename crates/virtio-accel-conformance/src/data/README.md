@@ -8,7 +8,9 @@ times over 1,024 elements and require exact BF16 output bits for every non-NaN v
 payloads may be canonicalized; all other packed values compare bit-for-bit. INT4
 uses TOSA's low-nibble-first ordering and excludes the reserved `-8` encoding. The INT8 matrix
 multiplication fixture uses nonzero zero points so a backend cannot pass by treating storage bytes
-as unquantized operands.
+as unquantized operands. The signed INT32-to-INT8 RESCALE fixture uses a nonzero output zero point
+and values around negative and positive half-way cases and saturation limits, so comparison proves
+the released single-round arithmetic exactly rather than merely checking an in-range example.
 
 Regeneration is explicit and writes only the exact path supplied through
 `VIRTIO_ACCEL_TOSA_FIXTURE_OUT`; the ordinary test suite never mutates the source tree. Every

@@ -24,8 +24,9 @@ use crate::XDNA_ERROR_DOMAIN;
 use crate::artifact;
 use crate::lower::{
     CompilerSpec, FP8_CAST_LINE_SIZE, Fp8Format, IDENTITY_LINE_SIZE, INT8_IDENTITY_MAX_LINE_SIZE,
-    INT8_MATMUL_MAX_TOTAL_BYTES, MATMUL_MAX_DIM, MATMUL_TILE_K, MATMUL_TILE_M, MATMUL_TILE_N,
-    MAX_POOL_MAX_KERNEL, MAX_POOL_MAX_STRIDE, MAX_POOL_MAX_TOTAL_ELEMENTS,
+    INT8_MATMUL_MAX_TOTAL_BYTES, INT8_RESCALE_MAX_TOTAL_BYTES, MATMUL_MAX_DIM, MATMUL_TILE_K,
+    MATMUL_TILE_M, MATMUL_TILE_N, MAX_POOL_MAX_KERNEL, MAX_POOL_MAX_STRIDE,
+    MAX_POOL_MAX_TOTAL_ELEMENTS,
 };
 
 /// The embedded compiler helper; written into each private workdir before invocation.
@@ -96,6 +97,18 @@ fn spec_json(spec: CompilerSpec) -> String {
              \"m\":{m},\"k\":{k},\"n\":{n},\"left_zero_point\":{left_zero_point},\
              \"right_zero_point\":{right_zero_point},\"max_dim\":{MATMUL_MAX_DIM},\
              \"max_total_bytes\":{INT8_MATMUL_MAX_TOTAL_BYTES},{device}}}"
+        ),
+        CompilerSpec::Int32ToInt8Rescale {
+            elements,
+            multiplier,
+            shift,
+            output_zero_point,
+        } => format!(
+            "{{\"op\":\"RESCALE\",\"in_dtype\":\"i32\",\"out_dtype\":\"i8\",\
+             \"elements\":{elements},\"multiplier\":{multiplier},\"shift\":{shift},\
+             \"input_zero_point\":0,\"output_zero_point\":{output_zero_point},\
+             \"rounding_mode\":\"SINGLE_ROUND\",\"per_channel\":false,\
+             \"max_total_bytes\":{INT8_RESCALE_MAX_TOTAL_BYTES},{device}}}"
         ),
         CompilerSpec::MaxPool2d {
             input_h,
@@ -405,6 +418,31 @@ mod tests {
             "\"out_dtype\":\"i32\"",
             "\"left_zero_point\":-2",
             "\"right_zero_point\":3",
+            "\"max_total_bytes\":16384",
+        ] {
+            assert!(json.contains(field), "missing {field} in {json}");
+        }
+    }
+
+    #[test]
+    fn rescale_spec_preserves_every_exact_compile_time_parameter() {
+        let json = spec_json(CompilerSpec::Int32ToInt8Rescale {
+            elements: 16,
+            multiplier: 1 << 29,
+            shift: 30,
+            output_zero_point: -3,
+        });
+        for field in [
+            "\"op\":\"RESCALE\"",
+            "\"in_dtype\":\"i32\"",
+            "\"out_dtype\":\"i8\"",
+            "\"elements\":16",
+            "\"multiplier\":536870912",
+            "\"shift\":30",
+            "\"input_zero_point\":0",
+            "\"output_zero_point\":-3",
+            "\"rounding_mode\":\"SINGLE_ROUND\"",
+            "\"per_channel\":false",
             "\"max_total_bytes\":16384",
         ] {
             assert!(json.contains(field), "missing {field} in {json}");
