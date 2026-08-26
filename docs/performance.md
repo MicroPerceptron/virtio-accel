@@ -187,6 +187,24 @@ throughput configuration. Multi-worker striping is an optional optimization; det
 continues to gate exact numerics, direct binding, and zero submission-time transfer bytes instead
 of wall-clock latency.
 
+The exact INT8 MATMUL benchmark uses the same 20 warmups and 200 measured submissions. Shapes that
+fill the AIE2P 4x4x8 tile subtract both zero points exactly, widen to INT16, and use the native
+matrix unit; incomplete shapes retain a scalar exact kernel. Run it with:
+
+```sh
+source ~/toolchains/amdxdna-hrx-v2026.08/env.sh
+export VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN=~/toolchains/amdxdna-hrx-v2026.08
+cargo test --release -p virtio-accel-xdna --test hardware \
+  measures_exact_int8_matmul_latency -- --ignored --nocapture --test-threads=1
+```
+
+On August 26, 2026, the same `1022:17f0` XDNA2 NPU and v2026.08 toolchain measured the 64x64x32
+specialization at 0.661 microseconds admission median, 0.334065 milliseconds submit-to-complete
+median, and 0.343723 milliseconds p95, or 0.785 effective GOPS. All 660 bindings across 220
+submissions were direct and submission reported zero explicit-transfer bytes. This is a first-tier
+dispatch-sized baseline, not peak NPU throughput; issue #151 tracks matrix-unit/dataflow
+optimization without weakening exactness or direct binding.
+
 ## Qualcomm Hexagon evidence status
 
 `virtio-accel-hexagon` includes an ignored release-mode measurement for fixed submission overhead:
