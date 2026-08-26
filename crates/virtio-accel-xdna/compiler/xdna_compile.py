@@ -15,6 +15,8 @@ Two modes:
 
     {"op": "IDENTITY", "dtype": "bf16", "elements": <n>, "device": "npu2",
      "fold_ddr_addr_offset": false}
+    {"op": "CAST", "in_dtype": "fp8e4m3" | "fp8e5m2", "out_dtype": "bf16",
+     "elements": <n>, "device": "npu2", "fold_ddr_addr_offset": false}
     {"op": "MATMUL", "in_dtype": "bf16", "out_dtype": "f32", "m": <M>, "k": <K>, "n": <N>,
      "device": "npu2", "fold_ddr_addr_offset": false}
     {"op": "MAX_POOL2D", "dtype": "bf16", "layout": "NHWC", "batch": 1,
@@ -28,6 +30,7 @@ Two modes:
 transaction stream transfers). IDENTITY binds one input and one output; MATMUL binds two inputs
 (A, B) and one output (C) — the zero-points are compile-time constants, not runtime bindings;
 MAX_POOL2D binds one NHWC input and one NHWC output.
+CAST binds one FP8 input directly and one BF16 output directly.
 
 The environment is pinned by the caller (cleared, with PEANO_INSTALL_DIR / AIE_XCLBINUTIL / PATH
 and a private HOME/TMPDIR/NPU_CACHE_HOME); this script sets no ambient state and never dispatches.
@@ -124,6 +127,57 @@ def _find_hrx_dir(prefix: Path) -> Path | None:
     return None
 
 
+_FP8_CAST_KERNEL_SOURCE = r"""
+#include <cstdint>
+
+static inline uint16_t fp8e4m3_to_bf16(uint8_t bits) {
+    const uint16_t sign = static_cast<uint16_t>(bits & 0x80u) << 8;
+    const uint16_t exponent = (bits >> 3) & 0x0fu;
+    const uint16_t fraction = bits & 0x07u;
+    if (exponent == 0) {
+        static const uint16_t subnormal[8] = {
+            0x0000, 0x3b00, 0x3b80, 0x3bc0, 0x3c00, 0x3c20, 0x3c40, 0x3c60
+        };
+        return sign | subnormal[fraction];
+    }
+    if (exponent == 0x0f && fraction == 0x07) {
+        return sign | 0x7fc0; // quiet BF16 NaN; TOSA permits payload canonicalization
+    }
+    return sign | static_cast<uint16_t>((exponent + 120) << 7) | (fraction << 4);
+}
+
+static inline uint16_t fp8e5m2_to_bf16(uint8_t bits) {
+    const uint16_t sign = static_cast<uint16_t>(bits & 0x80u) << 8;
+    const uint16_t exponent = (bits >> 2) & 0x1fu;
+    const uint16_t fraction = bits & 0x03u;
+    if (exponent == 0) {
+        static const uint16_t subnormal[4] = {0x0000, 0x3780, 0x3800, 0x3840};
+        return sign | subnormal[fraction];
+    }
+    if (exponent == 0x1f) {
+        return sign | (fraction == 0 ? 0x7f80 : 0x7fc0);
+    }
+    return sign | static_cast<uint16_t>((exponent + 112) << 7) | (fraction << 5);
+}
+
+extern "C" void cast_fp8e4m3_to_bf16(
+    const uint8_t *__restrict input, uint16_t *__restrict output) {
+#pragma clang loop vectorize(enable) interleave(enable)
+    for (unsigned i = 0; i < 1024; ++i) {
+        output[i] = fp8e4m3_to_bf16(input[i]);
+    }
+}
+
+extern "C" void cast_fp8e5m2_to_bf16(
+    const uint8_t *__restrict input, uint16_t *__restrict output) {
+#pragma clang loop vectorize(enable) interleave(enable)
+    for (unsigned i = 0; i < 1024; ++i) {
+        output[i] = fp8e5m2_to_bf16(input[i]);
+    }
+}
+"""
+
+
 def _build_identity(line_size: int):
     """Return the @iron.jit IDENTITY design (a bf16 DMA copy: shim -> memtile -> shim)."""
     import aie.iron as iron
@@ -155,6 +209,58 @@ def _build_identity(line_size: int):
         return Program(iron.get_current_device(), rt).resolve_program()
 
     return identity_bf16
+
+
+def _build_fp8_to_bf16(line_size: int, in_dtype: str):
+    """Return an explicit FP8 storage-to-BF16 conversion design.
+
+    The runtime DMA binds the caller's FP8 bytes directly. One AIE2P worker expands fixed 1,024
+    element tiles to exact BF16 storage bits; there is no host-side or submission-time staging.
+    The external kernel is compiled by Peano because it targets the AIE core ISA (a host compiler,
+    including zig cc, cannot produce this device object).
+    """
+    import aie.iron as iron
+    import numpy as np
+    from aie.iron import CompileTime, In, ObjectFifo, Out, Program, Runtime, Worker
+    from aie.iron.controlflow import range_
+    from aie.iron.kernel import ExternalFunction
+
+    symbol = f"cast_{in_dtype}_to_bf16"
+
+    @iron.jit
+    def fp8_to_bf16(x_in: In, y_out: Out, *, n: CompileTime[int]):
+        input_ty = np.ndarray[(n,), np.dtype[np.uint8]]
+        # The worker writes BF16 storage bits directly. IRON uses uint16 here only as the exact
+        # two-byte transport type; no integer-to-float conversion or host-side copy is inserted.
+        output_ty = np.ndarray[(n,), np.dtype[np.uint16]]
+        input_line_ty = np.ndarray[(line_size,), np.dtype[np.uint8]]
+        output_line_ty = np.ndarray[(line_size,), np.dtype[np.uint16]]
+        converter = ExternalFunction(
+            symbol,
+            source_string=_FP8_CAST_KERNEL_SOURCE,
+            arg_types=[input_line_ty, output_line_ty],
+        )
+        of_in = ObjectFifo(input_line_ty, name="fp8_in")
+        of_out = ObjectFifo(output_line_ty, name="bf16_out")
+
+        def core_fn(in_fifo, out_fifo, kernel):
+            for _ in range_(n // line_size):
+                source = in_fifo.acquire(1)
+                destination = out_fifo.acquire(1)
+                kernel(source, destination)
+                in_fifo.release(1)
+                out_fifo.release(1)
+
+        worker = Worker(core_fn, [of_in.cons(), of_out.prod(), converter])
+
+        def sequence(source, destination, in_prod, out_cons):
+            in_prod.fill(source)
+            out_cons.drain(destination, wait=True)
+
+        rt = Runtime(sequence, [input_ty, output_ty, of_in.prod(), of_out.cons()])
+        return Program(iron.get_current_device(), rt, workers=[worker]).resolve_program()
+
+    return fp8_to_bf16
 
 
 def _build_matmul(tile_m: int, tile_k: int, tile_n: int):
@@ -354,6 +460,25 @@ def _compile(workdir: Path) -> int:
 
         def build():
             return _build_identity(line_size).specialize(n=elements)
+    elif op == "CAST":
+        in_dtype = spec.get("in_dtype")
+        out_dtype = spec.get("out_dtype")
+        elements = spec.get("elements")
+        line_size = spec.get("line_size")
+        if in_dtype not in ("fp8e4m3", "fp8e5m2") or out_dtype != "bf16":
+            return _fail(
+                workdir, "spec-rejected", f"unsupported dtype pair: {in_dtype}->{out_dtype}"
+            )
+        if line_size != 1024:
+            return _fail(workdir, "spec-rejected", f"unsupported CAST line_size: {line_size}")
+        if not isinstance(elements, int) or elements <= 0 or elements % line_size != 0:
+            return _fail(
+                workdir, "spec-rejected", f"elements must be a positive multiple of {line_size}"
+            )
+        input_bytes, output_bytes = [elements], [elements * 2]
+
+        def build():
+            return _build_fp8_to_bf16(line_size, in_dtype).specialize(n=elements)
     elif op == "MATMUL":
         in_dtype = spec.get("in_dtype")
         out_dtype = spec.get("out_dtype")

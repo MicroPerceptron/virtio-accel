@@ -5,8 +5,8 @@
 //! validated, integers-and-enums-only description the compiler helper (issue #84) turns into an
 //! amdxdna artifact. Anything outside the advertised subset is rejected here, before any subprocess
 //! runs. Graph lowering for compute tiers grows on top of this; the compilable subsets today are
-//! the BF16 IDENTITY (a DMA copy), BF16 → FP32 MATMUL (issue #90), and BF16 NHWC
-//! MAX_POOL2D (issue #91).
+//! the BF16 IDENTITY (a DMA copy), BF16 → FP32 MATMUL (issue #90), BF16 NHWC MAX_POOL2D
+//! (issue #91), and explicit FP8 → BF16 CAST storage conversion (issue #109).
 
 use virtio_accel_tosa::{
     AnalyzedValueKind, CapabilityDescriptor, DType, DTypeCapability, ExtensionSet,
@@ -23,6 +23,20 @@ pub const XDNA_TOSA_TARGET: Target = Target::new(
     ProfileSet::FLOATING_POINT,
     Level::Level8K,
     ExtensionSet::BF16,
+);
+
+/// The FP8 storage tier: graph-visible E4M3/E5M2 inputs explicitly cast to BF16 on the NPU.
+///
+/// This is separate from [`XDNA_TOSA_TARGET`] so adding the storage tier does not change the
+/// identity of the existing BF16 target. FP8 is not advertised as a compute dtype: every admitted
+/// graph has an FP8 block input, one explicit CAST, and a BF16 block output.
+pub const XDNA_TOSA_FP8_TARGET: Target = Target::new(
+    Version::TOSA_1_0,
+    ProfileSet::FLOATING_POINT,
+    Level::Level8K,
+    ExtensionSet::BF16
+        .union(ExtensionSet::FP8E4M3)
+        .union(ExtensionSet::FP8E5M2),
 );
 
 /// The integer tier: TOSA 1.0, integer profile, level 8K, no extensions.
@@ -64,9 +78,33 @@ pub const XDNA_TOSA_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
     },
 };
 
+const FP8_STORAGE_DTYPES: &[DTypeCapability] = &[
+    DTypeCapability::new(DType::FP8E4M3, ValueRoles::INPUT),
+    DTypeCapability::new(DType::FP8E5M2, ValueRoles::INPUT),
+    DTypeCapability::new(DType::BF16, ValueRoles::OUTPUT),
+];
+
+const FP8_STORAGE_OPERATORS: &[OperatorCapability] = &[OperatorCapability::new(Op::CAST)];
+
+/// Conservative capability boundary for explicit FP8 storage conversion.
+pub const XDNA_TOSA_FP8_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
+    target: XDNA_TOSA_FP8_TARGET,
+    dtypes: FP8_STORAGE_DTYPES,
+    operators: FP8_STORAGE_OPERATORS,
+    graph: GraphCapabilities {
+        max_regions: 1,
+        max_blocks: 1,
+        dynamic_shapes: false,
+        runtime_conditions: RuntimeConditionSupport::None,
+    },
+};
+
 /// The DMA line size the IDENTITY template transfers in; an admitted element count must be a
 /// positive multiple of it. The Rust compiler driver carries this value into the helper spec.
 pub(crate) const IDENTITY_LINE_SIZE: usize = 1024;
+
+/// The fixed element tile converted by the FP8 → BF16 kernel.
+pub(crate) const FP8_CAST_LINE_SIZE: usize = 1024;
 
 /// The one tested MATMUL compute tile (`m`, `k`, `n`), proven on npu2 (AIE2P).
 ///
@@ -102,6 +140,9 @@ pub enum CompilerSpec {
     /// BF16 → BF16 elementwise copy of `elements` values (a positive multiple of
     /// 1,024 values).
     Identity { elements: usize },
+    /// Explicit FP8 storage conversion to BF16. Every finite source value is exactly
+    /// representable, so the output is bit-exact except for permitted NaN canonicalization.
+    Fp8ToBf16 { format: Fp8Format, elements: usize },
     /// BF16 × BF16 → FP32 matrix multiply `C[M, N] = A[M, K] · B[K, N]` (batch 1). Each of `m`,
     /// `k`, `n` is a positive multiple of the corresponding MATMUL tile dimension and at most
     /// 512. The FP32 output is the TOSA-mandated accumulator (issue #82).
@@ -119,6 +160,13 @@ pub enum CompilerSpec {
         stride_h: usize,
         stride_w: usize,
     },
+}
+
+/// The two TOSA/OCP FP8 storage encodings accepted by the conversion template.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Fp8Format {
+    E4M3,
+    E5M2,
 }
 
 /// Why a TOSA artifact is not admissible to the compilable subset.
@@ -148,9 +196,10 @@ impl From<AdmitError> for virtio_accel_core::BackendError {
 
 /// Admit a TOSA artifact for `target`, returning the specialization the helper compiles.
 ///
-/// Three subsets are compilable today, all on the BF16 target: BF16 IDENTITY (a DMA copy), BF16 →
-/// FP32 MATMUL, and BF16 NHWC MAX_POOL2D. Everything else is rejected without running the compiler. Each template
-/// admits only graphs whose **dataflow** matches what the compiled kernel executes — the IDENTITY
+/// The BF16 target admits IDENTITY (a DMA copy), BF16 → FP32 MATMUL, and BF16 NHWC MAX_POOL2D.
+/// The separate FP8 storage target admits one explicit FP8 → BF16 CAST. Everything else is rejected
+/// without running the compiler. Each template admits only graphs whose **dataflow** matches what
+/// the compiled kernel executes — the IDENTITY
 /// template requires every operator to be IDENTITY (no constants: with a single block input, every
 /// value then provably carries that input's bytes), and the MATMUL template requires the operator's
 /// operands to be exactly the block inputs (constants may exist only as the two zero-points).
@@ -160,7 +209,7 @@ impl From<AdmitError> for virtio_accel_core::BackendError {
 /// BF16 MATMUL zero-points are constant zero — is enforced by
 /// [`analyze_for`](virtio_accel_tosa::Model::analyze_for) before these structural checks.
 pub fn admit(bytes: &[u8], target: Target) -> Result<CompilerSpec, AdmitError> {
-    if target != XDNA_TOSA_TARGET {
+    if target != XDNA_TOSA_TARGET && target != XDNA_TOSA_FP8_TARGET {
         // The integer tier and other targets are later tickets.
         return Err(AdmitError::Unsupported);
     }
@@ -177,11 +226,12 @@ pub fn admit(bytes: &[u8], target: Target) -> Result<CompilerSpec, AdmitError> {
     }
     let block = analysis.blocks()[0].id();
 
-    // Classify in one pass. IDENTITY tolerates no other operator kind (not even CONST); MATMUL
-    // tolerates exactly one MATMUL plus CONST operators, which `admit_matmul` then pins down to
-    // the two zero-points.
+    // Classify in one pass. IDENTITY and CAST tolerate no other operator kind (not even CONST);
+    // MATMUL tolerates exactly one MATMUL plus CONST operators, which `admit_matmul` then pins down
+    // to the two zero-points.
     let mut matmul = None;
     let mut max_pool = None;
+    let mut cast = None;
     let mut identities = 0usize;
     let mut constants = 0usize;
     for operator in analysis.execution_order(block) {
@@ -190,17 +240,77 @@ pub fn admit(bytes: &[u8], target: Target) -> Result<CompilerSpec, AdmitError> {
             Op::CONST => constants += 1,
             Op::MATMUL if matmul.is_none() => matmul = Some(*operator),
             Op::MAX_POOL2D if max_pool.is_none() => max_pool = Some(*operator),
+            Op::CAST if cast.is_none() => cast = Some(*operator),
             _ => return Err(AdmitError::Unsupported),
         }
     }
-    match (matmul, max_pool, identities, constants) {
+    match (target, matmul, max_pool, cast, identities, constants) {
         // All-IDENTITY (zero operators included: the block output then *is* the block input, and a
         // DMA copy is exact for it).
-        (None, None, _, 0) => admit_identity(&analysis, block),
-        (Some(matmul), None, 0, _) => admit_matmul(&analysis, block, matmul),
-        (None, Some(max_pool), 0, 0) => admit_max_pool2d(&analysis, block, max_pool),
+        (XDNA_TOSA_TARGET, None, None, None, _, 0) => admit_identity(&analysis, block),
+        (XDNA_TOSA_TARGET, Some(matmul), None, None, 0, _) => {
+            admit_matmul(&analysis, block, matmul)
+        }
+        (XDNA_TOSA_TARGET, None, Some(max_pool), None, 0, 0) => {
+            admit_max_pool2d(&analysis, block, max_pool)
+        }
+        (XDNA_TOSA_FP8_TARGET, None, None, Some(cast), 0, 0) => {
+            admit_fp8_to_bf16(&analysis, block, cast)
+        }
         _ => Err(AdmitError::Unsupported),
     }
+}
+
+/// Admit one explicit FP8 → BF16 CAST directly connecting the block input and output.
+///
+/// FP8 is storage only: no FP8 arithmetic is inferred or hidden. The guest-visible CAST is the
+/// exact point where the NPU expands each element, after which existing BF16 compute kernels can
+/// consume the result in a subsequent program.
+fn admit_fp8_to_bf16(
+    analysis: &virtio_accel_tosa::TosaAnalysis<'_>,
+    block: virtio_accel_tosa::BlockId,
+    cast: virtio_accel_tosa::OperatorId,
+) -> Result<CompilerSpec, AdmitError> {
+    let inputs = analysis.operator_inputs(cast);
+    let outputs = analysis.operator_outputs(cast);
+    if inputs.len() != 1
+        || outputs.len() != 1
+        || analysis.block_inputs(block) != [inputs[0]]
+        || analysis.block_outputs(block) != [outputs[0]]
+    {
+        return Err(AdmitError::Unsupported);
+    }
+
+    let AnalyzedValueKind::Tensor(input) = analysis.value(inputs[0]).kind() else {
+        return Err(AdmitError::Unsupported);
+    };
+    let AnalyzedValueKind::Tensor(output) = analysis.value(outputs[0]).kind() else {
+        return Err(AdmitError::Unsupported);
+    };
+    let format = match input.dtype() {
+        DType::FP8E4M3 => Fp8Format::E4M3,
+        DType::FP8E5M2 => Fp8Format::E5M2,
+        _ => return Err(AdmitError::Unsupported),
+    };
+    if output.dtype() != DType::BF16 || input.dimensions().ne(output.dimensions()) {
+        return Err(AdmitError::Unsupported);
+    }
+
+    let mut elements = 1usize;
+    for dimension in output.dimensions() {
+        let dimension = usize::try_from(dimension).map_err(|_| AdmitError::Unsupported)?;
+        if dimension == 0 {
+            return Err(AdmitError::Unsupported);
+        }
+        elements = elements
+            .checked_mul(dimension)
+            .ok_or(AdmitError::Unsupported)?;
+    }
+    if elements % FP8_CAST_LINE_SIZE != 0 {
+        return Err(AdmitError::Unsupported);
+    }
+
+    Ok(CompilerSpec::Fp8ToBf16 { format, elements })
 }
 
 /// Admit the BF16 IDENTITY subset: one BF16 input and output, IDENTITY operators only (already
@@ -461,6 +571,21 @@ mod tests {
         graph
     }
 
+    fn fp8_cast_graph(input: DType, output: DType, shape: Vec<i32>) -> OwnedGraph<'static> {
+        let mut graph = OwnedGraph::new("main");
+        graph
+            .push_tensor(OwnedTensor::new("x", shape.clone(), input))
+            .push_tensor(OwnedTensor::new("y", shape, output))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::Cast,
+                vec!["x".into()],
+                vec!["y".into()],
+            ))
+            .push_input("x")
+            .push_output("y");
+        graph
+    }
+
     /// A batch-1 MATMUL `C[1,M,N] = A[1,M,K] · B[1,K,N]` with the two constant-zero zero-points.
     fn matmul_graph(
         m: i32,
@@ -561,7 +686,11 @@ mod tests {
             Ok(XDNA_TOSA_INTEGER_TARGET)
         );
         assert_ne!(XDNA_TOSA_TARGET, XDNA_TOSA_INTEGER_TARGET);
-        for target in [XDNA_TOSA_TARGET, XDNA_TOSA_INTEGER_TARGET] {
+        for target in [
+            XDNA_TOSA_TARGET,
+            XDNA_TOSA_FP8_TARGET,
+            XDNA_TOSA_INTEGER_TARGET,
+        ] {
             assert_eq!(Target::from_identity(target.to_identity()), Ok(target));
         }
     }
@@ -573,6 +702,46 @@ mod tests {
             .expect("build bf16 identity");
         let spec = admit(&bytes, XDNA_TOSA_TARGET).expect("admit");
         assert_eq!(spec, CompilerSpec::Identity { elements: 4 * 1024 });
+    }
+
+    #[test]
+    fn admits_both_explicit_fp8_to_bf16_casts() {
+        for (dtype, format) in [
+            (DType::FP8E4M3, Fp8Format::E4M3),
+            (DType::FP8E5M2, Fp8Format::E5M2),
+        ] {
+            let bytes = fp8_cast_graph(dtype, DType::BF16, vec![1, 1, 4096])
+                .build(XDNA_TOSA_FP8_TARGET)
+                .expect("build fp8 cast");
+            assert_eq!(
+                admit(&bytes, XDNA_TOSA_FP8_TARGET),
+                Ok(CompilerSpec::Fp8ToBf16 {
+                    format,
+                    elements: 4096,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn fp8_storage_tier_rejects_hidden_or_unsupported_conversion() {
+        let valid = fp8_cast_graph(DType::FP8E4M3, DType::BF16, vec![1024])
+            .build(XDNA_TOSA_FP8_TARGET)
+            .expect("build fp8 cast");
+        assert_eq!(admit(&valid, XDNA_TOSA_TARGET), Err(AdmitError::Analysis));
+
+        for graph in [
+            fp8_cast_graph(DType::FP8E4M3, DType::FP32, vec![1024]),
+            fp8_cast_graph(DType::FP8E5M2, DType::BF16, vec![8]),
+        ] {
+            let bytes = graph
+                .build(XDNA_TOSA_FP8_TARGET)
+                .expect("build semantically valid cast");
+            assert_eq!(
+                admit(&bytes, XDNA_TOSA_FP8_TARGET),
+                Err(AdmitError::Unsupported)
+            );
+        }
     }
 
     #[test]

@@ -214,6 +214,40 @@ pub struct PackedTensor {
     pub bytes: &'static [u8],
 }
 
+/// A stable explicit FP8 → BF16 CAST with a bit-exact output oracle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TosaFp8ToBfloat16Case {
+    /// Diagnostic case name.
+    pub name: &'static str,
+    /// Source FP8 storage encoding.
+    pub input_dtype: PackedDType,
+    /// TOSA 1.0 FlatBuffer payload.
+    pub artifact: &'static [u8],
+    /// Single graph-visible FP8 input.
+    pub input: PackedTensor,
+    /// Single graph-visible BF16 output.
+    pub output: Bfloat16Tensor,
+}
+
+impl TosaFp8ToBfloat16Case {
+    /// Compare BF16 output bits exactly, allowing only NaN payload canonicalization.
+    pub fn output_matches(self, actual: &[u16]) -> bool {
+        self.output.bits.len() == actual.len()
+            && self
+                .output
+                .bits
+                .iter()
+                .zip(actual)
+                .all(|(expected, actual)| {
+                    if is_bfloat16_nan(*expected) {
+                        is_bfloat16_nan(*actual)
+                    } else {
+                        expected == actual
+                    }
+                })
+    }
+}
+
 /// One immutable INT32 tensor produced by an integer-profile acceptance case.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Int32Tensor {
@@ -971,6 +1005,97 @@ pub const IDENTITY_FP8E5M2: TosaPackedCase = TosaPackedCase {
     outputs: IDENTITY_FP8E5M2_TENSORS,
 };
 
+const fn all_fp8_encodings() -> [u8; 1024] {
+    let mut values = [0u8; 1024];
+    let mut index = 0;
+    while index < values.len() {
+        values[index] = index as u8;
+        index += 1;
+    }
+    values
+}
+
+const fn fp8e4m3_bf16_oracle() -> [u16; 1024] {
+    let mut values = [0u16; 1024];
+    let mut index = 0;
+    while index < values.len() {
+        let bits = index as u8;
+        let sign = ((bits & 0x80) as u16) << 8;
+        let exponent = ((bits >> 3) & 0x0f) as u16;
+        let fraction = (bits & 0x07) as u16;
+        values[index] = if exponent == 0 {
+            let subnormal = [
+                0x0000, 0x3b00, 0x3b80, 0x3bc0, 0x3c00, 0x3c20, 0x3c40, 0x3c60,
+            ];
+            sign | subnormal[fraction as usize]
+        } else if exponent == 0x0f && fraction == 0x07 {
+            sign | 0x7fc0
+        } else {
+            sign | ((exponent + 120) << 7) | (fraction << 4)
+        };
+        index += 1;
+    }
+    values
+}
+
+const fn fp8e5m2_bf16_oracle() -> [u16; 1024] {
+    let mut values = [0u16; 1024];
+    let mut index = 0;
+    while index < values.len() {
+        let bits = index as u8;
+        let sign = ((bits & 0x80) as u16) << 8;
+        let exponent = ((bits >> 2) & 0x1f) as u16;
+        let fraction = (bits & 0x03) as u16;
+        values[index] = if exponent == 0 {
+            let subnormal = [0x0000, 0x3780, 0x3800, 0x3840];
+            sign | subnormal[fraction as usize]
+        } else if exponent == 0x1f {
+            sign | if fraction == 0 { 0x7f80 } else { 0x7fc0 }
+        } else {
+            sign | ((exponent + 112) << 7) | (fraction << 5)
+        };
+        index += 1;
+    }
+    values
+}
+
+const ALL_FP8_ENCODINGS: [u8; 1024] = all_fp8_encodings();
+const CAST_FP8E4M3_OUTPUT: [u16; 1024] = fp8e4m3_bf16_oracle();
+
+/// Explicit FP8 E4M3 → BF16 CAST spanning signed zeros, subnormals, ordinary values, finite
+/// maximum, and NaN. All 256 byte encodings repeat four times across one XDNA conversion tile.
+pub const CAST_FP8E4M3_TO_BF16: TosaFp8ToBfloat16Case = TosaFp8ToBfloat16Case {
+    name: "cast-fp8e4m3-to-bf16",
+    input_dtype: PackedDType::Fp8E4M3,
+    artifact: include_bytes!("data/cast-fp8e4m3-to-bf16-v1.0.0.tosa"),
+    input: PackedTensor {
+        shape: &[1024],
+        bytes: &ALL_FP8_ENCODINGS,
+    },
+    output: Bfloat16Tensor {
+        shape: &[1024],
+        bits: &CAST_FP8E4M3_OUTPUT,
+    },
+};
+
+const CAST_FP8E5M2_OUTPUT: [u16; 1024] = fp8e5m2_bf16_oracle();
+
+/// Explicit FP8 E5M2 → BF16 CAST spanning signed zeros, subnormals, one, finite maximum,
+/// infinity, and NaN. All 256 byte encodings repeat four times across one XDNA conversion tile.
+pub const CAST_FP8E5M2_TO_BF16: TosaFp8ToBfloat16Case = TosaFp8ToBfloat16Case {
+    name: "cast-fp8e5m2-to-bf16",
+    input_dtype: PackedDType::Fp8E5M2,
+    artifact: include_bytes!("data/cast-fp8e5m2-to-bf16-v1.0.0.tosa"),
+    input: PackedTensor {
+        shape: &[1024],
+        bytes: &ALL_FP8_ENCODINGS,
+    },
+    output: Bfloat16Tensor {
+        shape: &[1024],
+        bits: &CAST_FP8E5M2_OUTPUT,
+    },
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1081,6 +1206,37 @@ mod tests {
     }
 
     #[test]
+    fn fp8_to_bf16_cast_oracles_are_derived_from_the_shared_exact_decoders() {
+        use virtio_accel_tosa::{
+            fp8e4m3_to_bf16_bits, fp8e4m3_to_f32, fp8e5m2_to_bf16_bits, fp8e5m2_to_f32,
+        };
+
+        for case in [CAST_FP8E4M3_TO_BF16, CAST_FP8E5M2_TO_BF16] {
+            assert_eq!(case.input.bytes.len(), case.output.bits.len());
+            for (input, expected) in case.input.bytes.iter().zip(case.output.bits) {
+                let value = match case.input_dtype {
+                    PackedDType::Fp8E4M3 => fp8e4m3_to_f32(*input),
+                    PackedDType::Fp8E5M2 => fp8e5m2_to_f32(*input),
+                    _ => unreachable!("CAST case must use FP8"),
+                };
+                if value.is_nan() {
+                    assert!(is_bfloat16_nan(*expected));
+                } else {
+                    assert_eq!(*expected, (value.to_bits() >> 16) as u16);
+                }
+                let shared_bits = match case.input_dtype {
+                    PackedDType::Fp8E4M3 => fp8e4m3_to_bf16_bits(*input),
+                    PackedDType::Fp8E5M2 => fp8e5m2_to_bf16_bits(*input),
+                    _ => unreachable!("CAST case must use FP8"),
+                };
+                assert_eq!(*expected, shared_bits);
+            }
+            assert!(case.output_matches(case.output.bits));
+            assert!(!case.output_matches(&case.output.bits[..8]));
+        }
+    }
+
+    #[test]
     fn int8_matmul_oracle_is_derived_from_the_shared_exact_dot_product() {
         use virtio_accel_tosa::dot_i8_i32;
 
@@ -1158,5 +1314,20 @@ mod tests {
             .unwrap()
             .validate_for(integer)
             .unwrap();
+
+        let fp8_storage = Target::new(
+            Version::TOSA_1_0,
+            ProfileSet::FLOATING_POINT,
+            Level::Level8K,
+            ExtensionSet::BF16
+                .union(ExtensionSet::FP8E4M3)
+                .union(ExtensionSet::FP8E5M2),
+        );
+        for case in [CAST_FP8E4M3_TO_BF16, CAST_FP8E5M2_TO_BF16] {
+            parse(case.artifact)
+                .unwrap()
+                .validate_for(fp8_storage)
+                .unwrap();
+        }
     }
 }

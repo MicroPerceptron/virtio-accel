@@ -16,11 +16,15 @@ the crate-local precompiled artifact format directly, and a TOSA artifact by adm
 compiling it with the bounded aiecc helper subprocess (`compiler/xdna_compile.py`, run under the
 pinned toolchain venv in a cleared environment, content-addressed in a cache). The compilable TOSA
 subset today is BF16 IDENTITY (a DMA copy), BF16 → FP32 MATMUL (the spec-mandated FP32-accumulator
-shape, batch 1, at multiples of the tested compute tile), and BF16 NHWC MAX_POOL2D. MAX_POOL2D is
+shape, batch 1, at multiples of the tested compute tile), BF16 NHWC MAX_POOL2D, and explicit
+FP8E4M3/FP8E5M2 → BF16 CAST. FP8 is a storage tier, not an arithmetic tier: the guest keeps the
+conversion visible in its graph, the NPU expands each value exactly, and subsequent programs use
+the existing BF16 compute kernels. MAX_POOL2D is
 deliberately bounded to batch 1, zero padding, propagating NaNs, kernel and stride dimensions no
 larger than 8, and at most 8,192 input-plus-output elements so both tensors fit in the worker's
 local-memory budget. All of this is exercised by `tests/hardware.rs` (a DMA passthrough, compiled
-TOSA IDENTITY, bit-exact non-square MATMUL, and the shared MAX_POOL2D oracle) and by
+TOSA IDENTITY, bit-exact non-square MATMUL, the shared MAX_POOL2D oracle, and both shared
+bit-exact FP8 → BF16 CAST oracles) and by
 `tests/conformance.rs` (the shared semantic suite, including the direct-binding copy-path
 diagnostics, on the device). Hosts without HRX build the portable admission surface plus a
 placeholder, compile no `unsafe`, and still unit-test admission and the artifact codec. The
@@ -53,13 +57,15 @@ pin. Builds without the runtime still compile and unit-test the portable admissi
 ## Advertised numerical tier
 
 Per the numerical-tier decision (#82), the crate defines a BF16 floating-point target (TOSA
-`EXT-BF16`) and a separate future integer target, and rejects FP32/FP16 compute at admission rather
-than silently executing it as BF16. Native builds expose the implemented BF16 IDENTITY, MATMUL,
-and MAX_POOL2D surface through `TosaCapabilityProvider`; placeholder builds expose an empty
+`EXT-BF16`), a separate FP8 storage target (`EXT-BF16 | EXT-FP8E4M3 | EXT-FP8E5M2`), and a future
+integer target. It rejects FP32/FP16 compute at admission rather than silently executing it as
+BF16. Native builds expose the implemented BF16 IDENTITY, MATMUL, MAX_POOL2D, and explicit
+FP8-to-BF16 CAST surfaces through `TosaCapabilityProvider`; placeholder builds expose an empty
 capability list, and the integer target is not advertised through the provider until its execution
-tier lands. MAX_POOL2D advertises the same propagating-NaN and zero-padding semantic constraints as
-the OpenVINO reference backend, while admission applies the narrower XDNA2 shape and local-memory
-envelope described above.
+tier lands. The FP8 capability advertises FP8 only for graph inputs and BF16 only for graph
+outputs, so it cannot be mistaken for native FP8 arithmetic. MAX_POOL2D advertises the same
+propagating-NaN and zero-padding semantic constraints as the OpenVINO reference backend, while
+admission applies the narrower XDNA2 shape and local-memory envelope described above.
 
 ## Completion and fault model
 
