@@ -106,6 +106,38 @@ cargo test -p virtio-accel-xdna --features test-control --test hardware -- --tes
 `test-control` only adds the hidden one-shot tier-1/tier-2 constructors used by the hardware test;
 ordinary `XdnaAccelerator::new` retains production behavior even in an all-features build.
 
+## Performance evidence
+
+The FP8 storage conversion streams 1,024-element tiles through one AIE2P worker. That is an
+intentional first-tier implementation boundary, not a claim that one worker is the final throughput
+configuration. Program compilation happens at load time and is content-addressed; warm submission
+binds the caller's FP8 and BF16 buffers directly and performs no explicit transfer or hidden bounce
+copy.
+
+An ignored release-mode benchmark mirrors the OpenVINO evidence structure: 20 warmups, 200 measured
+submissions, separate admission and submit-to-complete percentiles, and direct-binding diagnostics.
+It measures 1,024 through 1,048,576 elements and validates every output against the exact FP8 oracle
+after timing:
+
+```sh
+source ~/toolchains/amdxdna-hrx-v2026.08/env.sh
+export VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN=~/toolchains/amdxdna-hrx-v2026.08
+cargo test --release -p virtio-accel-xdna --test hardware \
+  measures_fp8_cast_scaling_on_one_aie_worker -- --ignored --nocapture --test-threads=1
+```
+
+On August 25, 2026, the reference `1022:17f0` XDNA2 NPU and v2026.08 toolchain produced stable
+linear scaling: submit-to-complete p50 was 86.4 microseconds at 1,024 elements, 485.9 microseconds at
+16,384, 6.743 milliseconds at 262,144, and 26.656 milliseconds at 1,048,576. Effective combined
+input/output traffic reached 0.110 GiB/s at the largest size. Every size reported 440 direct
+bindings and zero explicit transfer bytes across 20 warmups plus 200 measured submissions. These
+numbers establish the one-worker baseline; increasing AIE-worker parallelism remains an optional
+throughput optimization rather than a correctness requirement for this storage tier.
+
+Wall-clock results are manual release evidence from the named NPU/toolchain, not a portable CI gate.
+Deterministic CI continues to enforce exact numerics, direct bindings, and zero submission-time
+transfer bytes.
+
 Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an
 experimental native-Rust protocol and implementation stack for a transport-neutral virtual
 accelerator device. Portable crates contain no host-OS or vendor APIs; host integrations live in

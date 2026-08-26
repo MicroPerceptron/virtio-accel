@@ -95,7 +95,7 @@ Independently of backend execution, `virtio-accel-tosa` validates the TOSA 1.0 p
 | `virtio-accel-vaccel`      | `core`                | Adapter seam for mapping native provider contracts (including vAccel-style backends) to `virtio-accel-core`  |
 | `virtio-accel-coreml`      | `std`                 | TOSA-to-Core ML lowering, direct buffers, and asynchronous ANE-capable prediction                            |
 | `virtio-accel-openvino`    | `std`                 | TOSA-to-OpenVINO IR lowering, direct host-pointer tensors, and asynchronous NPU/GPU/CPU inference            |
-| `virtio-accel-xdna`        | `std`                 | AMD XDNA2 NPU backend over the HRX runtime (`libhrx`); scaffold with build probe and placeholder today       |
+| `virtio-accel-xdna`        | `std`                 | AMD XDNA2 NPU backend over HRX with direct buffers, asynchronous dispatch, and strict BF16/FP8 TOSA tiers    |
 | `virtio-accel-hexagon`     | `std` (Windows ARM64) | Strict FP16/INT8 TOSA-to-QNN lowering, direct buffers, and asynchronous Hexagon HTP execution                |
 | `virtio-accel`             | `core + alloc`        | Facade re-exporting the portable layers                                                                      |
 | `virtio-accel-proto`       | `core`                | Pointer-free, little-endian protocol 1.0 wire structures                                                     |

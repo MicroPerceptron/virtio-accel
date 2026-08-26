@@ -6,10 +6,10 @@
 //! ticket.
 #![cfg(va_xdna)]
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod common;
-use common::{bf16_identity_tosa, bf16_matmul_tosa, poll_to_terminal};
+use common::{bf16_identity_tosa, bf16_matmul_tosa, fp8e4m3_to_bf16_tosa, poll_to_terminal};
 
 use virtio_accel_conformance::numerics::{
     CAST_FP8E4M3_TO_BF16, CAST_FP8E5M2_TO_BF16, MAX_POOL2D_BF16, TosaFp8ToBfloat16Case,
@@ -19,7 +19,7 @@ use virtio_accel_core::{
     BufferRange, BufferUsage, ByteSink, ByteSource, ContextDesc, EventState, MemoryDomain,
     QueueDesc, ReleaseFailure, SubmitFailure, TargetIdentity, Timeout,
 };
-use virtio_accel_tosa::{ARTIFACT_FORMAT, DType, TosaCapabilityProvider};
+use virtio_accel_tosa::{ARTIFACT_FORMAT, DType, TosaCapabilityProvider, fp8e4m3_to_bf16_bits};
 use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
 use virtio_accel_xdna::{
     InitError, XDNA_PRECOMPILED_FORMAT, XDNA_TOSA_FP8_TARGET, XDNA_TOSA_TARGET, XdnaAccelerator,
@@ -966,6 +966,152 @@ fn tosa_fp8_casts_match_the_shared_bit_exact_oracles_on_the_npu() {
     for case in [CAST_FP8E4M3_TO_BF16, CAST_FP8E5M2_TO_BF16] {
         run_fp8_cast_case(&backend, case);
     }
+}
+
+#[test]
+#[ignore = "manual native performance evidence"]
+fn measures_fp8_cast_scaling_on_one_aie_worker() {
+    let Some(backend) = backend() else { return };
+    if !toolchain_present() {
+        eprintln!("no XDNA toolchain configured; skipping FP8 benchmark");
+        return;
+    }
+
+    const WARMUPS: usize = 20;
+    const SAMPLES: usize = 200;
+    const ELEMENT_COUNTS: [usize; 4] = [1_024, 16_384, 262_144, 1_048_576];
+
+    for elements in ELEMENT_COUNTS {
+        measure_fp8_cast_size(&backend, elements, WARMUPS, SAMPLES);
+    }
+}
+
+fn measure_fp8_cast_size(
+    backend: &XdnaAccelerator,
+    elements: usize,
+    warmups: usize,
+    samples: usize,
+) {
+    let artifact = fp8e4m3_to_bf16_tosa(elements);
+    let context = backend
+        .create_context(ContextDesc::default())
+        .expect("context");
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .expect("queue");
+    let program = backend
+        .load_program(
+            &context,
+            ArtifactRef {
+                format: ARTIFACT_FORMAT,
+                target: XDNA_TOSA_FP8_TARGET.to_identity(),
+                payload: &Slice(&artifact),
+                resident_bytes: u64::MAX,
+            },
+        )
+        .expect("load FP8 benchmark program");
+
+    let input_len = elements;
+    let output_len = elements * 2;
+    let input_desc = BufferDesc::new(
+        input_len as u64,
+        4096,
+        MemoryDomain::Shared,
+        BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+    )
+    .expect("input descriptor");
+    let output_desc = BufferDesc::new(
+        output_len as u64,
+        4096,
+        MemoryDomain::Shared,
+        BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+    )
+    .expect("output descriptor");
+    let (mut input, _) = backend
+        .allocate_buffer(&context, input_desc)
+        .expect("input buffer")
+        .into_parts();
+    let (output, _) = backend
+        .allocate_buffer(&context, output_desc)
+        .expect("output buffer")
+        .into_parts();
+    let input_bytes: Vec<u8> = (0..elements).map(|index| index as u8).collect();
+    backend
+        .write_buffer(&mut input, 0, &Slice(&input_bytes))
+        .expect("initialize FP8 input");
+
+    let direct_before = backend.direct_binding_admissions();
+    let transfer_before = backend.explicit_transfer_bytes();
+    let submit_once = || {
+        let bindings = [
+            BindingRef {
+                slot: 0,
+                buffer: &input,
+                range: BufferRange::new(0, input_len as u64).expect("input range"),
+                access: AccessMode::Read,
+            },
+            BindingRef {
+                slot: 1,
+                buffer: &output,
+                range: BufferRange::new(0, output_len as u64).expect("output range"),
+                access: AccessMode::Write,
+            },
+        ];
+        let started = Instant::now();
+        let event = backend
+            .submit(&queue, &program, &bindings, Timeout::Infinite)
+            .expect("warm FP8 submission");
+        let admission = started.elapsed();
+        let state = poll_to_terminal(backend, &event, Duration::from_secs(30))
+            .expect("FP8 benchmark completion");
+        assert!(matches!(state, EventState::Complete), "got {state:?}");
+        let completion = started.elapsed();
+        backend.destroy_event(event).expect("destroy event");
+        (admission, completion)
+    };
+
+    for _ in 0..warmups {
+        submit_once();
+    }
+    let (mut admission, mut completion): (Vec<_>, Vec<_>) =
+        (0..samples).map(|_| submit_once()).unzip();
+    admission.sort_unstable();
+    completion.sort_unstable();
+
+    let measured_submissions = (warmups + samples) as u64;
+    let direct_bindings = backend.direct_binding_admissions() - direct_before;
+    let explicit_transfer_bytes = backend.explicit_transfer_bytes() - transfer_before;
+    assert_eq!(direct_bindings, measured_submissions * 2);
+    assert_eq!(explicit_transfer_bytes, 0);
+
+    let mut result = vec![0u8; output_len];
+    backend
+        .read_buffer(&output, 0, &mut SliceMut(&mut result))
+        .expect("read FP8 benchmark output");
+    for (index, bytes) in result.chunks_exact(2).enumerate() {
+        assert_eq!(
+            u16::from_le_bytes([bytes[0], bytes[1]]),
+            fp8e4m3_to_bf16_bits(index as u8),
+            "FP8 benchmark oracle mismatch at element {index}"
+        );
+    }
+
+    let p50 = completion[completion.len() / 2];
+    let transferred_bytes = (input_len + output_len) as f64;
+    let gib_per_second = transferred_bytes / p50.as_secs_f64() / (1024.0 * 1024.0 * 1024.0);
+    eprintln!(
+        "XDNA FP8 E4M3 -> BF16: elements={elements}; worker=1; warmups={warmups}; samples={samples}; admission p50={:?} p95={:?}; submit-to-complete p50={:?} p95={:?}; effective IO={gib_per_second:.3} GiB/s; direct_bindings={direct_bindings}; explicit_transfer_bytes={explicit_transfer_bytes}",
+        admission[admission.len() / 2],
+        admission[admission.len() * 95 / 100],
+        p50,
+        completion[completion.len() * 95 / 100],
+    );
+
+    backend.free_buffer(input).expect("free input");
+    backend.free_buffer(output).expect("free output");
+    backend.unload_program(program).expect("unload program");
+    backend.destroy_queue(queue).expect("destroy queue");
+    backend.destroy_context(context).expect("destroy context");
 }
 
 #[test]

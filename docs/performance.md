@@ -152,6 +152,41 @@ timing claim is made; the deterministic regression tests instead pin capacity re
 scrubbing, guard release at terminal observation, and tensor-metadata release after request
 destruction.
 
+## AMD XDNA provider evidence
+
+`virtio-accel-xdna` compiles each admitted TOSA shape once at program load and stores the resulting
+precompiled artifact in a content-addressed cache. Warm FP8 submission binds the caller's FP8 input
+and BF16 output allocations directly. The conversion streams fixed 1,024-element tiles through one
+AIE2P worker; no host conversion, submission-time bounce copy, or tensor-sized Rust allocation is
+part of the warm path.
+
+The crate includes an ignored release-mode scaling measurement matching the OpenVINO structure:
+
+```sh
+source ~/toolchains/amdxdna-hrx-v2026.08/env.sh
+export VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN=~/toolchains/amdxdna-hrx-v2026.08
+cargo test --release -p virtio-accel-xdna --test hardware \
+  measures_fp8_cast_scaling_on_one_aie_worker -- --ignored --nocapture --test-threads=1
+```
+
+On August 25, 2026, a `1022:17f0` XDNA2 NPU with the v2026.08 HRX/aiecc toolchain produced the
+following E4M3-to-BF16 results. Each shape was loaded once, warmed up for 20 submissions, and then
+measured for 200 sequential submissions. Effective I/O counts one FP8 input byte plus two BF16
+output bytes per element.
+
+| Elements | Admission median / p95 | Submit-to-complete median / p95 | Effective I/O | Diagnostics |
+|---:|---:|---:|---:|---|
+| 1,024 | 0.692 / 1.513 µs | 0.086 / 0.113 ms | 0.033 GiB/s | 440 direct bindings; 0 explicit bytes |
+| 16,384 | 0.631 / 1.513 µs | 0.486 / 0.512 ms | 0.094 GiB/s | 440 direct bindings; 0 explicit bytes |
+| 262,144 | 1.072 / 5.080 µs | 6.743 / 6.790 ms | 0.109 GiB/s | 440 direct bindings; 0 explicit bytes |
+| 1,048,576 | 2.585 / 8.526 µs | 26.656 / 26.816 ms | 0.110 GiB/s | 440 direct bindings; 0 explicit bytes |
+
+The benchmark validates every output against the exact FP8 oracle after timing. The near-constant
+large-shape rate documents the current single-worker envelope without claiming it is the final
+throughput configuration. Multi-worker striping is an optional optimization; deterministic CI
+continues to gate exact numerics, direct binding, and zero submission-time transfer bytes instead
+of wall-clock latency.
+
 ## Qualcomm Hexagon evidence status
 
 `virtio-accel-hexagon` includes an ignored release-mode measurement for fixed submission overhead:
