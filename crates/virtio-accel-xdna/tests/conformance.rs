@@ -18,24 +18,39 @@ use virtio_accel_conformance::{
 };
 use virtio_accel_core::{AccessMode, BackendError, EventState, MemoryDomain};
 use virtio_accel_tosa::ARTIFACT_FORMAT;
-use virtio_accel_xdna::{
-    InitError, REQUIRED_RESIDENT_BYTES, XDNA_TOSA_TARGET, XdnaAccelerator, XdnaEvent,
-};
+use virtio_accel_xdna::{REQUIRED_RESIDENT_BYTES, XDNA_TOSA_TARGET, XdnaAccelerator, XdnaEvent};
 
 const BUFFER_ALIGNMENT: u64 = 4096;
 /// One IDENTITY DMA line (the smallest admitted count).
 const ELEMENTS: usize = 1024;
+const REQUIRE_HARDWARE_ENV: &str = "VIRTIO_ACCEL_XDNA_REQUIRE_HARDWARE";
+
+fn hardware_required() -> bool {
+    match std::env::var(REQUIRE_HARDWARE_ENV) {
+        Ok(value) if value == "1" => true,
+        Ok(value) if value == "0" => false,
+        Ok(value) => panic!("{REQUIRE_HARDWARE_ENV} must be \"0\" or \"1\", not {value:?}"),
+        Err(std::env::VarError::NotPresent) => false,
+        Err(error) => panic!("invalid {REQUIRE_HARDWARE_ENV}: {error}"),
+    }
+}
 
 fn toolchain_present() -> bool {
     std::env::var_os("VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN").is_some()
 }
 
-/// Whether an NPU is accessible (a fresh backend constructs), so the suite can be skipped honestly.
-fn device_present() -> bool {
+/// Whether the complete native runtime is usable, so an ordinary portable run can skip honestly.
+fn runtime_present() -> bool {
     match XdnaAccelerator::new() {
         Ok(_) => true,
-        Err(InitError::DeviceUnavailable) => false,
-        Err(error) => panic!("unexpected initialization failure: {error}"),
+        Err(error) => {
+            assert!(
+                !hardware_required(),
+                "{REQUIRE_HARDWARE_ENV}=1 but the XDNA runtime is unusable: {error}"
+            );
+            eprintln!("XDNA runtime unavailable ({error}); skipping conformance suite");
+            false
+        }
     }
 }
 
@@ -113,11 +128,14 @@ fn conformance_target() -> TargetDescription {
 
 #[test]
 fn xdna_backend_passes_the_standard_semantic_suite() {
-    if !device_present() {
-        eprintln!("no XDNA NPU device accessible; skipping conformance suite");
+    if !runtime_present() {
         return;
     }
     if !toolchain_present() {
+        assert!(
+            !hardware_required(),
+            "{REQUIRE_HARDWARE_ENV}=1 but VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN is not configured"
+        );
         eprintln!("no XDNA toolchain configured; skipping conformance suite");
         return;
     }

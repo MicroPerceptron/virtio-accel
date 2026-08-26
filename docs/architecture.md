@@ -316,16 +316,19 @@ trait obligations and separates semantic evidence from the quantitative allocati
 in [performance.md](performance.md).
 
 Its `numerics` module complements lifecycle conformance with checked-in TOSA graphs and shared
-FP32, FP16, FP8E4M3, FP8E5M2, INT8, and packed INT4 oracles. Identity edge values, non-square
-batched matrix multiplication, and NHWC max pooling are the first shared cases. A backend runs every
-case it advertises and rejects unsupported profiles, extensions, and dtypes at program admission;
-provider-specific graphs cannot stand in for the shared bytes.
+FP32, FP16, BF16, FP8E4M3, FP8E5M2, INT8, INT32-accumulator, and packed INT4 oracles. Identity edge
+values, non-square batched matrix multiplication, NHWC max pooling, explicit FP8-to-BF16 CAST, and
+signed INT32-to-INT8 RESCALE are shared cases. A backend runs every case it advertises and rejects
+unsupported profiles, extensions, and dtypes at program admission; provider-specific graphs cannot
+stand in for the shared bytes.
 
 The exact integer oracle is implemented in portable Rust from the TOSA scaling and accumulation
-rules. The first production integer tier uses direct INT8 boundaries for identity and widens INT8
-MATMUL operands to INT32 before explicit zero-point subtraction and INT32 accumulation. Core ML
-encodes this as an ML Program on macOS 26+; OpenVINO encodes the same semantics as IR Convert,
-Subtract, and MatMul nodes. Neither path converts through floating point.
+rules. The first production integer tiers use direct INT8 boundaries for identity and widen INT8
+MATMUL operands to INT32 before explicit zero-point subtraction and INT32 accumulation. XDNA also
+implements the released per-tensor scale32/single-round RESCALE back to signed INT8. Core ML
+encodes MATMUL as an ML Program on macOS 26+; OpenVINO encodes the same MATMUL semantics as IR
+Convert, Subtract, and MatMul nodes; XDNA specializes the exact expressions into AIE kernels.
+None of these paths converts through floating point.
 
 ## Production lowering boundaries
 
@@ -357,6 +360,25 @@ validation runs the backend conformance suite and the shared numerical TOSA corp
 enumerated device and reports the direct-binding and explicit-transfer counters through the
 conformance diagnostics hook. This keeps the Core ML and Intel paths on one bounded TOSA contract
 without requiring either provider to adopt the other's native graph representation.
+
+The AMD XDNA provider follows that OpenVINO boundary with one ecosystem-forced compiler
+divergence. Safe Rust verifies and analyzes one static TOSA graph, matches only the advertised BF16,
+explicit FP8-to-BF16 storage-conversion, or exact integer templates, and invokes the pinned
+MLIR-AIE/IRON compiler as a bounded subprocess during program load or offline catalog population.
+Guest TOSA bytes never enter Python: the subprocess receives a small validated specialization, and
+its measured toolchain identity participates in the content-addressed cache key. A serving host may
+load the resulting crate-local XDNP artifact without Python or a compiler. Each artifact carries an
+exact per-slot byte/access plan so fixed DMA extents are checked again at submission.
+
+Native execution uses the amdxdna HRX C ABI rather than XRT. One process-wide device owner creates
+per-backend streams; each backend serializes accepted work through a bounded ring and worker that
+bridges blocking HRX synchronization to latched, nonblocking event polling. Persistent HRX mappings
+are the exact allocations bound to dispatch, and diagnostics prove that submission introduces no
+bounce allocation or transfer. HRX exposes no bounded cancellation, so finite deadlines are
+rejected before acceptance and a two-tier poison/watchdog model handles device loss. These choices
+preserve OpenVINO's static admission, direct-binding, capability, and conformance seams; the helper
+process, serialized stream, and XDNA-specific local-memory envelopes are documented hardware/runtime
+constraints rather than portable API changes or silent fallback paths.
 
 The Qualcomm adapter uses the same seam. Its safe planner admits 41 of the 42 floating-point
 operators shared by Core ML and OpenVINO, including owned constants/data movement, FP16 unary and

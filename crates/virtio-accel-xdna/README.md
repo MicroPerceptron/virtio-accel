@@ -1,14 +1,14 @@
 # virtio-accel-xdna
 
 An AMD XDNA (Ryzen AI NPU) host backend for `virtio-accel`, targeting XDNA2/Strix-class parts
-through the HRX runtime (`libhrx`) with no XRT userspace dependency. It will execute device-neutral
+through the HRX runtime (`libhrx`) with no XRT userspace dependency. It executes device-neutral
 TOSA 1.0 programs on the NPU, compiling admitted graphs with the pinned aiecc toolchain as a
 bounded subprocess (never a Cargo dependency, never in-process Python).
 
 **Portability tier:** `host-native` — the amdxdna-native HRX runtime (`libhrx`) when detected at
 build time; a compile-only unsupported-runtime placeholder elsewhere.
 
-**This crate is under construction.** In a `va_xdna` build it runs the full `Accelerator`
+In a `va_xdna` build it runs the full `Accelerator`
 lifecycle — device/stream owner, `hrx_buffer` primitives (persistent mapping, range
 flush/invalidate, release), and a serialized dispatch worker bridging
 `hrx_stream_dispatch`/`synchronize` to a latched nonblocking `poll_event`. `load_program` accepts
@@ -31,10 +31,11 @@ MATMUL, and INT32 → INT8 RESCALE oracles) and by
 `tests/conformance.rs` (the shared semantic suite, including the direct-binding copy-path
 diagnostics, on the device). Hosts without HRX build the portable admission surface plus a
 placeholder, compile no `unsafe`, and still unit-test admission and the artifact codec. The
-remaining executing numerical tiers land in subsequent tickets of the
-[AMD XDNA wayfinder map](https://github.com/MicroPerceptron/virtio-accel/issues/78); the design
-decisions live on their ticket branches: crate layout (#83), FFI/buffers (#87), execution model
-(#85), compiler helper (#84), and the advertised numerical tier (#82).
+[AMD XDNA wayfinder map](https://github.com/MicroPerceptron/virtio-accel/issues/78) records the
+implementation lineage; its design decisions cover crate layout (#83), FFI/buffers (#87),
+execution model (#85), compiler helper (#84), and the advertised numerical tier (#82). Optional
+throughput, parallelism, broader integer, and experimental block-scaled work remains in separately
+scoped follow-up issues and does not expand this support claim.
 
 The compiler is never a Cargo dependency and never runs in-process. `compile_artifact` exposes the
 admit-then-compile path without a device (the offline / catalog-population use), so a build host can
@@ -106,6 +107,28 @@ produces no `SubmitFailure::Indeterminate` or `ReleaseFailure::Indeterminate` pa
 states remain reserved for a future runtime operation whose ownership outcome is genuinely
 unknown.
 
+## Validated baseline
+
+The hardware claim is pinned to the configuration proven on August 26, 2026:
+
+- Fedora 44 with Linux `7.1.8-200.fc44.x86_64` and the in-tree `amdxdna` driver;
+- PCI `1022:17f0` revision `0x20` (Strix/Krackan/Strix Halo XDNA2), exposed as
+  `/dev/accel/accel0`;
+- firmware `1.1.2.64` from `amdnpu/17f0_20/npu.sbin`;
+- toolchain prefix `amdxdna-hrx-v2026.08`: Python 3.12.14, `amd-npu-compiler` commit
+  `c9554426`, `mlir_aie==1.4.1`, Peano/`llvm-aie==21.0.0.2026080301+c9c5ecb7`, and
+  `hrx-xclbinutil` commit `3940dd23`;
+- HRX tag `flm-hrx-amdxdna-v2026.07.30`, source commit `eb0b39f4`, C ABI/library version
+  `0.1.0`, release SHA-256 `661ed94051cc6ad04f53739b2df7a791aecb658bc435bd5a6ff3c46716696345`;
+  and
+- unfolded DDR addressing (`NPU_RUNTIME=hrx`, `fold_ddr_addr_offset=false`).
+
+This is an evidence boundary, not a claim that every XDNA generation or runtime revision works.
+The compiler/Python toolchain runs only while populating the content-addressed artifact catalog or
+on a load path configured to compile; a serving host loading precompiled XDNP artifacts does not
+need Python or the compiler. The currently validated native runtime still uses the Linux `amdxdna`
+driver; a future kore-native runtime adapter is outside this support claim.
+
 ## Running
 
 ```sh
@@ -121,12 +144,19 @@ The exact manual replacement for the unavailable public hardware CI lane is:
 
 ```sh
 source ~/toolchains/amdxdna-hrx-v2026.08/env.sh
+export VIRTIO_ACCEL_XDNA=1
+export VIRTIO_ACCEL_XDNA_REQUIRE_HARDWARE=1
+export VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN=~/toolchains/amdxdna-hrx-v2026.08
 cargo test -p virtio-accel-xdna --test conformance -- --test-threads=1
 cargo test -p virtio-accel-xdna --features test-control --test hardware -- --test-threads=1
 ```
 
 `test-control` only adds the hidden one-shot tier-1/tier-2 constructors used by the hardware test;
 ordinary `XdnaAccelerator::new` retains production behavior even in an all-features build.
+`VIRTIO_ACCEL_XDNA=1` makes an incomplete HRX install fail at build time, while the test-only
+`VIRTIO_ACCEL_XDNA_REQUIRE_HARDWARE=1` turns an inaccessible NPU into a test failure instead of the
+ordinary developer-machine skip. Together they prevent the manual hardware lane from passing
+without exercising the native backend.
 
 ## Performance evidence
 

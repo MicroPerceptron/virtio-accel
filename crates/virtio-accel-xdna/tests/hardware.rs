@@ -27,12 +27,25 @@ use virtio_accel_tosa::{
 };
 use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
 use virtio_accel_xdna::{
-    InitError, XDNA_PRECOMPILED_FORMAT, XDNA_TOSA_FP8_TARGET, XDNA_TOSA_INTEGER_TARGET,
-    XDNA_TOSA_TARGET, XdnaAccelerator, XdnaBuffer, XdnaContext, XdnaProgram, XdnaQueue,
-    XdnaResourceCounts, compile_artifact,
+    XDNA_PRECOMPILED_FORMAT, XDNA_TOSA_FP8_TARGET, XDNA_TOSA_INTEGER_TARGET, XDNA_TOSA_TARGET,
+    XdnaAccelerator, XdnaBuffer, XdnaContext, XdnaProgram, XdnaQueue, XdnaResourceCounts,
+    compile_artifact,
 };
 #[cfg(feature = "test-control")]
 use virtio_accel_xdna::{XdnaTestConfig, XdnaTestFault};
+
+const REQUIRE_HARDWARE_ENV: &str = "VIRTIO_ACCEL_XDNA_REQUIRE_HARDWARE";
+
+/// Whether this run is the documented manual hardware gate, where skipping would be a false pass.
+fn hardware_required() -> bool {
+    match std::env::var(REQUIRE_HARDWARE_ENV) {
+        Ok(value) if value == "1" => true,
+        Ok(value) if value == "0" => false,
+        Ok(value) => panic!("{REQUIRE_HARDWARE_ENV} must be \"0\" or \"1\", not {value:?}"),
+        Err(std::env::VarError::NotPresent) => false,
+        Err(error) => panic!("invalid {REQUIRE_HARDWARE_ENV}: {error}"),
+    }
+}
 
 /// Whether the pinned compiler toolchain is configured (the compiler tests need it, not a device).
 fn toolchain_present() -> bool {
@@ -158,15 +171,18 @@ impl PassthroughResources {
     }
 }
 
-/// Construct a backend, or skip the test when no NPU is accessible on this host.
+/// Construct a backend, or skip when the complete native runtime is unavailable on this host.
 fn backend() -> Option<XdnaAccelerator> {
     match XdnaAccelerator::new() {
         Ok(backend) => Some(backend),
-        Err(InitError::DeviceUnavailable) => {
-            eprintln!("no XDNA NPU device accessible; skipping hardware test");
+        Err(error) => {
+            assert!(
+                !hardware_required(),
+                "{REQUIRE_HARDWARE_ENV}=1 but the XDNA runtime is unusable: {error}"
+            );
+            eprintln!("XDNA runtime unavailable ({error}); skipping hardware test");
             None
         }
-        Err(error) => panic!("unexpected initialization failure: {error}"),
     }
 }
 
