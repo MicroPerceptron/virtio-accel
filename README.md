@@ -38,7 +38,7 @@ The project claims no Virtio device ID (_yet_). For guest environments, use the 
 | ------------------------------------------- | ----------------------------------------- | -------------------------------------------------------- | --------------------------------- | -------------------------------------- | --------------------------- | ----------------- | --------------- | --------------------------- |
 | Apple Core ML / ANE (`virtio-accel-coreml`) | Implemented; macOS 14+                    | Static TOSA 1.0 FP; INT8 tier on macOS 26+               | Supported                         | Supported                              | Not implemented             | Identity + MATMUL | Not implemented | Direct host/shared bindings |
 | Intel OpenVINO (`virtio-accel-openvino`)    | Implemented; OpenVINO 2026.x              | Static TOSA 1.0 FP + INT8 tier                           | Supported                         | Supported                              | Not implemented             | Identity + MATMUL | Not implemented | Direct host/shared bindings |
-| AMD XDNA (`virtio-accel-xdna`)              | In Progress                               | In Progress                                              | In Progress                       | In Progress                            | In Progress                 | In Progress       | In Progress     | In Progress                 |
+| AMD XDNA (`virtio-accel-xdna`)              | Experimental; HRX on XDNA2                | Static BF16 TOSA + explicit FP8 storage CAST             | Accumulator outputs only          | Not implemented                        | E4M3/E5M2 → BF16 CAST       | Not implemented   | Not implemented | Direct host/shared bindings |
 | Qualcomm Hexagon (`virtio-accel-hexagon`)   | Experimental; QAIRT 2.49 on Windows ARM64 | Static TOSA 1.0 FP16 + BOOL/INT32 auxiliaries; INT8 tier | Blocked by v73 precision evidence | 41/42 shared operators (`ERF` blocked) | Blocked: ambiguous encoding | Identity + MATMUL | Not implemented | Direct host/shared bindings |
 | Vulkan (planned)                            | Planned                                   | Not implemented                                          | Not implemented                   | Not implemented                        | Not implemented             | Not implemented   | Not implemented | Not implemented             |
 
@@ -70,7 +70,15 @@ See the [`virtio-accel-hexagon` support boundary](crates/virtio-accel-hexagon/RE
 
 ### XDNA/2 (_AMD XDNA2 NPU over HRX runtime_)
 
-The XDNA row is a scaffold for AMD's XDNA2 NPU over the HRX runtime. It is not yet implemented, but the crate is present to allow early integration and to provide a build probe for the HRX runtime.
+- **Execution:** The backend uses HRX-owned buffers and a serialized dispatch worker; submitted
+  program buffers bind directly, without a submission-time bounce copy.
+- **BF16:** IDENTITY, BF16→FP32 MATMUL, and NHWC MAX_POOL2D are implemented within documented
+  static shape envelopes. FP32 is exposed only where TOSA requires the MATMUL accumulator output;
+  FP32 and FP16 arithmetic are rejected.
+- **FP8 storage:** Explicit TOSA CAST from E4M3 or E5M2 to BF16 runs on the NPU and is bit-exact for
+  every finite value. NaN payload canonicalization is permitted. FP8 arithmetic is not advertised.
+- **Runtime:** Native execution requires the pinned amdxdna-native HRX runtime and compiler
+  toolchain. Portable admission and offline artifact compilation remain available without a device.
 
 ### Vulkan (_planned_)
 

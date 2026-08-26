@@ -1673,6 +1673,61 @@ fn movement_fp16_bytes(op: wire::Op) -> Vec<u8> {
     }
 }
 
+fn fp8_to_bf16_cast_bytes(input_dtype: wire::DType) -> Vec<u8> {
+    assert!(matches!(
+        input_dtype,
+        wire::DType::FP8E4M3 | wire::DType::FP8E5M2
+    ));
+    let mut builder = flatbuffers::FlatBufferBuilder::new();
+    let input_name = builder.create_string("input");
+    let output_name = builder.create_string("output");
+    let shape = builder.create_vector(&[1024_i32]);
+    let input = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(input_name),
+            shape: Some(shape),
+            type_: input_dtype,
+            ..Default::default()
+        },
+    );
+    let output = wire::TosaTensor::create(
+        &mut builder,
+        &wire::TosaTensorArgs {
+            name: Some(output_name),
+            shape: Some(shape),
+            type_: wire::DType::BF16,
+            ..Default::default()
+        },
+    );
+    let attribute = wire::CastAttribute::create(&mut builder, &Default::default());
+    let inputs = builder.create_vector(&[input_name]);
+    let outputs = builder.create_vector(&[output_name]);
+    let cast = wire::TosaOperator::create(
+        &mut builder,
+        &wire::TosaOperatorArgs {
+            op: wire::Op::CAST,
+            attribute_type: wire::Attribute::CastAttribute,
+            attribute: Some(attribute.as_union_value()),
+            inputs: Some(inputs),
+            outputs: Some(outputs),
+            location: None,
+        },
+    );
+    let tensors = builder.create_vector(&[input, output]);
+    let operators = builder.create_vector(&[cast]);
+    let block_inputs = builder.create_vector(&[input_name]);
+    let block_outputs = builder.create_vector(&[output_name]);
+    finish_fixture!(
+        builder,
+        tensors,
+        operators,
+        block_inputs,
+        block_outputs,
+        None
+    )
+}
+
 fn movement_single_input<'a>(
     mut builder: flatbuffers::FlatBufferBuilder<'a>,
     input_name: flatbuffers::WIPOffset<&'a str>,
@@ -1928,6 +1983,24 @@ fn max_pool2d_fixture_is_semantically_valid() {
 }
 
 #[test]
+fn fp8_to_bf16_cast_fixtures_are_semantically_valid() {
+    let target = Target::new(
+        Version::TOSA_1_0,
+        ProfileSet::FLOATING_POINT,
+        Level::Level8K,
+        ExtensionSet::BF16
+            .union(ExtensionSet::FP8E4M3)
+            .union(ExtensionSet::FP8E5M2),
+    );
+    for dtype in [wire::DType::FP8E4M3, wire::DType::FP8E5M2] {
+        parse(&fp8_to_bf16_cast_bytes(dtype))
+            .unwrap()
+            .validate_for(target)
+            .unwrap();
+    }
+}
+
+#[test]
 #[ignore = "writes a requested checked-in test fixture"]
 fn regenerate_matmul_fixture() {
     let destination = std::env::var_os("VIRTIO_ACCEL_TOSA_FIXTURE_OUT")
@@ -1973,6 +2046,24 @@ fn regenerate_max_pool2d_bf16_fixture() {
     let destination = std::env::var_os("VIRTIO_ACCEL_TOSA_FIXTURE_OUT")
         .expect("set VIRTIO_ACCEL_TOSA_FIXTURE_OUT to the exact output path");
     std::fs::write(destination, max_pool2d_float_bytes(wire::DType::BF16)).unwrap();
+}
+
+fn regenerate_fp8_to_bf16_cast_fixture(dtype: wire::DType) {
+    let destination = std::env::var_os("VIRTIO_ACCEL_TOSA_FIXTURE_OUT")
+        .expect("set VIRTIO_ACCEL_TOSA_FIXTURE_OUT to the exact output path");
+    std::fs::write(destination, fp8_to_bf16_cast_bytes(dtype)).unwrap();
+}
+
+#[test]
+#[ignore = "writes one requested checked-in FP8 CAST fixture"]
+fn regenerate_fp8e4m3_to_bf16_cast_fixture() {
+    regenerate_fp8_to_bf16_cast_fixture(wire::DType::FP8E4M3);
+}
+
+#[test]
+#[ignore = "writes one requested checked-in FP8 CAST fixture"]
+fn regenerate_fp8e5m2_to_bf16_cast_fixture() {
+    regenerate_fp8_to_bf16_cast_fixture(wire::DType::FP8E5M2);
 }
 
 fn regenerate_binary_fp16_fixture(op: wire::Op) {

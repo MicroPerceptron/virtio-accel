@@ -71,7 +71,8 @@ by the reusable semantic suite. A public hardware CI lane remains unavailable, s
 publishes the exact manual replacement commands.
 
 The AMD XDNA crate compiles its portable admission surface (`lower`, including the TOSA IDENTITY,
-MATMUL, and MAX_POOL2D admissions and the two advertised `Target` constants), the portable
+MATMUL, MAX_POOL2D, and explicit FP8-to-BF16 CAST admissions and its advertised `Target`
+constants), the portable
 precompiled-artifact codec, and a placeholder on every host; portable CI unit-tests admission. HRX
 exposes a plain C ABI, so its
 build script has no `cc`/CMake step; it enables the native modules (HRX FFI, the `Accelerator`
@@ -84,7 +85,8 @@ incompatible libhrx generation — and `lib/libhrx.so`. `VIRTIO_ACCEL_XDNA=0` fo
 the toolchain pin authoritative. On the reference machine with the pinned toolchain
 (`VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN`) and an NPU, backend-local tests run a DMA passthrough, a
 compiled TOSA BF16 IDENTITY, a bit-exact BF16 → FP32 MATMUL, BF16 NHWC MAX_POOL2D against the
-shared bit-exact oracle, and the shared semantic conformance suite end to end; compilation invokes
+shared bit-exact oracle, both FP8E4M3/E5M2 → BF16 CASTs against shared bit-exact oracles, and the
+shared semantic conformance suite end to end; compilation invokes
 the aiecc helper as a bounded subprocess (never a Cargo dependency). The conformance run includes
 provider-resource accounting and direct-binding diagnostics; a feature-gated on-metal fault suite
 proves definite device loss, the 120-second tier-2 watchdog state machine with a shortened test

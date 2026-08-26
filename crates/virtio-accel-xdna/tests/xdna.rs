@@ -4,11 +4,12 @@
 
 #[cfg(not(va_xdna))]
 use virtio_accel_tosa::TosaCapabilityProvider;
-use virtio_accel_tosa::{ExtensionSet, Op, OperatorConstraints, ProfileSet, Target};
+use virtio_accel_tosa::{ExtensionSet, Op, OperatorConstraints, ProfileSet, Target, ValueRoles};
 #[cfg(not(va_xdna))]
 use virtio_accel_xdna::XdnaAccelerator;
 use virtio_accel_xdna::{
-    REQUIRED_RESIDENT_BYTES, XDNA_TOSA_CAPABILITY, XDNA_TOSA_INTEGER_TARGET, XDNA_TOSA_TARGET,
+    REQUIRED_RESIDENT_BYTES, XDNA_TOSA_CAPABILITY, XDNA_TOSA_FP8_CAPABILITY, XDNA_TOSA_FP8_TARGET,
+    XDNA_TOSA_INTEGER_TARGET, XDNA_TOSA_TARGET,
 };
 
 #[test]
@@ -23,7 +24,9 @@ fn advertised_targets_are_coherent_and_distinct() {
         XDNA_TOSA_INTEGER_TARGET.validate(),
         Ok(XDNA_TOSA_INTEGER_TARGET)
     );
+    assert_eq!(XDNA_TOSA_FP8_TARGET.validate(), Ok(XDNA_TOSA_FP8_TARGET));
     assert_ne!(XDNA_TOSA_TARGET, XDNA_TOSA_INTEGER_TARGET);
+    assert_ne!(XDNA_TOSA_TARGET, XDNA_TOSA_FP8_TARGET);
 }
 
 #[test]
@@ -47,10 +50,42 @@ fn integer_target_declares_the_integer_profile_and_no_extensions() {
 }
 
 #[test]
+fn fp8_storage_target_requires_bf16_and_both_fp8_extensions() {
+    for extension in [
+        ExtensionSet::BF16,
+        ExtensionSet::FP8E4M3,
+        ExtensionSet::FP8E5M2,
+    ] {
+        assert!(XDNA_TOSA_FP8_TARGET.extensions.contains(extension));
+    }
+}
+
+#[test]
 fn targets_survive_an_identity_round_trip() {
-    for target in [XDNA_TOSA_TARGET, XDNA_TOSA_INTEGER_TARGET] {
+    for target in [
+        XDNA_TOSA_TARGET,
+        XDNA_TOSA_FP8_TARGET,
+        XDNA_TOSA_INTEGER_TARGET,
+    ] {
         assert_eq!(Target::from_identity(target.to_identity()), Ok(target));
     }
+}
+
+#[test]
+fn fp8_capability_is_storage_conversion_only() {
+    assert_eq!(XDNA_TOSA_FP8_CAPABILITY.target, XDNA_TOSA_FP8_TARGET);
+    assert!(XDNA_TOSA_FP8_CAPABILITY.supports_operator(Op::CAST));
+    assert!(!XDNA_TOSA_FP8_CAPABILITY.supports_operator(Op::MATMUL));
+    for dtype in [
+        virtio_accel_tosa::DType::FP8E4M3,
+        virtio_accel_tosa::DType::FP8E5M2,
+    ] {
+        assert!(XDNA_TOSA_FP8_CAPABILITY.supports_dtype(dtype, ValueRoles::INPUT));
+        assert!(!XDNA_TOSA_FP8_CAPABILITY.supports_dtype(dtype, ValueRoles::OUTPUT));
+    }
+    assert!(
+        XDNA_TOSA_FP8_CAPABILITY.supports_dtype(virtio_accel_tosa::DType::BF16, ValueRoles::OUTPUT)
+    );
 }
 
 #[test]

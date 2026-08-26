@@ -11,7 +11,9 @@ use std::time::Duration;
 mod common;
 use common::{bf16_identity_tosa, bf16_matmul_tosa, poll_to_terminal};
 
-use virtio_accel_conformance::numerics::MAX_POOL2D_BF16;
+use virtio_accel_conformance::numerics::{
+    CAST_FP8E4M3_TO_BF16, CAST_FP8E5M2_TO_BF16, MAX_POOL2D_BF16, TosaFp8ToBfloat16Case,
+};
 use virtio_accel_core::{
     Accelerator, AccessMode, ArtifactFormat, ArtifactRef, BackendError, BindingRef, BufferDesc,
     BufferRange, BufferUsage, ByteSink, ByteSource, ContextDesc, EventState, MemoryDomain,
@@ -20,8 +22,8 @@ use virtio_accel_core::{
 use virtio_accel_tosa::{ARTIFACT_FORMAT, DType, TosaCapabilityProvider};
 use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
 use virtio_accel_xdna::{
-    InitError, XDNA_PRECOMPILED_FORMAT, XDNA_TOSA_TARGET, XdnaAccelerator, XdnaBuffer, XdnaContext,
-    XdnaProgram, XdnaQueue, XdnaResourceCounts, compile_artifact,
+    InitError, XDNA_PRECOMPILED_FORMAT, XDNA_TOSA_FP8_TARGET, XDNA_TOSA_TARGET, XdnaAccelerator,
+    XdnaBuffer, XdnaContext, XdnaProgram, XdnaQueue, XdnaResourceCounts, compile_artifact,
 };
 #[cfg(feature = "test-control")]
 use virtio_accel_xdna::{XdnaTestConfig, XdnaTestFault};
@@ -226,8 +228,9 @@ fn device_info_reports_the_npu() {
     let info = backend.device_info().expect("device info");
     assert_eq!(info.identity.vendor_id, 0x1022);
     assert_eq!(info.identity.device_id, 0x17f0);
-    assert_eq!(backend.tosa_capabilities().len(), 1);
+    assert_eq!(backend.tosa_capabilities().len(), 2);
     assert_eq!(backend.tosa_capabilities()[0].target, XDNA_TOSA_TARGET);
+    assert_eq!(backend.tosa_capabilities()[1].target, XDNA_TOSA_FP8_TARGET);
 }
 
 #[test]
@@ -835,6 +838,134 @@ fn tosa_bf16_identity_runs_on_the_npu() {
     backend.unload_program(program).expect("unload");
     backend.destroy_queue(queue).expect("destroy queue");
     backend.destroy_context(context).expect("destroy context");
+}
+
+#[test]
+fn tosa_fp8_casts_compile_to_wellformed_artifacts() {
+    if !toolchain_present() {
+        eprintln!("no XDNA toolchain configured; skipping compiler test");
+        return;
+    }
+    for case in [CAST_FP8E4M3_TO_BF16, CAST_FP8E5M2_TO_BF16] {
+        let container = compile_artifact(case.artifact, XDNA_TOSA_FP8_TARGET)
+            .unwrap_or_else(|error| panic!("compile {}: {error:?}", case.name));
+        let parsed = virtio_accel_xdna::PrecompiledArtifact::parse(&container)
+            .unwrap_or_else(|error| panic!("parse {}: {error:?}", case.name));
+        assert!(parsed.xclbin.starts_with(b"xclbin2"));
+        assert!(!parsed.insts.is_empty() && parsed.insts.len() % 4 == 0);
+        assert_eq!((parsed.inputs, parsed.outputs), (1, 1));
+        assert_eq!(parsed.slot_bytes, [1024, 2048]);
+        assert_eq!(parsed.entry, "MLIR_AIE");
+    }
+}
+
+fn run_fp8_cast_case(backend: &XdnaAccelerator, case: TosaFp8ToBfloat16Case) {
+    let context = backend
+        .create_context(ContextDesc::default())
+        .expect("context");
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .expect("queue");
+    let program = backend
+        .load_program(
+            &context,
+            ArtifactRef {
+                format: ARTIFACT_FORMAT,
+                target: XDNA_TOSA_FP8_TARGET.to_identity(),
+                payload: &Slice(case.artifact),
+                resident_bytes: u64::MAX,
+            },
+        )
+        .unwrap_or_else(|error| panic!("load {}: {error:?}", case.name));
+
+    let input_len = case.input.bytes.len();
+    let output_len = case.output.bits.len() * 2;
+    let (mut input, _) = backend
+        .allocate_buffer(
+            &context,
+            BufferDesc::new(
+                input_len as u64,
+                4096,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+            )
+            .unwrap(),
+        )
+        .expect("input buffer")
+        .into_parts();
+    let (output, _) = backend
+        .allocate_buffer(
+            &context,
+            BufferDesc::new(
+                output_len as u64,
+                4096,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+            )
+            .unwrap(),
+        )
+        .expect("output buffer")
+        .into_parts();
+    backend
+        .write_buffer(&mut input, 0, &Slice(case.input.bytes))
+        .expect("write FP8 input");
+    let event = backend
+        .submit(
+            &queue,
+            &program,
+            &[
+                BindingRef {
+                    slot: 0,
+                    buffer: &input,
+                    range: BufferRange::new(0, input_len as u64).unwrap(),
+                    access: AccessMode::Read,
+                },
+                BindingRef {
+                    slot: 1,
+                    buffer: &output,
+                    range: BufferRange::new(0, output_len as u64).unwrap(),
+                    access: AccessMode::Write,
+                },
+            ],
+            Timeout::Infinite,
+        )
+        .unwrap_or_else(|error| panic!("submit {}: {error:?}", case.name));
+    let state = poll_to_terminal(backend, &event, Duration::from_secs(30))
+        .unwrap_or_else(|error| panic!("poll {}: {error:?}", case.name));
+    assert!(matches!(state, EventState::Complete), "got {state:?}");
+
+    let mut result = vec![0u8; output_len];
+    backend
+        .read_buffer(&output, 0, &mut SliceMut(&mut result))
+        .expect("read BF16 output");
+    let result_bits: Vec<_> = result
+        .chunks_exact(2)
+        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+        .collect();
+    assert!(
+        case.output_matches(&result_bits),
+        "{} oracle mismatch",
+        case.name
+    );
+
+    backend.destroy_event(event).expect("destroy event");
+    backend.free_buffer(input).expect("free input");
+    backend.free_buffer(output).expect("free output");
+    backend.unload_program(program).expect("unload");
+    backend.destroy_queue(queue).expect("destroy queue");
+    backend.destroy_context(context).expect("destroy context");
+}
+
+#[test]
+fn tosa_fp8_casts_match_the_shared_bit_exact_oracles_on_the_npu() {
+    let Some(backend) = backend() else { return };
+    if !toolchain_present() {
+        eprintln!("no XDNA toolchain configured; skipping TOSA execution test");
+        return;
+    }
+    for case in [CAST_FP8E4M3_TO_BF16, CAST_FP8E5M2_TO_BF16] {
+        run_fp8_cast_case(&backend, case);
+    }
 }
 
 #[test]

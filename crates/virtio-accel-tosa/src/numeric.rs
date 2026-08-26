@@ -72,6 +72,44 @@ pub fn fp8e5m2_to_f32(bits: u8) -> f32 {
     f32::from_bits(sign | ((exponent + 112) << 23) | (fraction << 21))
 }
 
+/// Convert one TOSA/OCP FP8 E4M3 bit pattern to BF16 storage bits.
+///
+/// Every finite E4M3 value is exactly representable in BF16. Signed zero is preserved and NaN is
+/// canonicalized to a quiet BF16 NaN while preserving its sign.
+pub const fn fp8e4m3_to_bf16_bits(bits: u8) -> u16 {
+    let sign = ((bits & 0x80) as u16) << 8;
+    let exponent = ((bits >> 3) & 0x0f) as u16;
+    let fraction = (bits & 0x07) as u16;
+    if exponent == 0 {
+        let subnormal = [
+            0x0000, 0x3b00, 0x3b80, 0x3bc0, 0x3c00, 0x3c20, 0x3c40, 0x3c60,
+        ];
+        return sign | subnormal[fraction as usize];
+    }
+    if exponent == 0x0f && fraction == 0x07 {
+        return sign | 0x7fc0;
+    }
+    sign | ((exponent + 120) << 7) | (fraction << 4)
+}
+
+/// Convert one TOSA/OCP FP8 E5M2 bit pattern to BF16 storage bits.
+///
+/// Every finite E5M2 value and infinity is exactly representable in BF16. Signed zero is
+/// preserved and NaN is canonicalized to a quiet BF16 NaN while preserving its sign.
+pub const fn fp8e5m2_to_bf16_bits(bits: u8) -> u16 {
+    let sign = ((bits & 0x80) as u16) << 8;
+    let exponent = ((bits >> 2) & 0x1f) as u16;
+    let fraction = (bits & 0x03) as u16;
+    if exponent == 0 {
+        let subnormal = [0x0000, 0x3780, 0x3800, 0x3840];
+        return sign | subnormal[fraction as usize];
+    }
+    if exponent == 0x1f {
+        return sign | if fraction == 0 { 0x7f80 } else { 0x7fc0 };
+    }
+    sign | ((exponent + 112) << 7) | (fraction << 5)
+}
+
 fn signed_fp8_subnormal(sign: u32, fraction: u32, scale: i32) -> f32 {
     if fraction == 0 {
         return f32::from_bits(sign);
@@ -128,5 +166,22 @@ mod tests {
         assert_eq!(fp8e5m2_to_f32(0x7c), f32::INFINITY);
         assert_eq!(fp8e5m2_to_f32(0xfc), f32::NEG_INFINITY);
         assert!(fp8e5m2_to_f32(0x7d).is_nan());
+    }
+
+    #[test]
+    fn fp8_to_bf16_is_exact_for_every_non_nan_encoding() {
+        for bits in u8::MIN..=u8::MAX {
+            for (value, bf16) in [
+                (fp8e4m3_to_f32(bits), fp8e4m3_to_bf16_bits(bits)),
+                (fp8e5m2_to_f32(bits), fp8e5m2_to_bf16_bits(bits)),
+            ] {
+                if value.is_nan() {
+                    assert_eq!(bf16 & 0x7f80, 0x7f80);
+                    assert_ne!(bf16 & 0x007f, 0);
+                } else {
+                    assert_eq!(bf16, (value.to_bits() >> 16) as u16);
+                }
+            }
+        }
     }
 }

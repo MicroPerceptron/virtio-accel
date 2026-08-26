@@ -23,8 +23,9 @@ use virtio_accel_core::BackendError;
 use crate::XDNA_ERROR_DOMAIN;
 use crate::artifact;
 use crate::lower::{
-    CompilerSpec, IDENTITY_LINE_SIZE, MATMUL_MAX_DIM, MATMUL_TILE_K, MATMUL_TILE_M, MATMUL_TILE_N,
-    MAX_POOL_MAX_KERNEL, MAX_POOL_MAX_STRIDE, MAX_POOL_MAX_TOTAL_ELEMENTS,
+    CompilerSpec, FP8_CAST_LINE_SIZE, Fp8Format, IDENTITY_LINE_SIZE, MATMUL_MAX_DIM, MATMUL_TILE_K,
+    MATMUL_TILE_M, MATMUL_TILE_N, MAX_POOL_MAX_KERNEL, MAX_POOL_MAX_STRIDE,
+    MAX_POOL_MAX_TOTAL_ELEMENTS,
 };
 
 /// The embedded compiler helper; written into each private workdir before invocation.
@@ -59,6 +60,16 @@ fn spec_json(spec: CompilerSpec) -> String {
             format!(
                 "{{\"op\":\"IDENTITY\",\"dtype\":\"bf16\",\"elements\":{elements},\
                  \"line_size\":{IDENTITY_LINE_SIZE},{device}}}"
+            )
+        }
+        CompilerSpec::Fp8ToBf16 { format, elements } => {
+            let input = match format {
+                Fp8Format::E4M3 => "fp8e4m3",
+                Fp8Format::E5M2 => "fp8e5m2",
+            };
+            format!(
+                "{{\"op\":\"CAST\",\"in_dtype\":\"{input}\",\"out_dtype\":\"bf16\",\
+                 \"elements\":{elements},\"line_size\":{FP8_CAST_LINE_SIZE},{device}}}"
             )
         }
         CompilerSpec::Matmul { m, k, n } => format!(
@@ -347,6 +358,19 @@ mod tests {
             "\"max_dim\":512",
         ] {
             assert!(json.contains(field), "missing {field} in {json}");
+        }
+    }
+
+    #[test]
+    fn fp8_cast_spec_names_the_encoding_and_authoritative_line_size() {
+        for (format, dtype) in [(Fp8Format::E4M3, "fp8e4m3"), (Fp8Format::E5M2, "fp8e5m2")] {
+            let json = spec_json(CompilerSpec::Fp8ToBf16 {
+                format,
+                elements: 4096,
+            });
+            assert!(json.contains(&format!("\"in_dtype\":\"{dtype}\"")));
+            assert!(json.contains("\"out_dtype\":\"bf16\""));
+            assert!(json.contains("\"line_size\":1024"));
         }
     }
 
