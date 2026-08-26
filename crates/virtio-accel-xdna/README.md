@@ -17,7 +17,8 @@ compiling it with the bounded aiecc helper subprocess (`compiler/xdna_compile.py
 pinned toolchain venv in a cleared environment, content-addressed in a cache). The compilable TOSA
 subset today is BF16 IDENTITY (a DMA copy), BF16 → FP32 MATMUL (the spec-mandated FP32-accumulator
 shape, batch 1, at multiples of the tested compute tile), BF16 NHWC MAX_POOL2D, and explicit
-FP8E4M3/FP8E5M2 → BF16 CAST, plus exact INT8 IDENTITY and zero-point-aware INT8 → INT32 MATMUL.
+FP8E4M3/FP8E5M2 → BF16 CAST, plus exact INT8 IDENTITY, zero-point-aware INT8 → INT32 MATMUL,
+and signed per-tensor INT32 → INT8 RESCALE.
 FP8 is a storage tier, not an arithmetic tier: the guest keeps the
 conversion visible in its graph, the NPU expands each value exactly, and subsequent programs use
 the existing BF16 compute kernels. MAX_POOL2D is
@@ -25,8 +26,8 @@ deliberately bounded to batch 1, zero padding, propagating NaNs, kernel and stri
 larger than 8, and at most 8,192 input-plus-output elements so both tensors fit in the worker's
 local-memory budget. All of this is exercised by `tests/hardware.rs` (a DMA passthrough, compiled
 TOSA IDENTITY, bit-exact non-square MATMUL, the shared MAX_POOL2D oracle, and both shared
-bit-exact FP8 → BF16 CAST oracles, plus the shared exact INT8 identity and nonzero-zero-point
-MATMUL oracles) and by
+bit-exact FP8 → BF16 CAST oracles, plus the shared exact INT8 identity, nonzero-zero-point
+MATMUL, and INT32 → INT8 RESCALE oracles) and by
 `tests/conformance.rs` (the shared semantic suite, including the direct-binding copy-path
 diagnostics, on the device). Hosts without HRX build the portable admission surface plus a
 placeholder, compile no `unsafe`, and still unit-test admission and the artifact codec. The
@@ -62,21 +63,31 @@ Per the numerical-tier decision (#82), the crate defines a BF16 floating-point t
 `EXT-BF16`), a separate FP8 storage target (`EXT-BF16 | EXT-FP8E4M3 | EXT-FP8E5M2`), and an exact
 integer target. It rejects FP32/FP16 compute at admission rather than silently executing it as
 BF16. Native builds expose the implemented BF16 IDENTITY, MATMUL, MAX_POOL2D, and explicit
-FP8-to-BF16 CAST surfaces plus INT8 IDENTITY and MATMUL through `TosaCapabilityProvider`;
+FP8-to-BF16 CAST surfaces plus INT8 IDENTITY, MATMUL, and RESCALE through
+`TosaCapabilityProvider`;
 placeholder builds expose an empty capability list. The FP8 capability advertises FP8 only for
 graph inputs and BF16 only for graph
 outputs, so it cannot be mistaken for native FP8 arithmetic. MAX_POOL2D advertises the same
 propagating-NaN and zero-padding semantic constraints as the OpenVINO reference backend, while
 admission applies the narrower XDNA2 shape and local-memory envelope described above.
 
-The integer capability deliberately mirrors OpenVINO's `CONST`/`IDENTITY`/`MATMUL`, INT8, and
-restricted INT32 semantic declaration, but does not claim the complete TOSA Integer profile.
+The integer capability deliberately preserves OpenVINO's `CONST`/`IDENTITY`/`MATMUL`, INT8, and
+restricted INT32 semantic baseline, but does not claim the complete TOSA Integer profile. It adds
+`RESCALE` as an intentional operator-surface divergence: released TOSA quantized inference needs
+an explicit conversion from an INT32 accumulator back to INT8, and XDNA executes that arithmetic
+exactly on the NPU rather than falling back to the host. The admitted form is signed INT32 → INT8,
+per-tensor, `scale32=true`, `SINGLE_ROUND`, with one compile-time multiplier, shift, and output zero
+point. Per-channel, unsigned, double-round, dynamic-shape, and invalid-shift forms are rejected.
+
 Admission is narrower for an XDNA-specific reason: batch is one, dimensions are at most 512, and
-the padded A/B plus INT32 C footprint is at most 16 KiB so depth-two FIFOs fit one AIE2P core.
+each admitted one-core program's padded tensor footprint is at most 16 KiB so depth-two FIFOs fit
+one AIE2P core.
 Non-word-sized INT8 inputs are rounded up to a four-byte binding slot because AIE DMA descriptors
 cannot transfer a shorter granularity; that padding is explicit in the artifact's binding plan and
-ignored by the kernel, rather than copied into a hidden bounce buffer. Zero points remain signed
-INT8 compile-time values and are subtracted on the NPU before exact INT32 accumulation.
+ignored by the kernel, rather than copied into a hidden bounce buffer. RESCALE similarly rounds
+the output slot to a DMA word and clears its at-most-three-byte tail on the NPU. Zero points remain
+compile-time values: MATMUL subtracts signed INT8 zero points before exact INT32 accumulation, and
+RESCALE applies its signed INT8 output zero point only after exact 64-bit multiply-and-round math.
 
 ## Completion and fault model
 

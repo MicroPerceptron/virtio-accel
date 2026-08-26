@@ -281,6 +281,32 @@ impl TosaInt8MatmulCase {
     }
 }
 
+/// A stable TOSA INT32-to-INT8 RESCALE with exact fixed-point rounding and saturation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TosaInt32ToInt8RescaleCase {
+    /// Diagnostic case name.
+    pub name: &'static str,
+    /// TOSA 1.0 FlatBuffer payload.
+    pub artifact: &'static [u8],
+    /// Single graph-visible INT32 input.
+    pub input: Int32Tensor,
+    /// Non-negative scale32 fixed-point multiplier.
+    pub multiplier: i32,
+    /// TOSA scale32 right shift.
+    pub shift: i8,
+    /// Signed INT8 zero point added after scaling.
+    pub output_zero_point: i8,
+    /// Exact signed INT8 output storage.
+    pub output: PackedTensor,
+}
+
+impl TosaInt32ToInt8RescaleCase {
+    /// Compare backend output bytes exactly with the signed INT8 oracle.
+    pub fn output_matches(self, actual: &[u8]) -> bool {
+        self.output.bytes == actual
+    }
+}
+
 /// A stable TOSA graph and packed low-precision oracle shared by host backends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TosaPackedCase {
@@ -959,6 +985,30 @@ pub const MATMUL_INT8: TosaInt8MatmulCase = TosaInt8MatmulCase {
     outputs: MATMUL_INT8_OUTPUTS,
 };
 
+const RESCALE_INT32_INPUT: &[i32] = &[
+    -1000, -251, -250, -249, -3, -2, -1, 0, 1, 2, 3, 249, 250, 251, 260, 1000,
+];
+const RESCALE_INT8_OUTPUT: &[u8] = &[
+    0x80, 0x80, 0x80, 0x81, 0xfc, 0xfc, 0xfd, 0xfd, 0xfe, 0xfe, 0xff, 0x7a, 0x7a, 0x7b, 0x7f, 0x7f,
+];
+
+/// Signed scale32 RESCALE covering ties, negative values, saturation, and a nonzero output point.
+pub const RESCALE_INT32_TO_INT8: TosaInt32ToInt8RescaleCase = TosaInt32ToInt8RescaleCase {
+    name: "rescale-int32-to-int8",
+    artifact: include_bytes!("data/rescale-int32-to-int8-v1.0.0.tosa"),
+    input: Int32Tensor {
+        shape: &[16],
+        values: RESCALE_INT32_INPUT,
+    },
+    multiplier: 1 << 29,
+    shift: 30,
+    output_zero_point: -3,
+    output: PackedTensor {
+        shape: &[16],
+        bytes: RESCALE_INT8_OUTPUT,
+    },
+};
+
 // Logical values [-7, -3, -1, 0, 1, 3, 6, 7], packed low nibble first.
 const IDENTITY_INT4_BYTES: &[u8] = &[0xd9, 0x0f, 0x31, 0x76];
 const IDENTITY_INT4_TENSORS: &[PackedTensor] = &[PackedTensor {
@@ -1265,6 +1315,29 @@ mod tests {
     }
 
     #[test]
+    fn int32_to_int8_rescale_oracle_is_derived_from_the_shared_exact_helper() {
+        use virtio_accel_tosa::rescale_i32_to_i8;
+
+        let actual: Vec<_> = RESCALE_INT32_TO_INT8
+            .input
+            .values
+            .iter()
+            .map(|value| {
+                rescale_i32_to_i8(
+                    *value,
+                    RESCALE_INT32_TO_INT8.multiplier,
+                    RESCALE_INT32_TO_INT8.shift,
+                    RESCALE_INT32_TO_INT8.output_zero_point,
+                    false,
+                )
+                .unwrap() as u8
+            })
+            .collect();
+        assert!(RESCALE_INT32_TO_INT8.output_matches(&actual));
+        assert!(!RESCALE_INT32_TO_INT8.output_matches(&actual[..8]));
+    }
+
+    #[test]
     fn packed_artifacts_are_valid_for_their_declared_tosa_profiles_and_extensions() {
         let integer = Target::new(
             Version::TOSA_1_0,
@@ -1311,6 +1384,10 @@ mod tests {
             );
         }
         parse(MATMUL_INT8.artifact)
+            .unwrap()
+            .validate_for(integer)
+            .unwrap();
+        parse(RESCALE_INT32_TO_INT8.artifact)
             .unwrap()
             .validate_for(integer)
             .unwrap();

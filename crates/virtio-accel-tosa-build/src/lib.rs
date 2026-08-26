@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use flatbuffers::{FlatBufferBuilder, TableFinishedWIPOffset, WIPOffset};
-use virtio_accel_tosa::{DType, NanPropagationMode, Op, SemanticError, Target};
+use virtio_accel_tosa::{DType, NanPropagationMode, Op, RoundingMode, SemanticError, Target};
 
 type Table = WIPOffset<TableFinishedWIPOffset>;
 
@@ -64,6 +64,12 @@ mod slot {
     pub const MAX_POOL_STRIDE: u16 = 6;
     pub const MAX_POOL_PAD: u16 = 8;
     pub const MAX_POOL_NAN_MODE: u16 = 10;
+
+    pub const RESCALE_SCALE32: u16 = 4;
+    pub const RESCALE_ROUNDING_MODE: u16 = 6;
+    pub const RESCALE_PER_CHANNEL: u16 = 8;
+    pub const RESCALE_INPUT_UNSIGNED: u16 = 10;
+    pub const RESCALE_OUTPUT_UNSIGNED: u16 = 12;
 }
 
 /// A serialized compile-time shape value.
@@ -163,6 +169,13 @@ pub enum OperatorKind {
     GreaterEqual,
     Reshape,
     Cast,
+    Rescale {
+        scale32: bool,
+        rounding_mode: RoundingMode,
+        per_channel: bool,
+        input_unsigned: bool,
+        output_unsigned: bool,
+    },
     Const,
     Identity,
     ConstShape,
@@ -200,6 +213,7 @@ impl OperatorKind {
             Self::GreaterEqual => Op::GREATER_EQUAL,
             Self::Reshape => Op::RESHAPE,
             Self::Cast => Op::CAST,
+            Self::Rescale { .. } => Op::RESCALE,
             Self::Const => Op::CONST,
             Self::Identity => Op::IDENTITY,
             Self::ConstShape => Op::CONST_SHAPE,
@@ -692,6 +706,19 @@ fn operator_table(builder: &mut FlatBufferBuilder<'_>, operator: Operator<'_>) -
                 builder.push_slot_always(slot::MAX_POOL_PAD, pad);
                 builder.push_slot::<u32>(slot::MAX_POOL_NAN_MODE, nan_mode.get(), 0);
             }
+            OperatorKind::Rescale {
+                scale32,
+                rounding_mode,
+                per_channel,
+                input_unsigned,
+                output_unsigned,
+            } => {
+                builder.push_slot::<bool>(slot::RESCALE_SCALE32, scale32, false);
+                builder.push_slot::<u32>(slot::RESCALE_ROUNDING_MODE, rounding_mode.get(), 0);
+                builder.push_slot::<bool>(slot::RESCALE_PER_CHANNEL, per_channel, false);
+                builder.push_slot::<bool>(slot::RESCALE_INPUT_UNSIGNED, input_unsigned, false);
+                builder.push_slot::<bool>(slot::RESCALE_OUTPUT_UNSIGNED, output_unsigned, false);
+            }
             _ => {}
         }
         builder.end_table(table)
@@ -1027,6 +1054,17 @@ mod tests {
             (OperatorKind::GreaterEqual, Op::GREATER_EQUAL, 48),
             (OperatorKind::Reshape, Op::RESHAPE, 57),
             (OperatorKind::Cast, Op::CAST, 65),
+            (
+                OperatorKind::Rescale {
+                    scale32: true,
+                    rounding_mode: RoundingMode::SINGLE_ROUND,
+                    per_channel: false,
+                    input_unsigned: false,
+                    output_unsigned: false,
+                },
+                Op::RESCALE,
+                66,
+            ),
             (OperatorKind::Const, Op::CONST, 67),
             (OperatorKind::Identity, Op::IDENTITY, 68),
             (OperatorKind::ConstShape, Op::CONST_SHAPE, 75),

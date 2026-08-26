@@ -22,6 +22,10 @@ Two modes:
     {"op": "MATMUL", "in_dtype": "i8", "out_dtype": "i32", "m": <M>, "k": <K>, "n": <N>,
      "left_zero_point": <i8>, "right_zero_point": <i8>, "device": "npu2",
      "fold_ddr_addr_offset": false}
+    {"op": "RESCALE", "in_dtype": "i32", "out_dtype": "i8", "elements": <n>,
+     "multiplier": <i32>, "shift": <2..62>, "input_zero_point": 0,
+     "output_zero_point": <i8>, "rounding_mode": "SINGLE_ROUND", "per_channel": false,
+     "device": "npu2", "fold_ddr_addr_offset": false}
     {"op": "MAX_POOL2D", "dtype": "bf16", "layout": "NHWC", "batch": 1,
      "input_h": <H>, "input_w": <W>, "channels": <C>, "output_h": <OH>, "output_w": <OW>,
      "kernel_h": <KH>, "kernel_w": <KW>, "stride_h": <SH>, "stride_w": <SW>,
@@ -529,6 +533,95 @@ def _build_int8_matmul(
     return matmul_int8_int32
 
 
+def _rescale_kernel_source(
+    elements: int, multiplier: int, shift: int, output_zero_point: int
+) -> str:
+    """Generate exact TOSA scale32 SINGLE_ROUND arithmetic for one fixed tensor."""
+    return f"""
+#include <cstdint>
+
+extern "C" void rescale_i32_i8(
+    const int32_t *__restrict input,
+    int8_t *__restrict output) {{
+    constexpr unsigned ELEMENTS = {elements};
+    constexpr unsigned OUTPUT_TRANSPORT_ELEMENTS = (ELEMENTS + 3) & ~3U;
+    constexpr int64_t MULTIPLIER = {multiplier};
+    constexpr unsigned SHIFT = {shift};
+    constexpr int64_t OUTPUT_ZERO_POINT = {output_zero_point};
+    constexpr int64_t ROUND = int64_t{{1}} << (SHIFT - 1);
+    constexpr int64_t DENOMINATOR = int64_t{{1}} << SHIFT;
+
+#pragma clang loop vectorize(disable) interleave(disable)
+    for (unsigned index = 0; index < ELEMENTS; ++index) {{
+        const int64_t rounded =
+            static_cast<int64_t>(input[index]) * MULTIPLIER + ROUND;
+        // Spell out arithmetic right shift so negative rounding does not depend on a C++
+        // implementation choice. floor(rounded / 2^SHIFT) equals -ceil(-rounded / 2^SHIFT).
+        const int64_t scaled = rounded >= 0
+            ? rounded >> SHIFT
+            : -((-rounded + DENOMINATOR - 1) >> SHIFT);
+        const int64_t shifted = scaled + OUTPUT_ZERO_POINT;
+        output[index] = static_cast<int8_t>(
+            shifted < -128 ? -128 : (shifted > 127 ? 127 : shifted));
+    }}
+    // The direct-binding slot is word-rounded for DMA. Clear its non-tensor tail so no prior local
+    // memory contents become observable through the explicit padding bytes.
+    for (unsigned index = ELEMENTS; index < OUTPUT_TRANSPORT_ELEMENTS; ++index) {{
+        output[index] = 0;
+    }}
+}}
+"""
+
+
+def _build_int32_to_int8_rescale(
+    elements: int, multiplier: int, shift: int, output_zero_point: int
+):
+    """Return one direct-bound exact INT32-to-INT8 RESCALE worker."""
+    import aie.iron as iron
+    import numpy as np
+    from aie.iron import In, ObjectFifo, Out, Program, Runtime, Worker
+    from aie.iron.kernel import ExternalFunction
+
+    output_transport_elements = (elements + 3) & ~3
+
+    @iron.jit
+    def rescale_int32_int8(input_in: In, output_out: Out):
+        input_ty = np.ndarray[(elements,), np.dtype[np.int32]]
+        # AIE DMA is word-granular. The slot exposes padding explicitly; the kernel writes the
+        # graph-visible prefix and clears the at-most-three-byte transport tail.
+        output_ty = np.ndarray[(output_transport_elements,), np.dtype[np.int8]]
+        kernel = ExternalFunction(
+            "rescale_i32_i8",
+            source_string=_rescale_kernel_source(
+                elements, multiplier, shift, output_zero_point
+            ),
+            arg_types=[input_ty, output_ty],
+        )
+        input_fifo = ObjectFifo(input_ty, name="rescale_input")
+        output_fifo = ObjectFifo(output_ty, name="rescale_output")
+
+        def core_fn(input_source, output_destination, rescale):
+            input_value = input_source.acquire(1)
+            output_value = output_destination.acquire(1)
+            rescale(input_value, output_value)
+            input_source.release(1)
+            output_destination.release(1)
+
+        worker = Worker(core_fn, [input_fifo.cons(), output_fifo.prod(), kernel])
+
+        def sequence(input_value, output_value, input_prod, output_cons):
+            input_prod.fill(input_value)
+            output_cons.drain(output_value, wait=True)
+
+        rt = Runtime(
+            sequence,
+            [input_ty, output_ty, input_fifo.prod(), output_fifo.cons()],
+        )
+        return Program(iron.get_current_device(), rt, workers=[worker]).resolve_program()
+
+    return rescale_int32_int8
+
+
 def _build_max_pool2d():
     """Return a batch-1 BF16 NHWC MAX_POOL2D design with propagating NaNs.
 
@@ -714,6 +807,43 @@ def _compile(workdir: Path) -> int:
                 return _build_int8_matmul(
                     m, k, n, left_zero_point, right_zero_point
                 ).specialize()
+    elif op == "RESCALE":
+        in_dtype = spec.get("in_dtype")
+        out_dtype = spec.get("out_dtype")
+        elements = spec.get("elements")
+        multiplier = spec.get("multiplier")
+        shift = spec.get("shift")
+        input_zero_point = spec.get("input_zero_point")
+        output_zero_point = spec.get("output_zero_point")
+        max_total_bytes = spec.get("max_total_bytes")
+        if (
+            in_dtype != "i32"
+            or out_dtype != "i8"
+            or spec.get("rounding_mode") != "SINGLE_ROUND"
+            or spec.get("per_channel") is not False
+            or input_zero_point != 0
+        ):
+            return _fail(workdir, "spec-rejected", "unsupported RESCALE semantic envelope")
+        if not isinstance(elements, int) or elements <= 0:
+            return _fail(workdir, "spec-rejected", "invalid RESCALE element count")
+        if not isinstance(multiplier, int) or not 0 <= multiplier <= 0x7FFFFFFF:
+            return _fail(workdir, "spec-rejected", "invalid RESCALE multiplier")
+        if not isinstance(shift, int) or not 2 <= shift <= 62:
+            return _fail(workdir, "spec-rejected", "invalid RESCALE shift")
+        if not isinstance(output_zero_point, int) or not -128 <= output_zero_point <= 127:
+            return _fail(workdir, "spec-rejected", "invalid RESCALE output zero point")
+        if not isinstance(max_total_bytes, int) or max_total_bytes <= 0:
+            return _fail(workdir, "spec-rejected", "invalid RESCALE memory bound")
+        output_bytes = (elements + 3) & ~3
+        if elements * 4 + output_bytes > max_total_bytes:
+            return _fail(workdir, "spec-rejected", "RESCALE local-memory bound exceeded")
+        input_bytes = [elements * 4]
+        output_bytes = [output_bytes]
+
+        def build():
+            return _build_int32_to_int8_rescale(
+                elements, multiplier, shift, output_zero_point
+            ).specialize()
     elif op == "MAX_POOL2D":
         dtype = spec.get("dtype")
         layout = spec.get("layout")

@@ -38,7 +38,7 @@ The project claims no Virtio device ID (_yet_). For guest environments, use the 
 | ------------------------------------------- | ----------------------------------------- | -------------------------------------------------------- | --------------------------------- | -------------------------------------- | --------------------------- | ----------------- | --------------- | --------------------------- |
 | Apple Core ML / ANE (`virtio-accel-coreml`) | Implemented; macOS 14+                    | Static TOSA 1.0 FP; INT8 tier on macOS 26+               | Supported                         | Supported                              | Not implemented             | Identity + MATMUL | Not implemented | Direct host/shared bindings |
 | Intel OpenVINO (`virtio-accel-openvino`)    | Implemented; OpenVINO 2026.x              | Static TOSA 1.0 FP + INT8 tier                           | Supported                         | Supported                              | Not implemented             | Identity + MATMUL | Not implemented | Direct host/shared bindings |
-| AMD XDNA (`virtio-accel-xdna`)              | Experimental; HRX on XDNA2                | Static BF16 TOSA + explicit FP8 storage CAST + INT8 tier | Accumulator outputs only          | Not implemented                        | E4M3/E5M2 → BF16 CAST       | Identity + MATMUL | Not implemented | Direct host/shared bindings |
+| AMD XDNA (`virtio-accel-xdna`)              | Experimental; HRX on XDNA2                | Static BF16 TOSA + explicit FP8 storage CAST + INT8 tier | Accumulator outputs only          | Not implemented                        | E4M3/E5M2 → BF16 CAST       | Identity + MATMUL + RESCALE | Not implemented | Direct host/shared bindings |
 | Qualcomm Hexagon (`virtio-accel-hexagon`)   | Experimental; QAIRT 2.49 on Windows ARM64 | Static TOSA 1.0 FP16 + BOOL/INT32 auxiliaries; INT8 tier | Blocked by v73 precision evidence | 41/42 shared operators (`ERF` blocked) | Blocked: ambiguous encoding | Identity + MATMUL | Not implemented | Direct host/shared bindings |
 | Vulkan (planned)                            | Planned                                   | Not implemented                                          | Not implemented                   | Not implemented                        | Not implemented             | Not implemented   | Not implemented | Not implemented             |
 
@@ -77,9 +77,11 @@ See the [`virtio-accel-hexagon` support boundary](crates/virtio-accel-hexagon/RE
   FP32 and FP16 arithmetic are rejected.
 - **FP8 storage:** Explicit TOSA CAST from E4M3 or E5M2 to BF16 runs on the NPU and is bit-exact for
   every finite value. NaN payload canonicalization is permitted. FP8 arithmetic is not advertised.
-- **INT8:** Exact identity and zero-point-aware MATMUL are supported with INT32 output. The
-  capability mirrors OpenVINO's narrow integer surface, while XDNA admission adds a one-core static
-  memory envelope and explicit four-byte DMA slot padding where a logical input is not word-sized.
+- **INT8:** Exact identity, zero-point-aware MATMUL with INT32 output, and signed per-tensor
+  INT32→INT8 RESCALE are supported. The CONST/IDENTITY/MATMUL baseline mirrors OpenVINO; RESCALE is
+  an intentional released-TOSA expansion needed to turn exact accumulator output back into INT8.
+  XDNA admission adds a one-core static memory envelope and explicit four-byte DMA slot padding
+  where a logical tensor is not word-sized.
 - **Runtime:** Native execution requires the pinned amdxdna-native HRX runtime and compiler
   toolchain. Portable admission and offline artifact compilation remain available without a device.
 

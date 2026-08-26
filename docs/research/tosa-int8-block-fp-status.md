@@ -11,6 +11,13 @@ DMA; neither path introduces host arithmetic or hidden staging. Tile-compatible 
 zero-point-adjusted values exactly to INT16 before using AIE2P's native 4x4x8 matrix unit, while
 small incomplete tiles use an exact scalar device kernel.
 
+Implementation update (2026-08-26): issue #147 adds exact signed INT32 → INT8 `RESCALE` for the
+released per-tensor `scale32`/`SINGLE_ROUND` form. This intentionally expands beyond OpenVINO's
+current `CONST`/`IDENTITY`/`MATMUL` operator surface while preserving its strict-admission and
+no-fallback precedent. The AIE kernel performs the multiply, signed rounding, output-zero-point
+addition, saturation, and DMA-tail clearing on the NPU. The shared oracle covers negative values,
+ties, nonzero output zero point, and saturation; the complete lifecycle passed on XDNA2 hardware.
+
 ## Executive conclusion
 
 INT8 inference and INT8 `MATMUL` are stable TOSA work. The latest official release is TOSA
@@ -224,10 +231,10 @@ AMD vendor experiment. Do not expose it through `ARTIFACT_FORMAT` as TOSA, a pub
    existing shared `IDENTITY_INT8`/`MATMUL_INT8` oracles, direct-binding diagnostics, and on-metal
    lifecycle proof. Mirror OpenVINO's target/capability split and explicit zero-point semantics;
    diverge only where the AIE kernel API implements the same arithmetic directly.
-2. **XDNA TOSA `RESCALE` INT32 → INT8.** Treat scale, shift, rounding mode, output zero point, and
-   saturation as the public numerical contract. Reuse the shared integer helper and add edge,
-   overflow/precondition, and on-metal cases. Keep optional rounding extensions out until they
-   have separate evidence.
+2. **XDNA TOSA `RESCALE` INT32 → INT8 (implemented by #147).** Scale, shift, rounding mode, output
+   zero point, and saturation are the public numerical contract. The implementation reuses the
+   shared integer oracle and includes edge, invalid-parameter, and on-metal cases. Optional
+   rounding extensions remain excluded until they have separate evidence.
 3. **Integer operator expansion, one numerical family per ticket.** Suggested order: `CONV2D`,
    `DEPTHWISE_CONV2D`, integer pooling, then elementwise/activation/data movement. Each ticket
    adds only the capability rows demonstrated by shared fixtures and hardware runs.

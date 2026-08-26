@@ -104,14 +104,16 @@ fn bf16_capability_matches_the_implemented_surface() {
 }
 
 #[test]
-fn integer_capability_matches_the_openvino_semantic_surface() {
+fn integer_capability_preserves_openvino_and_adds_exact_rescale() {
     use virtio_accel_tosa::DType;
 
     assert_eq!(
         XDNA_TOSA_INTEGER_CAPABILITY.target,
         XDNA_TOSA_INTEGER_TARGET
     );
-    for op in [Op::CONST, Op::IDENTITY, Op::MATMUL] {
+    // CONST/IDENTITY/MATMUL are the OpenVINO baseline. RESCALE is the intentional issue-#147
+    // expansion; target separation and dtype roles remain unchanged.
+    for op in [Op::CONST, Op::IDENTITY, Op::MATMUL, Op::RESCALE] {
         assert!(XDNA_TOSA_INTEGER_CAPABILITY.supports_operator(op));
     }
     assert!(XDNA_TOSA_INTEGER_CAPABILITY.supports_dtype(DType::INT8, ValueRoles::ALL));
