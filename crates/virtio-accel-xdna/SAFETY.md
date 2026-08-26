@@ -36,16 +36,23 @@ Each HRX handle has exactly one Rust owner with a `Drop`:
   the fork's model it is never shut down. `SharedDevice` is `unsafe impl Send + Sync` because it is
   used only as a read-only factory for per-instance streams and executables, and the amdxdna HAL
   exposes the device as a process-wide singleton.
-- Each `XdnaAccelerator` owns one stream (in `Stream`) and one worker thread. `Drop` sets the ring
-  `stopping` flag, wakes the worker, and **joins it before** the lane (and thus `Stream::drop` →
-  `hrx_stream_release`) runs, so no dispatch can be in progress when the stream is released.
+- Each `XdnaAccelerator` owns one stream (in `Stream`), one dispatch worker, and one watchdog.
+  Ordinary teardown has no pending event: `Drop` stops and joins both threads before the lane (and
+  thus `Stream::drop` → `hrx_stream_release`) runs. If an accepted event is still pending — the
+  tier-2 wedge case or a caller discarding an active instance — `Drop` stops the watchdog but
+  detaches the dispatch worker. Its `Arc<Lane>` retains the stream, and its queued `Job` retains the
+  executable and every native buffer allocation, so no HRX handle can be released under a blocked
+  C call. This is an intentional quarantine: a truly wedged worker may retain those resources until
+  process exit, but dropping the poisoned backend itself never blocks.
 - Each `XdnaProgram` is an `Arc<ProgramInner>` owning one executable reference, released once in
   `ProgramInner::drop`. A submission clones the `Arc` into the queued job, so an in-flight dispatch
   keeps the executable alive even if the caller unloads the program first.
-- Each `XdnaBuffer` owns one `hrx_buffer_t` and its persistent mapping, released once in `Drop` (the
-  mapping is released together with the buffer; the fork never unmaps first). Allocation releases
-  the buffer on any post-allocation error path (a failed map, a rejected `BufferInfo`), and export
-  lookup releases the executable on failure, so no handle leaks on error.
+- Each `XdnaBuffer` holds an `Arc<BufferInner>`, which owns one `hrx_buffer_t`, its persistent mapping,
+  and its in-flight gate. `BufferInner::drop` releases that native reference exactly once.
+  A queued job clones the same `Arc`, making the allocation and gate address-stable even if the
+  caller moves or discards the Rust handle. Allocation releases the buffer on any post-allocation
+  error path (a failed map, a rejected `BufferInfo`), and export lookup releases the executable on
+  failure, so no handle leaks on error.
 
 ## Buffers and mappings
 
@@ -74,14 +81,14 @@ claims a preallocated ring entry and event slot, arms each bound buffer's `in_fl
 enqueues a `Job`. The cross-context rejection is load-bearing for the release/dispatch race: a job
 only ever references buffers whose owning context also owns the queue, so a valid submission cannot
 outlive its buffers through a foreign context. A full ring returns `Busy`; submit never blocks.
-`Job` is
-`unsafe impl Send`: its raw pointers are HRX buffer/executable handles — heap objects owned by the
-HRX runtime, whose addresses are independent of where the caller's Rust handle values live — kept
-referenced until the event is terminal and destroyed (the `Accelerator` contract), and dereferenced
-only on the worker while the stream mutex is held. The in-flight gates are **`Arc`s, not pointers
-into caller structs**: the contract requires the caller keep handles *alive* until the event is
-terminal, not address-stable, so a caller may legally move an `XdnaBuffer` mid-flight; the shared
-`Arc` keeps the gate valid regardless. The worker, per job, dispatches, synchronizes,
+`Job` is `unsafe impl Send`: its raw pointers are HRX buffer/executable handles — heap objects owned
+by the HRX runtime, whose addresses are independent of where the caller's Rust handle values live —
+and its `Arc<ProgramInner>`/`Arc<BufferInner>` owners keep every one live. The handles are
+dereferenced only on the worker while the stream mutex is held. The in-flight gates live inside
+those `BufferInner` Arcs, not caller structs: the contract requires the caller keep handles *alive*
+until the event is terminal, not address-stable, so a caller may legally move an `XdnaBuffer`
+mid-flight; the shared allocation keeps both handle and gate valid regardless. The worker, per job,
+dispatches, synchronizes,
 `invalidate_range`s each output, clears the `in_flight` gates, and latches the event's terminal
 state exactly once. While a buffer's gate is set, `write_buffer`/`read_buffer`/`free_buffer` reject
 with `Busy`, so no host access or release races the device.
@@ -89,9 +96,21 @@ with `Busy`, so no host access or release races the device.
 Finite timeouts are rejected before admission (no cancellation exists at any layer). A synchronize
 error latches the event `Failed` (a normal terminal state — the kernel TDR has quiesced the device)
 and then poisons the instance, which refuses further work with `DeviceLost`. `poll_event` reads the
-latched atomic state without touching HRX; a pending event on a poisoned instance reports
-`DeviceLost`. The tier-2 wedge watchdog (a synchronize that never returns) is the fault-paths
-ticket; `EVENT_CANCELLATION` is not advertised.
+latched atomic state without touching HRX. The worker arms a 120-second watchdog immediately before
+dispatch, longer than the kernel's 60-second NPU TDR. If HRX still has not returned, the watchdog
+poisons the lane but deliberately leaves the accepted event pending and every gate armed: there is
+no trustworthy completion boundary. `poll_event` then reports `DeviceLost`; event release remains
+retryably rejected as `Busy`; discarding the backend enters the quarantine described above.
+`EVENT_CANCELLATION` is not advertised.
+
+The per-instance resource tracker counts accepted contexts, native buffer allocations, loaded
+executables, queues, and events. Counters increment only after successful admission and decrement
+only at the matching successful release/native final `Drop`; rejected operations do not perturb
+them. The shared conformance hook samples these counts before and after every ordinary case. HRX's
+release functions return `void`, so v1 has no runtime path with genuinely unknown ownership and
+does not manufacture `Indeterminate` results. The feature-gated `test-control` constructor injects
+one failure before touching HRX and is absent from ordinary builds; it shortens the same watchdog
+state machine for deterministic on-metal tier-1/tier-2 tests.
 
 ## Audited unsafe operations
 
@@ -102,6 +121,7 @@ tests (`tests/hardware.rs`, `va_xdna` only) exercise device info, the buffer rou
 out-of-bounds and permission rejection, the advertised-limit aggregation, the full precompiled
 passthrough lifecycle (load → allocate → write+flush → submit → worker dispatch/synchronize →
 poll → invalidate+read → release → teardown), and a compiled BF16 → FP32 MATMUL that runs
-bit-exact against an integer oracle — all against a live NPU. `tests/conformance.rs` runs the shared
-`virtio-accel-conformance` semantic suite on the device, including the direct-binding copy-path
-diagnostics case. Unsupported hosts compile no native module.
+bit-exact against an integer oracle, rejected ownership paths, exact lifecycle accounting, and both
+device-loss tiers — all against a live NPU. `tests/conformance.rs` runs the shared
+`virtio-accel-conformance` semantic suite on the device, including resource accounting and the
+direct-binding copy-path diagnostics case. Unsupported hosts compile no native module.

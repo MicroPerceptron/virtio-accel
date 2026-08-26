@@ -13,15 +13,18 @@ use common::{bf16_identity_tosa, bf16_matmul_tosa, poll_to_terminal};
 
 use virtio_accel_conformance::numerics::MAX_POOL2D_BF16;
 use virtio_accel_core::{
-    Accelerator, AccessMode, ArtifactRef, BackendError, BindingRef, BufferDesc, BufferRange,
-    BufferUsage, ByteSink, ByteSource, ContextDesc, EventState, MemoryDomain, QueueDesc,
-    SubmitFailure, TargetIdentity, Timeout,
+    Accelerator, AccessMode, ArtifactFormat, ArtifactRef, BackendError, BindingRef, BufferDesc,
+    BufferRange, BufferUsage, ByteSink, ByteSource, ContextDesc, EventState, MemoryDomain,
+    QueueDesc, ReleaseFailure, SubmitFailure, TargetIdentity, Timeout,
 };
 use virtio_accel_tosa::{ARTIFACT_FORMAT, DType, TosaCapabilityProvider};
 use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
 use virtio_accel_xdna::{
-    InitError, XDNA_PRECOMPILED_FORMAT, XDNA_TOSA_TARGET, XdnaAccelerator, compile_artifact,
+    InitError, XDNA_PRECOMPILED_FORMAT, XDNA_TOSA_TARGET, XdnaAccelerator, XdnaBuffer, XdnaContext,
+    XdnaProgram, XdnaQueue, XdnaResourceCounts, compile_artifact,
 };
+#[cfg(feature = "test-control")]
+use virtio_accel_xdna::{XdnaTestConfig, XdnaTestFault};
 
 /// Whether the pinned compiler toolchain is configured (the compiler tests need it, not a device).
 fn toolchain_present() -> bool {
@@ -46,6 +49,106 @@ fn f32_le(bytes: &[u8]) -> f32 {
 /// inputs and one output; the DMA copies the first input to the output.
 const PASSTHROUGH: &[u8] = include_bytes!("data/passthrough-dmas-npu2.xdnp");
 const PASSTHROUGH_BYTES: usize = 4096 * 4;
+
+struct PassthroughResources {
+    context: XdnaContext,
+    queue: XdnaQueue,
+    program: XdnaProgram,
+    input: XdnaBuffer,
+    unused: XdnaBuffer,
+    output: XdnaBuffer,
+}
+
+impl PassthroughResources {
+    fn create(backend: &XdnaAccelerator) -> Self {
+        let context = backend
+            .create_context(ContextDesc::default())
+            .expect("context");
+        let queue = backend
+            .create_queue(&context, QueueDesc::default())
+            .expect("queue");
+        let program = backend
+            .load_program(
+                &context,
+                ArtifactRef {
+                    format: XDNA_PRECOMPILED_FORMAT,
+                    target: TargetIdentity([0; 12]),
+                    payload: &Slice(PASSTHROUGH),
+                    resident_bytes: u64::MAX,
+                },
+            )
+            .expect("load passthrough");
+        let input_desc = BufferDesc::new(
+            PASSTHROUGH_BYTES as u64,
+            4096,
+            MemoryDomain::Shared,
+            BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+        )
+        .expect("input descriptor");
+        let (input, _) = backend
+            .allocate_buffer(&context, input_desc)
+            .expect("input")
+            .into_parts();
+        let (unused, _) = backend
+            .allocate_buffer(&context, input_desc)
+            .expect("unused input")
+            .into_parts();
+        let output_desc = BufferDesc::new(
+            PASSTHROUGH_BYTES as u64,
+            4096,
+            MemoryDomain::Shared,
+            BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+        )
+        .expect("output descriptor");
+        let (output, _) = backend
+            .allocate_buffer(&context, output_desc)
+            .expect("output")
+            .into_parts();
+        Self {
+            context,
+            queue,
+            program,
+            input,
+            unused,
+            output,
+        }
+    }
+
+    fn bindings(&self) -> [BindingRef<'_, XdnaBuffer>; 3] {
+        let range = BufferRange::new(0, PASSTHROUGH_BYTES as u64).expect("binding range");
+        [
+            BindingRef {
+                slot: 0,
+                buffer: &self.input,
+                range,
+                access: AccessMode::Read,
+            },
+            BindingRef {
+                slot: 1,
+                buffer: &self.unused,
+                range,
+                access: AccessMode::Read,
+            },
+            BindingRef {
+                slot: 2,
+                buffer: &self.output,
+                range,
+                access: AccessMode::Write,
+            },
+        ]
+    }
+
+    fn release(self, backend: &XdnaAccelerator) {
+        backend.free_buffer(self.input).expect("free input");
+        backend.free_buffer(self.unused).expect("free unused");
+        backend.free_buffer(self.output).expect("free output");
+        backend.unload_program(self.program).expect("unload");
+        backend.destroy_queue(self.queue).expect("destroy queue");
+        backend
+            .destroy_context(self.context)
+            .expect("destroy context");
+    }
+}
 
 /// Construct a backend, or skip the test when no NPU is accessible on this host.
 fn backend() -> Option<XdnaAccelerator> {
@@ -237,6 +340,254 @@ fn advertised_limits_are_aggregation_safe() {
             .checked_mul(limits.max_bindings_per_submission)
             .is_some()
     );
+}
+
+#[test]
+fn malformed_and_unsupported_artifacts_leave_no_native_resources() {
+    let Some(backend) = backend() else { return };
+    let context = backend
+        .create_context(ContextDesc::default())
+        .expect("context");
+    assert_eq!(
+        backend.resource_counts(),
+        XdnaResourceCounts {
+            contexts: 1,
+            ..XdnaResourceCounts::default()
+        }
+    );
+
+    let malformed = b"not-an-xdnp-container";
+    assert!(matches!(
+        backend.load_program(
+            &context,
+            ArtifactRef {
+                format: XDNA_PRECOMPILED_FORMAT,
+                target: TargetIdentity([0; 12]),
+                payload: &Slice(malformed),
+                resident_bytes: u64::MAX,
+            }
+        ),
+        Err(BackendError::InvalidArgument)
+    ));
+    let unknown = ArtifactFormat::new(0x554e_4b4e).expect("nonzero format tag");
+    assert!(matches!(
+        backend.load_program(
+            &context,
+            ArtifactRef {
+                format: unknown,
+                target: TargetIdentity([0; 12]),
+                payload: &Slice(PASSTHROUGH),
+                resident_bytes: u64::MAX,
+            }
+        ),
+        Err(BackendError::Unsupported)
+    ));
+    assert_eq!(
+        backend.resource_counts(),
+        XdnaResourceCounts {
+            contexts: 1,
+            ..XdnaResourceCounts::default()
+        },
+        "rejected artifacts must not retain an executable"
+    );
+    backend.destroy_context(context).expect("destroy context");
+    assert_eq!(backend.resource_counts(), XdnaResourceCounts::default());
+}
+
+#[test]
+fn concurrent_submit_is_rejected_without_disturbing_the_accepted_job() {
+    let Some(backend) = backend() else { return };
+    let resources = PassthroughResources::create(&backend);
+    let bindings = resources.bindings();
+    let event = backend
+        .submit(
+            &resources.queue,
+            &resources.program,
+            &bindings,
+            Timeout::Infinite,
+        )
+        .expect("first submit");
+    assert!(matches!(
+        backend.submit(
+            &resources.queue,
+            &resources.program,
+            &bindings,
+            Timeout::Infinite,
+        ),
+        Err(SubmitFailure::Rejected(BackendError::Busy))
+    ));
+    assert_eq!(backend.resource_counts().events, 1);
+    let state = poll_to_terminal(&backend, &event, Duration::from_secs(10))
+        .expect("accepted job did not complete");
+    assert!(matches!(state, EventState::Complete), "got {state:?}");
+    backend.destroy_event(event).expect("destroy event");
+    resources.release(&backend);
+    assert_eq!(backend.resource_counts(), XdnaResourceCounts::default());
+}
+
+#[test]
+fn pending_releases_return_the_same_live_resources_for_retry() {
+    let Some(backend) = backend() else { return };
+    let PassthroughResources {
+        context,
+        queue,
+        program,
+        input,
+        unused,
+        output,
+    } = PassthroughResources::create(&backend);
+    let range = BufferRange::new(0, PASSTHROUGH_BYTES as u64).expect("binding range");
+    let bindings = [
+        BindingRef {
+            slot: 0,
+            buffer: &input,
+            range,
+            access: AccessMode::Read,
+        },
+        BindingRef {
+            slot: 1,
+            buffer: &unused,
+            range,
+            access: AccessMode::Read,
+        },
+        BindingRef {
+            slot: 2,
+            buffer: &output,
+            range,
+            access: AccessMode::Write,
+        },
+    ];
+    let event = backend
+        .submit(&queue, &program, &bindings, Timeout::Infinite)
+        .expect("submit");
+    let input = match backend.free_buffer(input) {
+        Err(ReleaseFailure::Rejected {
+            error: BackendError::Busy,
+            resource,
+        }) => resource,
+        other => panic!("in-flight buffer release was not retryable: {other:?}"),
+    };
+    let event = match backend.destroy_event(event) {
+        Err(ReleaseFailure::Rejected {
+            error: BackendError::Busy,
+            resource,
+        }) => resource,
+        other => panic!("pending event release was not retryable: {other:?}"),
+    };
+    assert_eq!(backend.resource_counts().events, 1);
+    let state =
+        poll_to_terminal(&backend, &event, Duration::from_secs(10)).expect("job did not complete");
+    assert!(matches!(state, EventState::Complete), "got {state:?}");
+    backend.destroy_event(event).expect("retry event release");
+    backend.free_buffer(input).expect("retry input release");
+    backend.free_buffer(unused).expect("free unused");
+    backend.free_buffer(output).expect("free output");
+    backend.unload_program(program).expect("unload");
+    backend.destroy_queue(queue).expect("destroy queue");
+    backend.destroy_context(context).expect("destroy context");
+    assert_eq!(backend.resource_counts(), XdnaResourceCounts::default());
+}
+
+#[cfg(feature = "test-control")]
+#[test]
+fn tier1_device_loss_latches_failure_and_releases_every_resource_once() {
+    let backend = XdnaAccelerator::new_for_testing(XdnaTestConfig {
+        watchdog_timeout: Duration::from_secs(2),
+        fault: XdnaTestFault::Tier1,
+    })
+    .expect("fault-controlled backend");
+    let resources = PassthroughResources::create(&backend);
+    let event = backend
+        .submit(
+            &resources.queue,
+            &resources.program,
+            &resources.bindings(),
+            Timeout::Infinite,
+        )
+        .expect("accepted tier-1 submission");
+    let state = poll_to_terminal(&backend, &event, Duration::from_secs(2))
+        .expect("tier-1 event did not become terminal");
+    assert_eq!(state, EventState::Failed(BackendError::DeviceLost));
+    assert_eq!(backend.poll_event(&event), Ok(state));
+    assert!(matches!(
+        backend.submit(
+            &resources.queue,
+            &resources.program,
+            &resources.bindings(),
+            Timeout::Infinite,
+        ),
+        Err(SubmitFailure::Rejected(BackendError::DeviceLost))
+    ));
+    backend.destroy_event(event).expect("destroy failed event");
+    resources.release(&backend);
+    assert_eq!(backend.resource_counts(), XdnaResourceCounts::default());
+}
+
+#[cfg(feature = "test-control")]
+#[test]
+fn tier2_watchdog_reports_device_loss_and_discard_never_blocks() {
+    let backend = XdnaAccelerator::new_for_testing(XdnaTestConfig {
+        watchdog_timeout: Duration::from_millis(50),
+        fault: XdnaTestFault::Tier2 {
+            stall: Duration::from_secs(1),
+        },
+    })
+    .expect("fault-controlled backend");
+    let resources = PassthroughResources::create(&backend);
+    let event = backend
+        .submit(
+            &resources.queue,
+            &resources.program,
+            &resources.bindings(),
+            Timeout::Infinite,
+        )
+        .expect("accepted tier-2 submission");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match backend.poll_event(&event) {
+            Err(BackendError::DeviceLost) => break,
+            Ok(EventState::Pending) if std::time::Instant::now() < deadline => {
+                std::thread::yield_now();
+            }
+            other => panic!("tier-2 watchdog produced {other:?}"),
+        }
+    }
+    let event = match backend.destroy_event(event) {
+        Err(ReleaseFailure::Rejected {
+            error: BackendError::Busy,
+            resource,
+        }) => resource,
+        other => panic!("wedged event release produced {other:?}"),
+    };
+    assert!(matches!(
+        backend.submit(
+            &resources.queue,
+            &resources.program,
+            &resources.bindings(),
+            Timeout::Infinite,
+        ),
+        Err(SubmitFailure::Rejected(BackendError::DeviceLost))
+    ));
+    assert_eq!(
+        backend.resource_counts(),
+        XdnaResourceCounts {
+            contexts: 1,
+            buffers: 3,
+            programs: 1,
+            queues: 1,
+            events: 1,
+        }
+    );
+
+    // No HRX call established a trustworthy terminal boundary, so these handles are deliberately
+    // discarded with the poisoned instance. The queued job's Arcs quarantine the native buffer
+    // and executable handles; dropping the backend detaches rather than joining the wedged worker.
+    drop(event);
+    drop(resources);
+    let started = std::time::Instant::now();
+    drop(backend);
+    assert!(started.elapsed() < Duration::from_millis(250));
 }
 
 #[test]

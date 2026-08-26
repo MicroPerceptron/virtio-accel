@@ -61,6 +61,23 @@ tier lands. MAX_POOL2D advertises the same propagating-NaN and zero-padding sema
 the OpenVINO reference backend, while admission applies the narrower XDNA2 shape and local-memory
 envelope described above.
 
+## Completion and fault model
+
+One worker serializes each instance's accepted submissions. Finite timeouts are rejected before
+admission because HRX exposes no cancellation primitive. A definite dispatch/synchronize failure
+becomes a stable terminal `Failed` event and poisons that backend instance (device-loss tier 1);
+the event and its buffers can still be released normally. A 120-second userspace watchdog, longer
+than the kernel's 60-second NPU TDR, detects a synchronize call that never returns (tier 2). In that
+case `poll_event` reports `DeviceLost`, the event remains pending and cannot be released, and the
+host must discard the backend instance. The detached worker retains the stream, executable, and
+buffer allocations so discarding cannot free native memory that HRX might still touch.
+
+HRX's native release functions are infallible `void` calls, and this backend rejects submissions
+before admission whenever ownership remains with the caller. Therefore the current XDNA runtime
+produces no `SubmitFailure::Indeterminate` or `ReleaseFailure::Indeterminate` path; those protocol
+states remain reserved for a future runtime operation whose ownership outcome is genuinely
+unknown.
+
 ## Running
 
 ```sh
@@ -71,6 +88,17 @@ cargo test -p virtio-accel-xdna
 Without HRX the example reports the placeholder state; in a `va_xdna` build it initializes the
 device and stream. The portable tests exercise the advertised targets on every host; the
 `va_xdna` `tests/hardware.rs` suite exercises the buffer primitives against a live NPU.
+
+The exact manual replacement for the unavailable public hardware CI lane is:
+
+```sh
+source ~/toolchains/amdxdna-hrx-v2026.08/env.sh
+cargo test -p virtio-accel-xdna --test conformance -- --test-threads=1
+cargo test -p virtio-accel-xdna --features test-control --test hardware -- --test-threads=1
+```
+
+`test-control` only adds the hidden one-shot tier-1/tier-2 constructors used by the hardware test;
+ordinary `XdnaAccelerator::new` retains production behavior even in an all-features build.
 
 Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an
 experimental native-Rust protocol and implementation stack for a transport-neutral virtual
