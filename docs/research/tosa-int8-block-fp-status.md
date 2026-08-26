@@ -2,6 +2,15 @@
 
 Status checked: **2026-08-25**
 
+Implementation update (2026-08-26): issue #144 implements the first exact XDNA integer tier:
+INT8 IDENTITY and batch-1, zero-point-aware INT8 × INT8 → INT32 MATMUL. It uses the shared
+`IDENTITY_INT8` and `MATMUL_INT8` corpus oracles on the physical NPU and does not claim complete
+`PRO-INT` support. The semantic surface mirrors OpenVINO. XDNA's documented hardware divergences
+are a bounded one-core memory envelope and explicit four-byte input-slot padding required by AIE
+DMA; neither path introduces host arithmetic or hidden staging. Tile-compatible MATMUL widens the
+zero-point-adjusted values exactly to INT16 before using AIE2P's native 4x4x8 matrix unit, while
+small incomplete tiles use an exact scalar device kernel.
+
 ## Executive conclusion
 
 INT8 inference and INT8 `MATMUL` are stable TOSA work. The latest official release is TOSA
@@ -112,11 +121,11 @@ target but publishes a separate conservative capability descriptor limited to `C
 the numerical rules under which admitted graphs are analyzed.
 [OpenVINO integer target and conservative capability](../../crates/virtio-accel-openvino/src/lower.rs)
 
-The XDNA crate already defines an unadvertised
-[`XDNA_TOSA_INTEGER_TARGET`](../../crates/virtio-accel-xdna/src/lower.rs). The implementation
-ticket should add a similarly narrow `XDNA_TOSA_INTEGER_CAPABILITY` only when its exact corpus and
-on-metal lifecycle pass. It should not add the whole Integer profile's operators merely because
-the shared TOSA validator recognizes them.
+The XDNA crate defines
+[`XDNA_TOSA_INTEGER_TARGET`](../../crates/virtio-accel-xdna/src/lower.rs) and now advertises a
+similarly narrow `XDNA_TOSA_INTEGER_CAPABILITY` because its exact corpus and on-metal lifecycle
+pass. It does not add the whole Integer profile's operators merely because the shared TOSA
+validator recognizes them.
 
 ## 2. Block floating-point and block-scaled status
 

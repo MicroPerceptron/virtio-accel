@@ -9,21 +9,27 @@
 use std::time::{Duration, Instant};
 
 mod common;
-use common::{bf16_identity_tosa, bf16_matmul_tosa, fp8e4m3_to_bf16_tosa, poll_to_terminal};
+use common::{
+    bf16_identity_tosa, bf16_matmul_tosa, fp8e4m3_to_bf16_tosa, int8_matmul_tosa, poll_to_terminal,
+};
 
 use virtio_accel_conformance::numerics::{
-    CAST_FP8E4M3_TO_BF16, CAST_FP8E5M2_TO_BF16, MAX_POOL2D_BF16, TosaFp8ToBfloat16Case,
+    CAST_FP8E4M3_TO_BF16, CAST_FP8E5M2_TO_BF16, IDENTITY_INT8, MATMUL_INT8, MAX_POOL2D_BF16,
+    TosaFp8ToBfloat16Case,
 };
 use virtio_accel_core::{
     Accelerator, AccessMode, ArtifactFormat, ArtifactRef, BackendError, BindingRef, BufferDesc,
     BufferRange, BufferUsage, ByteSink, ByteSource, ContextDesc, EventState, MemoryDomain,
     QueueDesc, ReleaseFailure, SubmitFailure, TargetIdentity, Timeout,
 };
-use virtio_accel_tosa::{ARTIFACT_FORMAT, DType, TosaCapabilityProvider, fp8e4m3_to_bf16_bits};
+use virtio_accel_tosa::{
+    ARTIFACT_FORMAT, DType, TosaCapabilityProvider, dot_i8_i32, fp8e4m3_to_bf16_bits,
+};
 use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
 use virtio_accel_xdna::{
-    InitError, XDNA_PRECOMPILED_FORMAT, XDNA_TOSA_FP8_TARGET, XDNA_TOSA_TARGET, XdnaAccelerator,
-    XdnaBuffer, XdnaContext, XdnaProgram, XdnaQueue, XdnaResourceCounts, compile_artifact,
+    InitError, XDNA_PRECOMPILED_FORMAT, XDNA_TOSA_FP8_TARGET, XDNA_TOSA_INTEGER_TARGET,
+    XDNA_TOSA_TARGET, XdnaAccelerator, XdnaBuffer, XdnaContext, XdnaProgram, XdnaQueue,
+    XdnaResourceCounts, compile_artifact,
 };
 #[cfg(feature = "test-control")]
 use virtio_accel_xdna::{XdnaTestConfig, XdnaTestFault};
@@ -228,9 +234,13 @@ fn device_info_reports_the_npu() {
     let info = backend.device_info().expect("device info");
     assert_eq!(info.identity.vendor_id, 0x1022);
     assert_eq!(info.identity.device_id, 0x17f0);
-    assert_eq!(backend.tosa_capabilities().len(), 2);
+    assert_eq!(backend.tosa_capabilities().len(), 3);
     assert_eq!(backend.tosa_capabilities()[0].target, XDNA_TOSA_TARGET);
     assert_eq!(backend.tosa_capabilities()[1].target, XDNA_TOSA_FP8_TARGET);
+    assert_eq!(
+        backend.tosa_capabilities()[2].target,
+        XDNA_TOSA_INTEGER_TARGET
+    );
 }
 
 #[test]
@@ -836,6 +846,421 @@ fn tosa_bf16_identity_runs_on_the_npu() {
     backend.free_buffer(input).expect("free input");
     backend.free_buffer(output).expect("free output");
     backend.unload_program(program).expect("unload");
+    backend.destroy_queue(queue).expect("destroy queue");
+    backend.destroy_context(context).expect("destroy context");
+}
+
+#[test]
+fn tosa_int8_corpus_compiles_to_wellformed_artifacts() {
+    if !toolchain_present() {
+        eprintln!("no XDNA toolchain configured; skipping compiler test");
+        return;
+    }
+    for (case_name, artifact, expected_slots) in [
+        (IDENTITY_INT8.name, IDENTITY_INT8.artifact, &[8, 8][..]),
+        (MATMUL_INT8.name, MATMUL_INT8.artifact, &[8, 8, 16][..]),
+    ] {
+        let container = compile_artifact(artifact, XDNA_TOSA_INTEGER_TARGET)
+            .unwrap_or_else(|error| panic!("compile {case_name}: {error:?}"));
+        let parsed = virtio_accel_xdna::PrecompiledArtifact::parse(&container)
+            .unwrap_or_else(|error| panic!("parse {case_name}: {error:?}"));
+        assert!(parsed.xclbin.starts_with(b"xclbin2"));
+        assert!(!parsed.insts.is_empty() && parsed.insts.len() % 4 == 0);
+        assert_eq!(parsed.slot_bytes, expected_slots);
+        assert_eq!(parsed.entry, "MLIR_AIE");
+    }
+}
+
+#[test]
+fn tosa_int8_identity_matches_the_shared_exact_oracle_on_the_npu() {
+    let Some(backend) = backend() else { return };
+    if !toolchain_present() {
+        eprintln!("no XDNA toolchain configured; skipping TOSA execution test");
+        return;
+    }
+    let context = backend
+        .create_context(ContextDesc::default())
+        .expect("context");
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .expect("queue");
+    let program = backend
+        .load_program(
+            &context,
+            ArtifactRef {
+                format: ARTIFACT_FORMAT,
+                target: XDNA_TOSA_INTEGER_TARGET.to_identity(),
+                payload: &Slice(IDENTITY_INT8.artifact),
+                resident_bytes: u64::MAX,
+            },
+        )
+        .expect("load INT8 identity");
+    let input_bytes = IDENTITY_INT8.inputs[0].bytes;
+    let output_len = IDENTITY_INT8.outputs[0].bytes.len();
+    let (mut input, _) = backend
+        .allocate_buffer(
+            &context,
+            BufferDesc::new(
+                input_bytes.len() as u64,
+                4096,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+            )
+            .unwrap(),
+        )
+        .expect("input buffer")
+        .into_parts();
+    let (output, _) = backend
+        .allocate_buffer(
+            &context,
+            BufferDesc::new(
+                output_len as u64,
+                4096,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+            )
+            .unwrap(),
+        )
+        .expect("output buffer")
+        .into_parts();
+    backend
+        .write_buffer(&mut input, 0, &Slice(input_bytes))
+        .expect("write INT8 input");
+
+    let direct_before = backend.direct_binding_admissions();
+    let transfer_before = backend.explicit_transfer_bytes();
+    let event = backend
+        .submit(
+            &queue,
+            &program,
+            &[
+                BindingRef {
+                    slot: 0,
+                    buffer: &input,
+                    range: BufferRange::new(0, input_bytes.len() as u64).unwrap(),
+                    access: AccessMode::Read,
+                },
+                BindingRef {
+                    slot: 1,
+                    buffer: &output,
+                    range: BufferRange::new(0, output_len as u64).unwrap(),
+                    access: AccessMode::Write,
+                },
+            ],
+            Timeout::Infinite,
+        )
+        .expect("submit INT8 identity");
+    let state = poll_to_terminal(&backend, &event, Duration::from_secs(30))
+        .expect("INT8 identity did not complete");
+    assert!(matches!(state, EventState::Complete), "got {state:?}");
+    assert_eq!(backend.direct_binding_admissions() - direct_before, 2);
+    assert_eq!(backend.explicit_transfer_bytes() - transfer_before, 0);
+
+    let mut result = vec![0u8; output_len];
+    backend
+        .read_buffer(&output, 0, &mut SliceMut(&mut result))
+        .expect("read INT8 output");
+    assert!(IDENTITY_INT8.output_matches(0, &result));
+
+    backend.destroy_event(event).expect("destroy event");
+    backend.free_buffer(input).expect("free input");
+    backend.free_buffer(output).expect("free output");
+    backend.unload_program(program).expect("unload program");
+    backend.destroy_queue(queue).expect("destroy queue");
+    backend.destroy_context(context).expect("destroy context");
+}
+
+#[test]
+fn tosa_int8_matmul_matches_the_shared_exact_oracle_on_the_npu() {
+    let Some(backend) = backend() else { return };
+    if !toolchain_present() {
+        eprintln!("no XDNA toolchain configured; skipping TOSA execution test");
+        return;
+    }
+    let context = backend
+        .create_context(ContextDesc::default())
+        .expect("context");
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .expect("queue");
+    let program = backend
+        .load_program(
+            &context,
+            ArtifactRef {
+                format: ARTIFACT_FORMAT,
+                target: XDNA_TOSA_INTEGER_TARGET.to_identity(),
+                payload: &Slice(MATMUL_INT8.artifact),
+                resident_bytes: u64::MAX,
+            },
+        )
+        .expect("load INT8 matmul");
+    let input_desc = |bytes: usize| {
+        BufferDesc::new(
+            bytes as u64,
+            4096,
+            MemoryDomain::Shared,
+            BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+        )
+        .unwrap()
+    };
+    let lhs_len = (MATMUL_INT8.inputs[0].bytes.len() + 3) & !3;
+    let rhs_len = (MATMUL_INT8.inputs[1].bytes.len() + 3) & !3;
+    let (mut lhs, _) = backend
+        .allocate_buffer(&context, input_desc(lhs_len))
+        .expect("lhs buffer")
+        .into_parts();
+    let (mut rhs, _) = backend
+        .allocate_buffer(&context, input_desc(rhs_len))
+        .expect("rhs buffer")
+        .into_parts();
+    let output_len = MATMUL_INT8.outputs[0].values.len() * 4;
+    let (output, _) = backend
+        .allocate_buffer(
+            &context,
+            BufferDesc::new(
+                output_len as u64,
+                4096,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+            )
+            .unwrap(),
+        )
+        .expect("output buffer")
+        .into_parts();
+    let mut lhs_bytes = vec![0u8; lhs_len];
+    lhs_bytes[..MATMUL_INT8.inputs[0].bytes.len()].copy_from_slice(MATMUL_INT8.inputs[0].bytes);
+    let mut rhs_bytes = vec![0u8; rhs_len];
+    rhs_bytes[..MATMUL_INT8.inputs[1].bytes.len()].copy_from_slice(MATMUL_INT8.inputs[1].bytes);
+    backend
+        .write_buffer(&mut lhs, 0, &Slice(&lhs_bytes))
+        .expect("write lhs");
+    backend
+        .write_buffer(&mut rhs, 0, &Slice(&rhs_bytes))
+        .expect("write rhs");
+
+    let direct_before = backend.direct_binding_admissions();
+    let transfer_before = backend.explicit_transfer_bytes();
+    let event = backend
+        .submit(
+            &queue,
+            &program,
+            &[
+                BindingRef {
+                    slot: 0,
+                    buffer: &lhs,
+                    range: BufferRange::new(0, lhs_len as u64).unwrap(),
+                    access: AccessMode::Read,
+                },
+                BindingRef {
+                    slot: 1,
+                    buffer: &rhs,
+                    range: BufferRange::new(0, rhs_len as u64).unwrap(),
+                    access: AccessMode::Read,
+                },
+                BindingRef {
+                    slot: 2,
+                    buffer: &output,
+                    range: BufferRange::new(0, output_len as u64).unwrap(),
+                    access: AccessMode::Write,
+                },
+            ],
+            Timeout::Infinite,
+        )
+        .expect("submit INT8 matmul");
+    let state = poll_to_terminal(&backend, &event, Duration::from_secs(30))
+        .expect("INT8 matmul did not complete");
+    assert!(matches!(state, EventState::Complete), "got {state:?}");
+    assert_eq!(backend.direct_binding_admissions() - direct_before, 3);
+    assert_eq!(backend.explicit_transfer_bytes() - transfer_before, 0);
+
+    let mut result = vec![0u8; output_len];
+    backend
+        .read_buffer(&output, 0, &mut SliceMut(&mut result))
+        .expect("read INT32 output");
+    let values: Vec<_> = result
+        .chunks_exact(4)
+        .map(|bytes| i32::from_le_bytes(bytes.try_into().expect("four-byte chunk")))
+        .collect();
+    assert!(MATMUL_INT8.output_matches(0, &values));
+
+    backend.destroy_event(event).expect("destroy event");
+    backend.free_buffer(lhs).expect("free lhs");
+    backend.free_buffer(rhs).expect("free rhs");
+    backend.free_buffer(output).expect("free output");
+    backend.unload_program(program).expect("unload program");
+    backend.destroy_queue(queue).expect("destroy queue");
+    backend.destroy_context(context).expect("destroy context");
+}
+
+#[test]
+#[ignore = "manual native performance evidence"]
+fn measures_exact_int8_matmul_latency() {
+    let Some(backend) = backend() else { return };
+    if !toolchain_present() {
+        eprintln!("no XDNA toolchain configured; skipping INT8 benchmark");
+        return;
+    }
+    const M: usize = 64;
+    const K: usize = 64;
+    const N: usize = 32;
+    const LEFT_ZERO_POINT: i8 = -2;
+    const RIGHT_ZERO_POINT: i8 = 3;
+    const WARMUPS: usize = 20;
+    const SAMPLES: usize = 200;
+
+    let artifact = int8_matmul_tosa(
+        M as i32,
+        K as i32,
+        N as i32,
+        LEFT_ZERO_POINT,
+        RIGHT_ZERO_POINT,
+    );
+    let context = backend
+        .create_context(ContextDesc::default())
+        .expect("context");
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .expect("queue");
+    let program = backend
+        .load_program(
+            &context,
+            ArtifactRef {
+                format: ARTIFACT_FORMAT,
+                target: XDNA_TOSA_INTEGER_TARGET.to_identity(),
+                payload: &Slice(&artifact),
+                resident_bytes: u64::MAX,
+            },
+        )
+        .expect("load INT8 benchmark program");
+    let lhs_bytes: Vec<u8> = (0..M * K).map(|index| (index * 17 + 3) as u8).collect();
+    let rhs_bytes: Vec<u8> = (0..K * N).map(|index| (index * 29 + 11) as u8).collect();
+    let output_len = M * N * 4;
+    let input_desc = |bytes: usize| {
+        BufferDesc::new(
+            bytes as u64,
+            4096,
+            MemoryDomain::Shared,
+            BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+        )
+        .expect("input descriptor")
+    };
+    let (mut lhs, _) = backend
+        .allocate_buffer(&context, input_desc(lhs_bytes.len()))
+        .expect("lhs buffer")
+        .into_parts();
+    let (mut rhs, _) = backend
+        .allocate_buffer(&context, input_desc(rhs_bytes.len()))
+        .expect("rhs buffer")
+        .into_parts();
+    let (output, _) = backend
+        .allocate_buffer(
+            &context,
+            BufferDesc::new(
+                output_len as u64,
+                4096,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+            )
+            .expect("output descriptor"),
+        )
+        .expect("output buffer")
+        .into_parts();
+    backend
+        .write_buffer(&mut lhs, 0, &Slice(&lhs_bytes))
+        .expect("initialize lhs");
+    backend
+        .write_buffer(&mut rhs, 0, &Slice(&rhs_bytes))
+        .expect("initialize rhs");
+
+    let direct_before = backend.direct_binding_admissions();
+    let transfer_before = backend.explicit_transfer_bytes();
+    let submit_once = || {
+        let bindings = [
+            BindingRef {
+                slot: 0,
+                buffer: &lhs,
+                range: BufferRange::new(0, lhs_bytes.len() as u64).expect("lhs range"),
+                access: AccessMode::Read,
+            },
+            BindingRef {
+                slot: 1,
+                buffer: &rhs,
+                range: BufferRange::new(0, rhs_bytes.len() as u64).expect("rhs range"),
+                access: AccessMode::Read,
+            },
+            BindingRef {
+                slot: 2,
+                buffer: &output,
+                range: BufferRange::new(0, output_len as u64).expect("output range"),
+                access: AccessMode::Write,
+            },
+        ];
+        let started = Instant::now();
+        let event = backend
+            .submit(&queue, &program, &bindings, Timeout::Infinite)
+            .expect("warm INT8 submission");
+        let admission = started.elapsed();
+        let state = poll_to_terminal(&backend, &event, Duration::from_secs(30))
+            .expect("INT8 benchmark completion");
+        assert!(matches!(state, EventState::Complete), "got {state:?}");
+        let completion = started.elapsed();
+        backend.destroy_event(event).expect("destroy event");
+        (admission, completion)
+    };
+    for _ in 0..WARMUPS {
+        submit_once();
+    }
+    let (mut admission, mut completion): (Vec<_>, Vec<_>) =
+        (0..SAMPLES).map(|_| submit_once()).unzip();
+    admission.sort_unstable();
+    completion.sort_unstable();
+
+    let submissions = (WARMUPS + SAMPLES) as u64;
+    let direct_bindings = backend.direct_binding_admissions() - direct_before;
+    let explicit_transfer_bytes = backend.explicit_transfer_bytes() - transfer_before;
+    assert_eq!(direct_bindings, submissions * 3);
+    assert_eq!(explicit_transfer_bytes, 0);
+
+    let mut result = vec![0u8; output_len];
+    backend
+        .read_buffer(&output, 0, &mut SliceMut(&mut result))
+        .expect("read benchmark output");
+    for row in 0..M {
+        for column in 0..N {
+            let right: Vec<_> = (0..K).map(|inner| rhs_bytes[inner * N + column]).collect();
+            let expected = dot_i8_i32(
+                &lhs_bytes[row * K..(row + 1) * K],
+                &right,
+                LEFT_ZERO_POINT,
+                RIGHT_ZERO_POINT,
+                0,
+            )
+            .expect("exact oracle");
+            let offset = (row * N + column) * 4;
+            let actual = i32::from_le_bytes(
+                result[offset..offset + 4]
+                    .try_into()
+                    .expect("four-byte output"),
+            );
+            assert_eq!(actual, expected, "C[{row},{column}] oracle mismatch");
+        }
+    }
+
+    let p50 = completion[SAMPLES / 2];
+    let operations = (2 * M * K * N) as f64;
+    let gigaops = operations / p50.as_secs_f64() / 1_000_000_000.0;
+    eprintln!(
+        "XDNA exact INT8 MATMUL: shape=1x{M}x{K} · 1x{K}x{N}; worker=1; zero_points=[{LEFT_ZERO_POINT},{RIGHT_ZERO_POINT}]; warmups={WARMUPS}; samples={SAMPLES}; admission p50={:?} p95={:?}; submit-to-complete p50={:?} p95={:?}; effective={gigaops:.3} GOPS; direct_bindings={direct_bindings}; explicit_transfer_bytes={explicit_transfer_bytes}",
+        admission[SAMPLES / 2],
+        admission[SAMPLES * 95 / 100],
+        p50,
+        completion[SAMPLES * 95 / 100],
+    );
+
+    backend.free_buffer(lhs).expect("free lhs");
+    backend.free_buffer(rhs).expect("free rhs");
+    backend.free_buffer(output).expect("free output");
+    backend.unload_program(program).expect("unload program");
     backend.destroy_queue(queue).expect("destroy queue");
     backend.destroy_context(context).expect("destroy context");
 }

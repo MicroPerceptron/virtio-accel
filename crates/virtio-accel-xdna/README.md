@@ -17,14 +17,16 @@ compiling it with the bounded aiecc helper subprocess (`compiler/xdna_compile.py
 pinned toolchain venv in a cleared environment, content-addressed in a cache). The compilable TOSA
 subset today is BF16 IDENTITY (a DMA copy), BF16 → FP32 MATMUL (the spec-mandated FP32-accumulator
 shape, batch 1, at multiples of the tested compute tile), BF16 NHWC MAX_POOL2D, and explicit
-FP8E4M3/FP8E5M2 → BF16 CAST. FP8 is a storage tier, not an arithmetic tier: the guest keeps the
+FP8E4M3/FP8E5M2 → BF16 CAST, plus exact INT8 IDENTITY and zero-point-aware INT8 → INT32 MATMUL.
+FP8 is a storage tier, not an arithmetic tier: the guest keeps the
 conversion visible in its graph, the NPU expands each value exactly, and subsequent programs use
 the existing BF16 compute kernels. MAX_POOL2D is
 deliberately bounded to batch 1, zero padding, propagating NaNs, kernel and stride dimensions no
 larger than 8, and at most 8,192 input-plus-output elements so both tensors fit in the worker's
 local-memory budget. All of this is exercised by `tests/hardware.rs` (a DMA passthrough, compiled
 TOSA IDENTITY, bit-exact non-square MATMUL, the shared MAX_POOL2D oracle, and both shared
-bit-exact FP8 → BF16 CAST oracles) and by
+bit-exact FP8 → BF16 CAST oracles, plus the shared exact INT8 identity and nonzero-zero-point
+MATMUL oracles) and by
 `tests/conformance.rs` (the shared semantic suite, including the direct-binding copy-path
 diagnostics, on the device). Hosts without HRX build the portable admission surface plus a
 placeholder, compile no `unsafe`, and still unit-test admission and the artifact codec. The
@@ -57,15 +59,24 @@ pin. Builds without the runtime still compile and unit-test the portable admissi
 ## Advertised numerical tier
 
 Per the numerical-tier decision (#82), the crate defines a BF16 floating-point target (TOSA
-`EXT-BF16`), a separate FP8 storage target (`EXT-BF16 | EXT-FP8E4M3 | EXT-FP8E5M2`), and a future
+`EXT-BF16`), a separate FP8 storage target (`EXT-BF16 | EXT-FP8E4M3 | EXT-FP8E5M2`), and an exact
 integer target. It rejects FP32/FP16 compute at admission rather than silently executing it as
 BF16. Native builds expose the implemented BF16 IDENTITY, MATMUL, MAX_POOL2D, and explicit
-FP8-to-BF16 CAST surfaces through `TosaCapabilityProvider`; placeholder builds expose an empty
-capability list, and the integer target is not advertised through the provider until its execution
-tier lands. The FP8 capability advertises FP8 only for graph inputs and BF16 only for graph
+FP8-to-BF16 CAST surfaces plus INT8 IDENTITY and MATMUL through `TosaCapabilityProvider`;
+placeholder builds expose an empty capability list. The FP8 capability advertises FP8 only for
+graph inputs and BF16 only for graph
 outputs, so it cannot be mistaken for native FP8 arithmetic. MAX_POOL2D advertises the same
 propagating-NaN and zero-padding semantic constraints as the OpenVINO reference backend, while
 admission applies the narrower XDNA2 shape and local-memory envelope described above.
+
+The integer capability deliberately mirrors OpenVINO's `CONST`/`IDENTITY`/`MATMUL`, INT8, and
+restricted INT32 semantic declaration, but does not claim the complete TOSA Integer profile.
+Admission is narrower for an XDNA-specific reason: batch is one, dimensions are at most 512, and
+the padded A/B plus INT32 C footprint is at most 16 KiB so depth-two FIFOs fit one AIE2P core.
+Non-word-sized INT8 inputs are rounded up to a four-byte binding slot because AIE DMA descriptors
+cannot transfer a shorter granularity; that padding is explicit in the artifact's binding plan and
+ignored by the kernel, rather than copied into a hidden bounce buffer. Zero points remain signed
+INT8 compile-time values and are subtracted on the NPU before exact INT32 accumulation.
 
 ## Completion and fault model
 
@@ -137,6 +148,24 @@ throughput optimization rather than a correctness requirement for this storage t
 Wall-clock results are manual release evidence from the named NPU/toolchain, not a portable CI gate.
 Deterministic CI continues to enforce exact numerics, direct bindings, and zero submission-time
 transfer bytes.
+
+The INT8 MATMUL benchmark follows the same 20-warmup/200-sample structure. Shapes divisible by the
+AIE2P 4x4x8 INT16 matrix tile widen and subtract both zero points exactly on the NPU, then use the
+native matrix unit; small shapes that cannot fill one tile use a scalar on-NPU kernel. Both paths
+remain direct-bound and bit-exact. Run it with:
+
+```sh
+source ~/toolchains/amdxdna-hrx-v2026.08/env.sh
+export VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN=~/toolchains/amdxdna-hrx-v2026.08
+cargo test --release -p virtio-accel-xdna --test hardware \
+  measures_exact_int8_matmul_latency -- --ignored --nocapture --test-threads=1
+```
+
+On August 26, 2026, the reference `1022:17f0` XDNA2 NPU and v2026.08 toolchain measured a
+64x64x32 specialization at 661 ns admission p50 and 334.065 microseconds submit-to-complete p50
+(343.723 microseconds p95), or 0.785 effective GOPS at this dispatch-sized workload. All 660
+bindings across 220 submissions were direct and submission performed zero explicit transfer
+bytes. This is evidence for the initial one-core tier, not a peak-throughput claim.
 
 Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an
 experimental native-Rust protocol and implementation stack for a transport-neutral virtual

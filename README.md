@@ -38,7 +38,7 @@ The project claims no Virtio device ID (_yet_). For guest environments, use the 
 | ------------------------------------------- | ----------------------------------------- | -------------------------------------------------------- | --------------------------------- | -------------------------------------- | --------------------------- | ----------------- | --------------- | --------------------------- |
 | Apple Core ML / ANE (`virtio-accel-coreml`) | Implemented; macOS 14+                    | Static TOSA 1.0 FP; INT8 tier on macOS 26+               | Supported                         | Supported                              | Not implemented             | Identity + MATMUL | Not implemented | Direct host/shared bindings |
 | Intel OpenVINO (`virtio-accel-openvino`)    | Implemented; OpenVINO 2026.x              | Static TOSA 1.0 FP + INT8 tier                           | Supported                         | Supported                              | Not implemented             | Identity + MATMUL | Not implemented | Direct host/shared bindings |
-| AMD XDNA (`virtio-accel-xdna`)              | Experimental; HRX on XDNA2                | Static BF16 TOSA + explicit FP8 storage CAST             | Accumulator outputs only          | Not implemented                        | E4M3/E5M2 → BF16 CAST       | Not implemented   | Not implemented | Direct host/shared bindings |
+| AMD XDNA (`virtio-accel-xdna`)              | Experimental; HRX on XDNA2                | Static BF16 TOSA + explicit FP8 storage CAST + INT8 tier | Accumulator outputs only          | Not implemented                        | E4M3/E5M2 → BF16 CAST       | Identity + MATMUL | Not implemented | Direct host/shared bindings |
 | Qualcomm Hexagon (`virtio-accel-hexagon`)   | Experimental; QAIRT 2.49 on Windows ARM64 | Static TOSA 1.0 FP16 + BOOL/INT32 auxiliaries; INT8 tier | Blocked by v73 precision evidence | 41/42 shared operators (`ERF` blocked) | Blocked: ambiguous encoding | Identity + MATMUL | Not implemented | Direct host/shared bindings |
 | Vulkan (planned)                            | Planned                                   | Not implemented                                          | Not implemented                   | Not implemented                        | Not implemented             | Not implemented   | Not implemented | Not implemented             |
 
@@ -77,6 +77,9 @@ See the [`virtio-accel-hexagon` support boundary](crates/virtio-accel-hexagon/RE
   FP32 and FP16 arithmetic are rejected.
 - **FP8 storage:** Explicit TOSA CAST from E4M3 or E5M2 to BF16 runs on the NPU and is bit-exact for
   every finite value. NaN payload canonicalization is permitted. FP8 arithmetic is not advertised.
+- **INT8:** Exact identity and zero-point-aware MATMUL are supported with INT32 output. The
+  capability mirrors OpenVINO's narrow integer surface, while XDNA admission adds a one-core static
+  memory envelope and explicit four-byte DMA slot padding where a logical input is not word-sized.
 - **Runtime:** Native execution requires the pinned amdxdna-native HRX runtime and compiler
   toolchain. Portable admission and offline artifact compilation remain available without a device.
 
@@ -95,7 +98,7 @@ Independently of backend execution, `virtio-accel-tosa` validates the TOSA 1.0 p
 | `virtio-accel-vaccel`      | `core`                | Adapter seam for mapping native provider contracts (including vAccel-style backends) to `virtio-accel-core`  |
 | `virtio-accel-coreml`      | `std`                 | TOSA-to-Core ML lowering, direct buffers, and asynchronous ANE-capable prediction                            |
 | `virtio-accel-openvino`    | `std`                 | TOSA-to-OpenVINO IR lowering, direct host-pointer tensors, and asynchronous NPU/GPU/CPU inference            |
-| `virtio-accel-xdna`        | `std`                 | AMD XDNA2 NPU backend over HRX with direct buffers, asynchronous dispatch, and strict BF16/FP8 TOSA tiers    |
+| `virtio-accel-xdna`        | `std`                 | AMD XDNA2 NPU backend over HRX with direct buffers, asynchronous dispatch, and strict BF16/FP8/INT8 TOSA tiers |
 | `virtio-accel-hexagon`     | `std` (Windows ARM64) | Strict FP16/INT8 TOSA-to-QNN lowering, direct buffers, and asynchronous Hexagon HTP execution                |
 | `virtio-accel`             | `core + alloc`        | Facade re-exporting the portable layers                                                                      |
 | `virtio-accel-proto`       | `core`                | Pointer-free, little-endian protocol 1.0 wire structures                                                     |

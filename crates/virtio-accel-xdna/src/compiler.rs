@@ -23,9 +23,9 @@ use virtio_accel_core::BackendError;
 use crate::XDNA_ERROR_DOMAIN;
 use crate::artifact;
 use crate::lower::{
-    CompilerSpec, FP8_CAST_LINE_SIZE, Fp8Format, IDENTITY_LINE_SIZE, MATMUL_MAX_DIM, MATMUL_TILE_K,
-    MATMUL_TILE_M, MATMUL_TILE_N, MAX_POOL_MAX_KERNEL, MAX_POOL_MAX_STRIDE,
-    MAX_POOL_MAX_TOTAL_ELEMENTS,
+    CompilerSpec, FP8_CAST_LINE_SIZE, Fp8Format, IDENTITY_LINE_SIZE, INT8_IDENTITY_MAX_LINE_SIZE,
+    INT8_MATMUL_MAX_TOTAL_BYTES, MATMUL_MAX_DIM, MATMUL_TILE_K, MATMUL_TILE_M, MATMUL_TILE_N,
+    MAX_POOL_MAX_KERNEL, MAX_POOL_MAX_STRIDE, MAX_POOL_MAX_TOTAL_ELEMENTS,
 };
 
 /// The embedded compiler helper; written into each private workdir before invocation.
@@ -62,6 +62,13 @@ fn spec_json(spec: CompilerSpec) -> String {
                  \"line_size\":{IDENTITY_LINE_SIZE},{device}}}"
             )
         }
+        CompilerSpec::Int8Identity {
+            elements,
+            line_size,
+        } => format!(
+            "{{\"op\":\"IDENTITY\",\"dtype\":\"i8\",\"elements\":{elements},\
+             \"line_size\":{line_size},\"max_line_size\":{INT8_IDENTITY_MAX_LINE_SIZE},{device}}}"
+        ),
         CompilerSpec::Fp8ToBf16 { format, elements } => {
             let input = match format {
                 Fp8Format::E4M3 => "fp8e4m3",
@@ -77,6 +84,18 @@ fn spec_json(spec: CompilerSpec) -> String {
              \"m\":{m},\"k\":{k},\"n\":{n},\"tile_m\":{MATMUL_TILE_M},\
              \"tile_k\":{MATMUL_TILE_K},\"tile_n\":{MATMUL_TILE_N},\
              \"max_dim\":{MATMUL_MAX_DIM},{device}}}"
+        ),
+        CompilerSpec::Int8Matmul {
+            m,
+            k,
+            n,
+            left_zero_point,
+            right_zero_point,
+        } => format!(
+            "{{\"op\":\"MATMUL\",\"in_dtype\":\"i8\",\"out_dtype\":\"i32\",\
+             \"m\":{m},\"k\":{k},\"n\":{n},\"left_zero_point\":{left_zero_point},\
+             \"right_zero_point\":{right_zero_point},\"max_dim\":{MATMUL_MAX_DIM},\
+             \"max_total_bytes\":{INT8_MATMUL_MAX_TOTAL_BYTES},{device}}}"
         ),
         CompilerSpec::MaxPool2d {
             input_h,
@@ -345,6 +364,17 @@ mod tests {
     }
 
     #[test]
+    fn int8_identity_spec_carries_the_admitted_line_size() {
+        let json = spec_json(CompilerSpec::Int8Identity {
+            elements: 8,
+            line_size: 8,
+        });
+        assert!(json.contains("\"dtype\":\"i8\""));
+        assert!(json.contains("\"line_size\":8"));
+        assert!(json.contains("\"max_line_size\":1024"));
+    }
+
+    #[test]
     fn matmul_spec_carries_the_authoritative_tiling_envelope() {
         let json = spec_json(CompilerSpec::Matmul {
             m: 64,
@@ -356,6 +386,26 @@ mod tests {
             "\"tile_k\":64",
             "\"tile_n\":32",
             "\"max_dim\":512",
+        ] {
+            assert!(json.contains(field), "missing {field} in {json}");
+        }
+    }
+
+    #[test]
+    fn int8_matmul_spec_preserves_zero_points_and_memory_bound() {
+        let json = spec_json(CompilerSpec::Int8Matmul {
+            m: 2,
+            k: 3,
+            n: 2,
+            left_zero_point: -2,
+            right_zero_point: 3,
+        });
+        for field in [
+            "\"in_dtype\":\"i8\"",
+            "\"out_dtype\":\"i32\"",
+            "\"left_zero_point\":-2",
+            "\"right_zero_point\":3",
+            "\"max_total_bytes\":16384",
         ] {
             assert!(json.contains(field), "missing {field} in {json}");
         }
