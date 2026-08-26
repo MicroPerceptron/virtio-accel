@@ -75,15 +75,17 @@ MATMUL, MAX_POOL2D, and explicit FP8-to-BF16 CAST admissions and its advertised 
 constants), the portable
 precompiled-artifact codec, and a placeholder on every host; portable CI unit-tests admission. HRX
 exposes a plain C ABI, so its
-build script has no `cc`/CMake step; it enables the native modules (HRX FFI, the `Accelerator`
-implementation with its serialized dispatch worker, and the compiler-helper subprocess) only when
+build script has no `cc`/CMake step; it enables the native modules (HRX FFI and the `Accelerator`
+implementation with its serialized dispatch worker) only when
 an amdxdna-native HRX prefix (`VIRTIO_ACCEL_HRX_DIR`/`HRX_DIR`) carries both HRX headers — the
 amdxdna header must declare `hrx_amdxdna_executable_create`, whose absence marks an older,
 incompatible libhrx generation — and `lib/libhrx.so`. `VIRTIO_ACCEL_XDNA=0` forces the placeholder,
 `VIRTIO_ACCEL_XDNA=1` makes a missing or incomplete runtime a build failure, and
 `VIRTIO_ACCEL_HRX_LIB_DIR` links a bare lib directory. No standard locations are scanned, keeping
-the toolchain pin authoritative. On the reference machine with the pinned toolchain
-(`VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN`) and an NPU, backend-local tests run a DMA passthrough, a
+the runtime pin authoritative. On Unix, the bounded compiler-helper subprocess and
+`compile_artifact` remain available without HRX for offline catalog population; they require only
+the separately pinned `VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN`. On the reference machine with that
+toolchain and an NPU, backend-local tests run a DMA passthrough, a
 compiled TOSA BF16 IDENTITY, a bit-exact BF16 → FP32 MATMUL, BF16 NHWC MAX_POOL2D against the
 shared bit-exact oracle, both FP8E4M3/E5M2 → BF16 CASTs against shared bit-exact oracles, and the
 shared semantic conformance suite end to end; compilation invokes

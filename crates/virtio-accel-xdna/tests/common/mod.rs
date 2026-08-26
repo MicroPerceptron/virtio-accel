@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use virtio_accel_core::{Accelerator, BackendError, EventState};
 use virtio_accel_tosa::DType;
 use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
-use virtio_accel_xdna::XDNA_TOSA_TARGET;
+use virtio_accel_xdna::{XDNA_TOSA_FP8_TARGET, XDNA_TOSA_TARGET};
 
 pub fn bf16_identity_tosa(elements: usize) -> Vec<u8> {
     let shape = vec![1, 1, elements as i32];
@@ -18,6 +18,26 @@ pub fn bf16_identity_tosa(elements: usize) -> Vec<u8> {
     graph.push_input("x");
     graph.push_output("y");
     graph.build(XDNA_TOSA_TARGET).expect("build bf16 identity")
+}
+
+#[allow(dead_code)] // The hardware benchmark uses this; conformance.rs compiles this module too.
+pub fn fp8e4m3_to_bf16_tosa(elements: usize) -> Vec<u8> {
+    let elements = i32::try_from(elements).expect("FP8 benchmark shape fits i32");
+    let shape = vec![elements];
+    let mut graph = OwnedGraph::new("main");
+    graph
+        .push_tensor(OwnedTensor::new("x", shape.clone(), DType::FP8E4M3))
+        .push_tensor(OwnedTensor::new("y", shape, DType::BF16))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Cast,
+            vec!["x".into()],
+            vec!["y".into()],
+        ))
+        .push_input("x")
+        .push_output("y");
+    graph
+        .build(XDNA_TOSA_FP8_TARGET)
+        .expect("build fp8e4m3 to bf16 cast")
 }
 
 #[allow(dead_code)] // This shared module is compiled separately into conformance.rs, which uses only IDENTITY.
