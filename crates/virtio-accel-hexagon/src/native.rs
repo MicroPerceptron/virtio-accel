@@ -1069,3 +1069,434 @@ impl Accelerator for HexagonAccelerator {
         }
     }
 }
+
+#[cfg(test)]
+mod fp32_capability_spike {
+    use super::*;
+    use std::slice;
+    use std::thread;
+    use std::time::Instant;
+
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
+    struct ProbeOutput {
+        values: Vec<f32>,
+    }
+
+    fn message_text(message: &[core::ffi::c_char]) -> String {
+        c_array(message)
+    }
+
+    fn element_count(shape: &[u32]) -> usize {
+        shape
+            .iter()
+            .try_fold(1_usize, |total, &dimension| {
+                total.checked_mul(dimension as usize)
+            })
+            .expect("probe shape element count")
+    }
+
+    fn write_f32(allocation: &AlignedAllocation, values: &[f32]) {
+        // SAFETY: the allocation was created for exactly this many f32 bytes, is aligned more
+        // strictly than f32 requires, and no native execution can observe it until this returns.
+        let target = unsafe {
+            slice::from_raw_parts_mut(allocation.pointer_at(0).cast::<f32>(), values.len())
+        };
+        target.copy_from_slice(values);
+    }
+
+    fn read_f32(allocation: &AlignedAllocation, elements: usize) -> Vec<f32> {
+        // SAFETY: the allocation was created for exactly this many f32 bytes and the native event
+        // has reached a terminal state before this function is called.
+        unsafe { slice::from_raw_parts(allocation.pointer_at(0).cast::<f32>(), elements) }.to_vec()
+    }
+
+    fn run_probe_graph(
+        runtime: &Rc<RuntimeHandle>,
+        node_kind: u32,
+        input_shapes: &[&[u32]],
+        output_shape: &[u32],
+        inputs: &[&[f32]],
+    ) -> Result<ProbeOutput, String> {
+        if input_shapes.len() != inputs.len()
+            || input_shapes
+                .iter()
+                .zip(inputs)
+                .any(|(shape, values)| element_count(shape) != values.len())
+        {
+            return Err("invalid probe input shape".to_owned());
+        }
+
+        let mut tensor_descriptions = Vec::with_capacity(inputs.len() + 1);
+        for (index, shape) in input_shapes.iter().enumerate() {
+            tensor_descriptions.push(ffi::TensorDesc {
+                value: index as u32,
+                role: ffi::TENSOR_INPUT,
+                io_index: index as u32,
+                element: ffi::ELEMENT_F32,
+                quantized: 0,
+                rank: shape.len() as u32,
+                dimensions: shape.as_ptr(),
+                constant_data: ptr::null(),
+                constant_size: 0,
+                scale: 0.0,
+                offset: 0,
+            });
+        }
+        let output_value = inputs.len() as u32;
+        tensor_descriptions.push(ffi::TensorDesc {
+            value: output_value,
+            role: ffi::TENSOR_OUTPUT,
+            io_index: 0,
+            element: ffi::ELEMENT_F32,
+            quantized: 0,
+            rank: output_shape.len() as u32,
+            dimensions: output_shape.as_ptr(),
+            constant_data: ptr::null(),
+            constant_size: 0,
+            scale: 0.0,
+            offset: 0,
+        });
+        let node_inputs = (0..inputs.len() as u32).collect::<Vec<_>>();
+        let node_outputs = [output_value];
+        let node = ffi::NodeDesc {
+            kind: node_kind,
+            inputs: node_inputs.as_ptr(),
+            input_count: node_inputs.len() as u32,
+            outputs: node_outputs.as_ptr(),
+            output_count: 1,
+            parameters: ptr::null(),
+            parameter_count: 0,
+        };
+
+        let mut raw_graph = ptr::null_mut();
+        let mut message = [0; MESSAGE_BYTES];
+        // SAFETY: every descriptor and nested slice stays live for this synchronous call. The
+        // bridge copies all graph metadata before returning.
+        let status = unsafe {
+            ffi::va_qnn_graph_create(
+                runtime.raw.as_ptr(),
+                tensor_descriptions.as_ptr(),
+                tensor_descriptions.len() as u32,
+                &node,
+                1,
+                ffi::PRECISION_F32,
+                &mut raw_graph,
+                message.as_mut_ptr(),
+                message.len(),
+            )
+        };
+        if status != ffi::SUCCESS {
+            return Err(format!(
+                "graph creation failed: status={status:#x}, message={}",
+                message_text(&message)
+            ));
+        }
+        let graph = GraphHandle {
+            raw: Cell::new(NonNull::new(raw_graph)),
+            _runtime: Rc::clone(runtime),
+        };
+        let Some(raw_graph) = graph.raw.get() else {
+            return Err("graph creation returned a null graph".to_owned());
+        };
+
+        let input_allocations = inputs
+            .iter()
+            .map(|values| {
+                let allocation =
+                    AlignedAllocation::new(size_of_val(*values) as u64, MIN_ALIGNMENT as u64)
+                        .map_err(|error| format!("input allocation failed: {error:?}"))?;
+                write_f32(&allocation, values);
+                Ok(allocation)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let output_elements = element_count(output_shape);
+        let output_allocation = AlignedAllocation::new(
+            (output_elements * size_of::<f32>()) as u64,
+            MIN_ALIGNMENT as u64,
+        )
+        .map_err(|error| format!("output allocation failed: {error:?}"))?;
+        let input_bindings = input_allocations
+            .iter()
+            .zip(inputs)
+            .map(|(allocation, values)| ffi::Binding {
+                data: allocation.pointer_at(0).cast(),
+                size: size_of_val(*values) as u64,
+            })
+            .collect::<Vec<_>>();
+        let output_binding = [ffi::Binding {
+            data: output_allocation.pointer_at(0).cast(),
+            size: (output_elements * size_of::<f32>()) as u64,
+        }];
+
+        let mut raw_event = ptr::null_mut();
+        message.fill(0);
+        // SAFETY: graph is live, and every binding points to an allocation retained until the
+        // native event reaches terminal state and is freed below.
+        let status = unsafe {
+            ffi::va_qnn_graph_execute_async(
+                raw_graph.as_ptr(),
+                input_bindings.as_ptr(),
+                input_bindings.len() as u32,
+                output_binding.as_ptr(),
+                1,
+                &mut raw_event,
+                message.as_mut_ptr(),
+                message.len(),
+            )
+        };
+        if status != ffi::SUCCESS {
+            return Err(format!(
+                "execution failed: status={status:#x}, message={}",
+                message_text(&message)
+            ));
+        }
+        let Some(raw_event) = NonNull::new(raw_event) else {
+            return Err("execution returned a null event".to_owned());
+        };
+        let deadline = Instant::now() + PROBE_TIMEOUT;
+        loop {
+            let mut qnn_error = ffi::SUCCESS;
+            // SAFETY: the event is live and owned by this function until it is freed below.
+            match unsafe { ffi::va_qnn_event_poll(raw_event.as_ptr(), &mut qnn_error) } {
+                ffi::EVENT_PENDING if Instant::now() < deadline => thread::yield_now(),
+                ffi::EVENT_PENDING => return Err("execution timed out".to_owned()),
+                ffi::EVENT_COMPLETE => break,
+                ffi::EVENT_FAILED => {
+                    return Err(format!("execution event failed: status={qnn_error:#x}"));
+                }
+                state => return Err(format!("execution returned unknown event state {state}")),
+            }
+        }
+        let values = read_f32(&output_allocation, output_elements);
+        // SAFETY: the event is terminal and this function is its sole owner.
+        let free_status = unsafe { ffi::va_qnn_event_free(raw_event.as_ptr()) };
+        if free_status != ffi::SUCCESS {
+            return Err(format!("event free failed: status={free_status:#x}"));
+        }
+        graph
+            .release()
+            .map_err(|error| format!("graph free failed: {error:?}"))?;
+        Ok(ProbeOutput { values })
+    }
+
+    fn ordered_bits(value: f32) -> i64 {
+        let bits = value.to_bits() as i32;
+        if bits < 0 {
+            i64::from(i32::MIN) - i64::from(bits)
+        } else {
+            i64::from(bits)
+        }
+    }
+
+    fn matches_oracle(expected: f32, actual: f32, max_ulp: u64) -> bool {
+        if expected.is_nan() {
+            return actual.is_nan();
+        }
+        if expected == 0.0 || expected.is_infinite() {
+            return expected.to_bits() == actual.to_bits();
+        }
+        if actual == 0.0 {
+            return false;
+        }
+        if !actual.is_finite() {
+            return false;
+        }
+        ordered_bits(expected).abs_diff(ordered_bits(actual)) <= max_ulp
+    }
+
+    fn report(probe: &str, expected: &[f32], actual: &[f32], max_ulp: u64) -> bool {
+        assert_eq!(expected.len(), actual.len());
+        let mut passed = true;
+        for (index, (&expected, &actual)) in expected.iter().zip(actual).enumerate() {
+            let matches = matches_oracle(expected, actual, max_ulp);
+            passed &= matches;
+            println!(
+                "FP32_PROBE op={probe} case={index} result={} expected={expected:e} expected_bits={:#010x} actual={actual:e} actual_bits={:#010x} ulp={}",
+                if matches { "PASS" } else { "FAIL" },
+                expected.to_bits(),
+                actual.to_bits(),
+                if expected.is_finite() && actual.is_finite() {
+                    ordered_bits(expected).abs_diff(ordered_bits(actual))
+                } else {
+                    u64::MAX
+                }
+            );
+        }
+        println!(
+            "FP32_PROBE_SUMMARY op={probe} result={} cases={} max_ulp={max_ulp}",
+            if passed { "PASS" } else { "FAIL" },
+            expected.len()
+        );
+        passed
+    }
+
+    #[test]
+    #[ignore = "manual HTP-only FP32 capability spike; never widens production admission"]
+    fn runs_fp32_precision_capability_spike_on_htp() {
+        let runtime = Rc::new(RuntimeHandle::new().expect("initialize QNN HTP runtime"));
+        println!(
+            "FP32_PROBE_RUNTIME provider={} build={} core={:?} backend={:?} backend_dll=QnnHtp.dll graph_precision=QNN_PRECISION_FLOAT32",
+            runtime.info.provider_name,
+            runtime.info.build_id,
+            runtime.info.core_version,
+            runtime.info.backend_version,
+        );
+
+        let edge_values = [
+            1.0001_f32,
+            70_000.0,
+            f32::from_bits(1),
+            f32::MIN_POSITIVE,
+            0.0,
+            -0.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::from_bits(0x7fc1_2345),
+        ];
+        let mut all_passed = true;
+
+        let identity = run_probe_graph(
+            &runtime,
+            ffi::NODE_RESHAPE,
+            &[&[edge_values.len() as u32]],
+            &[edge_values.len() as u32],
+            &[&edge_values],
+        )
+        .expect("execute FP32 identity probe");
+        all_passed &= report("IDENTITY", &edge_values, &identity.values, 0);
+
+        let add_left = [
+            2.0_f32,
+            1.0001_f32,
+            70_000.0,
+            f32::from_bits(1),
+            -0.0,
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::from_bits(0x7fc1_2345),
+        ];
+        let add_right = [
+            3.0_f32,
+            0.0002_f32,
+            1.0,
+            f32::from_bits(1),
+            -0.0,
+            1.0,
+            f32::NEG_INFINITY,
+            1.0,
+        ];
+        let add_expected =
+            std::array::from_fn::<_, 8, _>(|index| add_left[index] + add_right[index]);
+        let add = run_probe_graph(
+            &runtime,
+            ffi::NODE_ADD,
+            &[&[8], &[8]],
+            &[8],
+            &[&add_left, &add_right],
+        )
+        .expect("execute FP32 ADD probe");
+        all_passed &= report("ADD", &add_expected, &add.values, 2);
+
+        let mul_left = [
+            3.0_f32,
+            1.0001_f32,
+            70_000.0,
+            1.0e-30,
+            -0.0,
+            f32::INFINITY,
+            f32::from_bits(0x7fc1_2345),
+            f32::NEG_INFINITY,
+        ];
+        let mul_right = [4.0_f32, 1.0001, 0.5, 2.0, 2.0, 0.0, 1.0, -2.0];
+        let mul_expected =
+            std::array::from_fn::<_, 8, _>(|index| mul_left[index] * mul_right[index]);
+        let mul = run_probe_graph(
+            &runtime,
+            ffi::NODE_MULTIPLY,
+            &[&[8], &[8]],
+            &[8],
+            &[&mul_left, &mul_right],
+        )
+        .expect("execute FP32 MUL probe");
+        all_passed &= report("MUL", &mul_expected, &mul.values, 2);
+
+        let matmul_left = [
+            2.0_f32,
+            4.0,
+            1.0001_f32,
+            1.0002,
+            70_000.0,
+            -69_999.0,
+            f32::from_bits(1),
+            f32::from_bits(1),
+        ];
+        let matmul_right = [3.0_f32, 5.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        let matmul_expected = [
+            matmul_left[0] * matmul_right[0] + matmul_left[1] * matmul_right[1],
+            matmul_left[2] * matmul_right[2] + matmul_left[3] * matmul_right[3],
+            matmul_left[4] * matmul_right[4] + matmul_left[5] * matmul_right[5],
+            matmul_left[6] * matmul_right[6] + matmul_left[7] * matmul_right[7],
+        ];
+        let matmul = run_probe_graph(
+            &runtime,
+            ffi::NODE_MATMUL,
+            &[&[4, 1, 2], &[4, 2, 1]],
+            &[4, 1, 1],
+            &[&matmul_left, &matmul_right],
+        )
+        .expect("execute FP32 MATMUL probe");
+        all_passed &= report("MATMUL", &matmul_expected, &matmul.values, 2);
+
+        let reciprocal_input = [
+            4.0_f32,
+            1.0001_f32,
+            70_000.0,
+            f32::MIN_POSITIVE,
+            f32::from_bits(1),
+            0.0,
+            -0.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::from_bits(0x7fc1_2345),
+        ];
+        let reciprocal_expected = reciprocal_input.map(f32::recip);
+        let reciprocal = run_probe_graph(
+            &runtime,
+            ffi::NODE_RECIPROCAL,
+            &[&[reciprocal_input.len() as u32]],
+            &[reciprocal_input.len() as u32],
+            &[&reciprocal_input],
+        )
+        .expect("execute FP32 RECIPROCAL probe");
+        all_passed &= report("RECIPROCAL", &reciprocal_expected, &reciprocal.values, 16);
+
+        let rsqrt_input = [
+            4.0_f32,
+            1.0001_f32,
+            70_000.0,
+            f32::MIN_POSITIVE,
+            f32::from_bits(1),
+            0.0,
+            -0.0,
+            f32::INFINITY,
+            -1.0,
+            f32::from_bits(0x7fc1_2345),
+        ];
+        let rsqrt_expected = rsqrt_input.map(|value| value.sqrt().recip());
+        let rsqrt = run_probe_graph(
+            &runtime,
+            ffi::NODE_RSQRT,
+            &[&[rsqrt_input.len() as u32]],
+            &[rsqrt_input.len() as u32],
+            &[&rsqrt_input],
+        )
+        .expect("execute FP32 RSQRT probe");
+        all_passed &= report("RSQRT", &rsqrt_expected, &rsqrt.values, 16);
+
+        assert!(
+            all_passed,
+            "one or more FP32 HTP probes failed; production FP32 admission remains blocked"
+        );
+    }
+}

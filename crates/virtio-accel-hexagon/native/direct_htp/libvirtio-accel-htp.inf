@@ -1,0 +1,30 @@
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = ComputeAccelerator
+ClassGuid   = {F01A9D53-3FF6-48D2-9F97-C8A7004BE10C}
+Provider    = %VirtioAccel%
+DriverVer   = 08/24/2026,1.0.0.0
+CatalogFile = libvirtio-accel-htp.cat
+PnpLockDown = 1
+
+[DestinationDirs]
+Drivers_Dir = 13
+
+[SourceDisksNames]
+1 = %DiskId%
+
+[SourceDisksFiles]
+libvirtio-accel-htp-v73.so = 1
+
+[ControlFlags]
+ExcludeFromSelect = *
+
+[DefaultInstall.NTarm64]
+CopyFiles=Drivers_Dir
+
+[Drivers_Dir]
+libvirtio-accel-htp-v73.so,,,0x10
+
+[Strings]
+VirtioAccel = 'virtio-accel'
+DiskId      = 'virtio-accel direct HTP library'

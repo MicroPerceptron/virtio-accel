@@ -12,10 +12,20 @@ use std::path::{Path, PathBuf};
 const FORCE_ENV: &str = "VIRTIO_ACCEL_HEXAGON";
 const ROOT_ENV: &str = "VIRTIO_ACCEL_QNN_SDK_ROOT";
 const LIB_ENV: &str = "VIRTIO_ACCEL_QNN_LIB_DIR";
+const DIRECT_FORCE_ENV: &str = "VIRTIO_ACCEL_HEXAGON_DIRECT";
+const HEXAGON_SDK_ENV: &str = "HEXAGON_SDK_ROOT";
 
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(va_hexagon)");
-    for variable in [FORCE_ENV, ROOT_ENV, LIB_ENV, "QNN_SDK_ROOT"] {
+    println!("cargo::rustc-check-cfg=cfg(va_hexagon_direct)");
+    for variable in [
+        FORCE_ENV,
+        ROOT_ENV,
+        LIB_ENV,
+        "QNN_SDK_ROOT",
+        DIRECT_FORCE_ENV,
+        HEXAGON_SDK_ENV,
+    ] {
         println!("cargo:rerun-if-env-changed={variable}");
     }
 
@@ -35,6 +45,8 @@ fn main() {
         );
         return;
     }
+
+    configure_direct_htp();
 
     let root = std::env::var_os(ROOT_ENV)
         .or_else(|| std::env::var_os("QNN_SDK_ROOT"))
@@ -98,6 +110,60 @@ fn main() {
         root.display()
     );
     println!("cargo::rustc-cfg=va_hexagon");
+}
+
+fn configure_direct_htp() {
+    let forced = match std::env::var(DIRECT_FORCE_ENV) {
+        Ok(value) if value == "0" => return,
+        Ok(value) if value == "1" => true,
+        Ok(other) => panic!("{DIRECT_FORCE_ENV} must be \"0\" or \"1\", not {other:?}"),
+        Err(_) => false,
+    };
+    let Some(root) = std::env::var_os(HEXAGON_SDK_ENV).map(PathBuf::from) else {
+        assert!(!forced, "{DIRECT_FORCE_ENV}=1 requires {HEXAGON_SDK_ENV}");
+        return;
+    };
+    let headers = [
+        root.join("incs/remote.h"),
+        root.join("incs/rpcmem.h"),
+        root.join("incs/domain.h"),
+    ];
+    let generated = [
+        Path::new("native/direct_htp/generated/va_htp.h"),
+        Path::new("native/direct_htp/generated/va_htp_stub.c"),
+    ];
+    if !headers.iter().all(|path| path.is_file()) || !generated.iter().all(|path| path.is_file()) {
+        assert!(
+            !forced,
+            "{DIRECT_FORCE_ENV}=1 but the Hexagon SDK or generated FastRPC stub is incomplete"
+        );
+        return;
+    }
+    for path in &headers {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    for path in &generated {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    println!("cargo:rerun-if-changed=native/direct_htp/host_bridge.cpp");
+    println!("cargo:rerun-if-changed=native/direct_htp/host_bridge.h");
+    cc::Build::new()
+        .cpp(true)
+        .file("native/direct_htp/host_bridge.cpp")
+        .file("native/direct_htp/generated/va_htp_stub.c")
+        .include("native/direct_htp")
+        .include("native/direct_htp/generated")
+        .include(root.join("incs"))
+        .include(root.join("incs/stddef"))
+        .define("WINNT", None)
+        .define("STATIC_LIB", None)
+        .flag_if_supported("/std:c++17")
+        .flag_if_supported("/EHsc")
+        .flag_if_supported("-std=c++17")
+        .warnings(true)
+        .compile("virtio_accel_direct_htp_bridge");
+    println!("cargo:rustc-link-lib=Advapi32");
+    println!("cargo::rustc-cfg=va_hexagon_direct");
 }
 
 fn has_import_library(directory: &Path, stem: &str) -> bool {

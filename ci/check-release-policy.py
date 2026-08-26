@@ -88,8 +88,8 @@ UNSAFE_AUDITS = {
     ),
     ROOT / "crates" / "virtio-accel-hexagon" / "src" / "lib.rs": (
         ROOT / "crates" / "virtio-accel-hexagon" / "SAFETY.md",
-        "cfg_attr(not(va_hexagon), forbid(unsafe_code))",
-        ("public QNN C interface", "AlignedAllocation", "`poll_event`"),
+        "cfg_attr(not(any(va_hexagon, va_hexagon_direct)), forbid(unsafe_code))",
+        ("public QNN C interface", "AlignedAllocation", "`poll_event`", "FastRPC", "`rpcmem`"),
     ),
     ROOT / "crates" / "virtio-accel-tosa" / "src" / "lib.rs": (
         ROOT / "crates" / "virtio-accel-tosa" / "SAFETY.md",

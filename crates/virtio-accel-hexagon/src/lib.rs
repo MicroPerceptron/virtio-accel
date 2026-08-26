@@ -5,9 +5,20 @@
 //! QAIRT/QNN SDK is detected. SDK-free hosts retain that portable code and a constructor that
 //! reports the unavailable runtime without importing Qualcomm dependencies into portable crates.
 
-#![cfg_attr(not(va_hexagon), forbid(unsafe_code))]
+#![cfg_attr(not(any(va_hexagon, va_hexagon_direct)), forbid(unsafe_code))]
 
 mod lower;
+
+#[allow(unsafe_code)]
+#[cfg(va_hexagon_direct)]
+mod direct;
+#[cfg(va_hexagon_direct)]
+pub use direct::{
+    DIRECT_HTP_ARTIFACT_FORMAT, DIRECT_HTP_V73_TARGET, DirectHexagonAccelerator,
+    DirectHexagonBuffer, DirectHexagonContext, DirectHexagonEvent, DirectHexagonProgram,
+    DirectHexagonQueue, DirectHtpArtifact, DirectHtpOperation, DirectHtpRuntimeInfo,
+    KerrFrameParameters, KerrTraceParameters, WormholeTraceParameters,
+};
 
 pub use lower::{
     HEXAGON_TOSA_CAPABILITY, HEXAGON_TOSA_INTEGER_CAPABILITY, HEXAGON_TOSA_INTEGER_TARGET,
@@ -40,6 +51,22 @@ pub enum InitError {
     /// The HTP backend or its device could not be created.
     DeviceUnavailable,
 }
+
+/// Failure to initialize the signed direct FastRPC/QFloat32 provider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirectInitError {
+    RuntimeUnavailable,
+    IncompatibleHardware,
+    ModuleUnavailable,
+}
+
+impl core::fmt::Display for DirectInitError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for DirectInitError {}
 
 impl core::fmt::Display for InitError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -84,6 +111,18 @@ impl HexagonAccelerator {
 impl TosaCapabilityProvider for HexagonAccelerator {
     fn tosa_capabilities(&self) -> &'static [CapabilityDescriptor] {
         TOSA_CAPABILITIES
+    }
+}
+
+/// SDK-free placeholder for the provider-local direct HTP path.
+#[cfg(not(va_hexagon_direct))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DirectHexagonAccelerator;
+
+#[cfg(not(va_hexagon_direct))]
+impl DirectHexagonAccelerator {
+    pub fn new() -> Result<Self, DirectInitError> {
+        Err(DirectInitError::RuntimeUnavailable)
     }
 }
 

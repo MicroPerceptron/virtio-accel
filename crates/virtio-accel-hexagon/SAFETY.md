@@ -1,4 +1,4 @@
-# Qualcomm QNN native-boundary safety argument
+# Qualcomm native-boundary safety argument
 
 The native backend is compiled only when `build.rs` finds the public QAIRT/QNN headers and Windows
 ARM64 HTP import library. Safe TOSA parsing, semantic admission, shape arithmetic, slot planning,
@@ -61,3 +61,45 @@ FP16/BOOL/INT32 operator and exact INT8/INT32 numerical execution, the reusable 
 direct-binding diagnostics, stable terminal polling, pre-admission timeout rejection, live-event
 graph retention, and ordered teardown on the pinned HTP runtime. Unsupported hosts compile without
 either native module.
+
+## Direct HTP boundary
+
+The optional direct provider is confined to `direct.rs`, `host_bridge.cpp`,
+the generated FastRPC stub, and the V73 skel. `Runtime` owns the driver module,
+FastRPC handle, mapped arena, and allocation table. Rust buffers retain the
+runtime through `Rc`; programs, queues, and buffers carry a context identifier,
+and submission validates context, ordinal slots, access modes, exact ranges,
+and checked pointer offsets before entering native code.
+
+The bridge allocates each client-visible buffer with Qualcomm `rpcmem` and
+passes that exact address in the synchronous FastRPC buffer argument. The skel
+does not retain input, output, parameter, or binding pointers after a request.
+Program parameter blobs are length-checked in Rust and checked again by the
+skel before casting to fixed-layout parameter structures. Matmul dimensions
+and byte counts are checked on the Rust side before binding; the skel rejects
+zero dimensions and short buffers.
+
+The fused Kerr-frame artifact additionally checks `width * height == lanes`,
+requires one sample per pixel, binds exactly four input bytes and
+`32 + 4 * lanes` output bytes, and rechecks those relationships before the skel
+casts parameters or writes output. Each worker owns disjoint pixel ranges and
+two disjoint slots in its private VTCM slice. A user-DMA descriptor is waited
+before its slot can be reused and again before the worker returns, so neither
+the stack descriptor nor VTCM source can expire while DMA is active. The
+synchronous FastRPC call keeps the exact `rpcmem` destination alive until all
+workers and DMA transfers complete.
+
+`DirectHexagonBuffer::mapped_bytes` is an explicitly unsafe provider-local
+escape hatch for zero-copy reads. Its safe Axiom wrapper borrows the complete
+Kerr session mutably for the lifetime of the returned frame view, preventing
+another submission or buffer release while the slice is live. The view is
+created only after synchronous FastRPC completion and validates the 32-byte
+header, remaining byte count, and `u32` alignment before exposing pixels.
+
+Direct events are terminal because FastRPC execution completes before
+`submit` returns. Finite deadlines are rejected before admission and neither
+asynchronous completion nor cancellation is advertised. Drop closes the remote
+handle and frees the mapped arena only after all Rust owners are gone. The
+ignored hardware tests exercise construction, exact transfers, all direct
+probe operations, repeated polling, explicit destruction, and fused Axiom
+workloads through the signed V73 module.

@@ -45,6 +45,32 @@ admission. The execution lane permits one native submission at a time. Finite su
 expire before admission and cancellation is not advertised because this QNN HTP interface does not
 provide a working bounded asynchronous execution primitive.
 
+## Explicit direct-HTP/QFloat32 path
+
+Windows ARM64 builds with Hexagon SDK 6.6 also expose
+`DirectHexagonAccelerator`, a provider-local FastRPC path that is separate from
+the TOSA/QNN targets above. It loads a signed V73 skel and accepts only the
+`DIRECT_HTP_V73_TARGET` artifact identity. Selection is therefore explicit;
+failure to load or execute the skel is returned to the caller and never becomes
+a QNN, CPU, or GPU fallback.
+
+The hardware probe covers identity, ADD, MUL, MATMUL, reciprocal, and
+reciprocal square root. On the validated V73 it preserves FP32 subnormals and
+values outside FP16 range and resolves `1.0 + 2^-20`. Exceptional arithmetic
+also demonstrates non-IEEE behavior: invalid QFloat32 results are canonicalized
+to raw `0xffffffff` NaNs. For that reason this target does not advertise TOSA
+FP32 and cannot satisfy a strict FP32 request.
+
+The provider implements the normal `Accelerator` ownership lifecycle with
+exact slot/range validation and direct `rpcmem` bindings. Kerr and Dneg use
+explicit 32-lane QFloat32/HVX kernels on four concurrent QuRT workers. The
+coarse Kerr-frame artifact additionally generates camera rays, handles events,
+shades, and packs RGBA on HTP; the host sends four control bytes and reads one
+packed pixel per lane. Worker-private ping-pong VTCM staging overlaps packed
+output through user DMA, while one-step legacy traces can stream aligned shared
+DDR directly. Build, signing, environment, probes, and measured limitations are
+in the [direct HTP runtime README](native/direct_htp/README.md).
+
 ## Install and configure QAIRT
 
 Download the complete Qualcomm AI Runtime Community SDK, not an AppBuilder/Genie-only bundle. The

@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: BSD-3-Clause-Clear
+// FastRPC control plane for virtio-accel's direct Hexagon provider.
+
+#ifndef VA_HTP_IDL
+#define VA_HTP_IDL
+
+#include "AEEStdDef.idl"
+#include "remote.idl"
+
+interface va_htp : remote_handle64 {
+    AEEResult hwinfo(rout uint32 arch, rout uint32 hvx_units, rout uint32 vtcm_bytes);
+    AEEResult map_arena(in uint32 fd, in uint32 size);
+    AEEResult unmap_arena();
+    AEEResult execute(
+        in uint32 opcode,
+        in uint32 lanes,
+        in sequence<uint8> parameters,
+        in sequence<uint8> input0,
+        in sequence<uint8> input1,
+        rout sequence<uint8> output,
+        rout uint64 elapsed_cycles);
+};
+
+#endif

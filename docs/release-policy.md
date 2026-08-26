@@ -94,14 +94,17 @@ tier of an existing crate.
 
 Project-authored code in portable crates, reference crates, and fuzz harness support code forbids or
 denies unsafe code at the crate root. This is an intentional v1 invariant, not incidental linting.
-There are three reviewed, confined exceptions. The host-native `virtio-accel-coreml` adapter's Rust
+There are four reviewed, confined exceptions. The host-native `virtio-accel-coreml` adapter's Rust
 FFI and aligned-allocation code is documented in `crates/virtio-accel-coreml/SAFETY.md`; non-macOS
 builds still forbid unsafe code. The host-native `virtio-accel-openvino` adapter's OpenVINO C API
 FFI and aligned-allocation code is documented in `crates/virtio-accel-openvino/SAFETY.md`; builds
 without a detected OpenVINO runtime still forbid unsafe code. `virtio-accel-tosa` denies unsafe
 code globally but locally permits its private, checked-in official FlatBuffers bindings after
 bounded verification; the boundary and regeneration procedure are documented in
-`crates/virtio-accel-tosa/SAFETY.md`.
+`crates/virtio-accel-tosa/SAFETY.md`. The host-native `virtio-accel-hexagon` adapter confines its
+QNN and FastRPC/`rpcmem` FFI to SDK-detected Windows ARM64 builds; builds without either detected
+native boundary forbid unsafe code, and both paths are audited in
+`crates/virtio-accel-hexagon/SAFETY.md`.
 
 A future unsafe exception requires all of the following in one reviewed change:
 
