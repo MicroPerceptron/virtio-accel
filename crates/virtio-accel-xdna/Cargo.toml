@@ -11,6 +11,12 @@ categories.workspace = true
 description = "AMD XDNA (Ryzen AI NPU) host backend for virtio-accel"
 readme = "README.md"
 
+[features]
+default = []
+# Deterministic, one-shot device-loss injection for the on-metal fault-path suite. Production
+# builds leave this off and contain no fault trigger.
+test-control = []
+
 [dependencies]
 virtio-accel-core.workspace = true
 virtio-accel-tosa.workspace = true

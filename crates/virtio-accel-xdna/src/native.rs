@@ -9,18 +9,21 @@
 //! `load_program` accepts the crate-local precompiled artifact format directly, and a TOSA
 //! artifact by admitting it (`lower`) and compiling it with the bounded helper subprocess
 //! (`compiler`); it builds an `hrx_amdxdna_executable` and dispatches it through the worker.
-//! Finite timeouts are rejected
-//! before admission (no cancellation exists); a synchronize error latches the event `Failed` and
-//! poisons the instance (device-loss tier 1). The tier-2 wedge watchdog is the fault-paths ticket.
+//! Finite timeouts are rejected before admission (no cancellation exists); a synchronize error
+//! latches the event `Failed` and poisons the instance (device-loss tier 1). A 120-second watchdog
+//! detects a synchronize call that outlives the kernel's 60-second TDR (tier 2), poisons the
+//! instance, and quarantines the still-pending job until the backend is discarded.
 
 use core::ffi::c_void;
 use core::marker::PhantomData;
+use core::mem::size_of;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::collections::VecDeque;
 use std::ffi::CString;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use virtio_accel_core::{
     Accelerator, AcceleratorClass, AccessMode, AllocatedBuffer, ArtifactRef, BackendError,
@@ -40,6 +43,10 @@ const MAX_TOSA_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Default submission-ring depth (issue #85: one admitted request, matching the Hexagon backend).
 const DEFAULT_RING_DEPTH: usize = 1;
+
+/// The kernel's NPU TDR is 60 seconds. A longer userspace watchdog distinguishes a returned
+/// device-loss error (tier 1) from an HRX synchronize call that never returns (tier 2).
+const DEFAULT_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Internal state-machine failure: a live event handle observed a free/unknown slot state.
 const INVALID_EVENT_STATE_CODE: i64 = 200;
@@ -136,8 +143,9 @@ unsafe impl Send for Stream {}
 
 impl Drop for Stream {
     fn drop(&mut self) {
-        // SAFETY: the lane owns exactly one reference to the stream and is dropped once, after the
-        // worker has been joined (no dispatch can be in progress).
+        // SAFETY: the lane owns exactly one stream reference. A normal teardown joins the worker;
+        // a detached tier-2 worker itself holds the last lane Arc, so this Drop still cannot run
+        // until its HRX call has returned and no dispatch is in progress.
         unsafe { ffi::hrx_stream_release(self.0.as_ptr()) };
     }
 }
@@ -155,6 +163,45 @@ mod slot_state {
 struct EventSlot {
     state: AtomicU8,
     error: Mutex<Option<BackendError>>,
+}
+
+/// Provider-owned resources that are currently live for one backend instance.
+///
+/// This is intentionally backend-local rather than part of the `Accelerator` ABI. The shared
+/// conformance hook translates it to its own `ResourceCounts` type.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct XdnaResourceCounts {
+    pub contexts: u64,
+    pub buffers: u64,
+    pub programs: u64,
+    pub queues: u64,
+    pub events: u64,
+}
+
+#[derive(Debug, Default)]
+struct ResourceTracker {
+    contexts: AtomicU64,
+    buffers: AtomicU64,
+    programs: AtomicU64,
+    queues: AtomicU64,
+    events: AtomicU64,
+}
+
+impl ResourceTracker {
+    fn snapshot(&self) -> XdnaResourceCounts {
+        XdnaResourceCounts {
+            contexts: self.contexts.load(Ordering::Acquire),
+            buffers: self.buffers.load(Ordering::Acquire),
+            programs: self.programs.load(Ordering::Acquire),
+            queues: self.queues.load(Ordering::Acquire),
+            events: self.events.load(Ordering::Acquire),
+        }
+    }
+
+    fn decrement(counter: &AtomicU64) {
+        let previous = counter.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "XDNA resource counter underflow");
+    }
 }
 
 impl EventSlot {
@@ -178,24 +225,23 @@ impl EventSlot {
 
 /// One queued dispatch handed to the worker. The raw pointers are HRX handles — heap objects HRX
 /// owns, whose addresses are independent of where the caller's `XdnaBuffer`/`XdnaProgram` values
-/// live — kept referenced until the event is terminal and destroyed (the `Accelerator` contract),
-/// and touched only by the worker while the stream mutex is held. The in-flight gates are `Arc`s,
-/// not pointers into the caller's structs: the caller may legally *move* a buffer while its job is
-/// in flight (the contract requires liveness, not address stability), so the gate must be
-/// address-stable on its own.
+/// live. The accompanying Arcs keep those handles referenced for the full worker operation, even
+/// when a poisoned backend is discarded, and the worker touches them only under the stream mutex.
+/// The in-flight gates live in the same Arcs, not in caller-movable structs.
 struct Job {
-    program: XdnaProgram,
+    program: Arc<ProgramInner>,
     bindings: Vec<ffi::hrx_buffer_ref_t>,
     outputs: Vec<(ffi::hrx_buffer_t, usize, usize)>,
-    in_flight: Vec<Arc<AtomicU64>>,
+    /// Retains each distinct HRX allocation and supplies its address-stable in-flight gate.
+    buffers: Vec<Arc<BufferInner>>,
     slot: Arc<EventSlot>,
 }
 
 // SAFETY: the raw pointers in a `Job` are HRX buffer/executable handles: heap objects owned by the
 // HRX runtime whose addresses do not change when the caller moves its Rust-side handle values.
-// They stay referenced until the event is terminal and destroyed, and are dereferenced only on the
-// worker thread while the stream mutex is held. Moving the job to the worker transfers that
-// exclusive access. Everything else in the job (`Arc`s) is `Send` on its own.
+// Their accompanying Arcs keep them referenced until the worker has stopped touching them, and
+// they are dereferenced only on the worker thread while the stream mutex is held. Moving the job to
+// the worker transfers that exclusive access. Everything else in the job (`Arc`s) is `Send`.
 unsafe impl Send for Job {}
 
 /// The bounded submission ring.
@@ -204,18 +250,108 @@ struct Ring {
     stopping: bool,
 }
 
+#[derive(Debug)]
+struct WatchdogState {
+    generation: u64,
+    active: Option<(u64, Instant)>,
+    stopping: bool,
+}
+
+#[cfg(feature = "test-control")]
+#[derive(Clone, Copy, Debug)]
+enum InjectedFault {
+    Tier1,
+    Tier2 { stall: Duration },
+}
+
+/// One-shot fault used by the on-metal fault-path tests.
+#[cfg(feature = "test-control")]
+#[derive(Clone, Copy, Debug)]
+#[doc(hidden)]
+pub enum XdnaTestFault {
+    /// Return a definite device-loss error from the worker before dispatching to HRX.
+    Tier1,
+    /// Hold the worker beyond the watchdog deadline without touching HRX.
+    Tier2 { stall: Duration },
+}
+
+/// Test-only construction parameters. This API is absent unless `test-control` is enabled.
+#[cfg(feature = "test-control")]
+#[derive(Clone, Copy, Debug)]
+#[doc(hidden)]
+pub struct XdnaTestConfig {
+    pub watchdog_timeout: Duration,
+    pub fault: XdnaTestFault,
+}
+
 /// One instance's serialized dispatch lane: the stream, the ring, and the poison flag.
 struct Lane {
     stream: Mutex<Stream>,
     ring: Mutex<Ring>,
     signal: Condvar,
     poisoned: AtomicBool,
+    wedged: AtomicBool,
+    watchdog: Mutex<WatchdogState>,
+    watchdog_signal: Condvar,
+    watchdog_timeout: Duration,
+    #[cfg(feature = "test-control")]
+    injected_fault: Mutex<Option<InjectedFault>>,
     depth: usize,
 }
 
 impl Lane {
     fn is_poisoned(&self) -> bool {
         self.poisoned.load(Ordering::Acquire)
+    }
+
+    fn arm_watchdog(&self) -> u64 {
+        let mut watchdog = self.watchdog.lock().expect("watchdog mutex");
+        watchdog.generation = watchdog.generation.wrapping_add(1);
+        let generation = watchdog.generation;
+        watchdog.active = Some((generation, Instant::now() + self.watchdog_timeout));
+        self.watchdog_signal.notify_one();
+        generation
+    }
+
+    /// Disarm one dispatch. `false` means the watchdog already declared this lane wedged.
+    fn disarm_watchdog(&self, generation: u64) -> bool {
+        let mut watchdog = self.watchdog.lock().expect("watchdog mutex");
+        if matches!(watchdog.active, Some((active, _)) if active == generation) {
+            watchdog.active = None;
+        }
+        self.watchdog_signal.notify_one();
+        !self.wedged.load(Ordering::Acquire)
+    }
+
+    fn run_watchdog(self: &Arc<Self>) {
+        let mut watchdog = self.watchdog.lock().expect("watchdog mutex");
+        loop {
+            if watchdog.stopping {
+                return;
+            }
+            let Some((generation, deadline)) = watchdog.active else {
+                watchdog = self
+                    .watchdog_signal
+                    .wait(watchdog)
+                    .expect("watchdog condvar");
+                continue;
+            };
+            let now = Instant::now();
+            if now < deadline {
+                let (next, _) = self
+                    .watchdog_signal
+                    .wait_timeout(watchdog, deadline - now)
+                    .expect("watchdog condvar");
+                watchdog = next;
+                continue;
+            }
+            if matches!(watchdog.active, Some((active, _)) if active == generation) {
+                watchdog.active = None;
+                self.wedged.store(true, Ordering::Release);
+                self.poisoned.store(true, Ordering::Release);
+                return;
+            }
+        }
     }
 
     /// Run the worker loop: drain the ring one job at a time, dispatching and synchronizing under
@@ -242,35 +378,45 @@ impl Lane {
     /// in-flight gates, and latch the event. A synchronize error latches `Failed` and poisons the
     /// instance (device-loss tier 1).
     fn execute(&self, job: Job) {
+        #[cfg(feature = "test-control")]
+        let injected = self
+            .injected_fault
+            .lock()
+            .expect("fault-injector mutex")
+            .take();
+        #[cfg(feature = "test-control")]
+        if let Some(InjectedFault::Tier2 { stall }) = injected {
+            let watchdog_generation = self.arm_watchdog();
+            std::thread::sleep(stall);
+            let _ = self.disarm_watchdog(watchdog_generation);
+            // Tier 2 has no trustworthy completion boundary: leave the event pending and every
+            // gate armed. Discarding the backend quarantines this job's native resources.
+            return;
+        }
+
         let config = ffi::hrx_dispatch_config_t {
             workgroup_count: [1, 1, 1],
             workgroup_size: [1, 1, 1],
             subgroup_size: 0,
         };
-        let program = job.program.inner.as_ref();
-        let result = {
-            let stream = self.stream.lock().expect("stream mutex");
-            // SAFETY: the stream, executable, and every bound buffer are live for this call
-            // (the caller holds them until the event is terminal); the bindings slice is valid for
-            // `binding_count`; the config is a valid local; constants are unused on this path.
-            let dispatch = unsafe {
-                ffi::hrx_stream_dispatch(
-                    stream.0.as_ptr(),
-                    program.executable.as_ptr(),
-                    program.ordinal,
-                    &config,
-                    ptr::null(),
-                    0,
-                    job.bindings.as_ptr(),
-                    job.bindings.len(),
-                    0,
-                )
-            };
-            check(dispatch).and_then(|()| {
-                // SAFETY: the stream is live; synchronize flushes and blocks until completion.
-                check(unsafe { ffi::hrx_stream_synchronize(stream.0.as_ptr()) })
-            })
+        #[cfg(feature = "test-control")]
+        let (trusted, result) = if matches!(injected, Some(InjectedFault::Tier1)) {
+            let generation = self.arm_watchdog();
+            (
+                self.disarm_watchdog(generation),
+                Err(BackendError::DeviceLost),
+            )
+        } else {
+            self.dispatch_and_synchronize(&job, &config)
         };
+        #[cfg(not(feature = "test-control"))]
+        let (trusted, result) = self.dispatch_and_synchronize(&job, &config);
+
+        if !trusted {
+            // Synchronize returned only after the watchdog declared the ownership boundary lost.
+            // Keep the accepted event pending and do not publish the buffers as reusable.
+            return;
+        }
 
         let result = result.and_then(|()| {
             for &(buffer, offset, len) in &job.outputs {
@@ -283,10 +429,10 @@ impl Lane {
 
         let failed = result.is_err();
         // Clear the in-flight gates before publishing the terminal state, so a caller that observes
-        // completion may immediately read or free the buffers. The gates are shared `Arc`s, valid
+        // completion may immediately read or free the buffers. The retained `Arc`s remain valid
         // regardless of where (or whether) the caller's buffer values still live.
-        for gate in &job.in_flight {
-            gate.store(0, Ordering::Release);
+        for buffer in &job.buffers {
+            buffer.in_flight.store(0, Ordering::Release);
         }
         // Latch the terminal state before poisoning, so this event reports its real error rather
         // than the instance-level `DeviceLost`.
@@ -298,16 +444,49 @@ impl Lane {
             self.poisoned.store(true, Ordering::Release);
         }
     }
+
+    fn dispatch_and_synchronize(
+        &self,
+        job: &Job,
+        config: &ffi::hrx_dispatch_config_t,
+    ) -> (bool, Result<(), BackendError>) {
+        let program = job.program.as_ref();
+        let stream = self.stream.lock().expect("stream mutex");
+        let watchdog_generation = self.arm_watchdog();
+        // SAFETY: the stream, executable, and every bound buffer are retained by the lane/job for
+        // this call; the bindings slice is valid for `binding_count`; the config is a valid local;
+        // constants are unused on this path.
+        let dispatch = unsafe {
+            ffi::hrx_stream_dispatch(
+                stream.0.as_ptr(),
+                program.executable.as_ptr(),
+                program.ordinal,
+                config,
+                ptr::null(),
+                0,
+                job.bindings.as_ptr(),
+                job.bindings.len(),
+                0,
+            )
+        };
+        let result = check(dispatch).and_then(|()| {
+            // SAFETY: the stream is live; synchronize flushes and blocks until completion.
+            check(unsafe { ffi::hrx_stream_synchronize(stream.0.as_ptr()) })
+        });
+        (self.disarm_watchdog(watchdog_generation), result)
+    }
 }
 
 /// One HRX backend instance: a serialized dispatch lane over the shared device.
 pub struct XdnaAccelerator {
     lane: Arc<Lane>,
     worker: Option<JoinHandle<()>>,
+    watchdog: Option<JoinHandle<()>>,
     slots: Vec<Arc<EventSlot>>,
     compiler: CompilerState,
     info: DeviceInfo,
     next_id: AtomicU64,
+    resources: Arc<ResourceTracker>,
     /// Cumulative count of buffers admitted as direct bindings (no submission-time staging copy).
     direct_binding_admissions: AtomicU64,
     /// Cumulative bytes moved by explicit `write_buffer`/`read_buffer` transfers.
@@ -325,6 +504,33 @@ impl XdnaAccelerator {
     /// Initialize the shared device (once per process), create this instance's stream, and start
     /// its dispatch worker.
     pub fn new() -> Result<Self, InitError> {
+        #[cfg(feature = "test-control")]
+        return Self::initialize(DEFAULT_WATCHDOG_TIMEOUT, None);
+        #[cfg(not(feature = "test-control"))]
+        Self::initialize(DEFAULT_WATCHDOG_TIMEOUT)
+    }
+
+    /// Construct a backend with one deterministic fault and a shortened watchdog.
+    #[cfg(feature = "test-control")]
+    #[doc(hidden)]
+    pub fn new_for_testing(config: XdnaTestConfig) -> Result<Self, InitError> {
+        if config.watchdog_timeout.is_zero() {
+            return Err(InitError::Initialization);
+        }
+        let fault = match config.fault {
+            XdnaTestFault::Tier1 => InjectedFault::Tier1,
+            XdnaTestFault::Tier2 { stall } if stall > config.watchdog_timeout => {
+                InjectedFault::Tier2 { stall }
+            }
+            XdnaTestFault::Tier2 { .. } => return Err(InitError::Initialization),
+        };
+        Self::initialize(config.watchdog_timeout, Some(fault))
+    }
+
+    fn initialize(
+        watchdog_timeout: Duration,
+        #[cfg(feature = "test-control")] fault: Option<InjectedFault>,
+    ) -> Result<Self, InitError> {
         let device = shared_device()?;
         let mut stream: ffi::hrx_stream_t = ptr::null_mut();
         // SAFETY: `device.0` is the live process-wide device; the out-pointer is a valid local and
@@ -342,15 +548,42 @@ impl XdnaAccelerator {
             }),
             signal: Condvar::new(),
             poisoned: AtomicBool::new(false),
+            wedged: AtomicBool::new(false),
+            watchdog: Mutex::new(WatchdogState {
+                generation: 0,
+                active: None,
+                stopping: false,
+            }),
+            watchdog_signal: Condvar::new(),
+            watchdog_timeout,
+            #[cfg(feature = "test-control")]
+            injected_fault: Mutex::new(fault),
             depth,
         });
         let slots = (0..depth).map(|_| EventSlot::new()).collect();
 
+        let watchdog_lane = Arc::clone(&lane);
+        let watchdog = std::thread::Builder::new()
+            .name("xdna-watchdog".into())
+            .spawn(move || watchdog_lane.run_watchdog())
+            .map_err(|_| InitError::Initialization)?;
+
         let worker_lane = Arc::clone(&lane);
-        let worker = std::thread::Builder::new()
+        let worker = match std::thread::Builder::new()
             .name("xdna-dispatch".into())
             .spawn(move || worker_lane.run_worker())
-            .map_err(|_| InitError::Initialization)?;
+        {
+            Ok(worker) => worker,
+            Err(_) => {
+                {
+                    let mut state = lane.watchdog.lock().expect("watchdog mutex");
+                    state.stopping = true;
+                }
+                lane.watchdog_signal.notify_all();
+                let _ = watchdog.join();
+                return Err(InitError::Initialization);
+            }
+        };
 
         let compiler = match Compiler::from_env() {
             Ok(compiler) => CompilerState::Ready(compiler),
@@ -363,10 +596,12 @@ impl XdnaAccelerator {
         Ok(Self {
             lane,
             worker: Some(worker),
+            watchdog: Some(watchdog),
             slots,
             compiler,
             info: device_info(),
             next_id: AtomicU64::new(1),
+            resources: Arc::new(ResourceTracker::default()),
             direct_binding_admissions: AtomicU64::new(0),
             explicit_transfer_bytes: AtomicU64::new(0),
             _not_send_sync: PhantomData,
@@ -391,6 +626,11 @@ impl XdnaAccelerator {
         self.explicit_transfer_bytes.load(Ordering::Relaxed)
     }
 
+    /// Snapshot provider-owned resources that have been admitted but not successfully released.
+    pub fn resource_counts(&self) -> XdnaResourceCounts {
+        self.resources.snapshot()
+    }
+
     /// Claim a free event slot, transitioning it to `PENDING`.
     fn claim_slot(&self) -> Option<Arc<EventSlot>> {
         self.slots.iter().find_map(|slot| {
@@ -409,17 +649,32 @@ impl XdnaAccelerator {
 
 impl Drop for XdnaAccelerator {
     fn drop(&mut self) {
-        // Signal the worker to stop, then join it before the lane (and its stream) is released.
+        // Signal both threads to stop. A normally quiescent worker is joined before the stream is
+        // released. If an accepted event is still pending (including a tier-2 wedge), detach the
+        // worker instead: its `Arc<Lane>` and the job's retained native resources form the
+        // quarantine and make discarding the poisoned instance nonblocking and memory-safe.
         {
             let mut ring = self.lane.ring.lock().expect("ring mutex");
             ring.stopping = true;
         }
         self.lane.signal.notify_all();
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+        {
+            let mut watchdog = self.lane.watchdog.lock().expect("watchdog mutex");
+            watchdog.stopping = true;
         }
-        // The worker is joined, so its `Arc<Lane>` is dropped; this instance's is now the last
-        // reference, and dropping it releases the stream in `Stream::drop`.
+        self.lane.watchdog_signal.notify_all();
+        if let Some(watchdog) = self.watchdog.take() {
+            let _ = watchdog.join();
+        }
+        let has_pending = self
+            .slots
+            .iter()
+            .any(|slot| slot.state.load(Ordering::Acquire) == slot_state::PENDING);
+        if let Some(worker) = self.worker.take() {
+            if !has_pending && !self.lane.wedged.load(Ordering::Acquire) {
+                let _ = worker.join();
+            }
+        }
     }
 }
 
@@ -454,6 +709,7 @@ fn build_executable(
     device: &SharedDevice,
     parsed: PrecompiledArtifact<'_>,
     context_id: u64,
+    resources: &Arc<ResourceTracker>,
 ) -> Result<XdnaProgram, BackendError> {
     // Build the borrowed create-params (valid only for the duration of the create call).
     let xclbin_span = ffi::hrx_const_byte_span_t {
@@ -538,6 +794,7 @@ fn build_executable(
         }
     };
 
+    resources.programs.fetch_add(1, Ordering::AcqRel);
     Ok(XdnaProgram {
         inner: Arc::new(ProgramInner {
             executable,
@@ -545,6 +802,7 @@ fn build_executable(
             inputs: parsed.inputs,
             outputs: parsed.outputs,
             slot_bytes: parsed.slot_bytes,
+            resources: Arc::clone(resources),
         }),
         context_id,
     })
@@ -555,12 +813,14 @@ fn build_executable(
 #[derive(Debug)]
 pub struct XdnaContext {
     id: u64,
+    resources: Arc<ResourceTracker>,
 }
 
 /// A logical execution queue funnelling into the instance's single stream lane.
 #[derive(Debug)]
 pub struct XdnaQueue {
     context_id: u64,
+    resources: Arc<ResourceTracker>,
 }
 
 /// A loaded, refcounted amdxdna executable and its dispatch plan.
@@ -573,6 +833,7 @@ struct ProgramInner {
     /// Exact per-slot byte sizes (inputs `0..inputs`, then outputs). The compiled TXN stream DMAs
     /// these extents regardless of the bound range length, so submit must enforce an exact match.
     slot_bytes: Vec<u64>,
+    resources: Arc<ResourceTracker>,
 }
 
 // SAFETY: the executable is refcounted and used only by the worker under the stream mutex, plus
@@ -586,11 +847,12 @@ impl Drop for ProgramInner {
         // SAFETY: this is the last owner of the executable reference (the caller unloaded it and no
         // in-flight job still holds a clone); release drops exactly one reference.
         unsafe { ffi::hrx_executable_release(self.executable.as_ptr()) };
+        ResourceTracker::decrement(&self.resources.programs);
     }
 }
 
 /// A loaded program: a cheap handle over the shared [`ProgramInner`], tagged with its context.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct XdnaProgram {
     inner: Arc<ProgramInner>,
     context_id: u64,
@@ -600,21 +862,42 @@ pub struct XdnaProgram {
 #[derive(Debug)]
 pub struct XdnaEvent {
     slot: Arc<EventSlot>,
+    resources: Arc<ResourceTracker>,
 }
 
-/// An HRX buffer with its persistent host mapping.
+/// One owned HRX allocation and its persistent mapping.
 #[derive(Debug)]
-pub struct XdnaBuffer {
+struct BufferInner {
     buffer: NonNull<ffi::hrx_buffer_s>,
     mapped: NonNull<u8>,
     len: usize,
+    /// Set while the device may be reading or writing this buffer; guards host access and release.
+    in_flight: AtomicU64,
+    resources: Arc<ResourceTracker>,
+}
+
+// SAFETY: the HRX allocation and persistent mapping are only accessed through XDNA's host-access
+// API or by the serialized worker. The in-flight gate excludes those paths from overlapping, and
+// the `Arc` keeps the allocation live until the worker has stopped touching it.
+unsafe impl Send for BufferInner {}
+unsafe impl Sync for BufferInner {}
+
+impl Drop for BufferInner {
+    fn drop(&mut self) {
+        // SAFETY: this is the last `Arc` owning one buffer reference. The persistent mapping is
+        // released together with the buffer (the fork never unmaps first).
+        unsafe { ffi::hrx_buffer_release(self.buffer.as_ptr()) };
+        ResourceTracker::decrement(&self.resources.buffers);
+    }
+}
+
+/// An HRX buffer handle over a refcounted native allocation.
+#[derive(Debug)]
+pub struct XdnaBuffer {
+    inner: Arc<BufferInner>,
     desc: BufferDesc,
     /// The context that allocated this buffer; a submission may only bind buffers from its own.
     context_id: u64,
-    /// Set while the device may be reading or writing this buffer; guards host access and release.
-    /// Heap-allocated (`Arc`) so a queued job's clone stays valid even if the caller moves this
-    /// struct while the job is in flight — the contract requires liveness, not address stability.
-    in_flight: Arc<AtomicU64>,
     _not_send_sync: PhantomData<*mut u8>,
 }
 
@@ -624,17 +907,9 @@ impl XdnaBuffer {
         let start = usize::try_from(offset).map_err(|_| BackendError::OutOfBounds)?;
         let end = start
             .checked_add(len)
-            .filter(|end| *end <= self.len)
+            .filter(|end| *end <= self.inner.len)
             .ok_or(BackendError::OutOfBounds)?;
         Ok((start, end))
-    }
-}
-
-impl Drop for XdnaBuffer {
-    fn drop(&mut self) {
-        // SAFETY: this handle owns one buffer reference and is dropped once. The persistent mapping
-        // is released together with the buffer (the fork never unmaps first).
-        unsafe { ffi::hrx_buffer_release(self.buffer.as_ptr()) };
     }
 }
 
@@ -651,13 +926,15 @@ impl Accelerator for XdnaAccelerator {
 
     fn create_context(&self, desc: ContextDesc) -> Result<Self::Context, BackendError> {
         self.info.validate_context_desc(desc)?;
-        Ok(XdnaContext { id: self.next_id() })
+        self.resources.contexts.fetch_add(1, Ordering::AcqRel);
+        Ok(XdnaContext {
+            id: self.next_id(),
+            resources: Arc::clone(&self.resources),
+        })
     }
 
-    fn destroy_context(
-        &self,
-        _context: Self::Context,
-    ) -> Result<(), ReleaseFailure<Self::Context>> {
+    fn destroy_context(&self, context: Self::Context) -> Result<(), ReleaseFailure<Self::Context>> {
+        ResourceTracker::decrement(&context.resources.contexts);
         Ok(())
     }
 
@@ -736,14 +1013,18 @@ impl Accelerator for XdnaAccelerator {
             unsafe { ffi::hrx_buffer_release(buffer.as_ptr()) };
         })?;
 
+        self.resources.buffers.fetch_add(1, Ordering::AcqRel);
         Ok(AllocatedBuffer::new(
             XdnaBuffer {
-                buffer,
-                mapped,
-                len: size,
+                inner: Arc::new(BufferInner {
+                    buffer,
+                    mapped,
+                    len: size,
+                    in_flight: AtomicU64::new(0),
+                    resources: Arc::clone(&self.resources),
+                }),
                 desc,
                 context_id: context.id,
-                in_flight: Arc::new(AtomicU64::new(0)),
                 _not_send_sync: PhantomData,
             },
             info,
@@ -763,18 +1044,21 @@ impl Accelerator for XdnaAccelerator {
         {
             return Err(BackendError::PermissionDenied);
         }
-        if buffer.in_flight.load(Ordering::Acquire) != 0 {
+        if buffer.inner.in_flight.load(Ordering::Acquire) != 0 {
             return Err(BackendError::Busy);
         }
         let len = usize::try_from(data.len()).map_err(|_| BackendError::OutOfBounds)?;
         let (start, end) = buffer.checked_range(offset, len)?;
         // SAFETY: the mapping is valid for `buffer.len` bytes and `[start,end)` is within it; the
         // exclusive borrow and the in-flight gate rule out concurrent device or host access.
-        let dst =
-            unsafe { core::slice::from_raw_parts_mut(buffer.mapped.as_ptr().add(start), len) };
+        let dst = unsafe {
+            core::slice::from_raw_parts_mut(buffer.inner.mapped.as_ptr().add(start), len)
+        };
         data.read_at(0, dst)?;
         // SAFETY: the buffer is live and currently mapped; the range is validated; status consumed.
-        check(unsafe { ffi::hrx_buffer_flush_range(buffer.buffer.as_ptr(), start, end - start) })?;
+        check(unsafe {
+            ffi::hrx_buffer_flush_range(buffer.inner.buffer.as_ptr(), start, end - start)
+        })?;
         // Count only completed transfers, so the diagnostics never include a failed write.
         self.explicit_transfer_bytes
             .fetch_add(len as u64, Ordering::Relaxed);
@@ -790,18 +1074,19 @@ impl Accelerator for XdnaAccelerator {
         if !buffer.desc.usage.contains(BufferUsage::TRANSFER_SOURCE) {
             return Err(BackendError::PermissionDenied);
         }
-        if buffer.in_flight.load(Ordering::Acquire) != 0 {
+        if buffer.inner.in_flight.load(Ordering::Acquire) != 0 {
             return Err(BackendError::Busy);
         }
         let len = usize::try_from(data.len()).map_err(|_| BackendError::OutOfBounds)?;
         let (start, end) = buffer.checked_range(offset, len)?;
         // SAFETY: the buffer is live and currently mapped; the range is validated; status consumed.
         check(unsafe {
-            ffi::hrx_buffer_invalidate_range(buffer.buffer.as_ptr(), start, end - start)
+            ffi::hrx_buffer_invalidate_range(buffer.inner.buffer.as_ptr(), start, end - start)
         })?;
         // SAFETY: the mapping is valid for `buffer.len` bytes and `[start,end)` is within it; the
         // shared borrow with the in-flight gate rules out concurrent device writes.
-        let src = unsafe { core::slice::from_raw_parts(buffer.mapped.as_ptr().add(start), len) };
+        let src =
+            unsafe { core::slice::from_raw_parts(buffer.inner.mapped.as_ptr().add(start), len) };
         data.write_at(0, src)?;
         self.explicit_transfer_bytes
             .fetch_add(len as u64, Ordering::Relaxed);
@@ -809,7 +1094,7 @@ impl Accelerator for XdnaAccelerator {
     }
 
     fn free_buffer(&self, buffer: Self::Buffer) -> Result<(), ReleaseFailure<Self::Buffer>> {
-        if buffer.in_flight.load(Ordering::Acquire) != 0 {
+        if buffer.inner.in_flight.load(Ordering::Acquire) != 0 {
             return Err(ReleaseFailure::Rejected {
                 error: BackendError::Busy,
                 resource: buffer,
@@ -870,7 +1155,7 @@ impl Accelerator for XdnaAccelerator {
 
         let parsed = PrecompiledArtifact::parse(container.as_ref())?;
         let device = shared_device().map_err(|_| BackendError::DeviceLost)?;
-        build_executable(device, parsed, context.id)
+        build_executable(device, parsed, context.id, &self.resources)
     }
 
     fn unload_program(&self, program: Self::Program) -> Result<(), ReleaseFailure<Self::Program>> {
@@ -887,12 +1172,15 @@ impl Accelerator for XdnaAccelerator {
         if !desc.flags.is_empty() {
             return Err(BackendError::Unsupported);
         }
+        self.resources.queues.fetch_add(1, Ordering::AcqRel);
         Ok(XdnaQueue {
             context_id: context.id,
+            resources: Arc::clone(&self.resources),
         })
     }
 
-    fn destroy_queue(&self, _queue: Self::Queue) -> Result<(), ReleaseFailure<Self::Queue>> {
+    fn destroy_queue(&self, queue: Self::Queue) -> Result<(), ReleaseFailure<Self::Queue>> {
+        ResourceTracker::decrement(&queue.resources.queues);
         Ok(())
     }
 
@@ -943,7 +1231,7 @@ impl Accelerator for XdnaAccelerator {
             })
             .collect();
         let mut output_ranges: Vec<(ffi::hrx_buffer_t, usize, usize)> = Vec::with_capacity(outputs);
-        let mut gates: Vec<Arc<AtomicU64>> = Vec::with_capacity(total);
+        let mut retained: Vec<Arc<BufferInner>> = Vec::with_capacity(total);
         // (buffer handle, bound-for-write) pairs for the aliasing rule below.
         let mut bound: Vec<(ffi::hrx_buffer_t, bool)> = Vec::with_capacity(total);
         let mut occupied = [0u64; 4]; // total <= max_bindings_per_submission = 256
@@ -990,10 +1278,14 @@ impl Accelerator for XdnaAccelerator {
             // Aliasing rule: binding one buffer to several read slots is sound (the kernel only
             // loads from it; OpenVINO admits the same). Any alias involving a write slot has
             // kernel-order-dependent results and is rejected.
-            let handle = buffer.buffer.as_ptr();
+            let handle = buffer.inner.buffer.as_ptr();
+            let mut already_retained = false;
             for &(other, other_writes) in &bound {
-                if core::ptr::eq(other, handle) && (is_output || other_writes) {
-                    return reject(BackendError::InvalidArgument);
+                if core::ptr::eq(other, handle) {
+                    if is_output || other_writes {
+                        return reject(BackendError::InvalidArgument);
+                    }
+                    already_retained = true;
                 }
             }
             bound.push((handle, is_output));
@@ -1002,7 +1294,9 @@ impl Accelerator for XdnaAccelerator {
                 offset,
                 length,
             };
-            gates.push(Arc::clone(&buffer.in_flight));
+            if !already_retained {
+                retained.push(Arc::clone(&buffer.inner));
+            }
             if is_output {
                 output_ranges.push((handle, offset, length));
             }
@@ -1017,14 +1311,25 @@ impl Accelerator for XdnaAccelerator {
             let Some(slot) = self.claim_slot() else {
                 return reject(BackendError::Busy);
             };
-            for gate in &gates {
-                gate.store(1, Ordering::Release);
+            for (armed, buffer) in retained.iter().enumerate() {
+                if buffer
+                    .in_flight
+                    .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
+                    for prior in &retained[..armed] {
+                        prior.in_flight.store(0, Ordering::Release);
+                    }
+                    slot.state.store(slot_state::FREE, Ordering::Release);
+                    return reject(BackendError::Busy);
+                }
             }
+            self.resources.events.fetch_add(1, Ordering::AcqRel);
             ring.queue.push_back(Job {
-                program: program.clone(),
+                program: Arc::clone(&program.inner),
                 bindings: refs,
                 outputs: output_ranges,
-                in_flight: gates,
+                buffers: retained,
                 slot: Arc::clone(&slot),
             });
             slot
@@ -1033,15 +1338,18 @@ impl Accelerator for XdnaAccelerator {
         // Every binding was bound directly (persistent device-visible mapping, no bounce buffer).
         self.direct_binding_admissions
             .fetch_add(total as u64, Ordering::Relaxed);
-        Ok(XdnaEvent { slot })
+        Ok(XdnaEvent {
+            slot,
+            resources: Arc::clone(&self.resources),
+        })
     }
 
     fn poll_event(&self, event: &Self::Event) -> Result<EventState, BackendError> {
         match event.slot.state.load(Ordering::Acquire) {
             slot_state::PENDING => {
                 if self.lane.is_poisoned() {
-                    // Tier-2 wedge (a never-terminal event) is the fault-paths ticket; a poisoned
-                    // instance with a still-pending event reports device loss.
+                    // A tier-2 wedge has no trustworthy terminal boundary. Keep the event pending
+                    // internally while reporting device loss at the polling API.
                     Err(BackendError::DeviceLost)
                 } else {
                     Ok(EventState::Pending)
@@ -1077,6 +1385,7 @@ impl Accelerator for XdnaAccelerator {
         }
         *event.slot.error.lock().expect("event error mutex") = None;
         event.slot.state.store(slot_state::FREE, Ordering::Release);
+        ResourceTracker::decrement(&event.resources.events);
         Ok(())
     }
 }

@@ -85,7 +85,11 @@ the toolchain pin authoritative. On the reference machine with the pinned toolch
 (`VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN`) and an NPU, backend-local tests run a DMA passthrough, a
 compiled TOSA BF16 IDENTITY, a bit-exact BF16 → FP32 MATMUL, BF16 NHWC MAX_POOL2D against the
 shared bit-exact oracle, and the shared semantic conformance suite end to end; compilation invokes
-the aiecc helper as a bounded subprocess (never a Cargo dependency). MAX_POOL2D mirrors OpenVINO's
+the aiecc helper as a bounded subprocess (never a Cargo dependency). The conformance run includes
+provider-resource accounting and direct-binding diagnostics; a feature-gated on-metal fault suite
+proves definite device loss, the 120-second tier-2 watchdog state machine with a shortened test
+deadline, rejected pending releases, stable terminal polling, and nonblocking poisoned-instance
+discard. MAX_POOL2D mirrors OpenVINO's
 propagating-NaN and zero-padding semantics, but XDNA admission is deliberately narrower: batch 1,
 kernel and stride dimensions at most 8, and at most 8,192 input-plus-output elements so the full
 tensors fit in the AIE2P worker's local memory. A public hardware CI lane remains unavailable.

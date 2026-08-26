@@ -13,8 +13,8 @@ mod common;
 use common::{bf16_identity_tosa, poll_to_terminal};
 
 use virtio_accel_conformance::{
-    BindingFixture, ConformanceHooks, ProgramFixture, SubmissionPathDiagnostics, TargetDescription,
-    run,
+    BindingFixture, ConformanceHooks, ProgramFixture, ResourceCounts, SubmissionPathDiagnostics,
+    TargetDescription, run,
 };
 use virtio_accel_core::{AccessMode, BackendError, EventState, MemoryDomain};
 use virtio_accel_tosa::ARTIFACT_FORMAT;
@@ -54,6 +54,17 @@ impl ConformanceHooks<XdnaAccelerator> for Hooks {
             EventState::Cancelled => Err(BackendError::Busy),
             EventState::Pending => unreachable!("poll_to_terminal never returns Pending"),
         }
+    }
+
+    fn resource_counts(&self, backend: &XdnaAccelerator) -> Option<ResourceCounts> {
+        let counts = backend.resource_counts();
+        Some(ResourceCounts {
+            contexts: counts.contexts,
+            buffers: counts.buffers,
+            programs: counts.programs,
+            queues: counts.queues,
+            events: counts.events,
+        })
     }
 
     fn submission_path_diagnostics(
@@ -127,5 +138,44 @@ fn xdna_backend_passes_the_standard_semantic_suite() {
         ),
         "direct-binding diagnostics did not pass: {diagnostics:?}"
     );
+    let accounting = report
+        .case("accounting.resource-lifecycle")
+        .expect("accounting case present");
+    assert!(
+        matches!(
+            accounting.status,
+            virtio_accel_conformance::CaseStatus::Passed
+        ),
+        "resource accounting did not pass: {accounting:?}"
+    );
+    let cancellation = report
+        .case("event.cancellation-races")
+        .expect("cancellation case present");
+    assert!(matches!(
+        cancellation.status,
+        virtio_accel_conformance::CaseStatus::Skipped(
+            virtio_accel_conformance::SkipReason::CapabilityNotAdvertised(capability)
+        ) if capability == virtio_accel_core::Capabilities::EVENT_CANCELLATION
+    ));
+    let device_memory = report
+        .case("memory.device")
+        .expect("device-memory case present");
+    assert!(matches!(
+        device_memory.status,
+        virtio_accel_conformance::CaseStatus::Skipped(
+            virtio_accel_conformance::SkipReason::CapabilityNotAdvertised(capability)
+        ) if capability == virtio_accel_core::Capabilities::DEVICE_LOCAL_MEMORY
+    ));
+    for case in report.cases() {
+        if matches!(
+            case.status,
+            virtio_accel_conformance::CaseStatus::Skipped(_)
+        ) {
+            assert!(
+                matches!(case.id, "memory.device" | "event.cancellation-races"),
+                "unexpected conformance skip: {case:?}"
+            );
+        }
+    }
     report.assert_conformant();
 }

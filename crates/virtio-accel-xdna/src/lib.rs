@@ -82,7 +82,12 @@ mod ffi;
 #[cfg(va_xdna)]
 mod native;
 #[cfg(va_xdna)]
-pub use native::{XdnaAccelerator, XdnaBuffer, XdnaContext, XdnaEvent, XdnaProgram, XdnaQueue};
+pub use native::{
+    XdnaAccelerator, XdnaBuffer, XdnaContext, XdnaEvent, XdnaProgram, XdnaQueue, XdnaResourceCounts,
+};
+#[cfg(all(va_xdna, feature = "test-control"))]
+#[doc(hidden)]
+pub use native::{XdnaTestConfig, XdnaTestFault};
 
 /// Admit a TOSA artifact and compile it to a precompiled-artifact container ([`artifact`]) with
 /// the pinned toolchain, without touching the device.
