@@ -36,7 +36,7 @@ enum {
 #define VA_KERR_FRAME_MAGIC 0x4d52464bu
 #define VA_KERR_FRAME_HEADER_WORDS 8u
 #define VA_KERR_SCENE_MAGIC 0x4543534bu
-#define VA_KERR_SCENE_ABI 1u
+#define VA_KERR_SCENE_ABI 2u
 #define VA_KERR_SCENE_HEADER_BYTES 160u
 #define VA_KERR_BOUNDARY_WORDS 16u
 #define VA_FRAME_FLAG_POWER_APP 0x01u
@@ -64,6 +64,7 @@ struct kerr_parameters {
     float escape_radius;
     float disk_inner_radius;
     float disk_outer_radius;
+    float termination_radius;
 };
 
 struct kerr_frame_parameters {
@@ -117,12 +118,26 @@ struct kerr_scene_header {
     uint32_t surface_temperature_bins;
     uint32_t surface_redshift_bins;
     uint32_t blackbody_bins;
-    uint32_t reserved[3];
+    uint32_t srgb_offset;
+    uint32_t srgb_entries;
+    uint32_t reserved;
 };
 
 struct kerr_boundary_record {
     uint32_t kind;
     float value[15];
+};
+
+struct kerr_scene_assets {
+    const uint8_t *extinction;
+    const uint8_t *source;
+    const uint8_t *temperature;
+    const float *surface_temperature;
+    const float *surface_density;
+    const float *surface_transfer;
+    const float *blackbody;
+    const float *sky;
+    const uint8_t *srgb;
 };
 
 struct matmul_parameters {
@@ -135,6 +150,23 @@ struct kerr_ray {
     float x[4];
     float p[4];
 };
+
+static int kerr_parameters_valid(const struct kerr_parameters *p) {
+    if (!p || !isfinite(p->mass) || !isfinite(p->spin) ||
+        !isfinite(p->step_size) || !isfinite(p->gradient_epsilon) ||
+        !isfinite(p->escape_radius) || !isfinite(p->disk_inner_radius) ||
+        !isfinite(p->disk_outer_radius) || !isfinite(p->termination_radius) ||
+        p->mass <= 0.0f || p->step_size <= 0.0f || !p->max_steps ||
+        p->gradient_epsilon <= 0.0f || p->termination_radius <= 0.0f)
+        return 0;
+    const float discriminant = p->mass * p->mass - p->spin * p->spin;
+    if (discriminant < 0.0f) return 0;
+    const float outer_horizon = p->mass + sqrtf(discriminant);
+    return p->termination_radius <= outer_horizon &&
+        p->escape_radius > outer_horizon &&
+        p->disk_inner_radius >= outer_horizon &&
+        p->disk_outer_radius >= p->disk_inner_radius;
+}
 
 struct va_htp_context {
     unsigned char *arena;
@@ -544,7 +576,7 @@ static inline HVX_Vector va_qinverse(HVX_Vector value) {
     HVX_Vector estimate = Q6_Vqf32_vadd_VsfVsf(
         Q6_Vw_vsub_VwVw(Q6_V_vsplat_R(0x7eeeeBB3), value), Q6_V_vzero());
     const HVX_Vector value_qf = Q6_Vqf32_vadd_VsfVsf(value, Q6_V_vzero());
-    for (int iteration = 0; iteration < 2; ++iteration) {
+    for (int iteration = 0; iteration < 3; ++iteration) {
         const HVX_Vector product = Q6_Vqf32_vmpy_Vqf32Vqf32(estimate, value_qf);
         const HVX_Vector correction = Q6_Vqf32_vsub_Vqf32Vqf32(two_qf, product);
         estimate = Q6_Vqf32_vmpy_Vqf32Vqf32(estimate, correction);
@@ -560,9 +592,11 @@ static inline HVX_Vector va_qinverse_seeded(HVX_Vector value, HVX_Vector seed) {
     const HVX_Vector two_qf = Q6_Vqf32_vadd_VsfVsf(va_splat(2.0f), Q6_V_vzero());
     const HVX_Vector value_qf = Q6_Vqf32_vadd_VsfVsf(value, Q6_V_vzero());
     HVX_Vector estimate = Q6_Vqf32_vadd_VsfVsf(seed, Q6_V_vzero());
-    const HVX_Vector product = Q6_Vqf32_vmpy_Vqf32Vqf32(estimate, value_qf);
-    const HVX_Vector correction = Q6_Vqf32_vsub_Vqf32Vqf32(two_qf, product);
-    estimate = Q6_Vqf32_vmpy_Vqf32Vqf32(estimate, correction);
+    for (int iteration = 0; iteration < 2; ++iteration) {
+        const HVX_Vector product = Q6_Vqf32_vmpy_Vqf32Vqf32(estimate, value_qf);
+        const HVX_Vector correction = Q6_Vqf32_vsub_Vqf32Vqf32(two_qf, product);
+        estimate = Q6_Vqf32_vmpy_Vqf32Vqf32(estimate, correction);
+    }
     return Q6_Vsf_equals_Vqf32(estimate);
 }
 
@@ -573,7 +607,7 @@ static inline HVX_Vector va_qrsqrt(HVX_Vector value) {
         Q6_Vw_vsub_VwVw(Q6_V_vsplat_R(0x5f3759df), Q6_Vw_vasr_VwR(value, 1)),
         Q6_V_vzero());
     const HVX_Vector x_half = Q6_Vqf32_vmpy_VsfVsf(value, va_splat(0.5f));
-    for (int iteration = 0; iteration < 2; ++iteration) {
+    for (int iteration = 0; iteration < 3; ++iteration) {
         const HVX_Vector square = Q6_Vqf32_vmpy_Vqf32Vqf32(estimate, estimate);
         const HVX_Vector product = Q6_Vqf32_vmpy_Vqf32Vqf32(x_half, square);
         const HVX_Vector correction = Q6_Vqf32_vsub_Vqf32Vqf32(
@@ -729,7 +763,7 @@ static inline void kerr_field_vector_seeded(
         seed->inverse_discriminant_root, 2);
     const HVX_Vector r2 = va_qmul(va_splat(0.5f),
         va_qadd(s, va_qmul(discriminant, inverse_root)));
-    const HVX_Vector inverse_r = va_qrsqrt_seeded(r2, seed->inverse_radius, 1);
+    const HVX_Vector inverse_r = va_qrsqrt_seeded(r2, seed->inverse_radius, 2);
     const HVX_Vector r = va_qmul(r2, inverse_r);
     const HVX_Vector inverse_denominator = va_qinverse_seeded(va_qadd(r2, a2),
         seed->inverse_direction_denominator);
@@ -813,7 +847,7 @@ static inline void kerr_position_metric_term_vector_pair(
             seed->inverse_discriminant_root, 2);
         const HVX_Vector r2 = va_qmul(va_splat(0.5f),
             va_qadd(s, va_qmul(discriminant, inverse_root)));
-        const HVX_Vector inverse_r = va_qrsqrt_seeded(r2, seed->inverse_radius, 1);
+        const HVX_Vector inverse_r = va_qrsqrt_seeded(r2, seed->inverse_radius, 2);
         const HVX_Vector radius = va_qmul(r2, inverse_r);
         const HVX_Vector inverse_denominator = va_qinverse_seeded(va_qadd(r2, a2),
             seed->inverse_direction_denominator);
@@ -1095,8 +1129,7 @@ static void kerr_trace_hvx(
     const HVX_Vector event_capture = va_splat(1.0f);
     const HVX_Vector event_disk = va_splat(2.0f);
     const HVX_Vector event_escape = va_splat(3.0f);
-    const HVX_Vector horizon = va_splat(parameters->mass + sqrtf(
-        parameters->mass * parameters->mass - parameters->spin * parameters->spin));
+    const HVX_Vector horizon = va_splat(parameters->termination_radius);
     const HVX_Vector escape_radius = va_splat(parameters->escape_radius);
     const HVX_Vector disk_inner = va_splat(parameters->disk_inner_radius);
     const HVX_Vector disk_outer = va_splat(parameters->disk_outer_radius);
@@ -1210,8 +1243,7 @@ static AEEResult kerr_trace_scalar(
     const struct kerr_parameters *parameters,
     const float *input,
     float *output) {
-    const float horizon = parameters->mass + sqrtf(
-        parameters->mass * parameters->mass - parameters->spin * parameters->spin);
+    const float horizon = parameters->termination_radius;
     for (uint32_t lane = 0; lane < count; ++lane) {
         struct kerr_ray ray;
         for (int i = 0; i < 4; ++i) {
@@ -1491,6 +1523,23 @@ static uint32_t va_pack_aces(const float color[3]) {
     return 0xff000000u | (encoded[0] << 16) | (encoded[1] << 8) | encoded[2];
 }
 
+static uint32_t va_pack_aces_lut(
+    const struct kerr_scene_header *scene,
+    const uint8_t *srgb,
+    const float color[3]) {
+    uint32_t encoded[3];
+    for (int channel = 0; channel < 3; ++channel) {
+        const float linear = fmaxf(color[channel], 0.0f);
+        float mapped = (linear * (2.51f * linear + 0.03f)) /
+            (linear * (2.43f * linear + 0.59f) + 0.14f);
+        mapped = fminf(fmaxf(mapped, 0.0f), 1.0f);
+        uint32_t index = (uint32_t)(mapped * (float)(scene->srgb_entries - 1u) + 0.5f);
+        if (index >= scene->srgb_entries) index = scene->srgb_entries - 1u;
+        encoded[channel] = srgb[index];
+    }
+    return 0xff000000u | (encoded[0] << 16) | (encoded[1] << 8) | encoded[2];
+}
+
 static uint32_t va_shade_kerr_lane(
     const struct kerr_frame_parameters *parameters,
     const float *trace_output,
@@ -1547,8 +1596,7 @@ static int kerr_trace_one_vector_has_event(
     HVX_VectorPred active) {
     struct kerr_ray_vector ray = *input_ray;
     const HVX_Vector zero = Q6_V_vzero();
-    const HVX_Vector horizon = va_splat(parameters->mass + sqrtf(
-        parameters->mass * parameters->mass - parameters->spin * parameters->spin));
+    const HVX_Vector horizon = va_splat(parameters->termination_radius);
     const HVX_Vector escape_radius = va_splat(parameters->escape_radius);
     const HVX_Vector disk_inner = va_splat(parameters->disk_inner_radius);
     const HVX_Vector disk_outer = va_splat(parameters->disk_outer_radius);
@@ -1621,8 +1669,7 @@ static __attribute__((noinline)) int kerr_trace_one_vector(
     const HVX_Vector event_capture = va_splat(1.0f);
     const HVX_Vector event_disk = va_splat(2.0f);
     const HVX_Vector event_escape = va_splat(3.0f);
-    const HVX_Vector horizon = va_splat(parameters->mass + sqrtf(
-        parameters->mass * parameters->mass - parameters->spin * parameters->spin));
+    const HVX_Vector horizon = va_splat(parameters->termination_radius);
     const HVX_Vector escape_radius = va_splat(parameters->escape_radius);
     const HVX_Vector disk_inner = va_splat(parameters->disk_inner_radius);
     const HVX_Vector disk_outer = va_splat(parameters->disk_outer_radius);
@@ -2282,14 +2329,14 @@ static void va_march_emission(
     }
 }
 
-static void va_shade_reference_disk(
+static void va_shade_reference_disk_rotated(
     const struct kerr_scene_header *scene,
-    const unsigned char *bytes,
+    const struct kerr_scene_assets *assets,
     const struct kerr_boundary_record *record,
+    float sine,
+    float cosine,
     float color[3]) {
     const float *v = record->value;
-    const float phase = v[10] * (scene->time * scene->plasma_time_scale - v[11]);
-    const float sine = sinf(-phase), cosine = cosf(-phase);
     const float point[3] = {cosine * v[0] - sine * v[1], sine * v[0] + cosine * v[1], v[2]};
     const float direction[3] = {cosine * v[4] - sine * v[5], sine * v[4] + cosine * v[5], v[6]};
     const float redshift = fminf(fmaxf(v[7], 0.12f), 3.0f);
@@ -2303,14 +2350,12 @@ static void va_shade_reference_disk(
     const float outer_taper = outer_amount * outer_amount * (3.0f - 2.0f * outer_amount);
     float temperature, density;
     if (scene->plasma_mode == 1u) {
-        const float *temperature_field = (const float *)(bytes + scene->surface_temperature_offset);
-        const float *density_field = (const float *)(bytes + scene->surface_density_offset);
-        temperature = va_sample_surface(scene, temperature_field, position);
-        density = va_sample_surface(scene, density_field, position);
+        temperature = va_sample_surface(scene, assets->surface_temperature, position);
+        density = va_sample_surface(scene, assets->surface_density, position);
     } else {
         temperature = 10000.0f * va_sample_trilinear_u8(scene,
-            bytes + scene->temperature_offset, position);
-        density = va_sample_trilinear_u8(scene, bytes + scene->extinction_offset, position);
+            assets->temperature, position);
+        density = va_sample_trilinear_u8(scene, assets->extinction, position);
     }
     if (temperature < 900.0f) {
         const float kinetic = fminf(fmaxf(v[9] / scene->kinetic_reference, 0.0f), 1.5f);
@@ -2323,11 +2368,11 @@ static void va_shade_reference_disk(
     const float surface_scale = outer_taper * (0.06f + 0.64f * fill);
     if (scene->plasma_mode == 1u) {
         va_sample_surface_transfer(scene,
-            (const float *)(bytes + scene->surface_transfer_offset), temperature, redshift, color);
+            assets->surface_transfer, temperature, redshift, color);
         for (int channel = 0; channel < 3; ++channel) color[channel] *= surface_scale;
         return;
     }
-    const float *blackbody = (const float *)(bytes + scene->blackbody_offset);
+    const float *blackbody = assets->blackbody;
     float reference[3], shifted[3], surface[3];
     va_sample_blackbody(scene, blackbody, va_display_temperature(temperature), reference);
     va_sample_blackbody(scene, blackbody, va_display_temperature(temperature * redshift), shifted);
@@ -2345,8 +2390,8 @@ static void va_shade_reference_disk(
         grid_direction[axis] = direction[axis] * scale[axis];
     }
     float volume[3], transmittance;
-    va_march_emission(scene, bytes + scene->extinction_offset,
-        bytes + scene->source_offset, origin, grid_direction, 2.0f * span,
+    va_march_emission(scene, assets->extinction,
+        assets->source, origin, grid_direction, 2.0f * span,
         volume, &transmittance);
     for (int channel = 0; channel < 3; ++channel) {
         const float spectral_shift = shifted[channel] / fmaxf(reference[channel], 1.0e-4f);
@@ -2354,18 +2399,28 @@ static void va_shade_reference_disk(
     }
 }
 
+static void va_shade_reference_disk(
+    const struct kerr_scene_header *scene,
+    const struct kerr_scene_assets *assets,
+    const struct kerr_boundary_record *record,
+    float color[3]) {
+    const float *v = record->value;
+    const float phase = v[10] * (scene->time * scene->plasma_time_scale - v[11]);
+    va_shade_reference_disk_rotated(scene, assets, record, sinf(-phase), cosf(-phase), color);
+}
+
 static void va_shade_reference_sample(
     const struct kerr_scene_header *scene,
-    const unsigned char *bytes,
+    const struct kerr_scene_assets *assets,
     const struct kerr_boundary_record *record,
     float color[3]) {
     if (record->kind == 1u || record->kind == 5u) {
         color[0] = color[1] = color[2] = 0.0f;
     } else if (record->kind == 2u) {
-        va_shade_reference_disk(scene, bytes, record, color);
+        va_shade_reference_disk(scene, assets, record, color);
     } else if (record->kind == 3u) {
         const float frame_u = scene->time * scene->sky_speed * 0.15915494309189535f;
-        va_sample_sky(scene, (const float *)(bytes + scene->sky_offset),
+        va_sample_sky(scene, assets->sky,
             record->value[5] + frame_u, record->value[6], color);
     } else {
         color[0] = 0.08f; color[1] = 0.012f; color[2] = 0.025f;
@@ -2375,6 +2430,7 @@ static void va_shade_reference_sample(
 static uint32_t va_shade_reference_pixel(
     const struct kerr_scene_header *scene,
     const unsigned char *bytes,
+    const struct kerr_scene_assets *assets,
     uint32_t pixel) {
     const struct kerr_boundary_record *base =
         (const struct kerr_boundary_record *)(bytes + scene->base_offset);
@@ -2390,12 +2446,12 @@ static uint32_t va_shade_reference_pixel(
     float color[3] = {0.0f, 0.0f, 0.0f};
     for (uint32_t sample = 0; sample < count; ++sample) {
         float sample_color[3];
-        va_shade_reference_sample(scene, bytes, samples + sample, sample_color);
+        va_shade_reference_sample(scene, assets, samples + sample, sample_color);
         for (int channel = 0; channel < 3; ++channel) color[channel] += sample_color[channel];
     }
     const float scale = scene->exposure / (float)count;
     for (int channel = 0; channel < 3; ++channel) color[channel] *= scale;
-    return va_pack_aces(color);
+    return va_pack_aces_lut(scene, assets->srgb, color);
 }
 
 struct kerr_shade_job {
@@ -2410,9 +2466,23 @@ static void kerr_shade_worker(unsigned int workers, unsigned int worker, void *o
     const uint32_t first = job->scene->pixels * worker / workers;
     const uint32_t last = job->scene->pixels * (worker + 1u) / workers;
     const uint32_t slice_bytes = (job->context->vtcm_size / workers) & ~127u;
+    unsigned char *slice = job->context->vtcm + worker * slice_bytes;
+    struct kerr_scene_assets assets = {
+        .extinction = job->bytes + job->scene->extinction_offset,
+        .source = job->bytes + job->scene->source_offset,
+        .temperature = job->bytes + job->scene->temperature_offset,
+        .surface_temperature = (const float *)(job->bytes +
+            job->scene->surface_temperature_offset),
+        .surface_density = (const float *)(job->bytes +
+            job->scene->surface_density_offset),
+        .surface_transfer = (const float *)(job->bytes +
+            job->scene->surface_transfer_offset),
+        .blackbody = (const float *)(job->bytes + job->scene->blackbody_offset),
+        .sky = (const float *)(job->bytes + job->scene->sky_offset),
+        .srgb = job->bytes + job->scene->srgb_offset,
+    };
     const uint32_t slot_bytes = (slice_bytes / 2u) & ~127u;
     const uint32_t capacity = slot_bytes / sizeof(uint32_t);
-    unsigned char *slice = job->context->vtcm + worker * slice_bytes;
     hexagon_udma_descriptor_type0_t descriptors[2] __attribute__((aligned(16)));
     int dma_active = 0;
     uint32_t slot = 0;
@@ -2420,7 +2490,8 @@ static void kerr_shade_worker(unsigned int workers, unsigned int worker, void *o
         const uint32_t count = last - offset < capacity ? last - offset : capacity;
         uint32_t *packed = (uint32_t *)(slice + slot * slot_bytes);
         for (uint32_t lane = 0; lane < count; ++lane)
-            packed[lane] = va_shade_reference_pixel(job->scene, job->bytes, offset + lane);
+            packed[lane] = va_shade_reference_pixel(job->scene, job->bytes,
+                &assets, offset + lane);
         if (dma_active) (void)Q6_R_dmwait();
         descriptors[slot] = (hexagon_udma_descriptor_type0_t){
             .next = NULL,
@@ -2593,7 +2664,7 @@ AEEResult va_htp_execute(
             scene->pixels != lanes || !scene->base_spp || scene->storage > 2u ||
             scene->plasma_mode > 1u || !scene->dim_x || !scene->dim_y || !scene->dim_z ||
             !scene->sky_width || !scene->sky_height || !scene->surface_temperature_bins ||
-            !scene->surface_redshift_bins || !scene->blackbody_bins ||
+            !scene->surface_redshift_bins || !scene->blackbody_bins || scene->srgb_entries < 2u ||
             scene->total_bytes != (uint32_t)input0_len ||
             !isfinite(scene->time) || !isfinite(scene->plasma_time_scale) ||
             !isfinite(scene->sky_speed) || !isfinite(scene->exposure) || scene->exposure <= 0.0f ||
@@ -2617,7 +2688,8 @@ AEEResult va_htp_execute(
             !va_scene_offset_valid(scene->blackbody_offset,
                 scene->blackbody_bins * 4u * sizeof(float), scene->total_bytes) ||
             !va_scene_offset_valid(scene->sky_offset,
-                (uint32_t)sky_values * sizeof(float), scene->total_bytes))
+                (uint32_t)sky_values * sizeof(float), scene->total_bytes) ||
+            !va_scene_offset_valid(scene->srgb_offset, scene->srgb_entries, scene->total_bytes))
             return AEE_EBADPARM;
         const uint64_t start = HAP_perf_get_qtimer_count();
         AEEResult result = kerr_shade_parallel(ctx, scene, input0, (uint32_t *)output);
@@ -2631,9 +2703,19 @@ AEEResult va_htp_execute(
             return AEE_EBADPARM;
         const struct kerr_frame_parameters *p =
             (const struct kerr_frame_parameters *)parameters;
-        if (!p->width || !p->height || p->samples_per_pixel != 1 ||
+        if (!kerr_parameters_valid(&p->trace) || !p->width || !p->height ||
+            p->samples_per_pixel != 1 ||
+            !isfinite(p->tan_half_fov) || p->tan_half_fov <= 0.0f ||
             (uint64_t)p->width * p->height != lanes)
             return AEE_EBADPARM;
+        for (int component = 0; component < 3; ++component)
+            if (!isfinite(p->camera_position[component])) return AEE_EBADPARM;
+        for (int component = 0; component < 4; ++component)
+            if (!isfinite(p->camera_time[component]) ||
+                !isfinite(p->camera_right[component]) ||
+                !isfinite(p->camera_up[component]) ||
+                !isfinite(p->camera_forward[component]))
+                return AEE_EBADPARM;
         const uint64_t start = HAP_perf_get_qtimer_count();
         AEEResult result = kerr_frame_parallel(ctx, lanes, p, (uint32_t *)output);
         *elapsed_cycles = HAP_perf_get_qtimer_count() - start;
@@ -2652,6 +2734,8 @@ AEEResult va_htp_execute(
     if (opcode == VA_HTP_OP_KERR_TRACE) {
         if (parameters_len != (int) sizeof(struct kerr_parameters) ||
             (uint32_t) input0_len < bytes * 9 || (uint32_t) output_len < bytes * 12)
+            return AEE_EBADPARM;
+        if (!kerr_parameters_valid((const struct kerr_parameters *)parameters))
             return AEE_EBADPARM;
         const uint64_t start = HAP_perf_get_qtimer_count();
         AEEResult result = trace_parallel(ctx, opcode, lanes, parameters,

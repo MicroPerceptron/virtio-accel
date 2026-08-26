@@ -1,6 +1,6 @@
 # Hexagon V73 direct-HTP evidence
 
-Recorded on 2026-08-25 for issue #128 and Axiom issue #49.
+Recorded through 2026-08-26 for issue #128 and Axiom issue #49.
 
 ## Change classification
 
@@ -18,7 +18,7 @@ are private to `virtio-accel-hexagon` and require explicit caller selection.
 - QAIRT: `2.49.0.260730`
 - Hexagon SDK: `6.6.0.0`
 - Compiler: `QuIC LLVM Hexagon Clang version 19.0.07`
-- Signed skel SHA-256: `c1da44916b212c0f2daebf6e6d5525644e083e4b4a32efa5101894fd95ee0b86`
+- Signed skel SHA-256: `ba39e65d89c99cd431926885db65a3b2f5979152a3579d43f62f69d277081347`
 - Development signing certificate: `CN=GGML.HTP.v1`; the catalog passed
   `signtool verify /pa`. Neither the certificate nor signed output is tracked.
 
@@ -61,7 +61,30 @@ the declared relative/absolute tolerances. Each test uses 128 lanes, forcing
 four 32-lane HVX partitions through the worker pool and VTCM path. A third
 hardware test covers the fused Kerr frame and asserts worker mask `0xf`, peak
 concurrency four, all compute/HVX/DCVS/core/bus votes, user-DMA use, compact
-output length, event totals, and packed unresolved color.
+output length, event totals, and packed unresolved color. The compact fused
+frame remains a pipeline diagnostic; Axiom's restored reference renderer uses
+the direct Kerr trace plus resident reference-scene shader described below.
+
+For the restored static camera at 160x90 and 320 steps, HTP and the independent
+CPU trace matched all 14,400 terminal classes and the same event totals: 549
+capture, 6,084 disk, 7,698 sky, and 69 unresolved. The 4-SPP/half-step boundary
+refinement also matched all 4,520 terminal classes. With identical boundaries,
+the resident HTP shader differed from the CPU shader by at most one 8-bit
+channel value and no channel exceeded the tolerance.
+
+The shader oracle also passed two nonzero-time animated frames for every
+combination of surface/volume mode and B8, UF8 E4M4, or UF8 E5M3 storage. This
+exercises all three decoders, bilinear surface-field sampling, trilinear volume
+sampling, emission/extinction marching, spectral interpolation, animated
+plasma/sky inputs, ACES/sRGB conversion, and packed RGBA output. Every case had
+a maximum channel error of one and zero channels above eight.
+
+For a past-directed infalling camera, the 32x18 base trace matched all 576 CPU
+terminal classes. Seven of 1,520 4-SPP/half-step refinement rays (0.46%) chose
+the opposite sky/interior terminal class after up to 640 QFloat32 steps. This
+is retained as explicit relaxed-precision trajectory evidence rather than
+being hidden by a CPU fallback. With identical HTP boundaries, the infall
+shader again had maximum channel error one and zero channels above eight.
 
 Deterministic render artifacts produced by the examples:
 
@@ -88,13 +111,19 @@ the CPU wormhole reference SHA-256 is
 
 ## Fused implementation and performance result
 
-The kernels use explicit 32-lane V73 QFloat32 operations, four dedicated QuRT
-workers, and one private VTCM slice per worker. The complete Kerr-frame opcode
-moves unchanged camera-ray generation and Axiom shading/packing onto HTP. It
-replaces nine uploaded FP32 planes with a four-byte control binding and twelve
-returned FP32 planes with a 32-byte header plus one packed RGBA word per pixel.
-Large submissions are internally tiled through ping-pong VTCM slots; V73 user
-DMA overlaps packed readback staging with computation of the next tile.
+The trace kernels use explicit 32-lane V73 QFloat32 operations, four dedicated
+QuRT workers, and one private VTCM slice per worker. Large submissions are
+internally tiled through VTCM. The separate compact Kerr-frame opcode moves
+camera-ray generation and a diagnostic shader/packer onto HTP and remains
+useful for pipeline tests, but it is not substituted for Axiom's reference
+scene.
+
+The restored reference path uploads the cached boundary/refinement records,
+all three eight-bit plasma fields, optional surface fields, spectral-transfer
+and blackbody tables, sky atlas, and dense sRGB transfer table once. The
+`KerrShade` program keeps that scene resident; each animated frame changes
+only its four-byte time value and reads packed RGBA. Four HTP workers shade
+disjoint pixel ranges and use ping-pong VTCM plus V73 user DMA for output.
 
 The backend applies compute-class, HVX, performance-mode DCVS, turbo core, and
 turbo bus votes. Hardware diagnostics prove all four workers overlap. The
@@ -102,11 +131,10 @@ one-step frame path keeps camera rays and the common no-event trace in HVX
 registers, hoists camera-position geometry, reuses nearby-geometry Newton
 seeds, and reruns the full trace only when a packet needs terminal state for
 shading. Packet-wide predicate checks skip masked outward/disk work and shared
-denominators reuse reciprocal results. Two refinements remain on the base and
-discriminant paths; the nearby radius path uses one seeded refinement that
-passes both scalar oracles. More aggressive one-refinement variants were
-rejected after exceeding the declared oracle tolerances. The simulation still
-uses its original centered finite-difference gradient and midpoint step.
+denominators reuse reciprocal results. Unseeded reciprocal and reciprocal
+square root use three Newton refinements; nearby seeded paths use two. The
+simulation still uses its original centered finite-difference gradient and
+midpoint step.
 
 The packed output remains in the provider's coherent host-mapped allocation.
 Axiom's scoped frame view consumes it in place, eliminating three redundant
@@ -127,11 +155,30 @@ unchanged. A preceding independent run measured p50 49.935 ms (20.026 FPS), so
 the one-step pipeline diagnostic passes on repeat runs. It does **not** satisfy
 the rendering acceptance criterion because all rays remain unresolved.
 
-The outstanding target is the complete Kerr scene at exactly 1080x760 using
-the unchanged reference 320-step integrator, with a moving camera or another
-visible temporal change, sustained at 20 FPS or better. The current complete
-160x90/320-step live renderer measures about 1.93 FPS, so issues #128 and Axiom
-#49 remain open.
+The table above predates restoration of the complete reference plasma,
+boundary-refinement, and animation behavior and is retained only as historical
+pipeline evidence. After the restored correctness checklist passed, the exact
+reference target was measured with 5 warmups and 20 animated frames:
+
+- 1080x760, 320 integration steps, one base sample, 4-SPP/half-step boundary
+  refinement, volume plasma, and UF8 E4M4 storage;
+- base trace: 19,000.8 ms for 820,800 rays; 38,839 capture, 429,088 disk,
+  347,693 sky, 5,180 unresolved;
+- refinement: 10,560 edge pixels in 2,806.7 ms;
+- resident scene: 83 MiB;
+- animated shader p50: 10,354.442 ms (**0.097 FPS**), p95 10,991.113 ms,
+  worst 11,197.949 ms, and 20/20 measured frames over 50 ms;
+- HTP request p50: 10,354.126 ms; four-byte time write p50: 0.600 us;
+- 477,410 of 820,800 pixels changed between the first and last measured frame;
+  final PPM SHA-256
+  `efb44abfdefaaefcc7213fd99c95b7c76346329506ab2d961a2f04d366e5a1f3`.
+
+The run used Windows Balanced mode at 50% charge. It proves a real visible
+temporal change and fails the 20 FPS criterion by about 207x. The request time
+nearly equals frame time, while the control write is sub-microsecond, so the
+remaining bottleneck is the scalar per-pixel reference volume shader on HTP,
+especially divergent DDA emission/extinction marching. It is not host transfer
+or FastRPC setup. Issues #128 and Axiom #49 remain open.
 
 The passing runs used Windows Balanced mode with successful HTP performance,
 turbo-core, and turbo-bus votes. Later diagnostic runs after the machine

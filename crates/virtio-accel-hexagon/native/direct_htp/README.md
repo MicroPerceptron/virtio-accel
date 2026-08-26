@@ -42,7 +42,8 @@ cargo test -p virtio-accel-hexagon direct_fp32_capability_spike_covers_required_
 
 The provider-local artifact ABI currently admits identity, add, multiply,
 reciprocal, reciprocal square root, matrix multiplication, fused Dneg
-wormhole tracing, fused Kerr tracing, and a complete fused Kerr frame. Every
+wormhole tracing, fused Kerr tracing, the compact diagnostic Kerr frame, and
+resident reference-scene Kerr shading. Every
 request is one FastRPC call
 to this skel; there is no QNN graph, CPU, or GPU fallback. The fused tracing
 kernels process 32 FP32 lanes per HVX vector through V73 QFloat32 arithmetic.
@@ -66,6 +67,15 @@ full trace before shading, preserving event state and pixels. The host can
 consume the coherent mapped framebuffer through a scoped zero-copy view or
 request an owned copy.
 
-The accepted reciprocal and reciprocal-square-root implementation uses two
-Newton refinements. A one-refinement experiment was rejected because it failed
-both independent Kerr and wormhole scalar-oracle tolerances.
+The accepted reciprocal and reciprocal-square-root implementation uses three
+Newton refinements for unseeded values and two for nearby seeded values. This
+configuration makes the restored static 320-step Kerr event and refinement
+maps match the CPU oracle exactly. More aggressive refinement reductions and
+an extra seeded refinement were rejected after worsening the hardware oracles.
+
+The resident reference shader supports B8/E4M3, UF8 E4M4, and UF8 E5M3
+storage; bilinear surface and trilinear volume sampling; emission/extinction
+marching; spectral-transfer and blackbody lookup/interpolation; boundary
+supersampling; animated plasma/sky time; and ACES/sRGB packed output. Axiom
+uploads the immutable scene once and changes only a four-byte time word for
+each animated frame.

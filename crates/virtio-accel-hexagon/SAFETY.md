@@ -80,7 +80,8 @@ and byte counts are checked on the Rust side before binding; the skel rejects
 zero dimensions and short buffers.
 
 The fused Kerr-frame artifact additionally checks `width * height == lanes`,
-requires one sample per pixel, binds exactly four input bytes and
+requires one sample per pixel, validates finite camera/tetrad/FOV values and a
+finite physically ordered trace configuration, binds exactly four input bytes and
 `32 + 4 * lanes` output bytes, and rechecks those relationships before the skel
 casts parameters or writes output. Each worker owns disjoint pixel ranges and
 two disjoint slots in its private VTCM slice. A user-DMA descriptor is waited

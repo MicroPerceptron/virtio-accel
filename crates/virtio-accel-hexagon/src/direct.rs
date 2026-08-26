@@ -23,7 +23,7 @@ const DEFAULT_ARENA_BYTES: u32 = 512 * 1024 * 1024;
 const MIN_ALIGNMENT: u64 = 128;
 const MAX_ARTIFACT_BYTES: u64 = 64 * 1024;
 const ARTIFACT_MAGIC: u32 = u32::from_le_bytes(*b"VAHD");
-const ARTIFACT_ABI: u32 = 1;
+const ARTIFACT_ABI: u32 = 2;
 const TARGET_MAGIC: u32 = u32::from_le_bytes(*b"V73Q");
 const TARGET_ABI: u32 = 1;
 const MESSAGE_BYTES: usize = 512;
@@ -147,6 +147,9 @@ impl DirectHtpArtifact {
     }
 
     pub fn kerr_trace(lanes: u32, parameters: KerrTraceParameters) -> Option<Self> {
+        if !parameters.is_valid() {
+            return None;
+        }
         let mut artifact = Self::new(DirectHtpOperation::KerrTrace, lanes)?;
         for word in [
             parameters.mass.to_bits(),
@@ -157,6 +160,7 @@ impl DirectHtpArtifact {
             parameters.escape_radius.to_bits(),
             parameters.disk_inner_radius.to_bits(),
             parameters.disk_outer_radius.to_bits(),
+            parameters.termination_radius.to_bits(),
         ] {
             artifact.0.extend_from_slice(&word.to_le_bytes());
         }
@@ -167,6 +171,7 @@ impl DirectHtpArtifact {
     pub fn kerr_frame(lanes: u32, parameters: KerrFrameParameters) -> Option<Self> {
         if parameters.width.checked_mul(parameters.height)? != lanes
             || parameters.samples_per_pixel != 1
+            || !parameters.is_valid()
         {
             return None;
         }
@@ -180,6 +185,7 @@ impl DirectHtpArtifact {
             parameters.trace.escape_radius.to_bits(),
             parameters.trace.disk_inner_radius.to_bits(),
             parameters.trace.disk_outer_radius.to_bits(),
+            parameters.trace.termination_radius.to_bits(),
             parameters.width,
             parameters.height,
             parameters.samples_per_pixel,
@@ -257,8 +263,8 @@ impl DirectHtpArtifact {
             | DirectHtpOperation::Rsqrt => 0,
             DirectHtpOperation::MatMul => 12,
             DirectHtpOperation::WormholeTrace => 24,
-            DirectHtpOperation::KerrTrace => 32,
-            DirectHtpOperation::KerrFrame => 124,
+            DirectHtpOperation::KerrTrace => 36,
+            DirectHtpOperation::KerrFrame => 128,
             DirectHtpOperation::KerrShade => 4,
         };
         if bytes.len() != 16 + expected_parameters {
@@ -302,6 +308,36 @@ pub struct KerrTraceParameters {
     pub escape_radius: f32,
     pub disk_inner_radius: f32,
     pub disk_outer_radius: f32,
+    /// Positive capture/termination surface, at or inside the outer horizon.
+    pub termination_radius: f32,
+}
+
+impl KerrTraceParameters {
+    fn is_valid(self) -> bool {
+        let horizon_discriminant = self.mass * self.mass - self.spin * self.spin;
+        if !self.mass.is_finite()
+            || !self.spin.is_finite()
+            || !self.step_size.is_finite()
+            || !self.gradient_epsilon.is_finite()
+            || !self.escape_radius.is_finite()
+            || !self.disk_inner_radius.is_finite()
+            || !self.disk_outer_radius.is_finite()
+            || !self.termination_radius.is_finite()
+            || self.mass <= 0.0
+            || horizon_discriminant < 0.0
+        {
+            return false;
+        }
+        let outer_horizon = self.mass + horizon_discriminant.sqrt();
+        self.step_size > 0.0
+            && self.max_steps > 0
+            && self.gradient_epsilon > 0.0
+            && self.termination_radius > 0.0
+            && self.termination_radius <= outer_horizon
+            && self.escape_radius > outer_horizon
+            && self.disk_inner_radius >= outer_horizon
+            && self.disk_outer_radius >= self.disk_inner_radius
+    }
 }
 
 /// Frozen Axiom Kerr camera/render state consumed by the fused HTP frame program.
@@ -317,6 +353,25 @@ pub struct KerrFrameParameters {
     pub camera_right: [f32; 4],
     pub camera_up: [f32; 4],
     pub camera_forward: [f32; 4],
+}
+
+impl KerrFrameParameters {
+    fn is_valid(self) -> bool {
+        self.trace.is_valid()
+            && self.width > 0
+            && self.height > 0
+            && self.samples_per_pixel == 1
+            && self.tan_half_fov.is_finite()
+            && self.tan_half_fov > 0.0
+            && self
+                .camera_position
+                .into_iter()
+                .chain(self.camera_time)
+                .chain(self.camera_right)
+                .chain(self.camera_up)
+                .chain(self.camera_forward)
+                .all(f32::is_finite)
+    }
 }
 
 #[repr(C)]
@@ -935,6 +990,7 @@ mod tests {
             escape_radius: 32.0,
             disk_inner_radius: 3.829_069,
             disk_outer_radius: 15.0,
+            termination_radius: 1.8,
         };
         let parameters = KerrFrameParameters {
             trace,
@@ -952,7 +1008,7 @@ mod tests {
         let (operation, lanes, encoded) = DirectHtpArtifact::parse(artifact.bytes()).unwrap();
         assert_eq!(operation, DirectHtpOperation::KerrFrame);
         assert_eq!(lanes, 14_400);
-        assert_eq!(encoded.len(), 124);
+        assert_eq!(encoded.len(), 128);
         assert_eq!(operation.binding_bytes(lanes, 0), Some(4));
         assert_eq!(operation.binding_bytes(lanes, 1), Some(57_632));
         assert!(DirectHtpArtifact::kerr_frame(14_399, parameters).is_none());
@@ -961,6 +1017,39 @@ mod tests {
                 14_400,
                 KerrFrameParameters {
                     samples_per_pixel: 2,
+                    ..parameters
+                }
+            )
+            .is_none()
+        );
+        assert!(
+            DirectHtpArtifact::kerr_frame(
+                14_400,
+                KerrFrameParameters {
+                    tan_half_fov: f32::NAN,
+                    ..parameters
+                }
+            )
+            .is_none()
+        );
+        assert!(
+            DirectHtpArtifact::kerr_frame(
+                14_400,
+                KerrFrameParameters {
+                    camera_forward: [0.0, 0.0, f32::INFINITY, 0.0],
+                    ..parameters
+                }
+            )
+            .is_none()
+        );
+        assert!(
+            DirectHtpArtifact::kerr_frame(
+                14_400,
+                KerrFrameParameters {
+                    trace: KerrTraceParameters {
+                        termination_radius: 1.81,
+                        ..trace
+                    },
                     ..parameters
                 }
             )
