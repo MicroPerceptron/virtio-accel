@@ -152,7 +152,7 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "virtio-accel"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "serde_json",
  "virtio-accel-cleanroom",
@@ -169,11 +169,11 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-cleanroom"
-version = "0.3.3"
+version = "0.3.4"
 
 [[package]]
 name = "virtio-accel-conformance"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "virtio-accel-core",
  "virtio-accel-mock",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-core"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "bitflags",
  "virtio-accel-transport",
@@ -190,7 +190,7 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-coreml"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "cc",
  "virtio-accel-conformance",
@@ -200,7 +200,7 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-device"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "virtio-accel-core",
  "virtio-accel-mock",
@@ -211,7 +211,7 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-guest"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "bitflags",
  "virtio-accel-proto",
@@ -222,7 +222,7 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-hexagon"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "cc",
  "virtio-accel-conformance",
@@ -234,14 +234,14 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-mock"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "virtio-accel-core",
 ]
 
 [[package]]
 name = "virtio-accel-openvino"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "pkg-config",
  "virtio-accel-conformance",
@@ -251,7 +251,7 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-proto"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "bitflags",
  "virtio-accel-cleanroom",
@@ -260,14 +260,14 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-split-queue"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "virtio-accel-transport",
 ]
 
 [[package]]
 name = "virtio-accel-tosa"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "flatbuffers",
  "virtio-accel-core",
@@ -275,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-tosa-build"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "flatbuffers",
  "virtio-accel-tosa",
@@ -283,11 +283,11 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-transport"
-version = "0.3.3"
+version = "0.3.4"
 
 [[package]]
 name = "virtio-accel-vaccel"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "virtio-accel-conformance",
  "virtio-accel-core",
@@ -296,7 +296,7 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-xdna"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "virtio-accel-conformance",
  "virtio-accel-core",
