@@ -1,6 +1,8 @@
-//! Scaffold-level tests: the advertised targets.
+//! Host-independent tests: the advertised targets, the capability descriptors, and the offline
+//! compile path.
 //!
-//! Native lifecycle tests arrive with the HRX FFI and hardware tickets. These run on every host.
+//! Native lifecycle and on-metal numerics live in `hardware.rs`, which is gated on a detected HRX
+//! runtime. Everything here runs on every host.
 
 #[cfg(not(va_xdna))]
 use virtio_accel_tosa::TosaCapabilityProvider;
@@ -112,13 +114,42 @@ fn integer_capability_preserves_openvino_and_adds_exact_rescale() {
         XDNA_TOSA_INTEGER_TARGET
     );
     // CONST/IDENTITY/MATMUL are the OpenVINO baseline. RESCALE is the intentional issue-#147
-    // expansion; target separation and dtype roles remain unchanged.
+    // expansion, and target separation is unchanged.
     for op in [Op::CONST, Op::IDENTITY, Op::MATMUL, Op::RESCALE] {
         assert!(XDNA_TOSA_INTEGER_CAPABILITY.supports_operator(op));
     }
     assert!(XDNA_TOSA_INTEGER_CAPABILITY.supports_dtype(DType::INT8, ValueRoles::ALL));
     assert!(XDNA_TOSA_INTEGER_CAPABILITY.supports_dtype(DType::INT32, ValueRoles::OUTPUT));
-    assert!(!XDNA_TOSA_INTEGER_CAPABILITY.supports_dtype(DType::INT32, ValueRoles::INPUT));
+    // The dtype roles *do* diverge from OpenVINO here, and they have to. `ValueRoles::INPUT` means
+    // "graph-visible block input"; OpenVINO's integer tier only ever produces INT32, but the
+    // RESCALE tier consumes it as the block input, so omitting the role would advertise a surface
+    // that contradicts `admit`. `admitted_integer_block_input_dtypes_are_advertised` pins that.
+    assert!(XDNA_TOSA_INTEGER_CAPABILITY.supports_dtype(DType::INT32, ValueRoles::INPUT));
+}
+
+/// The advertised dtype roles must cover what admission actually accepts. A dtype omitted from
+/// `INPUT` is unroutable through the standard `INPUT || OUTPUT` capability filter every sibling
+/// backend builds, so an admitted tier whose block input dtype is unadvertised is invisible to a
+/// scheduler — the tier would be implemented, tested, and unreachable.
+#[test]
+fn admitted_integer_block_input_dtypes_are_advertised() {
+    use virtio_accel_conformance::numerics::RESCALE_INT32_TO_INT8;
+    use virtio_accel_tosa::DType;
+
+    // The shared corpus RESCALE fixture takes INT32 in and INT8 out, both at the block boundary.
+    assert!(
+        virtio_accel_xdna::admit(RESCALE_INT32_TO_INT8.artifact, XDNA_TOSA_INTEGER_TARGET).is_ok(),
+        "the shared RESCALE fixture must stay admissible"
+    );
+    for (dtype, role) in [
+        (DType::INT32, ValueRoles::INPUT),
+        (DType::INT8, ValueRoles::OUTPUT),
+    ] {
+        assert!(
+            XDNA_TOSA_INTEGER_CAPABILITY.supports_dtype(dtype, role),
+            "admission accepts {dtype:?} at the block boundary but the capability hides it"
+        );
+    }
 }
 
 #[cfg(not(va_xdna))]

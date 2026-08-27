@@ -619,6 +619,111 @@ fn tier2_watchdog_reports_device_loss_and_discard_never_blocks() {
     assert!(started.elapsed() < Duration::from_millis(250));
 }
 
+/// An event that is dropped rather than destroyed must still release its ring slot. The ring depth
+/// is one, so stranding the slot would fail every later submission with `Busy` for the life of the
+/// instance — and leave `resource_counts` reporting an event that no longer exists.
+#[test]
+fn dropping_a_completed_event_reclaims_its_ring_slot() {
+    let Some(backend) = backend() else { return };
+    let context = backend
+        .create_context(ContextDesc::default())
+        .expect("context");
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .expect("queue");
+    let program = backend
+        .load_program(
+            &context,
+            ArtifactRef {
+                format: XDNA_PRECOMPILED_FORMAT,
+                target: TargetIdentity([0; 12]),
+                payload: &Slice(PASSTHROUGH),
+                resident_bytes: u64::MAX,
+            },
+        )
+        .expect("load precompiled passthrough");
+
+    let input_desc = BufferDesc::new(
+        PASSTHROUGH_BYTES as u64,
+        4096,
+        MemoryDomain::Shared,
+        BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+    )
+    .unwrap();
+    let (input, _) = backend
+        .allocate_buffer(&context, input_desc)
+        .expect("input buffer")
+        .into_parts();
+    let (unused, _) = backend
+        .allocate_buffer(&context, input_desc)
+        .expect("unused input buffer")
+        .into_parts();
+    let (output, _) = backend
+        .allocate_buffer(
+            &context,
+            BufferDesc::new(
+                PASSTHROUGH_BYTES as u64,
+                4096,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+            )
+            .unwrap(),
+        )
+        .expect("output buffer")
+        .into_parts();
+
+    let range = BufferRange::new(0, PASSTHROUGH_BYTES as u64).unwrap();
+    let bindings = [
+        BindingRef {
+            slot: 0,
+            buffer: &input,
+            range,
+            access: AccessMode::Read,
+        },
+        BindingRef {
+            slot: 1,
+            buffer: &unused,
+            range,
+            access: AccessMode::Read,
+        },
+        BindingRef {
+            slot: 2,
+            buffer: &output,
+            range,
+            access: AccessMode::Write,
+        },
+    ];
+
+    // Two rounds through the single ring slot, releasing the first event by dropping it.
+    for round in 0..2 {
+        let event = match backend.submit(&queue, &program, &bindings, Timeout::Infinite) {
+            Ok(event) => event,
+            Err(failure) => panic!("submit rejected in round {round}: {failure:?}"),
+        };
+        let state = poll_to_terminal(&backend, &event, Duration::from_secs(10))
+            .expect("dispatch did not complete in 10s");
+        assert!(
+            matches!(state, EventState::Complete),
+            "round {round}: expected Complete, got {state:?}"
+        );
+        assert_eq!(backend.resource_counts().events, 1, "round {round}");
+        drop(event);
+        // The slot and the resource charge are both released by the drop.
+        assert_eq!(
+            backend.resource_counts().events,
+            0,
+            "round {round}: dropping a terminal event must release its charge"
+        );
+    }
+
+    backend.free_buffer(input).expect("free input");
+    backend.free_buffer(unused).expect("free unused");
+    backend.free_buffer(output).expect("free output");
+    backend.unload_program(program).expect("unload");
+    backend.destroy_queue(queue).expect("destroy queue");
+    backend.destroy_context(context).expect("destroy context");
+}
+
 #[test]
 fn precompiled_passthrough_runs_the_full_lifecycle() {
     let Some(backend) = backend() else { return };
@@ -733,6 +838,10 @@ fn precompiled_passthrough_runs_the_full_lifecycle() {
 fn tosa_bf16_identity_compiles_to_a_wellformed_artifact() {
     // Hardware-free: needs the compiler toolchain but never initializes a device.
     if !toolchain_present() {
+        assert!(
+            !hardware_required(),
+            "{REQUIRE_HARDWARE_ENV}=1 but VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN is not configured"
+        );
         eprintln!("no XDNA toolchain configured; skipping compiler test");
         return;
     }
@@ -774,6 +883,10 @@ fn tosa_bf16_identity_compiles_to_a_wellformed_artifact() {
 fn tosa_bf16_identity_runs_on_the_npu() {
     let Some(backend) = backend() else { return };
     if !toolchain_present() {
+        assert!(
+            !hardware_required(),
+            "{REQUIRE_HARDWARE_ENV}=1 but VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN is not configured"
+        );
         eprintln!("no XDNA toolchain configured; skipping TOSA execution test");
         return;
     }
@@ -869,6 +982,10 @@ fn tosa_bf16_identity_runs_on_the_npu() {
 #[test]
 fn tosa_integer_corpus_compiles_to_wellformed_artifacts() {
     if !toolchain_present() {
+        assert!(
+            !hardware_required(),
+            "{REQUIRE_HARDWARE_ENV}=1 but VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN is not configured"
+        );
         eprintln!("no XDNA toolchain configured; skipping compiler test");
         return;
     }
@@ -896,6 +1013,10 @@ fn tosa_integer_corpus_compiles_to_wellformed_artifacts() {
 fn tosa_int8_identity_matches_the_shared_exact_oracle_on_the_npu() {
     let Some(backend) = backend() else { return };
     if !toolchain_present() {
+        assert!(
+            !hardware_required(),
+            "{REQUIRE_HARDWARE_ENV}=1 but VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN is not configured"
+        );
         eprintln!("no XDNA toolchain configured; skipping TOSA execution test");
         return;
     }
@@ -995,6 +1116,10 @@ fn tosa_int8_identity_matches_the_shared_exact_oracle_on_the_npu() {
 fn tosa_int8_matmul_matches_the_shared_exact_oracle_on_the_npu() {
     let Some(backend) = backend() else { return };
     if !toolchain_present() {
+        assert!(
+            !hardware_required(),
+            "{REQUIRE_HARDWARE_ENV}=1 but VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN is not configured"
+        );
         eprintln!("no XDNA toolchain configured; skipping TOSA execution test");
         return;
     }
@@ -1117,6 +1242,10 @@ fn tosa_int8_matmul_matches_the_shared_exact_oracle_on_the_npu() {
 fn tosa_int32_to_int8_rescale_matches_the_shared_exact_oracle_on_the_npu() {
     let Some(backend) = backend() else { return };
     if !toolchain_present() {
+        assert!(
+            !hardware_required(),
+            "{REQUIRE_HARDWARE_ENV}=1 but VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN is not configured"
+        );
         eprintln!("no XDNA toolchain configured; skipping TOSA execution test");
         return;
     }
@@ -1222,6 +1351,10 @@ fn tosa_int32_to_int8_rescale_matches_the_shared_exact_oracle_on_the_npu() {
 fn measures_exact_int8_matmul_latency() {
     let Some(backend) = backend() else { return };
     if !toolchain_present() {
+        assert!(
+            !hardware_required(),
+            "{REQUIRE_HARDWARE_ENV}=1 but VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN is not configured"
+        );
         eprintln!("no XDNA toolchain configured; skipping INT8 benchmark");
         return;
     }
@@ -1393,6 +1526,10 @@ fn measures_exact_int8_matmul_latency() {
 #[test]
 fn tosa_fp8_casts_compile_to_wellformed_artifacts() {
     if !toolchain_present() {
+        assert!(
+            !hardware_required(),
+            "{REQUIRE_HARDWARE_ENV}=1 but VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN is not configured"
+        );
         eprintln!("no XDNA toolchain configured; skipping compiler test");
         return;
     }
@@ -1510,6 +1647,10 @@ fn run_fp8_cast_case(backend: &XdnaAccelerator, case: TosaFp8ToBfloat16Case) {
 fn tosa_fp8_casts_match_the_shared_bit_exact_oracles_on_the_npu() {
     let Some(backend) = backend() else { return };
     if !toolchain_present() {
+        assert!(
+            !hardware_required(),
+            "{REQUIRE_HARDWARE_ENV}=1 but VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN is not configured"
+        );
         eprintln!("no XDNA toolchain configured; skipping TOSA execution test");
         return;
     }
@@ -1523,6 +1664,10 @@ fn tosa_fp8_casts_match_the_shared_bit_exact_oracles_on_the_npu() {
 fn measures_fp8_cast_scaling_on_one_aie_worker() {
     let Some(backend) = backend() else { return };
     if !toolchain_present() {
+        assert!(
+            !hardware_required(),
+            "{REQUIRE_HARDWARE_ENV}=1 but VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN is not configured"
+        );
         eprintln!("no XDNA toolchain configured; skipping FP8 benchmark");
         return;
     }
@@ -1667,6 +1812,10 @@ fn measure_fp8_cast_size(
 #[test]
 fn tosa_bf16_max_pool2d_compiles_to_a_wellformed_artifact() {
     if !toolchain_present() {
+        assert!(
+            !hardware_required(),
+            "{REQUIRE_HARDWARE_ENV}=1 but VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN is not configured"
+        );
         eprintln!("no XDNA toolchain configured; skipping compiler test");
         return;
     }
@@ -1685,6 +1834,10 @@ fn tosa_bf16_max_pool2d_compiles_to_a_wellformed_artifact() {
 fn tosa_bf16_max_pool2d_matches_the_shared_oracle_on_the_npu() {
     let Some(backend) = backend() else { return };
     if !toolchain_present() {
+        assert!(
+            !hardware_required(),
+            "{REQUIRE_HARDWARE_ENV}=1 but VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN is not configured"
+        );
         eprintln!("no XDNA toolchain configured; skipping TOSA execution test");
         return;
     }
@@ -1831,6 +1984,10 @@ fn tosa_bf16_max_pool2d_matches_the_shared_oracle_on_the_npu() {
 fn tosa_bf16_matmul_compiles_to_a_wellformed_artifact() {
     // Hardware-free: needs the compiler toolchain but never initializes a device.
     if !toolchain_present() {
+        assert!(
+            !hardware_required(),
+            "{REQUIRE_HARDWARE_ENV}=1 but VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN is not configured"
+        );
         eprintln!("no XDNA toolchain configured; skipping compiler test");
         return;
     }
@@ -1859,6 +2016,10 @@ fn tosa_bf16_matmul_compiles_to_a_wellformed_artifact() {
 fn tosa_bf16_matmul_runs_on_the_npu() {
     let Some(backend) = backend() else { return };
     if !toolchain_present() {
+        assert!(
+            !hardware_required(),
+            "{REQUIRE_HARDWARE_ENV}=1 but VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN is not configured"
+        );
         eprintln!("no XDNA toolchain configured; skipping TOSA execution test");
         return;
     }
@@ -1998,6 +2159,10 @@ fn tosa_matmul_with_a_shared_input_buffer_runs_on_the_npu() {
     // be bit-exact.
     let Some(backend) = backend() else { return };
     if !toolchain_present() {
+        assert!(
+            !hardware_required(),
+            "{REQUIRE_HARDWARE_ENV}=1 but VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN is not configured"
+        );
         eprintln!("no XDNA toolchain configured; skipping TOSA execution test");
         return;
     }
@@ -2192,6 +2357,20 @@ fn submit_enforces_the_per_slot_binding_plan_and_load_enforces_residency() {
     ];
     assert!(matches!(
         backend.submit(&queue, &program, &wrong_length, Timeout::Infinite),
+        Err(SubmitFailure::Rejected(BackendError::Incompatible))
+    ));
+
+    // Exactly the tensor length and in bounds (the buffers are twice the tensor size), but starting
+    // mid-word. An AIE DMA descriptor cannot express a sub-word start, so this is rejected before
+    // the device sees it rather than handed to the driver as a malformed transfer.
+    let misaligned = BufferRange::new(2, PASSTHROUGH_BYTES as u64).unwrap();
+    let unaligned_start = [
+        binding(0, &input, misaligned, AccessMode::Read),
+        binding(1, &unused, full, AccessMode::Read),
+        binding(2, &output, full, AccessMode::Write),
+    ];
+    assert!(matches!(
+        backend.submit(&queue, &program, &unaligned_start, Timeout::Infinite),
         Err(SubmitFailure::Rejected(BackendError::Incompatible))
     ));
 

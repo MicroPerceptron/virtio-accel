@@ -85,7 +85,10 @@ each admitted one-core program's padded tensor footprint is at most 16 KiB so de
 one AIE2P core.
 Non-word-sized INT8 inputs are rounded up to a four-byte binding slot because AIE DMA descriptors
 cannot transfer a shorter granularity; that padding is explicit in the artifact's binding plan and
-ignored by the kernel, rather than copied into a hidden bounce buffer. RESCALE similarly rounds
+ignored by the kernel, rather than copied into a hidden bounce buffer.
+The same granularity bounds the other end of a binding: a submitted range must start on a four-byte
+boundary as well as cover its slot's exact length, and a mid-word offset is rejected as
+`Incompatible` before the device sees it. RESCALE similarly rounds
 the output slot to a DMA word and clears its at-most-three-byte tail on the NPU. Zero points remain
 compile-time values: MATMUL subtracts signed INT8 zero points before exact INT32 accumulation, and
 RESCALE applies its signed INT8 output zero point only after exact 64-bit multiply-and-round math.
