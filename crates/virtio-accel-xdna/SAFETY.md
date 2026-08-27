@@ -103,6 +103,12 @@ no trustworthy completion boundary. `poll_event` then reports `DeviceLost`; even
 retryably rejected as `Busy`; discarding the backend enters the quarantine described above.
 `EVENT_CANCELLATION` is not advertised.
 
+`XdnaEvent::drop` is the single reclaim path for a ring slot: `destroy_event` validates that the
+event is terminal and then drops it, so an event released either way returns its slot and its
+`resource_counts` charge exactly once. A `PENDING` slot is never reclaimed by `drop` — the dispatch
+worker still owns it and will latch it — which is what keeps a quarantined wedge's slot and charge
+outstanding rather than handing a live slot to the next submission.
+
 The per-instance resource tracker counts accepted contexts, native buffer allocations, loaded
 executables, queues, and events. Counters increment only after successful admission and decrement
 only at the matching successful release/native final `Drop`; rejected operations do not perturb

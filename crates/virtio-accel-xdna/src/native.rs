@@ -44,6 +44,12 @@ const MAX_TOSA_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
 /// Default submission-ring depth (issue #85: one admitted request, matching the Hexagon backend).
 const DEFAULT_RING_DEPTH: usize = 1;
 
+/// AIE DMA descriptors transfer whole four-byte words, so a bound range must begin on a word
+/// boundary as well as cover its slot's exact byte length. The base mapping is page-aligned, so the
+/// caller's offset alone decides alignment (the reference backend rejects the same way, against its
+/// per-slot scalar size).
+const DMA_WORD_BYTES: u64 = 4;
+
 /// The kernel's NPU TDR is 60 seconds. A longer userspace watchdog distinguishes a returned
 /// device-loss error (tier 1) from an HRX synchronize call that never returns (tier 2).
 const DEFAULT_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(120);
@@ -1169,9 +1175,7 @@ impl Accelerator for XdnaAccelerator {
         context: &Self::Context,
         desc: QueueDesc,
     ) -> Result<Self::Queue, BackendError> {
-        if !desc.flags.is_empty() {
-            return Err(BackendError::Unsupported);
-        }
+        self.info.validate_queue_desc(desc)?;
         self.resources.queues.fetch_add(1, Ordering::AcqRel);
         Ok(XdnaQueue {
             context_id: context.id,
@@ -1273,6 +1277,11 @@ impl Accelerator for XdnaAccelerator {
             // length, so anything but an exact match would read or write past the caller's declared
             // range (mirrors OpenVINO's per-slot byte_len check).
             if binding.range.bytes() != program.inner.slot_bytes[slot] {
+                return reject(BackendError::Incompatible);
+            }
+            // The descriptor starts at `offset`, so an unaligned start would ask the DMA for a
+            // sub-word transfer it cannot express.
+            if binding.range.offset % DMA_WORD_BYTES != 0 {
                 return reject(BackendError::Incompatible);
             }
             // Aliasing rule: binding one buffer to several read slots is sound (the kernel only
@@ -1383,9 +1392,30 @@ impl Accelerator for XdnaAccelerator {
                 resource: event,
             });
         }
-        *event.slot.error.lock().expect("event error mutex") = None;
-        event.slot.state.store(slot_state::FREE, Ordering::Release);
-        ResourceTracker::decrement(&event.resources.events);
+        // Dropping reclaims the slot, so this is the single reclaim path: an event that is merely
+        // dropped instead of destroyed cannot strand its ring entry.
+        drop(event);
         Ok(())
+    }
+}
+
+impl Drop for XdnaEvent {
+    /// Reclaim the ring slot. `destroy_event` is the intended release path, but with a ring depth of
+    /// one a dropped-instead-of-destroyed event would strand the only slot and fail every later
+    /// submission with `Busy` for the life of the instance.
+    ///
+    /// Only a terminal slot is reclaimed. A `PENDING` slot still belongs to the dispatch worker,
+    /// which will latch it; freeing it here would hand a live slot to the next submission. Such a
+    /// slot stays charged to `resource_counts`, which is exactly where a wedged lane's event
+    /// belongs. The error detail is cleared before `FREE` is published, so a later claimer of this
+    /// slot can never observe the previous submission's failure.
+    fn drop(&mut self) {
+        let state = self.slot.state.load(Ordering::Acquire);
+        if state != slot_state::COMPLETE && state != slot_state::FAILED {
+            return;
+        }
+        *self.slot.error.lock().expect("event error mutex") = None;
+        self.slot.state.store(slot_state::FREE, Ordering::Release);
+        ResourceTracker::decrement(&self.resources.events);
     }
 }

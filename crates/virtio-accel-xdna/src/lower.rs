@@ -102,13 +102,17 @@ pub const XDNA_TOSA_FP8_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor 
     },
 };
 
-// This is deliberately the same semantic surface OpenVINO advertises for its integer target.
+// This is OpenVINO's semantic surface for its integer target, plus the one role its integer tier
+// does not need: OpenVINO only ever *produces* INT32, while this backend also *consumes* it as the
+// RESCALE input below. A dtype omitted from `INPUT` is unroutable through the standard
+// `INPUT || OUTPUT` capability filter, so the advertised roles have to cover every admitted tier.
 // XDNA's admission functions below impose an additional, hardware-specific static-memory envelope.
 const INTEGER_DTYPES: &[DTypeCapability] = &[
     DTypeCapability::new(DType::INT8, ValueRoles::ALL),
     DTypeCapability::new(
         DType::INT32,
-        ValueRoles::OUTPUT
+        ValueRoles::INPUT
+            .union(ValueRoles::OUTPUT)
             .union(ValueRoles::CONSTANT)
             .union(ValueRoles::INTERMEDIATE),
     ),
@@ -260,6 +264,14 @@ pub enum AdmitError {
     Unsupported,
 }
 
+impl core::fmt::Display for AdmitError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for AdmitError {}
+
 /// The one authoritative mapping to wire-level error codes, shared by `load_program` and
 /// `compile_artifact` so the two paths can never drift. The codes match the OpenVINO backend's
 /// classification of the same failure classes (its `lowering_error`): a malformed or semantically
@@ -404,6 +416,10 @@ fn admit_int8_matmul(
     let outputs = analysis.operator_outputs(matmul);
     if inputs.len() != 4
         || outputs.len() != 1
+        // The compiled kernel always declares two independent input slots, so one value feeding
+        // both operands would let a caller bind different buffers and compute `A * B` for a graph
+        // that says `X * X`.
+        || inputs[0] == inputs[1]
         || analysis.block_inputs(block) != [inputs[0], inputs[1]]
         || analysis.block_outputs(block) != [outputs[0]]
     {
@@ -719,8 +735,11 @@ fn admit_matmul(
     }
 
     // The operator's dataflow must be the block's: lhs/rhs are the block inputs in binding order,
-    // and the MATMUL result is the block output.
-    if analysis.block_inputs(block) != [inputs[0], inputs[1]]
+    // and the MATMUL result is the block output. One value feeding both operands is rejected: the
+    // compiled kernel declares two independent slots, so a caller could bind different buffers and
+    // compute `A * B` for a graph that says `X * X`.
+    if inputs[0] == inputs[1]
+        || analysis.block_inputs(block) != [inputs[0], inputs[1]]
         || analysis.block_outputs(block) != [outputs[0]]
     {
         return Err(AdmitError::Unsupported);
@@ -1513,6 +1532,62 @@ mod tests {
         assert_eq!(
             BackendError::from(AdmitError::Unsupported),
             BackendError::Unsupported
+        );
+    }
+
+    /// One value feeding both MATMUL operands is rejected. The compiled design always declares two
+    /// independent input slots, so admitting `X * X` would let a caller bind different buffers to
+    /// slots 0 and 1 and compute `A * B` — a result no reading of the graph produces.
+    #[test]
+    fn rejects_matmul_with_one_value_feeding_both_operands() {
+        fn aliased_matmul(dim: i32, in_dtype: DType, out_dtype: DType) -> Vec<u8> {
+            let zp = match in_dtype {
+                DType::INT8 => vec![0u8],
+                _ => vec![0u8; 2],
+            };
+            let mut graph = OwnedGraph::new("main");
+            graph
+                .push_tensor(OwnedTensor::new("x", vec![1, dim, dim], in_dtype))
+                .push_tensor(OwnedTensor::constant(
+                    "lhs_zp",
+                    vec![1],
+                    in_dtype,
+                    zp.clone(),
+                ))
+                .push_tensor(OwnedTensor::constant("rhs_zp", vec![1], in_dtype, zp))
+                .push_tensor(OwnedTensor::new("output", vec![1, dim, dim], out_dtype))
+                .push_operator(OwnedOperator::new(
+                    OperatorKind::Const,
+                    vec![],
+                    vec!["lhs_zp".into()],
+                ))
+                .push_operator(OwnedOperator::new(
+                    OperatorKind::Const,
+                    vec![],
+                    vec!["rhs_zp".into()],
+                ))
+                .push_operator(OwnedOperator::new(
+                    OperatorKind::MatMul,
+                    vec!["x".into(), "x".into(), "lhs_zp".into(), "rhs_zp".into()],
+                    vec!["output".into()],
+                ))
+                .push_input("x")
+                .push_input("x")
+                .push_output("output");
+            let target = if in_dtype == DType::INT8 {
+                XDNA_TOSA_INTEGER_TARGET
+            } else {
+                XDNA_TOSA_TARGET
+            };
+            graph.build(target).expect("build aliased matmul")
+        }
+
+        let bf16 = aliased_matmul(64, DType::BF16, DType::FP32);
+        assert_eq!(admit(&bf16, XDNA_TOSA_TARGET), Err(AdmitError::Unsupported));
+        let int8 = aliased_matmul(32, DType::INT8, DType::INT32);
+        assert_eq!(
+            admit(&int8, XDNA_TOSA_INTEGER_TARGET),
+            Err(AdmitError::Unsupported)
         );
     }
 
