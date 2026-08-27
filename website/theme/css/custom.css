@@ -539,11 +539,54 @@ body {
   text-transform: uppercase;
 }
 
+/* --------------------------------------------- floating chrome overlaps */
+
+/* The menu bar is sticky and translucent, and nothing downstream reserved
+ * space for it: the first heading of every chapter renders flush against its
+ * bottom edge (h1 top and bar bottom both land on y=57). Give the measure room
+ * to start below the bar instead of touching it. */
+.content main {
+  padding-block-start: 1.4rem;
+}
+
+/* A sticky bar also swallows anchor targets: `#section` links scroll the
+ * heading to y=0, which is underneath the bar. `scroll-margin-top` is what
+ * keeps the heading clear of it. */
+.content h1,
+.content h2,
+.content h3,
+.content h4 {
+  scroll-margin-top: calc(var(--menu-bar-height, 57px) + 16px);
+}
+
 /* ------------------------------------------------------- nav & printing */
 
 .nav-chapters {
   border-radius: 8px;
   font-size: 0.9em;
+}
+
+/* The fixed prev/next chevrons need a 90px column beside the measure, and this
+ * theme never has one to give. `.content` is a two-column grid -- the prose
+ * measure plus the on-this-page table of contents (`.va-has-toc`) -- so `main`
+ * begins 5px from the content edge at every viewport width and the left
+ * chevron always lands on top of the text. Widening the window does not help;
+ * the extra space goes to the grid, not to a gutter.
+ *
+ * Hide them. The prev/next links at the foot of each chapter already carry the
+ * same navigation, and unlike the chevrons they never cover the prose. */
+.nav-chapters {
+  display: none;
+}
+
+.mobile-nav-chapters {
+  display: block;
+}
+
+/* The resize handle sits in the same gutter as the sidebar edge; keep it from
+ * drawing over content that scrolls past it. */
+.sidebar-resize-handle {
+  z-index: 100;
 }
 
 @media print {

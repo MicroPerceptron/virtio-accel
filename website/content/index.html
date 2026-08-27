@@ -283,16 +283,20 @@ section { border-bottom: 1px solid var(--rule); }
 
 /* backend cards */
 .backends {
-  display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 16px;
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px;
 }
 .backend {
+  display: flex; flex-direction: column;
   border: 1px solid var(--rule); border-radius: 10px;
   padding: 20px; background: var(--bg-raised);
+  transition: border-color 0.2s;
 }
+.backend:hover { border-color: var(--accent-line); }
 .backend.planned { background: none; border-style: dashed; }
+.backend.planned:hover { border-color: var(--rule); }
 .backend-top {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 10px; margin-bottom: 12px;
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 12px; margin-bottom: 12px;
 }
 .backend-top b { font-family: var(--mono); font-size: 13px; font-weight: 700; }
 .backend p { font-size: 13.5px; line-height: 1.55; color: var(--fg-muted); }
@@ -304,9 +308,45 @@ section { border-bottom: 1px solid var(--rule); }
 .tag-ok    { color: var(--accent); border-color: var(--accent-line); }
 .tag-exp   { color: var(--amber);  border-color: oklch(0.80 0.16 75 / 0.4); }
 .tag-plan  { color: var(--fg-dim); border-color: var(--rule-strong); }
-@media (max-width: 1180px) { .backends { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
-@media (max-width: 1000px) { .backends { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 560px)  { .backends { grid-template-columns: minmax(0, 1fr); } }
+
+/* Card internals: crate name, the silicon the backend actually drives, and the
+   dtype strip. The dtype strip is the part that beats a paragraph -- five
+   fixed slots in the same order on every card, so the eye compares columns
+   across cards instead of reading five descriptions. */
+.bk-id { min-width: 0; }
+.bk-crate {
+  display: block; margin-top: 4px;
+  font-family: var(--mono); font-size: 11px; color: var(--fg-dim);
+}
+.backend > p { flex: 1 1 auto; }
+.bk-device {
+  margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--rule);
+  font-family: var(--mono); font-size: 11px; line-height: 1.6; color: var(--fg-dim);
+}
+.bk-device b { display: block; color: var(--fg-muted); font-weight: 500; }
+.bk-label {
+  margin-top: 14px;
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--fg-dim);
+}
+.bk-dtypes {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin: 9px 0 0; padding: 0; list-style: none;
+}
+.dt {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.03em;
+  border: 1px solid var(--rule-strong); border-radius: 4px; padding: 3px 7px;
+  color: var(--fg-dim); opacity: 0.55;
+}
+.dt.on {
+  border-color: var(--accent-line); background: var(--accent-soft);
+  color: var(--accent); opacity: 1;
+}
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+@media (max-width: 860px) { .backends { grid-template-columns: minmax(0, 1fr); } }
 
 /* crate table */
 .crates { font-family: var(--mono); font-size: 13px; }
@@ -500,37 +540,103 @@ footer { padding-block: 44px 52px; }
 <section>
   <div class="shell sec">
     <div class="sec-head">
-      <h2>Real backends, not shims</h2>
-      <a href="docs/backend-implementer-guide.html">Backend implementer guide &rarr;</a>
+      <h2>Real backends, real silicon</h2>
+      <a href="docs/device-support-matrix.html">Device support matrix &rarr;</a>
     </div>
+    <p class="lede" style="max-width: 52rem; margin-bottom: 26px;">Four backends run end to end
+      today. Each takes the same device-neutral TOSA&nbsp;1.0 artifact, lowers it with its own
+      native toolchain, and binds the caller's own allocations &mdash; no staging copy in or out.
+      &ldquo;Supported&rdquo; means the backend admits that program and dtype and runs it on
+      hardware; parsing a graph is not executing one.</p>
     <div class="backends">
       <div class="backend">
-        <div class="backend-top"><b>Core ML / ANE</b><span class="tag tag-ok">implemented</span></div>
-        <p>TOSA lowered to Core ML with direct buffer bindings and ANE-capable prediction on
-          macOS&nbsp;14+.</p>
+        <div class="backend-top">
+          <span class="bk-id"><b>Apple Core ML / ANE</b><span class="bk-crate">virtio-accel-coreml</span></span>
+          <span class="tag tag-ok">macOS 14+</span>
+        </div>
+        <p>Lowers TOSA into Core ML and predicts against buffers the caller already owns, accepting
+          a result only when Core ML wrote into that same allocation. Core ML places each operator
+          on the ANE or the CPU as it sees fit. Direct INT8 boundaries need macOS&nbsp;26+ and cover
+          identity plus zero-point-aware MATMUL; the INT4 that Core ML advertises is compressed
+          weight storage, not INT4 tensor execution.</p>
+        <p class="bk-device"><b>Apple Neural Engine + CPU</b>validated on Apple M4 / macOS 26.5.2</p>
+        <p class="bk-label">Program dtypes</p>
+        <ul class="bk-dtypes">
+          <li class="dt on">FP32<span class="sr-only"> supported</span></li>
+          <li class="dt on">FP16<span class="sr-only"> supported</span></li>
+          <li class="dt">FP8<span class="sr-only"> not supported</span></li>
+          <li class="dt on">INT8<span class="sr-only"> supported</span></li>
+          <li class="dt">INT4<span class="sr-only"> not supported</span></li>
+        </ul>
       </div>
       <div class="backend">
-        <div class="backend-top"><b>OpenVINO</b><span class="tag tag-ok">implemented</span></div>
-        <p>TOSA lowered to in-memory OpenVINO IR, executed on NPU, GPU or CPU with direct
-          host-pointer tensors.</p>
+        <div class="backend-top">
+          <span class="bk-id"><b>Intel OpenVINO</b><span class="bk-crate">virtio-accel-openvino</span></span>
+          <span class="tag tag-ok">OpenVINO 2026.x</span>
+        </div>
+        <p>Lowers the same artifact into in-memory OpenVINO IR and compiles it per device &mdash;
+          NPU first, then GPU, then CPU &mdash; under accuracy-preserving execution mode. It reports
+          completion only if the runtime actually wrote into the caller's output allocation, which
+          is a stronger claim than &ldquo;the call returned&rdquo;. Its INT8 tier legalizes zero
+          points explicitly in INT32.</p>
+        <p class="bk-device"><b>Intel NPU, GPU or CPU</b>CPU plugin proven in CI; the only
+          CI-verified device path here</p>
+        <p class="bk-label">Program dtypes</p>
+        <ul class="bk-dtypes">
+          <li class="dt on">FP32<span class="sr-only"> supported</span></li>
+          <li class="dt on">FP16<span class="sr-only"> supported</span></li>
+          <li class="dt">FP8<span class="sr-only"> not supported</span></li>
+          <li class="dt on">INT8<span class="sr-only"> supported</span></li>
+          <li class="dt">INT4<span class="sr-only"> not supported</span></li>
+        </ul>
       </div>
       <div class="backend">
-        <div class="backend-top"><b>Hexagon</b><span class="tag tag-exp">experimental</span></div>
-        <p>Strict FP16 and INT8 TOSA subsets lowered to QNN and executed on Hexagon HTP.</p>
+        <div class="backend-top">
+          <span class="bk-id"><b>AMD XDNA</b><span class="bk-crate">virtio-accel-xdna</span></span>
+          <span class="tag tag-exp">experimental &middot; XDNA2 on Linux</span>
+        </div>
+        <p>BF16 TOSA over the HRX runtime with no XRT userspace dependency, compiling admitted
+          graphs with the pinned aiecc toolchain as a bounded subprocess. There is no native FP32 or
+          FP16 path: FP32 appears only as MATMUL accumulator output, and FP8 is an explicit
+          E4M3/E5M2&nbsp;&rarr;&nbsp;BF16 storage CAST. The INT8 tier adds exact RESCALE.</p>
+        <p class="bk-device"><b>Ryzen AI NPU &mdash; PCI 1022:17f0</b>Strix, Strix Halo and Krackan;
+          validated on Fedora 44 with the in-tree amdxdna driver</p>
+        <p class="bk-label">Program dtypes</p>
+        <ul class="bk-dtypes">
+          <li class="dt">FP32<span class="sr-only"> accumulator outputs only</span></li>
+          <li class="dt">FP16<span class="sr-only"> not supported</span></li>
+          <li class="dt on">FP8<span class="sr-only"> supported as storage CAST</span></li>
+          <li class="dt on">INT8<span class="sr-only"> supported</span></li>
+          <li class="dt">INT4<span class="sr-only"> not supported</span></li>
+        </ul>
       </div>
       <div class="backend">
-        <div class="backend-top"><b>AMD XDNA/2</b><span class="tag tag-exp">in progress</span></div>
-        <p>Ryzen AI NPU over the HRX runtime; build probe and scaffold today.</p>
-      </div>
-      <div class="backend planned">
-        <div class="backend-top"><b>Vulkan</b><span class="tag tag-plan">planned</span></div>
-        <p>Placeholder for a future compute backend. No crate or build probe yet.</p>
+        <div class="backend-top">
+          <span class="bk-id"><b>Qualcomm Hexagon</b><span class="bk-crate">virtio-accel-hexagon</span></span>
+          <span class="tag tag-exp">experimental &middot; QAIRT 2.49</span>
+        </div>
+        <p>Lowers a strict FP16 and INT8 subset to QNN and runs it on Hexagon HTP with direct client
+          buffers. FP16 covers 41 of the 42 operators the other backends share &mdash; ERF has no
+          QAIRT node. FP32 is refused on purpose: the v73 precision probe caught MATMUL rounding to
+          FP16 even for FLOAT_32 tensors, so admitting it would be a lie about precision.</p>
+        <p class="bk-device"><b>Hexagon HTP v73</b>Snapdragon X126100 on Windows 11 ARM64</p>
+        <p class="bk-label">Program dtypes</p>
+        <ul class="bk-dtypes">
+          <li class="dt">FP32<span class="sr-only"> not supported</span></li>
+          <li class="dt on">FP16<span class="sr-only"> supported</span></li>
+          <li class="dt">FP8<span class="sr-only"> not supported</span></li>
+          <li class="dt on">INT8<span class="sr-only"> supported</span></li>
+          <li class="dt">INT4<span class="sr-only"> not supported</span></li>
+        </ul>
       </div>
     </div>
     <p style="margin-top: 18px; font-size: 14px; color: var(--fg-dim);">None of these silently
       dequantize an unsupported graph: an FP8, unsupported INT8 or packed INT4 graph is rejected at
-      load. See the <a href="docs/hexagon-operator-matrix.html">Hexagon operator matrix</a> for the
-      per-operator detail.</p>
+      load, where you can see it. Vulkan is planned and has no crate yet. The
+      <a href="docs/device-support-matrix.html">device support matrix</a> records which parts are
+      validated on hardware, which are merely reachable, and which are one named change away; the
+      <a href="docs/hexagon-operator-matrix.html">Hexagon operator matrix</a> has the per-operator
+      detail.</p>
   </div>
 </section>
 
