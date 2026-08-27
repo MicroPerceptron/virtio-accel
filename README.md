@@ -34,6 +34,8 @@ The project claims no Virtio device ID (_yet_). For guest environments, use the 
 
 “Supported” below means that the backend admits the declared program and dtype and exercises it end-to-end; support in the TOSA parser or shared numerical corpus alone does not imply hardware execution. “Not implemented” describes this repository, not necessarily the underlying hardware.
 
+This table is organized by program and dtype. For the physical devices behind it — which parts are validated on hardware, which are merely reachable, and which are one named constant away, including the non-NPU CPU and GPU paths Core ML and OpenVINO already expose — see the [device support matrix](docs/device-support-matrix.md).
+
 | Backend                                     | Status                                    | Program admission                                        | FP32                              | FP16                                   | FP8 E4M3/E5M2               | INT8              | Packed INT4     | Program-visible buffers     |
 | ------------------------------------------- | ----------------------------------------- | -------------------------------------------------------- | --------------------------------- | -------------------------------------- | --------------------------- | ----------------- | --------------- | --------------------------- |
 | Apple Core ML / ANE (`virtio-accel-coreml`) | Implemented; macOS 14+                    | Static TOSA 1.0 FP; INT8 tier on macOS 26+               | Supported                         | Supported                              | Not implemented             | Identity + MATMUL | Not implemented | Direct host/shared bindings |
@@ -327,6 +329,7 @@ The [backend implementer guide](docs/backend-implementer-guide.md) walks through
 | [architecture.md](docs/architecture.md)                           | Implementation invariants                                                                    |
 | [threat-model.md](docs/threat-model.md)                           | Trust boundaries and finite resource policy                                                  |
 | [portability.md](docs/portability.md)                             | Enforced target matrix and crate tiers                                                       |
+| [device-support-matrix.md](docs/device-support-matrix.md)         | Physical devices each backend reaches, and the named gate holding back the rest              |
 | [performance.md](docs/performance.md)                             | v1 performance and copy budgets                                                              |
 | [public-api.md](docs/public-api.md)                               | Public rustdoc policy                                                                        |
 | [release-policy.md](docs/release-policy.md)                       | Release governance and evolution rules                                                       |

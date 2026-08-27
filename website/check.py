@@ -51,6 +51,7 @@ REQUIRED_PAGES = [
     "docs/threat-model.html",
     "docs/architecture.html",
     "docs/portability.html",
+    "docs/device-support-matrix.html",
     "docs/performance.html",
     "docs/public-api.html",
     "docs/release-policy.html",
