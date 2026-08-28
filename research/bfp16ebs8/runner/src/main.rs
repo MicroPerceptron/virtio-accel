@@ -12,6 +12,7 @@ use virtio_accel_core::{
 };
 use virtio_accel_xdna::{XDNA_PRECOMPILED_FORMAT, XdnaAccelerator, artifact};
 
+#[allow(dead_code)] // The model is the citable #146 deliverable; probes use what each needs.
 mod model;
 
 #[derive(Debug)]
@@ -57,6 +58,9 @@ const P0_OUTPUT_BYTES: u64 = 148;
 const P1_OUTPUT_BYTES: u64 = 724;
 const P4_INPUT_BYTES: u64 = 576;
 const P4_OUTPUT_BYTES: u64 = 256;
+const XBFP_K: usize = 512;
+const XBFP_INPUT_BYTES: u64 = 2 * (XBFP_K as u64 / 8) * 72;
+const XBFP_OUTPUT_BYTES: u64 = 256;
 const P1_MODES: [(u32, &str); 10] = [
     (0, "floor"),
     (1, "ceil"),
@@ -396,6 +400,7 @@ fn main() {
         "p0" | "p2" | "p3" => (F32_INPUT_BYTES, P0_OUTPUT_BYTES),
         "p1" => (F32_INPUT_BYTES, P1_OUTPUT_BYTES),
         "p4" | "p5" => (P4_INPUT_BYTES, P4_OUTPUT_BYTES),
+        "xbfp" => (XBFP_INPUT_BYTES, XBFP_OUTPUT_BYTES),
         other => panic!("unknown probe {other}"),
     };
     let xclbin = std::fs::read(format!("{dir}/final.xclbin")).expect("read final.xclbin");
@@ -831,6 +836,90 @@ fn main() {
                     &b,
                 );
             }
+        }
+        "xbfp" => {
+            println!("== XBFP flavor-1 accumulation-order contract (K = {XBFP_K})");
+            // Per-row planes: CHUNKS units for A (row set 0..8) and B. Mixed per-32-group
+            // exponents with a large spread so FP32 fold order genuinely matters.
+            let chunks = XBFP_K / 8;
+            let mut state = 0x0148_1481u32;
+            let mut next = move || {
+                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                (state >> 24) as u8 as i8
+            };
+            // Mantissa planes per chunk (64 lanes = 8 rows x 8 k-lanes).
+            let mut a_m = vec![[0i8; 64]; chunks];
+            let mut b_m = vec![[0i8; 64]; chunks];
+            for chunk in 0..chunks {
+                for lane in 0..64 {
+                    a_m[chunk][lane] = next();
+                    b_m[chunk][lane] = next();
+                }
+            }
+            // Exponents: per MXINT8 semantics the four chunks of one 32-group share a byte.
+            // Group 0 is large; every later group's chunk values sit just below the running
+            // accumulator's FP32 half-ULP, so an FP32 fold drops each one individually while
+            // an f64 sum accumulates them past the rounding boundary — the discriminating
+            // case for the documented accumulation order.
+            let group_e = |group: usize| -> u8 { if group == 0 { 130 } else { 118 } };
+            let mut a_units: Vec<[u8; 72]> = Vec::with_capacity(chunks);
+            let mut b_units: Vec<[u8; 72]> = Vec::with_capacity(chunks);
+            for chunk in 0..chunks {
+                let e = group_e(chunk / 4);
+                a_units.push(craft(&a_m[chunk], &[e; 8]));
+                b_units.push(craft(&b_m[chunk], &[e; 8]));
+            }
+            let mut payload = Vec::with_capacity(XBFP_INPUT_BYTES as usize);
+            for unit in &a_units {
+                payload.extend_from_slice(unit);
+            }
+            for unit in &b_units {
+                payload.extend_from_slice(unit);
+            }
+            let raw = submit_case(
+                &backend, &queue, &program, &mut input, &output, in_bytes, out_bytes, &payload,
+            );
+
+            // Oracle per output lane (i, j): fold row i of A against row j of B in chunk order.
+            let mut fold_matches = 0usize;
+            let mut naive_differs = 0usize;
+            for i in 0..8 {
+                for j in 0..8 {
+                    let mut am = Vec::with_capacity(XBFP_K);
+                    let mut bm = Vec::with_capacity(XBFP_K);
+                    let mut ae = Vec::with_capacity(chunks);
+                    let mut be = Vec::with_capacity(chunks);
+                    for chunk in 0..chunks {
+                        for lane in 0..8 {
+                            am.push(a_m[chunk][i * 8 + lane]);
+                            bm.push(b_m[chunk][j * 8 + lane]);
+                        }
+                        let e = group_e(chunk / 4);
+                        ae.push(e);
+                        be.push(e);
+                    }
+                    let expected = model::dot_fold_f32(&am, &ae, &bm, &be);
+                    let naive = model::dot_reference(&am, &ae, &bm, &be, 8) as f32;
+                    let got =
+                        f32::from_le_bytes(raw[(i * 8 + j) * 4..(i * 8 + j) * 4 + 4].try_into().unwrap());
+                    if got.to_bits() == expected.to_bits() {
+                        fold_matches += 1;
+                    } else {
+                        println!(
+                            "   lane ({i},{j}): got {got} ({:#010x}) expected {expected} ({:#010x})",
+                            got.to_bits(),
+                            expected.to_bits()
+                        );
+                    }
+                    if expected.to_bits() != naive.to_bits() {
+                        naive_differs += 1;
+                    }
+                }
+            }
+            println!("   fold-order oracle: {fold_matches}/64 lanes bit-exact");
+            println!(
+                "   order sensitivity: fold differs from single-rounded f64 sum on {naive_differs}/64 lanes"
+            );
         }
         _ => unreachable!(),
     }

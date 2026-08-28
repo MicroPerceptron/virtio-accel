@@ -23,6 +23,9 @@ P0_OUTPUT_WORDS = 37  # 64 mantissa + 8 exponent + 72 native-struct bytes + 1 rn
 P1_OUTPUT_WORDS = 181  # 10 modes x 72 plane bytes + 1 rnd word
 P4_INPUT_BYTES = 576  # A (4 x 72) then B (4 x 72) raw bfp16ebs8 planes
 P4_OUTPUT_WORDS = 64  # 64 FP32 accumulator lanes
+XBFP_K = 512  # prototype envelope ceiling (docs/plans/issue-148-bfp16ebs8-vendor-tier.md)
+XBFP_INPUT_BYTES = 2 * (XBFP_K // 8) * 72
+XBFP_OUTPUT_WORDS = 64
 
 
 def configure_toolchain_env() -> None:
@@ -70,12 +73,15 @@ def build_probe(name: str, output_words: int):
     from aie.iron import In, ObjectFifo, Out, Program, Runtime, Worker
     from aie.iron.kernel import ExternalFunction
 
-    kernel_source = (PROBE_DIR / f"kernel_{name}.cc").read_text()
+    kernel_source = (PROBE_DIR / f"kernel_{name}.cc").read_text().replace("@K@", str(XBFP_K))
 
     @iron.jit
     def probe(x_in: In, y_out: Out):
         if name == "p4":
             input_ty = np.ndarray[(P4_INPUT_BYTES,), np.dtype[np.uint8]]
+            output_ty = np.ndarray[(output_words,), np.dtype[np.float32]]
+        elif name == "xbfp":
+            input_ty = np.ndarray[(XBFP_INPUT_BYTES,), np.dtype[np.uint8]]
             output_ty = np.ndarray[(output_words,), np.dtype[np.float32]]
         else:
             input_ty = np.ndarray[(P0_INPUT_FLOATS,), np.dtype[np.float32]]
@@ -108,7 +114,12 @@ def build_probe(name: str, output_words: int):
 
 
 def main() -> int:
-    probes = {"p0": P0_OUTPUT_WORDS, "p1": P1_OUTPUT_WORDS, "p4": P4_OUTPUT_WORDS}
+    probes = {
+        "p0": P0_OUTPUT_WORDS,
+        "p1": P1_OUTPUT_WORDS,
+        "p4": P4_OUTPUT_WORDS,
+        "xbfp": XBFP_OUTPUT_WORDS,
+    }
     if len(sys.argv) != 3 or sys.argv[1] not in probes:
         print(__doc__, file=sys.stderr)
         return 2

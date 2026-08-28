@@ -185,6 +185,28 @@ pub fn dot_reference(a_m: &[i8], a_e: &[u8], b_m: &[i8], b_e: &[u8], block: usiz
     sum
 }
 
+/// The vendor-tier accumulation contract (docs/plans/issue-148-bfp16ebs8-vendor-tier.md):
+/// each block-8 MAC sums eight products sharing one exponent pair — an integer of magnitude
+/// at most 8·127·127 < 2^17 times a power of two, hence exactly representable in FP32 — and
+/// the per-chunk MAC results accumulate in ascending-k chain order with one FP32 rounding per
+/// step. This models the mul/mac_8x8_8x8T chain lane-exactly for arbitrary exponents.
+pub fn dot_fold_f32(a_m: &[i8], a_e: &[u8], b_m: &[i8], b_e: &[u8]) -> f32 {
+    assert_eq!(a_m.len(), b_m.len());
+    assert_eq!(a_m.len() % 8, 0);
+    let mut acc = 0f32;
+    for chunk in 0..a_m.len() / 8 {
+        let mut integer = 0i64;
+        for lane in 0..8 {
+            let i = chunk * 8 + lane;
+            integer += i64::from(a_m[i]) * i64::from(b_m[i]);
+        }
+        let chunk_value = integer as f64
+            * (f64::from(a_e[chunk]) + f64::from(b_e[chunk]) - 266.0).exp2();
+        acc = ((f64::from(acc)) + chunk_value) as f32;
+    }
+    acc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,6 +350,29 @@ mod tests {
         let d32 = dot_reference(&m32, &[e32], &m32, &[e32], 32);
         let d8 = dot_reference(&m8, &e8, &m8, &e8, 8);
         assert_eq!(d32, d8);
+    }
+
+    /// The fold-order oracle agrees with the exact f64 dot on integer-exact envelopes and
+    /// is genuinely order-sensitive outside them (which is why the tier documents the order).
+    #[test]
+    fn fold_oracle_semantics() {
+        // Integer-exact: equal exponents everywhere.
+        let a_m: Vec<i8> = (0..32).map(|i| (i * 7 % 127) as i8 - 63).collect();
+        let b_m: Vec<i8> = (0..32).map(|i| (i * 11 % 127) as i8 - 63).collect();
+        let e = [127u8; 4];
+        let exact = dot_reference(&a_m, &e, &b_m, &e, 8);
+        assert_eq!(f64::from(dot_fold_f32(&a_m, &e, &b_m, &e)), exact);
+
+        // Mixed exponents with magnitudes spread far enough that FP32 fold order matters:
+        // the fold result differs from the f64 sum rounded once.
+        let ea = [127u8, 100, 127, 100];
+        let eb = [127u8, 100, 127, 100];
+        let folded = dot_fold_f32(&a_m, &ea, &b_m, &eb);
+        let exact = dot_reference(&a_m, &ea, &b_m, &eb, 8);
+        assert!(
+            (f64::from(folded) - exact).abs() <= exact.abs() * 1e-6,
+            "fold stays within FP32 accuracy of the true sum"
+        );
     }
 
     /// The documented converter-vs-OCP divergence at the +-127.5 boundary.
