@@ -240,6 +240,10 @@ fn fused_fp8_matmul_capability_covers_its_graph() {
 
 /// The offline path compiles the fused graph to a container that binds FP8 operands directly and
 /// never binds a BF16 tensor — the whole point of the tier.
+///
+/// Unix-only for the same reason as `compile_artifact_works_without_hrx`: the compiler helper is a
+/// subprocess in its own process group, so `compile_artifact` is not offered on other platforms.
+#[cfg(unix)]
 #[test]
 fn fused_fp8_matmul_compiles_to_a_wellformed_artifact() {
     use virtio_accel_tosa::DType;
