@@ -71,6 +71,8 @@ pub(crate) type hrx_stream_t = *mut hrx_stream_s;
 pub(crate) type hrx_buffer_t = *mut hrx_buffer_s;
 /// `hrx_executable_t` — refcounted executable handle.
 pub(crate) type hrx_executable_t = *mut hrx_executable_s;
+pub(crate) enum hrx_semaphore_s {}
+pub(crate) type hrx_semaphore_t = *mut hrx_semaphore_s;
 
 /// Borrowed byte span (`hrx_const_byte_span_t`).
 #[repr(C)]
@@ -87,6 +89,14 @@ pub(crate) struct hrx_string_view_t {
 }
 
 /// Dispatch grid configuration (`hrx_dispatch_config_t`); the amdxdna path uses {1,1,1}/{1,1,1}/0.
+/// `hrx_timeline_point_t` (hrx_runtime.h:250): a stream-timeline completion marker.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct hrx_timeline_point_t {
+    pub(crate) semaphore: hrx_semaphore_t,
+    pub(crate) value: u64,
+}
+
 #[repr(C)]
 pub(crate) struct hrx_dispatch_config_t {
     pub workgroup_count: [u32; 3],
@@ -222,5 +232,14 @@ unsafe extern "C" {
         binding_count: usize,
         flags: u32,
     ) -> hrx_status_t;
-    pub(crate) fn hrx_stream_synchronize(stream: hrx_stream_t) -> hrx_status_t;
+    pub(crate) fn hrx_stream_flush(stream: hrx_stream_t) -> hrx_status_t;
+    pub(crate) fn hrx_stream_get_timeline_position(
+        stream: hrx_stream_t,
+        position: *mut hrx_timeline_point_t,
+    ) -> hrx_status_t;
+    pub(crate) fn hrx_semaphore_wait(
+        semaphore: hrx_semaphore_t,
+        value: u64,
+        timeout_ns: u64,
+    ) -> hrx_status_t;
 }

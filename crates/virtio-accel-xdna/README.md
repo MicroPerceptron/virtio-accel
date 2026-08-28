@@ -11,7 +11,8 @@ build time; a compile-only unsupported-runtime placeholder elsewhere.
 In a `va_xdna` build it runs the full `Accelerator`
 lifecycle — device/stream owner, `hrx_buffer` primitives (persistent mapping, range
 flush/invalidate, release), and a serialized dispatch worker bridging
-`hrx_stream_dispatch`/`synchronize` to a latched nonblocking `poll_event`. `load_program` accepts
+`hrx_stream_dispatch`/timeline-semaphore completion to a latched nonblocking `poll_event`, with
+up to four submissions in flight per instance. `load_program` accepts
 the crate-local precompiled artifact format directly, and a TOSA artifact by admitting it and
 compiling it with the bounded aiecc helper subprocess (`compiler/xdna_compile.py`, run under the
 pinned toolchain venv in a cleared environment, content-addressed in a cache). The compilable TOSA
@@ -104,10 +105,10 @@ RESCALE applies its signed INT8 output zero point only after exact 64-bit multip
 ## Completion and fault model
 
 One worker serializes each instance's accepted submissions. Finite timeouts are rejected before
-admission because HRX exposes no cancellation primitive. A definite dispatch/synchronize failure
+admission because HRX exposes no cancellation primitive. A definite dispatch or completion-wait failure
 becomes a stable terminal `Failed` event and poisons that backend instance (device-loss tier 1);
 the event and its buffers can still be released normally. A 120-second userspace watchdog, longer
-than the kernel's 60-second NPU TDR, detects a synchronize call that never returns (tier 2). In that
+than the kernel's 60-second NPU TDR, detects a dispatch or completion wait that never finishes (tier 2). In that
 case `poll_event` reports `DeviceLost`, the event remains pending and cannot be released, and the
 host must discard the backend instance. The detached worker retains the stream, executable, and
 buffer allocations so discarding cannot free native memory that HRX might still touch.
