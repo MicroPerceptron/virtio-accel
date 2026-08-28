@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use virtio_accel_core::{
-    AccessMode, Accelerator, ArtifactRef, BackendError, BindingRef, BufferDesc, BufferRange,
+    Accelerator, AccessMode, ArtifactRef, BackendError, BindingRef, BufferDesc, BufferRange,
     BufferUsage, ByteSink, ByteSource, ContextDesc, EventState, MemoryDomain, QueueDesc,
     TargetIdentity, Timeout,
 };
@@ -108,7 +108,11 @@ fn round_reference(mode: u32, x: f64) -> f64 {
             // ties to even
             if half {
                 let down = x.floor();
-                if (down as i64) % 2 == 0 { down } else { x.ceil() }
+                if (down as i64) % 2 == 0 {
+                    down
+                } else {
+                    x.ceil()
+                }
             } else {
                 x.round()
             }
@@ -117,7 +121,11 @@ fn round_reference(mode: u32, x: f64) -> f64 {
             // ties to odd
             if half {
                 let down = x.floor();
-                if (down as i64) % 2 != 0 { down } else { x.ceil() }
+                if (down as i64) % 2 != 0 {
+                    down
+                } else {
+                    x.ceil()
+                }
             } else {
                 x.round()
             }
@@ -162,8 +170,7 @@ fn p4_reference(a_planes: &[[u8; 72]; 4], b_planes: &[[u8; 72]; 4]) -> [f32; 64]
                     let ma = f64::from(a[i * 8 + lane] as i8);
                     let mb = f64::from(b[j * 8 + lane] as i8);
                     if ma != 0.0 && mb != 0.0 {
-                        c[i * 8 + j] +=
-                            ma * mb * (f64::from(ea) + f64::from(eb) - 266.0).exp2();
+                        c[i * 8 + j] += ma * mb * (f64::from(ea) + f64::from(eb) - 266.0).exp2();
                     }
                 }
             }
@@ -384,7 +391,10 @@ fn decode_p1(name: &str, values: &[f32; 64], raw: &[u8]) {
                 &exponent[0..4]
             );
         } else {
-            println!("   mode {mode:2} {mode_name:>9}: {} MISMATCHES", mismatches.len());
+            println!(
+                "   mode {mode:2} {mode_name:>9}: {} MISMATCHES",
+                mismatches.len()
+            );
             for m in &mismatches {
                 println!("      {m}");
             }
@@ -683,8 +693,7 @@ fn main() {
                     let mut ma = [0i8; 64];
                     ma[p] = 64;
                     let a = [craft(&ma, &[127u8; 8]), zero, zero, zero];
-                    let lanes =
-                        mm_run(&backend, &queue, &program, &mut input, &output, &a, &b);
+                    let lanes = mm_run(&backend, &queue, &program, &mut input, &output, &a, &b);
                     let nonzero: Vec<String> = (0..64)
                         .filter(|&i| lanes[i] != 0.0)
                         .map(|i| format!("C[{},{}]={}", i / 8, i % 8, lanes[i]))
@@ -818,8 +827,9 @@ fn main() {
                     craft(&ma_shift[3], &[128u8; 8]),
                 ];
                 let c_even = mm_run(&backend, &queue, &program, &mut input, &output, &a_even, &b);
-                let c_shift =
-                    mm_run(&backend, &queue, &program, &mut input, &output, &a_shift, &b);
+                let c_shift = mm_run(
+                    &backend, &queue, &program, &mut input, &output, &a_shift, &b,
+                );
                 let same = (0..64).all(|i| c_even[i].to_bits() == c_shift[i].to_bits());
                 println!(
                     "   same values via (m, e) vs (m/2, e+1): {}",
@@ -900,8 +910,11 @@ fn main() {
                     }
                     let expected = model::dot_fold_f32(&am, &ae, &bm, &be);
                     let naive = model::dot_reference(&am, &ae, &bm, &be, 8) as f32;
-                    let got =
-                        f32::from_le_bytes(raw[(i * 8 + j) * 4..(i * 8 + j) * 4 + 4].try_into().unwrap());
+                    let got = f32::from_le_bytes(
+                        raw[(i * 8 + j) * 4..(i * 8 + j) * 4 + 4]
+                            .try_into()
+                            .unwrap(),
+                    );
                     if got.to_bits() == expected.to_bits() {
                         fold_matches += 1;
                     } else {

@@ -53,7 +53,11 @@ pub fn round_mode(mode: u32, x: f64) -> f64 {
         12 => {
             if half {
                 let down = x.floor();
-                if (down as i64) % 2 == 0 { down } else { x.ceil() }
+                if (down as i64) % 2 == 0 {
+                    down
+                } else {
+                    x.ceil()
+                }
             } else {
                 x.round()
             }
@@ -61,7 +65,11 @@ pub fn round_mode(mode: u32, x: f64) -> f64 {
         13 => {
             if half {
                 let down = x.floor();
-                if (down as i64) % 2 != 0 { down } else { x.ceil() }
+                if (down as i64) % 2 != 0 {
+                    down
+                } else {
+                    x.ceil()
+                }
             } else {
                 x.round()
             }
@@ -132,7 +140,10 @@ pub fn encode_block(values: &[f32; 8], mode: u32) -> ([i8; 8], u8) {
         if !bumped {
             return (out, e);
         }
-        assert!(e < 254, "renormalization past e=254 is outside the probed envelope");
+        assert!(
+            e < 254,
+            "renormalization past e=254 is outside the probed envelope"
+        );
         e += 1;
     }
 }
@@ -200,8 +211,8 @@ pub fn dot_fold_f32(a_m: &[i8], a_e: &[u8], b_m: &[i8], b_e: &[u8]) -> f32 {
             let i = chunk * 8 + lane;
             integer += i64::from(a_m[i]) * i64::from(b_m[i]);
         }
-        let chunk_value = integer as f64
-            * (f64::from(a_e[chunk]) + f64::from(b_e[chunk]) - 266.0).exp2();
+        let chunk_value =
+            integer as f64 * (f64::from(a_e[chunk]) + f64::from(b_e[chunk]) - 266.0).exp2();
         acc = ((f64::from(acc)) + chunk_value) as f32;
     }
     acc
@@ -290,7 +301,11 @@ mod tests {
         n3[0] = f32::from_bits(0x0000_0001);
         n3[1] = f32::from_bits(0x007f_ffff);
         let (m, e) = encode_v64(&n3, HARDWARE_DEFAULT_MODE);
-        assert_eq!((m[0], m[1], e[0]), (0, 0, 0), "subnormal inputs flush to zero");
+        assert_eq!(
+            (m[0], m[1], e[0]),
+            (0, 0, 0),
+            "subnormal inputs flush to zero"
+        );
 
         let mut n4 = [0f32; 64];
         n4[..6].copy_from_slice(&[
