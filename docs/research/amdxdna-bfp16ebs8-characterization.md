@@ -1,7 +1,7 @@
 # AMD XDNA2 `bfp16ebs8` characterization (issue #146)
 
-Status: **in progress** — toolchain surface frozen 2026-08-27; probe P0 run on silicon
-2026-08-27 (results in §6); P1–P5 pending.
+Status: **in progress** — toolchain surface frozen 2026-08-27; probes P0–P3 run on silicon
+2026-08-27 (results in §6); P4–P5 (MMUL contract, MX mapping verdict) pending.
 Part of #110. Companion to
 [tosa-int8-block-fp-status.md](tosa-int8-block-fp-status.md) and the forward spec
 `docs/research/amdxdna-blockfp-tier.md` (branch `grilling/first-numerical-tier`).
@@ -198,6 +198,41 @@ members are quantized at that exponent and lose low bits under the active roundi
 This matches OCP MX v1.0's scale rule (`X = 2^(floor(log2(max|v|)) − emax_elem)` with
 `emax_elem = 0` for INT8's 2.0 ceiling — same outcome as "max member's IEEE exponent" for all
 P0 cases); P2 adds the boundary cases where the two formulations could differ.
+
+**P1 — rounding modes: all ten exact.** Every `crrnd` mode (`floor, ceil, sym_floor, sym_ceil,
+neg_inf, pos_inf, sym_zero, sym_inf, conv_even, conv_odd`) matched the reference rounding
+function on all 64 lanes, including negative ties and large-mantissa ties
+(`results/p1-2026-08-27.txt`). `set_rnd`/`to_v64bfp16ebs8_conf` work from kernel context and
+restore the previous mode. **Round-to-nearest-even is therefore available and exact**, which is
+what the MX tier needs — it just is not the default.
+
+**P1b — overflow renormalizes, never saturates or wraps.** With exact mantissa `±127.5` at
+`e = 127`, every mode that rounds the magnitude up to 128 (ceil, sym_ceil, pos_inf, sym_inf,
+conv_even) bumps the shared exponent to 128 and re-quantizes the whole block; every mode that
+rounds down (floor, sym_floor, neg_inf, sym_zero, conv_odd — 127.5 ties to odd 127) keeps
+`e = 127`. The observed mantissas match the reference at the *post-bump* exponent in every mode.
+
+**P2 — normalization: `e` is the max member's IEEE FP32 exponent *field*.** Verified through
+`e = 254` (`f32::MAX → m = 127`). An all-subnormal-FP32 block flushes to zero (`e = 0, m = 0`) —
+input FTZ. A negative-only block is symmetric (`−1.984375 → m = −127` exact at `e = 127`).
+Members far below the block maximum quantize at the shared scale under the active mode — under
+the default floor mode a tiny *negative* member becomes `m = −1` rather than 0, one more reason
+the MX tier must run under `conv_even`. (`results/p2-2026-08-27.txt`)
+
+**P3 — exceptional values are structural, not special-cased.** `+Inf → e = 255, m = +64`
+(the implicit-one pattern), `−Inf → m = −64`, `NaN → e = 255, m = ±96` (quiet-bit pattern),
+`±0 → m = 0`. Other members of an Inf/NaN block simply quantize at the `e = 255` scale
+(`2^122`): positives floor to 0, negatives to −1 under the default mode — the max-exponent rule
+extended to field 255, with per-block isolation confirmed. Consequence for the MX mapping: OCP
+E8M0 reserves 255 as NaN and MXINT8 has no Inf, so `e = 255` blocks are outside MXINT8's domain;
+the mapping direction MX → `bfp16ebs8` never produces them, and any `bfp16ebs8 → MX` path must
+reject or canonicalize them. (`results/p3-2026-08-27.txt`)
+
+**Emerging model.** All P0–P3 observations are consistent with one description: the conversion
+takes each member's IEEE FP32 representation, selects the block exponent as the maximum member
+exponent field (0 treated as flush-to-zero, 255 passed through), forms each member's signed
+mantissa `sign · 1.fraction · 2^6` shifted right by `e − e_member`, and rounds per the `crrnd`
+mode with post-rounding renormalization. This is the reference model P4/P5 will encode.
 
 **Bonus finding.** The conversion path `vector<float,64> → accum<accfloat,64> →
 to_v64bfp16ebs8` compiles and runs on the first attempt through the standalone probe pipeline,

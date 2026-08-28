@@ -1,0 +1,26 @@
+P1 run 2026-08-28T00:36:23Z
+host: 7.1.8-200.fc44.x86_64, NPU 1022:17f0 rev 0x20, toolchain amdxdna-hrx-v2026.08 (mlir-aie 1.4.1, llvm-aie 21.0.0.2026080301+c9c5ecb7), HRX hrx-amdxdna-2026.07.30-amdxdna-hal-native-rel-eb0b39f-linux-x86_64
+
+== case ties (rnd mode at entry: 0)
+   mode  0     floor: PASS (all 64 lanes match reference)  e[0..4]=[127, 127, 127, 0]
+   mode  1      ceil: PASS (all 64 lanes match reference)  e[0..4]=[127, 127, 127, 0]
+   mode  2 sym_floor: PASS (all 64 lanes match reference)  e[0..4]=[127, 127, 127, 0]
+   mode  3  sym_ceil: PASS (all 64 lanes match reference)  e[0..4]=[127, 127, 127, 0]
+   mode  8   neg_inf: PASS (all 64 lanes match reference)  e[0..4]=[127, 127, 127, 0]
+   mode  9   pos_inf: PASS (all 64 lanes match reference)  e[0..4]=[127, 127, 127, 0]
+   mode 10  sym_zero: PASS (all 64 lanes match reference)  e[0..4]=[127, 127, 127, 0]
+   mode 11   sym_inf: PASS (all 64 lanes match reference)  e[0..4]=[127, 127, 127, 0]
+   mode 12 conv_even: PASS (all 64 lanes match reference)  e[0..4]=[127, 127, 127, 0]
+   mode 13  conv_odd: PASS (all 64 lanes match reference)  e[0..4]=[127, 127, 127, 0]
+== case sat (rnd mode at entry: 0)
+   mode  0     floor: PASS (all 64 lanes match reference)  e[0..4]=[127, 0, 0, 0]
+   mode  1      ceil: PASS (all 64 lanes match reference)  e[0..4]=[128, 0, 0, 0]
+   mode  2 sym_floor: PASS (all 64 lanes match reference)  e[0..4]=[127, 0, 0, 0]
+   mode  3  sym_ceil: PASS (all 64 lanes match reference)  e[0..4]=[128, 0, 0, 0]
+   mode  8   neg_inf: PASS (all 64 lanes match reference)  e[0..4]=[127, 0, 0, 0]
+   mode  9   pos_inf: PASS (all 64 lanes match reference)  e[0..4]=[128, 0, 0, 0]
+   mode 10  sym_zero: PASS (all 64 lanes match reference)  e[0..4]=[127, 0, 0, 0]
+   mode 11   sym_inf: PASS (all 64 lanes match reference)  e[0..4]=[128, 0, 0, 0]
+   mode 12 conv_even: PASS (all 64 lanes match reference)  e[0..4]=[128, 0, 0, 0]
+   mode 13  conv_odd: PASS (all 64 lanes match reference)  e[0..4]=[127, 0, 0, 0]
+p1 complete

@@ -20,6 +20,7 @@ PROBE_DIR = Path(__file__).resolve().parent
 
 P0_INPUT_FLOATS = 64
 P0_OUTPUT_WORDS = 37  # 64 mantissa + 8 exponent + 72 native-struct bytes + 1 rnd word
+P1_OUTPUT_WORDS = 181  # 10 modes x 72 plane bytes + 1 rnd word
 
 
 def configure_toolchain_env() -> None:
@@ -60,26 +61,26 @@ def configure_toolchain_env() -> None:
     prepend("LD_LIBRARY_PATH", str(mlir_dir / "lib"))
 
 
-def build_p0():
-    """One worker: 64 FP32 in, one raw 148-byte encoding dump out."""
+def build_probe(name: str, output_words: int):
+    """One worker: 64 FP32 in, one raw little-endian word dump out."""
     import aie.iron as iron
     import numpy as np
     from aie.iron import In, ObjectFifo, Out, Program, Runtime, Worker
     from aie.iron.kernel import ExternalFunction
 
-    kernel_source = (PROBE_DIR / "kernel_p0.cc").read_text()
+    kernel_source = (PROBE_DIR / f"kernel_{name}.cc").read_text()
 
     @iron.jit
-    def probe_p0(x_in: In, y_out: Out):
+    def probe(x_in: In, y_out: Out):
         input_ty = np.ndarray[(P0_INPUT_FLOATS,), np.dtype[np.float32]]
-        output_ty = np.ndarray[(P0_OUTPUT_WORDS,), np.dtype[np.uint32]]
+        output_ty = np.ndarray[(output_words,), np.dtype[np.uint32]]
         kernel = ExternalFunction(
-            "probe_p0",
+            f"probe_{name}",
             source_string=kernel_source,
             arg_types=[input_ty, output_ty],
         )
-        of_in = ObjectFifo(input_ty, name="p0_in")
-        of_out = ObjectFifo(output_ty, name="p0_out")
+        of_in = ObjectFifo(input_ty, name="probe_in")
+        of_out = ObjectFifo(output_ty, name="probe_out")
 
         def core_fn(in_fifo, out_fifo, probe):
             source = in_fifo.acquire(1)
@@ -97,11 +98,12 @@ def build_p0():
         rt = Runtime(sequence, [input_ty, output_ty, of_in.prod(), of_out.cons()])
         return Program(iron.get_current_device(), rt, workers=[worker]).resolve_program()
 
-    return probe_p0
+    return probe
 
 
 def main() -> int:
-    if len(sys.argv) != 3 or sys.argv[1] not in ("p0",):
+    probes = {"p0": P0_OUTPUT_WORDS, "p1": P1_OUTPUT_WORDS}
+    if len(sys.argv) != 3 or sys.argv[1] not in probes:
         print(__doc__, file=sys.stderr)
         return 2
     out_dir = Path(sys.argv[2])
@@ -113,7 +115,7 @@ def main() -> int:
 
     iron.set_current_device(from_name("npu2"))
 
-    design = build_p0()
+    design = build_probe(sys.argv[1], probes[sys.argv[1]])
     design.compile(
         xclbin_path=str(out_dir / "final.xclbin"),
         inst_path=str(out_dir / "insts.bin"),

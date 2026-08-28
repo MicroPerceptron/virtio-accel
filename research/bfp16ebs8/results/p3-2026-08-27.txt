@@ -1,0 +1,26 @@
+P3 run 2026-08-28T00:36:24Z
+host: 7.1.8-200.fc44.x86_64, NPU 1022:17f0 rev 0x20, toolchain amdxdna-hrx-v2026.08 (mlir-aie 1.4.1, llvm-aie 21.0.0.2026080301+c9c5ecb7), HRX hrx-amdxdna-2026.07.30-amdxdna-hal-native-rel-eb0b39f-linux-x86_64
+
+== case X1 (rnd mode at entry: 0)
+   exponent plane: [ff, 00, 00, 00, 00, 00, 00, 00]
+   block 0 (e=255): inf->m=64! -inf->m=-64! NaN->m=96! NaN->m=-96! 1->m=0! -1->m=-1! 0->m=0  -0->m=0  
+   block 1 (e=  0): 0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  
+   block 2 (e=  0): 0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  
+   block 3 (e=  0): 0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  
+   block 4 (e=  0): 0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  
+   block 5 (e=  0): 0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  
+   block 6 (e=  0): 0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  
+   block 7 (e=  0): 0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  
+   native struct layout: mantissa-then-exponent=true exponent-then-mantissa=false
+== case X2 (rnd mode at entry: 0)
+   exponent plane: [ff, ff, fe, 00, 00, 00, 00, 00]
+   block 0 (e=255): inf->m=64! 0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  
+   block 1 (e=255): NaN->m=96! 0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  
+   block 2 (e=254): 1->m=0! 340282350000000000000000000000000000000->m=127! 0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  
+   block 3 (e=  0): -0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  
+   block 4 (e=  0): 0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  
+   block 5 (e=  0): 0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  
+   block 6 (e=  0): 0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  
+   block 7 (e=  0): 0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  
+   native struct layout: mantissa-then-exponent=true exponent-then-mantissa=false
+p3 complete
