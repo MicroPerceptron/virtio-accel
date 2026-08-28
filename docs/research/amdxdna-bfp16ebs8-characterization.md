@@ -1,7 +1,12 @@
 # AMD XDNA2 `bfp16ebs8` characterization (issue #146)
 
-Status: **probes complete** — toolchain surface frozen 2026-08-27; probes P0–P5 run on silicon
-2026-08-27 (results in §6). Verdict: **exact MX mapping, with three stated conditions** (§6a).
+Status: **complete** — toolchain surface frozen 2026-08-27; probes P0–P5 run on silicon
+2026-08-27/28 (results in §6); bit-level reference model delivered and cross-validated against
+silicon (§4). Verdict: **exact MX mapping, with three stated conditions** (§6a). This meets the
+issue #146 exit criteria: the format is described by a cited note and a host-verifiable
+reference model, on-metal tests distinguish exact matches from mismatches, and the
+exact-MX-mapping outcome is chosen explicitly. No public `Target`, extension bit, capability
+row, or protocol value was added.
 Part of #110. Companion to
 [tosa-int8-block-fp-status.md](tosa-int8-block-fp-status.md) and the forward spec
 `docs/research/amdxdna-blockfp-tier.md` (branch `grilling/first-numerical-tier`).
@@ -140,15 +145,28 @@ owns).
 Every probe records the toolchain identity table above plus driver/firmware versions at run time,
 and preserves its artifact and raw output vectors under `research/` for repeatability.
 
-## 4. Reference model
+## 4. Reference model (delivered)
 
-A host-side Rust model, kept in the standalone probe project (not in any published crate):
+`research/bfp16ebs8/runner/src/model.rs` holds the bit-level model, host-verifiable without an
+NPU (`cargo test` in the runner project replays the recorded silicon planes as fixtures):
 
-- `bfp16ebs8` codec parameterized by the H1/H2 candidates until P0 pins them, then frozen;
-- OCP MX v1.0 MXINT8 quantizer/dequantizer (block-32, E8M0 scale, round-to-nearest-even) as the
-  independent oracle for P5 — deliberately a *separate formulation* from the codec, following the
-  two-independent-formulations pattern the RESCALE tier uses;
-- exact FP32 dot-product references (`f32` accumulation in kernel order) for P4/P5.
+- `encode_block`/`encode_v64`: the hardware converter exactly as P0–P3 observed it — max-member
+  IEEE exponent-field selection, subnormal flush, structural Inf/NaN at `e = 255`, all ten
+  `crrnd` rounding functions, post-rounding renormalization;
+- `mxint8_quantize_block`: OCP MX v1.0 MXINT8 quantization implemented from the spec (RNE,
+  saturating) as the deliberately independent second formulation;
+- `decode` and `dot_reference` for exact value-level comparisons.
+
+The probe runner cross-validates live: every P0/P2/P3 case asserts the silicon planes are
+bit-identical to `encode_v64`, including a 64-element pseudorandom case
+(`results/p0-2026-08-28.txt`, `p2-…`, `p3-…`: eleven cases, all `model check: PASS`).
+
+One divergence between the two formulations is real and documented in the model
+(`CONVERTER_OCP_OVERFLOW_DIVERGENCE`): at an exact mantissa of ±127.5, an up-rounding hardware
+conversion renormalizes to the next exponent while the OCP quantization procedure saturates the
+element without re-selecting the scale. Both are self-consistent; a tier claiming MXINT8
+semantics must therefore quantize with the OCP procedure rather than the hardware converter
+whenever inputs can sit on that boundary.
 
 ## 5. Feed into #145 (draft tracking)
 
@@ -192,7 +210,9 @@ maximum member's *IEEE FP32 exponent* — not the smallest exponent that fits th
 Case B (max member `−2.0`) chose `e = 128` with `m = −64`, although `e = 127` with `m = −128`
 is representable and would have kept a full extra bit for every other member (it would have
 made `127/64` exact). The conversion therefore normalizes the largest-magnitude member into
-`|m| ∈ [64, 127]` (exactly 64 for powers of two) and never emits `m = −128`. Mixed-magnitude
+`|m| ∈ [64, 127]` (exactly 64 for powers of two); `m = −128` is never a *normalization target*,
+though rounding a near-max negative member can still produce it (P1 `sat`: `−127.5` under floor
+encodes as `m = −128` at the unbumped exponent). Mixed-magnitude
 members are quantized at that exponent and lose low bits under the active rounding mode
 (case C: at `e = 127`, `1/128 → m = 0`, `1.5/64 → m = 1`, while `1 ± 1/64 → m = ±65` exactly).
 This matches OCP MX v1.0's scale rule (`X = 2^(floor(log2(max|v|)) − emax_elem)` with

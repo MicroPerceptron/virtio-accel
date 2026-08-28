@@ -1,0 +1,64 @@
+P0 run 2026-08-28T00:52:52Z (with model cross-check)
+host: 7.1.8-200.fc44.x86_64, NPU 1022:17f0 rev 0x20, toolchain amdxdna-hrx-v2026.08 (mlir-aie 1.4.1, llvm-aie 21.0.0.2026080301+c9c5ecb7), HRX hrx-amdxdna-2026.07.30-amdxdna-hal-native-rel-eb0b39f-linux-x86_64
+
+== case A (rnd mode at entry: 0)
+   exponent plane: [7c, 7d, 7e, 7f, 80, 81, 82, 83]
+   block 0 (e=124):  0.125->m=64  0.125->m=64  0.125->m=64  0.125->m=64  0.125->m=64  0.125->m=64  0.125->m=64  0.125->m=64
+   block 1 (e=125):  0.25->m=64  0.25->m=64  0.25->m=64  0.25->m=64  0.25->m=64  0.25->m=64  0.25->m=64  0.25->m=64
+   block 2 (e=126):  0.5->m=64  0.5->m=64  0.5->m=64  0.5->m=64  0.5->m=64  0.5->m=64  0.5->m=64  0.5->m=64
+   block 3 (e=127):  1->m=64  1->m=64  1->m=64  1->m=64  1->m=64  1->m=64  1->m=64  1->m=64
+   block 4 (e=128):  2->m=64  2->m=64  2->m=64  2->m=64  2->m=64  2->m=64  2->m=64  2->m=64
+   block 5 (e=129):  4->m=64  4->m=64  4->m=64  4->m=64  4->m=64  4->m=64  4->m=64  4->m=64
+   block 6 (e=130):  8->m=64  8->m=64  8->m=64  8->m=64  8->m=64  8->m=64  8->m=64  8->m=64
+   block 7 (e=131):  16->m=64  16->m=64  16->m=64  16->m=64  16->m=64  16->m=64  16->m=64  16->m=64
+   model check: PASS (planes bit-identical to model::encode_v64)
+   native struct layout: mantissa-then-exponent=true exponent-then-mantissa=false
+== case B (rnd mode at entry: 0)
+   exponent plane: [80, 00, 00, 00, 00, 00, 00, 00]
+   block 0 (e=128):  1->m=32  -1->m=-32  0.5->m=16  -0.5->m=-16  1.5->m=48  -1.5->m=-48  1.984375->m=63! -2->m=-64
+   block 1 (e=  0):  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0
+   block 2 (e=  0):  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0
+   block 3 (e=  0):  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0
+   block 4 (e=  0):  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0
+   block 5 (e=  0):  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0
+   block 6 (e=  0):  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0
+   block 7 (e=  0):  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0
+   model check: PASS (planes bit-identical to model::encode_v64)
+   native struct layout: mantissa-then-exponent=true exponent-then-mantissa=false
+== case C (rnd mode at entry: 0)
+   exponent plane: [7f, 00, 00, 00, 00, 00, 00, 00]
+   block 0 (e=127):  1->m=64  0.015625->m=1  0.0078125->m=0! 0.0234375->m=1! -0.015625->m=-1  0->m=0  1.015625->m=65  -1.015625->m=-65
+   block 1 (e=  0):  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0
+   block 2 (e=  0):  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0
+   block 3 (e=  0):  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0
+   block 4 (e=  0):  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0
+   block 5 (e=  0):  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0
+   block 6 (e=  0):  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0
+   block 7 (e=  0):  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0
+   model check: PASS (planes bit-identical to model::encode_v64)
+   native struct layout: mantissa-then-exponent=true exponent-then-mantissa=false
+== case D (rnd mode at entry: 0)
+   exponent plane: [00, 00, 00, 00, 00, 00, 00, 00]
+   block 0 (e=  0):  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0
+   block 1 (e=  0):  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0
+   block 2 (e=  0):  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0
+   block 3 (e=  0):  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0
+   block 4 (e=  0):  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0
+   block 5 (e=  0):  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0
+   block 6 (e=  0):  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0
+   block 7 (e=  0):  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0  0->m=0
+   model check: PASS (planes bit-identical to model::encode_v64)
+   native struct layout: mantissa-then-exponent=true exponent-then-mantissa=true
+== case E (rnd mode at entry: 0)
+   exponent plane: [86, 86, 86, 86, 86, 85, 86, 86]
+   block 0 (e=134):  -114.77344->m=-58! 194.64453->m=97! -255.21875->m=-128! 184.04297->m=92! -92.30469->m=-47! 52.14453->m=26! -235.44922->m=-118! 24.363281->m=12!
+   block 1 (e=134):  -65.953125->m=-33! 192.67969->m=96! -38.64453->m=-20! 164.78906->m=82! -128.48828->m=-65! 54.20703->m=27! -94.20703->m=-48! 3.4023438->m=1!
+   block 2 (e=134):  -126.921875->m=-64! 103.92578->m=51! -3.765625->m=-2! 81.52734->m=40! -50.51953->m=-26! 226.28906->m=113! -113.21875->m=-57! 247.7461->m=123!
+   block 3 (e=134):  -226.79688->m=-114! 223.0039->m=111! -76.703125->m=-39! 189.8789->m=94! -45.51953->m=-23! 121.015625->m=60! -44.609375->m=-23! 31.011719->m=15!
+   block 4 (e=134):  -74.70703->m=-38! 32.535156->m=16! -123.578125->m=-62! 221.46875->m=110! -144.6211->m=-73! 79.015625->m=39! -156.5039->m=-79! 214.82813->m=107!
+   block 5 (e=133):  -55.777344->m=-56! 123.15234->m=123! -78.52344->m=-79! 23.921875->m=23! -94.94531->m=-95! 76.90625->m=76! -81.02734->m=-82! 48.82422->m=48!
+   block 6 (e=134):  -79.13672->m=-40! 17.476563->m=8! -71.65625->m=-36! 200.86328->m=100! -255.61719->m=-128! 111.31641->m=55! -222.30469->m=-112! 114.61719->m=57!
+   block 7 (e=134):  -217.90234->m=-109! 90.12891->m=45! -45.109375->m=-23! 191.91797->m=95! -189.75781->m=-95! 70.87109->m=35! -92.46094->m=-47! 149.83984->m=74!
+   model check: PASS (planes bit-identical to model::encode_v64)
+   native struct layout: mantissa-then-exponent=true exponent-then-mantissa=false
+p0 complete

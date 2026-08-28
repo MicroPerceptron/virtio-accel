@@ -12,6 +12,8 @@ use virtio_accel_core::{
 };
 use virtio_accel_xdna::{XDNA_PRECOMPILED_FORMAT, XdnaAccelerator, artifact};
 
+mod model;
+
 #[derive(Debug)]
 struct Slice<'a>(&'a [u8]);
 
@@ -324,6 +326,17 @@ fn decode_p0(name: &str, values: &[f32; 64], raw: &[u8]) {
         }
         println!();
     }
+    // Model cross-validation: the silicon planes must equal the reference model bit for bit.
+    let (model_m, model_e) = model::encode_v64(values, model::HARDWARE_DEFAULT_MODE);
+    let silicon_m: Vec<i8> = mantissa.iter().map(|&b| b as i8).collect();
+    if silicon_m == model_m && exponent == model_e {
+        println!("   model check: PASS (planes bit-identical to model::encode_v64)");
+    } else {
+        println!("   model check: MISMATCH");
+        println!("      model e: {model_e:?}");
+        println!("      model m: {model_m:?}");
+    }
+
     // Native-layout comparison: where do the register planes land in the stored struct?
     let plane_order = native[0..64] == raw[0..64] && native[64..72] == raw[64..72];
     let exp_first = native[0..8] == raw[64..72] && native[8..72] == raw[0..64];
@@ -461,7 +474,16 @@ fn main() {
             ]);
             // Case D: all zeros.
             let d = [0f32; 64];
-            for (name, values) in [("A", &a), ("B", &b), ("C", &c), ("D", &d)] {
+            // Case E: pseudorandom finite values — silicon planes must equal the model exactly.
+            let mut e_case = [0f32; 64];
+            let mut state = 0x00c0_ffeeu32;
+            for v in e_case.iter_mut() {
+                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                // Finite, mixed sign and magnitude across ~2^-8..2^8.
+                let mag = ((state >> 8) & 0xffff) as f32 / 256.0;
+                *v = if state & 1 == 0 { mag } else { -mag };
+            }
+            for (name, values) in [("A", &a), ("B", &b), ("C", &c), ("D", &d), ("E", &e_case)] {
                 let raw = submit_case(
                     &backend,
                     &queue,
