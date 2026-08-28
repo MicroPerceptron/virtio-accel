@@ -22,5 +22,6 @@ virtio-accel-core.workspace = true
 virtio-accel-tosa.workspace = true
 
 [dev-dependencies]
+blake3.workspace = true
 virtio-accel-conformance.workspace = true
 virtio-accel-tosa-build.workspace = true
