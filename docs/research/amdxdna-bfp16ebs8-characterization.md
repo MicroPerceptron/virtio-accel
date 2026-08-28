@@ -287,7 +287,12 @@ tier (#148 / #110 stages 2+), not a hardware defect:
    order cannot affect them — the same bounded-envelope discipline the exact INT8 tier uses.
    A tier admitting larger K must either re-prove order-independence for its envelope or bound
    K accordingly. FP32 accumulation is confirmed (`accfloat`, P4); the accumulation *order* for
-   general values is deliberately not part of this verdict.
+   general values is deliberately not part of this verdict — and probe P6 (branch
+   `codex/xdna-bfp-experiment`, `tests/bfp_p6_probe.rs`) has since shown why it must not be
+   assumed: the mac chain is serial with no guard bits persisting across an `X, d, −X`
+   sequence, yet its tie-adjacent rounding matches neither round-to-nearest-even nor any
+   single directed mode (crafted exact ties break toward zero; an organic mid-chain tie broke
+   away). Pinning the exact intermediate-rounding rule is open P6 work.
 
 Additional tier-relevant facts: conversion out of `bfp16ebs8` is matrix-unit math (identity
 MMUL), not a cast (§1); the converter's normalization matches OCP MX v1.0's scale rule on every

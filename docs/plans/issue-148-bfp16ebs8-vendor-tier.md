@@ -91,11 +91,16 @@ Revisit if #110 standardization lands a stricter obligation.
 
 ## Sequencing
 
-1. **Done (2026-08-28).** Kernel emitter + flavor-1 kernel at the envelope ceiling (K = 512)
-   produced in `research/bfp16ebs8/` (`kernel_xbfp.cc`) and executed on the NPU by the probe
-   runner: all 64 output lanes bit-exact against the fold-order oracle
-   (`model.rs::dot_fold_f32`), on inputs where 51 of 64 lanes *distinguish* that oracle from a
-   single-rounded f64 sum — the accumulation-order contract is silicon-proven, not assumed
-   (`research/bfp16ebs8/results/xbfp-2026-08-28.txt`).
+1. **Done (2026-08-28), with one correction from P6.** Kernel emitter + flavor-1 kernel at
+   the envelope ceiling (K = 512) produced in `research/bfp16ebs8/` (`kernel_xbfp.cc`) and
+   executed on the NPU: all 64 output lanes bit-exact against the fold-order oracle on that
+   dataset, on inputs where 51 of 64 lanes distinguish the fold from a single-rounded f64 sum
+   (`research/bfp16ebs8/results/xbfp-2026-08-28.txt`). **P6 later falsified the per-step-RNE
+   model at tie-adjacent steps** (crate branch `codex/xdna-bfp-experiment`,
+   `tests/bfp_p6_probe.rs`): the chain is serial with no persistent guard bits, but crafted
+   exact ties break toward zero while an organic mid-chain tie broke away from zero — no
+   single directed-mode, tie-rule, or wider-precision model fits all observations. Until P6
+   pins the real rule, the tier's oracle claims bit-exactness only away from exact ties, and
+   the order-contract hardware test is quarantined behind an ignore.
 2. Crate integration (`bfp_experiment` module, `load_program` arm, tests) once #162 merges.
 3. On-metal suite + README, then close #148.
