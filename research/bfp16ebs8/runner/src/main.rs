@@ -320,7 +320,7 @@ fn decode_p0(name: &str, values: &[f32; 64], raw: &[u8]) {
             } else {
                 '!'
             };
-            print!("{input_value}->m={m}{mark} ");
+            print!(" {input_value}->m={m}{mark}");
         }
         println!();
     }
