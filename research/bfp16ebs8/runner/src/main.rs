@@ -50,9 +50,11 @@ impl ByteSink for SliceMut<'_> {
     }
 }
 
-const INPUT_BYTES: u64 = 64 * 4;
+const F32_INPUT_BYTES: u64 = 64 * 4;
 const P0_OUTPUT_BYTES: u64 = 148;
 const P1_OUTPUT_BYTES: u64 = 724;
+const P4_INPUT_BYTES: u64 = 576;
+const P4_OUTPUT_BYTES: u64 = 256;
 const P1_MODES: [(u32, &str); 10] = [
     (0, "floor"),
     (1, "ceil"),
@@ -118,6 +120,124 @@ fn round_reference(mode: u32, x: f64) -> f64 {
     }
 }
 
+fn f32_payload(values: &[f32; 64]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(F32_INPUT_BYTES as usize);
+    for v in values {
+        payload.extend_from_slice(&v.to_le_bytes());
+    }
+    payload
+}
+
+/// One raw v64bfp16ebs8: 64 mantissa bytes then 8 exponent bytes (layout pinned by P0).
+fn craft(mantissa: &[i8; 64], exponent: &[u8; 8]) -> [u8; 72] {
+    let mut unit = [0u8; 72];
+    for (i, m) in mantissa.iter().enumerate() {
+        unit[i] = *m as u8;
+    }
+    unit[64..72].copy_from_slice(exponent);
+    unit
+}
+
+/// Reference MMUL under the transposed-B hypothesis: A is 8x32 (chunk k holds columns
+/// 8k..8k+8, row-major i*8+c within the chunk), B is the 8x32 view of the transposed
+/// 32x8 operand (same chunk/lane layout), C lane i*8+j = sum_k A[i,k] * B[j,k].
+/// All products are integers scaled by powers of two, so f64 accumulation is exact and
+/// FP32 comparison is order-independent for the magnitudes the cases use.
+fn p4_reference(a_planes: &[[u8; 72]; 4], b_planes: &[[u8; 72]; 4]) -> [f32; 64] {
+    let mut c = [0f64; 64];
+    for chunk in 0..4 {
+        let a = &a_planes[chunk];
+        let b = &b_planes[chunk];
+        for i in 0..8 {
+            for j in 0..8 {
+                for lane in 0..8 {
+                    let ea = a[64 + i.min(7)]; // per-block exponent: block = row index
+                    let eb = b[64 + j.min(7)];
+                    let ma = f64::from(a[i * 8 + lane] as i8);
+                    let mb = f64::from(b[j * 8 + lane] as i8);
+                    if ma != 0.0 && mb != 0.0 {
+                        c[i * 8 + j] +=
+                            ma * mb * (f64::from(ea) + f64::from(eb) - 266.0).exp2();
+                    }
+                }
+            }
+        }
+    }
+    let mut out = [0f32; 64];
+    for (o, v) in out.iter_mut().zip(c) {
+        *o = v as f32;
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mm_run<A: Accelerator>(
+    backend: &A,
+    queue: &A::Queue,
+    program: &A::Program,
+    input: &mut A::Buffer,
+    output: &A::Buffer,
+    a: &[[u8; 72]; 4],
+    b: &[[u8; 72]; 4],
+) -> [f32; 64] {
+    let mut payload = Vec::with_capacity(576);
+    for chunk in a {
+        payload.extend_from_slice(chunk);
+    }
+    for chunk in b {
+        payload.extend_from_slice(chunk);
+    }
+    let raw = submit_case(
+        backend,
+        queue,
+        program,
+        input,
+        output,
+        P4_INPUT_BYTES,
+        P4_OUTPUT_BYTES,
+        &payload,
+    );
+    let mut lanes = [0f32; 64];
+    for (i, lane) in lanes.iter_mut().enumerate() {
+        *lane = f32::from_le_bytes(raw[i * 4..i * 4 + 4].try_into().unwrap());
+    }
+    lanes
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mm_check<A: Accelerator>(
+    backend: &A,
+    queue: &A::Queue,
+    program: &A::Program,
+    input: &mut A::Buffer,
+    output: &A::Buffer,
+    name: &str,
+    a: &[[u8; 72]; 4],
+    b: &[[u8; 72]; 4],
+) {
+    let got = mm_run(backend, queue, program, input, output, a, b);
+    let expected = p4_reference(a, b);
+    let mismatches: Vec<usize> = (0..64)
+        .filter(|&i| got[i].to_bits() != expected[i].to_bits())
+        .collect();
+    if mismatches.is_empty() {
+        println!("   {name}: PASS (all 64 lanes bit-exact vs reference)");
+    } else {
+        println!("   {name}: {} MISMATCHES", mismatches.len());
+        for i in mismatches.iter().take(12) {
+            println!(
+                "      lane {i} (i={},j={}): got {} ({:#010x}), expected {} ({:#010x})",
+                i / 8,
+                i % 8,
+                got[*i],
+                got[*i].to_bits(),
+                expected[*i],
+                expected[*i].to_bits()
+            );
+        }
+    }
+}
+
 /// H1: value = mantissa * 2^(exponent - 127 - 6), two's-complement int8 mantissa.
 fn h1_decode(mantissa: i8, exponent: u8) -> f64 {
     f64::from(mantissa) * (f64::from(exponent) - 133.0).exp2()
@@ -129,22 +249,20 @@ fn submit_case<A: Accelerator>(
     program: &A::Program,
     input: &mut A::Buffer,
     output: &A::Buffer,
+    in_bytes: u64,
     out_bytes: u64,
-    values: &[f32; 64],
+    payload: &[u8],
 ) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(INPUT_BYTES as usize);
-    for v in values {
-        payload.extend_from_slice(&v.to_le_bytes());
-    }
+    assert_eq!(payload.len() as u64, in_bytes);
     backend
-        .write_buffer(input, 0, &Slice(&payload))
+        .write_buffer(input, 0, &Slice(payload))
         .expect("write input");
 
     let bindings = [
         BindingRef {
             slot: 0,
             buffer: input,
-            range: BufferRange::new(0, INPUT_BYTES).unwrap(),
+            range: BufferRange::new(0, in_bytes).unwrap(),
             access: AccessMode::Read,
         },
         BindingRef {
@@ -261,14 +379,15 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let probe = args.next().expect("usage: runner <p0|p1> <probe-dir>");
     let dir = args.next().expect("usage: runner <p0|p1> <probe-dir>");
-    let out_bytes = match probe.as_str() {
-        "p0" | "p2" | "p3" => P0_OUTPUT_BYTES,
-        "p1" => P1_OUTPUT_BYTES,
+    let (in_bytes, out_bytes) = match probe.as_str() {
+        "p0" | "p2" | "p3" => (F32_INPUT_BYTES, P0_OUTPUT_BYTES),
+        "p1" => (F32_INPUT_BYTES, P1_OUTPUT_BYTES),
+        "p4" | "p5" => (P4_INPUT_BYTES, P4_OUTPUT_BYTES),
         other => panic!("unknown probe {other}"),
     };
     let xclbin = std::fs::read(format!("{dir}/final.xclbin")).expect("read final.xclbin");
     let insts = std::fs::read(format!("{dir}/insts.bin")).expect("read insts.bin");
-    let container = artifact::encode("MLIR_AIE", &[INPUT_BYTES], &[out_bytes], &xclbin, &insts);
+    let container = artifact::encode("MLIR_AIE", &[in_bytes], &[out_bytes], &xclbin, &insts);
 
     let backend = XdnaAccelerator::new().expect("construct XDNA backend (needs the NPU + HRX)");
     let context = backend
@@ -293,7 +412,7 @@ fn main() {
         .allocate_buffer(
             &context,
             BufferDesc::new(
-                INPUT_BYTES,
+                in_bytes,
                 4096,
                 MemoryDomain::Shared,
                 BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
@@ -343,8 +462,16 @@ fn main() {
             // Case D: all zeros.
             let d = [0f32; 64];
             for (name, values) in [("A", &a), ("B", &b), ("C", &c), ("D", &d)] {
-                let raw =
-                    submit_case(&backend, &queue, &program, &mut input, &output, out_bytes, values);
+                let raw = submit_case(
+                    &backend,
+                    &queue,
+                    &program,
+                    &mut input,
+                    &output,
+                    in_bytes,
+                    out_bytes,
+                    &f32_payload(values),
+                );
                 decode_p0(name, values, &raw);
             }
         }
@@ -386,7 +513,16 @@ fn main() {
                 0.5,
                 -0.5,
             ]);
-            let raw = submit_case(&backend, &queue, &program, &mut input, &output, out_bytes, &t);
+            let raw = submit_case(
+                &backend,
+                &queue,
+                &program,
+                &mut input,
+                &output,
+                in_bytes,
+                out_bytes,
+                &f32_payload(&t),
+            );
             decode_p1("ties", &t, &raw);
 
             // Saturation-by-rounding: exact x = +-127.5 at e = 127. A mode that rounds the
@@ -403,8 +539,16 @@ fn main() {
                 0.5,
                 -0.5,
             ]);
-            let raw =
-                submit_case(&backend, &queue, &program, &mut input, &output, out_bytes, &sat);
+            let raw = submit_case(
+                &backend,
+                &queue,
+                &program,
+                &mut input,
+                &output,
+                in_bytes,
+                out_bytes,
+                &f32_payload(&sat),
+            );
             decode_p1("sat", &sat, &raw);
         }
         "p2" => {
@@ -449,8 +593,16 @@ fn main() {
                 0.0,
             ]);
             for (name, values) in [("N1", &n1), ("N2", &n2), ("N3", &n3), ("N4", &n4)] {
-                let raw =
-                    submit_case(&backend, &queue, &program, &mut input, &output, out_bytes, values);
+                let raw = submit_case(
+                    &backend,
+                    &queue,
+                    &program,
+                    &mut input,
+                    &output,
+                    in_bytes,
+                    out_bytes,
+                    &f32_payload(values),
+                );
                 decode_p0(name, values, &raw);
             }
         }
@@ -475,9 +627,187 @@ fn main() {
             x2[17] = f32::from_bits(0x7f7f_ffff); // f32::MAX
             x2[24] = -0.0;
             for (name, values) in [("X1", &x1), ("X2", &x2)] {
-                let raw =
-                    submit_case(&backend, &queue, &program, &mut input, &output, out_bytes, values);
+                let raw = submit_case(
+                    &backend,
+                    &queue,
+                    &program,
+                    &mut input,
+                    &output,
+                    in_bytes,
+                    out_bytes,
+                    &f32_payload(values),
+                );
                 decode_p0(name, values, &raw);
+            }
+        }
+        "p4" | "p5" => {
+            let zero = craft(&[0i8; 64], &[0u8; 8]);
+
+            if probe == "p4" {
+                println!("== P4 layout inference (single-entry A, graded B, chunk 0 only)");
+                // B lane q holds mantissa q+1 at e=127 in every block.
+                let mut mb = [0i8; 64];
+                for (q, m) in mb.iter_mut().enumerate() {
+                    *m = (q + 1) as i8;
+                }
+                let b0 = craft(&mb, &[127u8; 8]);
+                let b = [b0, zero, zero, zero];
+                for p in [0usize, 1, 8, 9] {
+                    let mut ma = [0i8; 64];
+                    ma[p] = 64;
+                    let a = [craft(&ma, &[127u8; 8]), zero, zero, zero];
+                    let lanes =
+                        mm_run(&backend, &queue, &program, &mut input, &output, &a, &b);
+                    let nonzero: Vec<String> = (0..64)
+                        .filter(|&i| lanes[i] != 0.0)
+                        .map(|i| format!("C[{},{}]={}", i / 8, i % 8, lanes[i]))
+                        .collect();
+                    println!("   A[{p}]=1.0: {}", nonzero.join(" "));
+                }
+
+                println!("== P4 exactness under the inferred layout");
+                // Deterministic pseudo-random mantissas including -128 and +/-127 corners.
+                let mut ma = [0i8; 64];
+                let mut mb2 = [0i8; 64];
+                let mut state = 0x12345678u32;
+                let mut next = move || {
+                    state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                    (state >> 24) as u8 as i8
+                };
+                for i in 0..64 {
+                    ma[i] = next();
+                    mb2[i] = next();
+                }
+                ma[0] = -128;
+                ma[1] = 127;
+                mb2[0] = 127;
+                mb2[1] = -128;
+                let a = [
+                    craft(&ma, &[127u8; 8]),
+                    craft(&mb2, &[127u8; 8]),
+                    craft(&ma, &[126u8; 8]),
+                    craft(&mb2, &[125u8; 8]),
+                ];
+                let b = [
+                    craft(&mb2, &[127u8; 8]),
+                    craft(&ma, &[127u8; 8]),
+                    craft(&mb2, &[128u8; 8]),
+                    craft(&ma, &[124u8; 8]),
+                ];
+                mm_check(
+                    &backend,
+                    &queue,
+                    &program,
+                    &mut input,
+                    &output,
+                    "uniform + per-chunk exponents (incl. m = -128)",
+                    &a,
+                    &b,
+                );
+
+                println!("== P4 per-block exponent disagreement inside one chunk");
+                let ea: [u8; 8] = [120, 121, 122, 123, 124, 125, 126, 127];
+                let eb: [u8; 8] = [127, 126, 125, 124, 123, 122, 121, 120];
+                let a = [craft(&ma, &ea), zero, zero, zero];
+                let b = [craft(&mb2, &eb), zero, zero, zero];
+                mm_check(
+                    &backend,
+                    &queue,
+                    &program,
+                    &mut input,
+                    &output,
+                    "disagreeing block exponents",
+                    &a,
+                    &b,
+                );
+            } else {
+                println!("== P5 MXINT8 block-32 decomposition (H6)");
+                // Two MXINT8-32 operand rows: 32 int8 elements, ONE shared E8M0 scale each.
+                // Decomposed to four block-8 groups with EQUAL exponent bytes = the MX scale.
+                let mut state = 0x5eed_cafeu32;
+                let mut next = move || {
+                    state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                    (state >> 24) as u8 as i8
+                };
+                // A: rows i share mantissa pattern; every chunk gets the SAME exponent (MX-32).
+                let mut ma = [[0i8; 64]; 4];
+                let mut mb = [[0i8; 64]; 4];
+                for chunk in 0..4 {
+                    for lane in 0..64 {
+                        ma[chunk][lane] = next();
+                        mb[chunk][lane] = next();
+                    }
+                }
+                // MX scales: A row scale e=127, B row scale e=125 (both uniform across chunks).
+                let a = [
+                    craft(&ma[0], &[127u8; 8]),
+                    craft(&ma[1], &[127u8; 8]),
+                    craft(&ma[2], &[127u8; 8]),
+                    craft(&ma[3], &[127u8; 8]),
+                ];
+                let b = [
+                    craft(&mb[0], &[125u8; 8]),
+                    craft(&mb[1], &[125u8; 8]),
+                    craft(&mb[2], &[125u8; 8]),
+                    craft(&mb[3], &[125u8; 8]),
+                ];
+                mm_check(
+                    &backend,
+                    &queue,
+                    &program,
+                    &mut input,
+                    &output,
+                    "MXINT8 32-dot as four equal-exponent block-8 groups",
+                    &a,
+                    &b,
+                );
+
+                // The mapping-direction evidence: the same numeric values expressed with
+                // per-sub-block exponents (block-8 native form, more precision available).
+                // Halving mantissas at e+1 must reproduce identical products.
+                let mut ma_half = [[0i8; 64]; 4];
+                for chunk in 0..4 {
+                    for lane in 0..64 {
+                        // keep only even mantissas so m/2 at e+1 is exact
+                        ma_half[chunk][lane] = ma[chunk][lane] & !1;
+                    }
+                }
+                let a_even = [
+                    craft(&ma_half[0], &[127u8; 8]),
+                    craft(&ma_half[1], &[127u8; 8]),
+                    craft(&ma_half[2], &[127u8; 8]),
+                    craft(&ma_half[3], &[127u8; 8]),
+                ];
+                let mut ma_shift = [[0i8; 64]; 4];
+                for chunk in 0..4 {
+                    for lane in 0..64 {
+                        ma_shift[chunk][lane] = ma_half[chunk][lane] / 2;
+                    }
+                }
+                let a_shift = [
+                    craft(&ma_shift[0], &[128u8; 8]),
+                    craft(&ma_shift[1], &[128u8; 8]),
+                    craft(&ma_shift[2], &[128u8; 8]),
+                    craft(&ma_shift[3], &[128u8; 8]),
+                ];
+                let c_even = mm_run(&backend, &queue, &program, &mut input, &output, &a_even, &b);
+                let c_shift =
+                    mm_run(&backend, &queue, &program, &mut input, &output, &a_shift, &b);
+                let same = (0..64).all(|i| c_even[i].to_bits() == c_shift[i].to_bits());
+                println!(
+                    "   same values via (m, e) vs (m/2, e+1): {}",
+                    if same { "BIT-IDENTICAL" } else { "DIFFER" }
+                );
+                mm_check(
+                    &backend,
+                    &queue,
+                    &program,
+                    &mut input,
+                    &output,
+                    "equal-exponent form vs reference",
+                    &a_even,
+                    &b,
+                );
             }
         }
         _ => unreachable!(),

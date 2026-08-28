@@ -1,0 +1,8 @@
+P5 run 2026-08-28T00:41:44Z
+host: 7.1.8-200.fc44.x86_64, NPU 1022:17f0 rev 0x20, toolchain amdxdna-hrx-v2026.08 (mlir-aie 1.4.1, llvm-aie 21.0.0.2026080301+c9c5ecb7), HRX hrx-amdxdna-2026.07.30-amdxdna-hal-native-rel-eb0b39f-linux-x86_64
+
+== P5 MXINT8 block-32 decomposition (H6)
+   MXINT8 32-dot as four equal-exponent block-8 groups: PASS (all 64 lanes bit-exact vs reference)
+   same values via (m, e) vs (m/2, e+1): BIT-IDENTICAL
+   equal-exponent form vs reference: PASS (all 64 lanes bit-exact vs reference)
+p5 complete

@@ -1,7 +1,7 @@
 # AMD XDNA2 `bfp16ebs8` characterization (issue #146)
 
-Status: **in progress** — toolchain surface frozen 2026-08-27; probes P0–P3 run on silicon
-2026-08-27 (results in §6); P4–P5 (MMUL contract, MX mapping verdict) pending.
+Status: **probes complete** — toolchain surface frozen 2026-08-27; probes P0–P5 run on silicon
+2026-08-27 (results in §6). Verdict: **exact MX mapping, with three stated conditions** (§6a).
 Part of #110. Companion to
 [tosa-int8-block-fp-status.md](tosa-int8-block-fp-status.md) and the forward spec
 `docs/research/amdxdna-blockfp-tier.md` (branch `grilling/first-numerical-tier`).
@@ -233,6 +233,46 @@ takes each member's IEEE FP32 representation, selects the block exponent as the 
 exponent field (0 treated as flush-to-zero, 255 passed through), forms each member's signed
 mantissa `sign · 1.fraction · 2^6` shifted right by `e − e_member`, and rounds per the `crrnd`
 mode with post-rounding renormalization. This is the reference model P4/P5 will encode.
+
+**P4 — MMUL contract: bit-exact against the H1 semantic model.** The operand layout is the
+transposed-B form the intrinsic names imply: A lane `i*8+k`, B lane `j*8+k`, C lane `i*8+j`,
+with block `n`'s exponent byte applying to row `n` of its operand (established empirically with
+single-entry operands, `results/p4-2026-08-27.txt`). With host-crafted raw planes bypassing the
+converter entirely, `mul_8x8_8x8T`/`mac_8x8_8x8T` chains over K = 32 reproduce the reference
+`sum(m_a · m_b · 2^(e_a + e_b − 266))` bit-exactly in FP32 — including per-chunk exponent
+differences, per-*block* exponent disagreement inside one chunk, and mantissa `−128`, which the
+converter never emits (P0/P2) but the matrix unit honors as exactly −2.0.
+
+**P5 — the #110 stage-1 hypothesis: CONFIRMED.** A block-32 MXINT8 dot product (one E8M0 scale,
+32 int8 elements per operand row) decomposed into four `bfp16ebs8` blocks with equal exponent
+bytes is bit-exact on the matrix unit against the pinned reference (`results/p5-2026-08-27.txt`).
+Scale-representation equivalence holds: the same numeric operand expressed as `(m, e)` and as
+`(m/2, e+1)` produces bit-identical accumulator lanes, so results depend on values, not on the
+chosen block normalization.
+
+### 6a. Verdict for issue #146
+
+**Exact MX mapping**, with the conditions the probes surfaced — each a requirement on the future
+tier (#148 / #110 stages 2+), not a hardware defect:
+
+1. **Quantization must run under `rnd_conv_even`.** The hardware default is `rnd_floor` (P1);
+   OCP MX v1.0 specifies round-to-nearest-even. The mode is exact when set (P1), so this is one
+   `set_rnd` per conversion kernel.
+2. **`e = 255` is outside MXINT8's domain.** The hardware represents Inf (`m = ±64`) and NaN
+   (`m = ±96`) at exponent 255 (P3); OCP E8M0 reserves 255 as NaN and MXINT8 has no Inf. The
+   MX → `bfp16ebs8` direction never produces such blocks; any path accepting raw `bfp16ebs8`
+   must reject or canonicalize them before claiming MX semantics.
+3. **Exactness is proven for integer-exact accumulations.** The P4/P5 dot products keep every
+   partial sum exactly representable in FP32 (products ≤ 2^14, ≤ 32 terms), so accumulation
+   order cannot affect them — the same bounded-envelope discipline the exact INT8 tier uses.
+   A tier admitting larger K must either re-prove order-independence for its envelope or bound
+   K accordingly. FP32 accumulation is confirmed (`accfloat`, P4); the accumulation *order* for
+   general values is deliberately not part of this verdict.
+
+Additional tier-relevant facts: conversion out of `bfp16ebs8` is matrix-unit math (identity
+MMUL), not a cast (§1); the converter's normalization matches OCP MX v1.0's scale rule on every
+probed case (P2); and subnormal FP32 inputs flush to zero on conversion (P2), which an MX
+quantizer reference must model.
 
 **Bonus finding.** The conversion path `vector<float,64> → accum<accfloat,64> →
 to_v64bfp16ebs8` compiles and runs on the first attempt through the standalone probe pipeline,
