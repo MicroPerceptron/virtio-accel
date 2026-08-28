@@ -83,7 +83,7 @@ impl Harness {
         }
     }
 
-    pub fn run_lane00(&self, a: &Planes, b: &Planes) -> f32 {
+    pub fn run_all_lanes(&self, a: &Planes, b: &Planes) -> [f32; 64] {
         let backend = &self.backend;
         let context = backend.create_context(ContextDesc::default()).unwrap();
         let queue = backend
@@ -172,13 +172,31 @@ impl Harness {
         backend
             .read_buffer(&out, 0, &mut SliceMut(&mut raw))
             .unwrap();
-        let c00 = f32::from_le_bytes(raw[0..4].try_into().unwrap());
+        let mut lanes = [0f32; 64];
+        for (i, lane) in lanes.iter_mut().enumerate() {
+            *lane = f32::from_le_bytes(raw[i * 4..i * 4 + 4].try_into().unwrap());
+        }
         assert!(backend.free_buffer(ab).is_ok());
         assert!(backend.free_buffer(bb).is_ok());
         assert!(backend.free_buffer(out).is_ok());
         assert!(backend.unload_program(program).is_ok());
         assert!(backend.destroy_queue(queue).is_ok());
         assert!(backend.destroy_context(context).is_ok());
-        c00
+        lanes
+    }
+
+    pub fn run_lane00(&self, a: &Planes, b: &Planes) -> f32 {
+        self.run_all_lanes(a, b)[0]
+    }
+
+    /// Full-plane variant: caller supplies complete operand unit streams.
+    pub fn run_all_lanes_raw(&self, a_units: &[[u8; 72]], b_units: &[[u8; 72]]) -> [f32; 64] {
+        let a = Planes {
+            units: a_units.to_vec(),
+        };
+        let b = Planes {
+            units: b_units.to_vec(),
+        };
+        self.run_all_lanes(&a, &b)
     }
 }
