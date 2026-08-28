@@ -41,8 +41,14 @@ use crate::{InitError, XDNA_ERROR_DOMAIN};
 /// Upper bound advertised for a loaded artifact (mirrors the OpenVINO backend).
 const MAX_TOSA_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Default submission-ring depth (issue #85: one admitted request, matching the Hexagon backend).
-const DEFAULT_RING_DEPTH: usize = 1;
+/// Default submission-ring depth: up to four requests outstanding per instance. Issue #85 started
+/// at one (matching the Hexagon backend); pipelined dispatch (#151/#149) raised it so consecutive
+/// submissions overlap on the stream and the per-submission host cost amortizes.
+const DEFAULT_RING_DEPTH: usize = 4;
+
+/// Completion waits poll the stream timeline in bounded slices so the worker observes a watchdog
+/// wedge verdict promptly and no HRX call blocks unboundedly.
+const WAIT_SLICE_NS: u64 = 100_000_000;
 
 /// AIE DMA descriptors transfer whole four-byte words, so a bound range must begin on a word
 /// boundary as well as cover its slot's exact byte length. The base mapping is page-aligned, so the
@@ -83,6 +89,12 @@ fn check(status: ffi::hrx_status_t) -> Result<(), BackendError> {
         ffi::hrx_status_ignore(status);
     }
     Err(backend_error_from_code(code))
+}
+
+/// The two `hrx_status_code_t` values the retire loop branches on by value.
+mod code {
+    pub(super) const OK: super::ffi::hrx_status_code_t = 0;
+    pub(super) const DEADLINE_EXCEEDED: super::ffi::hrx_status_code_t = 4;
 }
 
 /// Map an HRX status code (`hrx_status_code_t`, mirroring IREE) to a `BackendError`.
@@ -250,9 +262,13 @@ struct Job {
 // the worker transfers that exclusive access. Everything else in the job (`Arc`s) is `Send`.
 unsafe impl Send for Job {}
 
-/// The bounded submission ring.
+/// The bounded submission ring. `queue` holds accepted jobs the worker has not yet dispatched;
+/// `dispatched` counts jobs the worker has moved onto the device but not yet retired. Their sum is
+/// bounded by the lane depth, so `submit` rejects with `Busy` exactly when `depth` submissions are
+/// outstanding in any mix of queued and in-flight.
 struct Ring {
     queue: VecDeque<Job>,
+    dispatched: usize,
     stopping: bool,
 }
 
@@ -268,6 +284,7 @@ struct WatchdogState {
 enum InjectedFault {
     Tier1,
     Tier2 { stall: Duration },
+    HoldDispatch { hold: Duration },
 }
 
 /// One-shot fault used by the on-metal fault-path tests.
@@ -279,6 +296,9 @@ pub enum XdnaTestFault {
     Tier1,
     /// Hold the worker beyond the watchdog deadline without touching HRX.
     Tier2 { stall: Duration },
+    /// Delay the worker before one normal dispatch (no fault): a deterministic pending window for
+    /// tests that assert in-flight semantics, which are otherwise a race against real completion.
+    HoldDispatch { hold: Duration },
 }
 
 /// Test-only construction parameters. This API is absent unless `test-control` is enabled.
@@ -360,44 +380,109 @@ impl Lane {
         }
     }
 
-    /// Run the worker loop: drain the ring one job at a time, dispatching and synchronizing under
-    /// the stream mutex, until stopped and empty.
+    /// Run the worker loop: keep up to `depth` jobs in flight on the stream, retiring the oldest
+    /// while later submissions are already recorded and executing. Dispatch (record + flush +
+    /// timeline position) holds the stream mutex briefly; the completion wait blocks on the
+    /// stream's timeline semaphore with no lock held, so `allocate_buffer` never queues behind a
+    /// running dispatch. In-flight jobs are worker-owned: on a tier-2 wedge the worker parks
+    /// forever holding them (and the `Arc<Lane>` stream), forming the quarantine.
     fn run_worker(self: &Arc<Self>) {
+        let mut in_flight: VecDeque<(Job, ffi::hrx_timeline_point_t)> = VecDeque::new();
+        // The timeline target of the most recently dispatched job. The stream is instance-private
+        // and dispatches are serialized under the stream mutex, so each job's target is exactly
+        // the first timeline value observed past its predecessor's (see `dispatch_job`).
+        let mut last_target: u64 = 0;
         loop {
-            let job = {
-                let mut ring = self.ring.lock().expect("ring mutex");
-                loop {
-                    if let Some(job) = ring.queue.pop_front() {
-                        break job;
+            // Fill: move queued jobs onto the device up to the lane depth.
+            loop {
+                let job = {
+                    let mut ring = self.ring.lock().expect("ring mutex");
+                    if in_flight.len() >= self.depth {
+                        None
+                    } else if let Some(job) = ring.queue.pop_front() {
+                        ring.dispatched += 1;
+                        Some(job)
+                    } else {
+                        None
                     }
-                    if ring.stopping {
-                        return;
-                    }
-                    ring = self.signal.wait(ring).expect("ring condvar");
+                };
+                let Some(job) = job else { break };
+                match self.dispatch_job(job, &mut last_target) {
+                    DispatchOutcome::InFlight(entry) => in_flight.push_back(entry),
+                    // Terminal at dispatch (error, poisoned short-circuit, or an injected
+                    // fault). `finish` released the ring capacity where a terminal state was
+                    // latched; the deliberately-pending outcomes (untrusted boundary, injected
+                    // tier 2) keep their slot and capacity, as quarantined work must.
+                    DispatchOutcome::Retired => {}
                 }
-            };
-            self.execute(job);
+            }
+            // Retire the oldest in-flight job, or sleep until there is work.
+            if let Some((job, position)) = in_flight.pop_front() {
+                if !self.retire(job, position) {
+                    // Tier-2 wedge: no trustworthy completion boundary exists for this job or
+                    // anything recorded behind it. Park forever holding every in-flight job's
+                    // retained resources and the stream; `Drop` detaches this thread.
+                    loop {
+                        std::thread::sleep(Duration::from_secs(3600));
+                    }
+                }
+                continue;
+            }
+            let mut ring = self.ring.lock().expect("ring mutex");
+            loop {
+                if !ring.queue.is_empty() {
+                    break;
+                }
+                if ring.stopping {
+                    return;
+                }
+                ring = self.signal.wait(ring).expect("ring condvar");
+            }
         }
     }
 
-    /// Dispatch one job on the stream, block on synchronize, make outputs host-visible, clear the
-    /// in-flight gates, and latch the event. A synchronize error latches `Failed` and poisons the
-    /// instance (device-loss tier 1).
-    fn execute(&self, job: Job) {
+    /// Dispatch one job: record it on the stream, flush, and capture its timeline position. On a
+    /// definite error the job is latched `Failed` here and the instance poisons (device-loss
+    /// tier 1); on a poisoned lane the job short-circuits to `Failed(DeviceLost)` without touching
+    /// the stream. Injected test faults are consumed here, before any HRX call.
+    fn dispatch_job(&self, job: Job, last_target: &mut u64) -> DispatchOutcome {
         #[cfg(feature = "test-control")]
-        let injected = self
-            .injected_fault
-            .lock()
-            .expect("fault-injector mutex")
-            .take();
-        #[cfg(feature = "test-control")]
-        if let Some(InjectedFault::Tier2 { stall }) = injected {
-            let watchdog_generation = self.arm_watchdog();
-            std::thread::sleep(stall);
-            let _ = self.disarm_watchdog(watchdog_generation);
-            // Tier 2 has no trustworthy completion boundary: leave the event pending and every
-            // gate armed. Discarding the backend quarantines this job's native resources.
-            return;
+        {
+            let injected = self
+                .injected_fault
+                .lock()
+                .expect("fault-injector mutex")
+                .take();
+            match injected {
+                Some(InjectedFault::Tier2 { stall }) => {
+                    let watchdog_generation = self.arm_watchdog();
+                    std::thread::sleep(stall);
+                    let _ = self.disarm_watchdog(watchdog_generation);
+                    // Tier 2 has no trustworthy completion boundary: leave the event pending and
+                    // every gate armed. Discarding the backend quarantines this job's native
+                    // resources. (No HRX call was made, so dropping the job itself is safe.)
+                    return DispatchOutcome::Retired;
+                }
+                Some(InjectedFault::Tier1) => {
+                    let generation = self.arm_watchdog();
+                    let trusted = self.disarm_watchdog(generation);
+                    if trusted {
+                        self.finish(job, Err(BackendError::DeviceLost));
+                    }
+                    return DispatchOutcome::Retired;
+                }
+                Some(InjectedFault::HoldDispatch { hold }) => {
+                    // A deterministic pending window: the event and every in-flight gate stay
+                    // armed for at least `hold`, then the job proceeds normally.
+                    std::thread::sleep(hold);
+                }
+                None => {}
+            }
+        }
+        // A poisoned lane refuses the stream: jobs accepted before the poison latch terminally.
+        if self.is_poisoned() {
+            self.finish(job, Err(BackendError::DeviceLost));
+            return DispatchOutcome::Retired;
         }
 
         let config = ffi::hrx_dispatch_config_t {
@@ -405,25 +490,106 @@ impl Lane {
             workgroup_size: [1, 1, 1],
             subgroup_size: 0,
         };
-        #[cfg(feature = "test-control")]
-        let (trusted, result) = if matches!(injected, Some(InjectedFault::Tier1)) {
-            let generation = self.arm_watchdog();
-            (
-                self.disarm_watchdog(generation),
-                Err(BackendError::DeviceLost),
+        let program = job.program.as_ref();
+        let stream = self.stream.lock().expect("stream mutex");
+        // The watchdog covers the record/flush ioctls too: a driver hang here is the same
+        // ownership-boundary loss as one during the completion wait.
+        let watchdog_generation = self.arm_watchdog();
+        // SAFETY: the stream, executable, and every bound buffer are retained by the lane/job for
+        // this call; the bindings slice is valid for `binding_count`; the config is a valid local;
+        // constants are unused on this path.
+        let dispatch = unsafe {
+            ffi::hrx_stream_dispatch(
+                stream.0.as_ptr(),
+                program.executable.as_ptr(),
+                program.ordinal,
+                &config,
+                ptr::null(),
+                0,
+                job.bindings.as_ptr(),
+                job.bindings.len(),
+                0,
             )
-        } else {
-            self.dispatch_and_synchronize(&job, &config)
         };
-        #[cfg(not(feature = "test-control"))]
-        let (trusted, result) = self.dispatch_and_synchronize(&job, &config);
-
+        let result = check(dispatch).and_then(|()| {
+            // SAFETY: the stream is live; flush submits the recorded work without waiting.
+            check(unsafe { ffi::hrx_stream_flush(stream.0.as_ptr()) })?;
+            // The flushed batch's timeline value is assigned asynchronously: a position read
+            // before the dispatch (or immediately after the flush, on an unlucky schedule) still
+            // reports the previous batch's target, and waiting on that retires this job early --
+            // observed on metal as stale outputs. The stream is instance-private and dispatches
+            // are serialized under this mutex, so only this flush can advance the timeline past
+            // the previous job's target: spin until it does, and that value is exactly this
+            // job's completion tick. The watchdog is armed, so a driver that never assigns is
+            // declared wedged rather than spun on forever.
+            loop {
+                let mut position = ffi::hrx_timeline_point_t {
+                    semaphore: ptr::null_mut(),
+                    value: 0,
+                };
+                // SAFETY: the stream is live; the out-pointer is a valid local.
+                check(unsafe {
+                    ffi::hrx_stream_get_timeline_position(stream.0.as_ptr(), &mut position)
+                })?;
+                if position.value > *last_target {
+                    *last_target = position.value;
+                    break Ok(position);
+                }
+                if self.wedged.load(Ordering::Acquire) {
+                    break Err(BackendError::DeviceLost);
+                }
+                std::thread::yield_now();
+            }
+        });
+        drop(stream);
+        let trusted = self.disarm_watchdog(watchdog_generation);
         if !trusted {
-            // Synchronize returned only after the watchdog declared the ownership boundary lost.
-            // Keep the accepted event pending and do not publish the buffers as reusable.
-            return;
+            // The ioctl returned only after the watchdog declared the boundary lost: keep the
+            // event pending, keep the gates armed; the caller's teardown quarantines.
+            return DispatchOutcome::Retired;
         }
+        match result {
+            Ok(position) => DispatchOutcome::InFlight((job, position)),
+            Err(error) => {
+                self.finish(job, Err(error));
+                DispatchOutcome::Retired
+            }
+        }
+    }
 
+    /// Wait for one in-flight job's timeline position and latch its terminal state. Returns
+    /// `false` when the watchdog declared the lane wedged while waiting (tier 2): the caller must
+    /// quarantine, because the device may still write through this and every later in-flight
+    /// job's bindings.
+    fn retire(&self, job: Job, position: ffi::hrx_timeline_point_t) -> bool {
+        let watchdog_generation = self.arm_watchdog();
+        let result = loop {
+            // Bounded slices keep this wait off the stream mutex and let the watchdog's verdict
+            // surface promptly; the semaphore is the stream's own timeline object, valid while
+            // the lane retains the stream, and safe to wait on while another thread holds the
+            // stream mutex (it is a standalone synchronization object).
+            // SAFETY: `position.semaphore` is the live stream timeline semaphore (see above); the
+            // status is consumed.
+            let status = unsafe {
+                ffi::hrx_semaphore_wait(position.semaphore, position.value, WAIT_SLICE_NS)
+            };
+            let code = unsafe { ffi::hrx_status_code(status) };
+            unsafe { ffi::hrx_status_ignore(status) };
+            match code {
+                code::OK => break Ok(()),
+                code::DEADLINE_EXCEEDED => {
+                    if self.wedged.load(Ordering::Acquire) {
+                        // Watchdog verdict while we sliced: same as disarm returning untrusted.
+                        return false;
+                    }
+                }
+                other => break Err(backend_error_from_code(other)),
+            }
+        };
+        let trusted = self.disarm_watchdog(watchdog_generation);
+        if !trusted {
+            return false;
+        }
         let result = result.and_then(|()| {
             for &(buffer, offset, len) in &job.outputs {
                 // SAFETY: each output buffer is live and persistently mapped; the range was
@@ -432,8 +598,21 @@ impl Lane {
             }
             Ok(())
         });
+        self.finish(job, result);
+        true
+    }
 
+    /// Publish a job's terminal state: clear the in-flight gates, latch the event, and poison the
+    /// instance on failure (device-loss tier 1).
+    fn finish(&self, job: Job, result: Result<(), BackendError>) {
         let failed = result.is_err();
+        // Release this job's ring capacity before the terminal state becomes observable: a caller
+        // that polls `Complete`, destroys the event, and immediately resubmits must never bounce
+        // off a stale `dispatched` count.
+        {
+            let mut ring = self.ring.lock().expect("ring mutex");
+            ring.dispatched -= 1;
+        }
         // Clear the in-flight gates before publishing the terminal state, so a caller that observes
         // completion may immediately read or free the buffers. The retained `Arc`s remain valid
         // regardless of where (or whether) the caller's buffer values still live.
@@ -450,37 +629,15 @@ impl Lane {
             self.poisoned.store(true, Ordering::Release);
         }
     }
+}
 
-    fn dispatch_and_synchronize(
-        &self,
-        job: &Job,
-        config: &ffi::hrx_dispatch_config_t,
-    ) -> (bool, Result<(), BackendError>) {
-        let program = job.program.as_ref();
-        let stream = self.stream.lock().expect("stream mutex");
-        let watchdog_generation = self.arm_watchdog();
-        // SAFETY: the stream, executable, and every bound buffer are retained by the lane/job for
-        // this call; the bindings slice is valid for `binding_count`; the config is a valid local;
-        // constants are unused on this path.
-        let dispatch = unsafe {
-            ffi::hrx_stream_dispatch(
-                stream.0.as_ptr(),
-                program.executable.as_ptr(),
-                program.ordinal,
-                config,
-                ptr::null(),
-                0,
-                job.bindings.as_ptr(),
-                job.bindings.len(),
-                0,
-            )
-        };
-        let result = check(dispatch).and_then(|()| {
-            // SAFETY: the stream is live; synchronize flushes and blocks until completion.
-            check(unsafe { ffi::hrx_stream_synchronize(stream.0.as_ptr()) })
-        });
-        (self.disarm_watchdog(watchdog_generation), result)
-    }
+/// What became of one job handed to `dispatch_job`.
+enum DispatchOutcome {
+    /// Recorded and flushed; retire it at this timeline position.
+    InFlight((Job, ffi::hrx_timeline_point_t)),
+    /// Terminal at dispatch: latched (error paths) or deliberately left pending (untrusted
+    /// boundary and the injected tier-2 fault).
+    Retired,
 }
 
 /// One HRX backend instance: a serialized dispatch lane over the shared device.
@@ -529,6 +686,14 @@ impl XdnaAccelerator {
                 InjectedFault::Tier2 { stall }
             }
             XdnaTestFault::Tier2 { .. } => return Err(InitError::Initialization),
+            // The hold must stay well inside the watchdog deadline: it delays a healthy
+            // dispatch, it does not simulate a hang.
+            XdnaTestFault::HoldDispatch { hold }
+                if !hold.is_zero() && hold * 2 <= config.watchdog_timeout =>
+            {
+                InjectedFault::HoldDispatch { hold }
+            }
+            XdnaTestFault::HoldDispatch { .. } => return Err(InitError::Initialization),
         };
         Self::initialize(config.watchdog_timeout, Some(fault))
     }
@@ -550,6 +715,7 @@ impl XdnaAccelerator {
             stream: Mutex::new(Stream(stream)),
             ring: Mutex::new(Ring {
                 queue: VecDeque::with_capacity(depth),
+                dispatched: 0,
                 stopping: false,
             }),
             signal: Condvar::new(),
@@ -1314,7 +1480,7 @@ impl Accelerator for XdnaAccelerator {
         // Acceptance boundary: claim a ring entry and an event slot, then arm the in-flight gates.
         let slot = {
             let mut ring = self.lane.ring.lock().expect("ring mutex");
-            if ring.queue.len() >= self.lane.depth {
+            if ring.queue.len() + ring.dispatched >= self.lane.depth {
                 return reject(BackendError::Busy);
             }
             let Some(slot) = self.claim_slot() else {
@@ -1400,9 +1566,9 @@ impl Accelerator for XdnaAccelerator {
 }
 
 impl Drop for XdnaEvent {
-    /// Reclaim the ring slot. `destroy_event` is the intended release path, but with a ring depth of
-    /// one a dropped-instead-of-destroyed event would strand the only slot and fail every later
-    /// submission with `Busy` for the life of the instance.
+    /// Reclaim the ring slot. `destroy_event` is the intended release path, but a
+    /// dropped-instead-of-destroyed event would strand its slot; enough of them exhaust the ring
+    /// and fail every later submission with `Busy` for the life of the instance.
     ///
     /// Only a terminal slot is reclaimed. A `PENDING` slot still belongs to the dispatch worker,
     /// which will latch it; freeing it here would hand a live slot to the next submission. Such a

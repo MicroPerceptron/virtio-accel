@@ -29,8 +29,8 @@ use virtio_accel_tosa::{
 use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
 use virtio_accel_xdna::{
     XDNA_PRECOMPILED_FORMAT, XDNA_TOSA_FP8_TARGET, XDNA_TOSA_INTEGER_TARGET, XDNA_TOSA_TARGET,
-    XdnaAccelerator, XdnaBuffer, XdnaContext, XdnaProgram, XdnaQueue, XdnaResourceCounts,
-    compile_artifact,
+    XdnaAccelerator, XdnaBuffer, XdnaContext, XdnaEvent, XdnaProgram, XdnaQueue,
+    XdnaResourceCounts, compile_artifact,
 };
 #[cfg(feature = "test-control")]
 use virtio_accel_xdna::{XdnaTestConfig, XdnaTestFault};
@@ -425,39 +425,321 @@ fn malformed_and_unsupported_artifacts_leave_no_native_resources() {
 }
 
 #[test]
-fn concurrent_submit_is_rejected_without_disturbing_the_accepted_job() {
+fn ring_capacity_bounds_outstanding_events_and_reclaim_restores_it() {
     let Some(backend) = backend() else { return };
-    let resources = PassthroughResources::create(&backend);
-    let bindings = resources.bindings();
-    let event = backend
-        .submit(
-            &resources.queue,
-            &resources.program,
-            &bindings,
-            Timeout::Infinite,
+    let context = backend
+        .create_context(ContextDesc::default())
+        .expect("context");
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .expect("queue");
+    let program = backend
+        .load_program(
+            &context,
+            ArtifactRef {
+                format: XDNA_PRECOMPILED_FORMAT,
+                target: TargetIdentity([0; 12]),
+                payload: &Slice(PASSTHROUGH),
+                resident_bytes: u64::MAX,
+            },
         )
-        .expect("first submit");
+        .expect("load passthrough");
+    let input_desc = BufferDesc::new(
+        PASSTHROUGH_BYTES as u64,
+        4096,
+        MemoryDomain::Shared,
+        BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+    )
+    .expect("input descriptor");
+    let output_desc = BufferDesc::new(
+        PASSTHROUGH_BYTES as u64,
+        4096,
+        MemoryDomain::Shared,
+        BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+    )
+    .expect("output descriptor");
+    // Five distinct binding sets: the ring bound must come from the lane, not from binding the
+    // same buffers twice (the in-flight gates reject that separately).
+    const DEPTH: usize = 4;
+    let mut sets = Vec::new();
+    for _ in 0..=DEPTH {
+        let (mut input, _) = backend
+            .allocate_buffer(&context, input_desc)
+            .expect("input")
+            .into_parts();
+        let (unused, _) = backend
+            .allocate_buffer(&context, input_desc)
+            .expect("unused")
+            .into_parts();
+        let (output, _) = backend
+            .allocate_buffer(&context, output_desc)
+            .expect("output")
+            .into_parts();
+        let payload: Vec<u8> = (0..PASSTHROUGH_BYTES).map(|i| (i * 13 + 5) as u8).collect();
+        backend
+            .write_buffer(&mut input, 0, &Slice(&payload))
+            .expect("write input");
+        sets.push((input, unused, output));
+    }
+    let range = BufferRange::new(0, PASSTHROUGH_BYTES as u64).expect("binding range");
+    fn bindings(
+        set: &(XdnaBuffer, XdnaBuffer, XdnaBuffer),
+        range: BufferRange,
+    ) -> [BindingRef<'_, XdnaBuffer>; 3] {
+        [
+            BindingRef {
+                slot: 0,
+                buffer: &set.0,
+                range,
+                access: AccessMode::Read,
+            },
+            BindingRef {
+                slot: 1,
+                buffer: &set.1,
+                range,
+                access: AccessMode::Read,
+            },
+            BindingRef {
+                slot: 2,
+                buffer: &set.2,
+                range,
+                access: AccessMode::Write,
+            },
+        ]
+    }
+
+    // Fill the ring: DEPTH accepted submissions, polled to terminal but not destroyed, so every
+    // event slot stays claimed regardless of retirement timing.
+    let mut events = Vec::new();
+    for set in &sets[..DEPTH] {
+        let event = backend
+            .submit(&queue, &program, &bindings(set, range), Timeout::Infinite)
+            .expect("submit within ring capacity");
+        events.push(event);
+    }
+    for (index, event) in events.iter().enumerate() {
+        let state = poll_to_terminal(&backend, event, Duration::from_secs(10))
+            .expect("accepted job did not complete");
+        assert!(
+            matches!(state, EventState::Complete),
+            "job {index}: {state:?}"
+        );
+    }
+    assert_eq!(backend.resource_counts().events, DEPTH as u64);
+    // Every slot is terminal-but-live: the next submission must reject with Busy and must not
+    // disturb the completed jobs.
     assert!(matches!(
         backend.submit(
-            &resources.queue,
-            &resources.program,
-            &bindings,
-            Timeout::Infinite,
+            &queue,
+            &program,
+            &bindings(&sets[DEPTH], range),
+            Timeout::Infinite
         ),
         Err(SubmitFailure::Rejected(BackendError::Busy))
     ));
-    assert_eq!(backend.resource_counts().events, 1);
-    let state = poll_to_terminal(&backend, &event, Duration::from_secs(10))
-        .expect("accepted job did not complete");
+    // Reclaiming one slot restores capacity for exactly one more submission.
+    backend
+        .destroy_event(events.pop().expect("filled ring"))
+        .expect("destroy event");
+    let refill = backend
+        .submit(
+            &queue,
+            &program,
+            &bindings(&sets[DEPTH], range),
+            Timeout::Infinite,
+        )
+        .expect("submit after reclaim");
+    let state = poll_to_terminal(&backend, &refill, Duration::from_secs(10))
+        .expect("refill job did not complete");
     assert!(matches!(state, EventState::Complete), "got {state:?}");
-    backend.destroy_event(event).expect("destroy event");
-    resources.release(&backend);
+    backend.destroy_event(refill).expect("destroy refill event");
+    for event in events {
+        backend.destroy_event(event).expect("destroy event");
+    }
+    for (input, unused, output) in sets {
+        backend.free_buffer(input).expect("free input");
+        backend.free_buffer(unused).expect("free unused");
+        backend.free_buffer(output).expect("free output");
+    }
+    backend.unload_program(program).expect("unload");
+    backend.destroy_queue(queue).expect("destroy queue");
+    backend.destroy_context(context).expect("destroy context");
     assert_eq!(backend.resource_counts(), XdnaResourceCounts::default());
 }
 
+/// Pipelined submissions must not mix jobs up: with the ring holding several in-flight
+/// passthrough copies at once, every completion must carry exactly its own submission's payload.
+/// Each round rotates distinct per-set payloads, so a cross-job binding or retirement-order bug
+/// surfaces as a byte mismatch.
+#[test]
+fn pipelined_submissions_complete_in_order_with_their_own_payloads() {
+    let Some(backend) = backend() else { return };
+    let context = backend
+        .create_context(ContextDesc::default())
+        .expect("context");
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .expect("queue");
+    let program = backend
+        .load_program(
+            &context,
+            ArtifactRef {
+                format: XDNA_PRECOMPILED_FORMAT,
+                target: TargetIdentity([0; 12]),
+                payload: &Slice(PASSTHROUGH),
+                resident_bytes: u64::MAX,
+            },
+        )
+        .expect("load passthrough");
+    let input_desc = BufferDesc::new(
+        PASSTHROUGH_BYTES as u64,
+        4096,
+        MemoryDomain::Shared,
+        BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+    )
+    .expect("input descriptor");
+    let output_desc = BufferDesc::new(
+        PASSTHROUGH_BYTES as u64,
+        4096,
+        MemoryDomain::Shared,
+        BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+    )
+    .expect("output descriptor");
+    const SETS: usize = 4;
+    const ROUNDS: usize = 8;
+    let mut sets = Vec::new();
+    for _ in 0..SETS {
+        let (input, _) = backend
+            .allocate_buffer(&context, input_desc)
+            .expect("input")
+            .into_parts();
+        let (unused, _) = backend
+            .allocate_buffer(&context, input_desc)
+            .expect("unused")
+            .into_parts();
+        let (output, _) = backend
+            .allocate_buffer(&context, output_desc)
+            .expect("output")
+            .into_parts();
+        sets.push((input, unused, output));
+    }
+    let range = BufferRange::new(0, PASSTHROUGH_BYTES as u64).expect("binding range");
+    let payload_for = |round: usize, set: usize| -> Vec<u8> {
+        (0..PASSTHROUGH_BYTES)
+            .map(|i| (i.wrapping_mul(31) + round * 41 + set * 17 + 7) as u8)
+            .collect()
+    };
+
+    // Prefill: one in-flight job per set, then retire-verify-resubmit in submission order so up
+    // to `SETS` jobs overlap on the stream at every point.
+    let mut in_flight: std::collections::VecDeque<(usize, usize, XdnaEvent)> =
+        std::collections::VecDeque::new();
+    for (set, entry) in sets.iter_mut().enumerate() {
+        backend
+            .write_buffer(&mut entry.0, 0, &Slice(&payload_for(0, set)))
+            .expect("write input");
+        let bindings = [
+            BindingRef {
+                slot: 0,
+                buffer: &entry.0,
+                range,
+                access: AccessMode::Read,
+            },
+            BindingRef {
+                slot: 1,
+                buffer: &entry.1,
+                range,
+                access: AccessMode::Read,
+            },
+            BindingRef {
+                slot: 2,
+                buffer: &entry.2,
+                range,
+                access: AccessMode::Write,
+            },
+        ];
+        let event = backend
+            .submit(&queue, &program, &bindings, Timeout::Infinite)
+            .expect("prefill submit");
+        in_flight.push_back((0, set, event));
+    }
+    let mut completed = 0usize;
+    while let Some((round, set, event)) = in_flight.pop_front() {
+        let state = poll_to_terminal(&backend, &event, Duration::from_secs(10))
+            .expect("pipelined job did not complete");
+        assert!(
+            matches!(state, EventState::Complete),
+            "round {round} set {set}: {state:?}"
+        );
+        backend.destroy_event(event).expect("destroy event");
+        let mut result = vec![0u8; PASSTHROUGH_BYTES];
+        backend
+            .read_buffer(&sets[set].2, 0, &mut SliceMut(&mut result))
+            .expect("read output");
+        assert_eq!(
+            result,
+            payload_for(round, set),
+            "round {round} set {set}: output does not match its own submission's payload"
+        );
+        completed += 1;
+        let next_round = round + 1;
+        if next_round < ROUNDS {
+            let entry = &mut sets[set];
+            backend
+                .write_buffer(&mut entry.0, 0, &Slice(&payload_for(next_round, set)))
+                .expect("write input");
+            let bindings = [
+                BindingRef {
+                    slot: 0,
+                    buffer: &entry.0,
+                    range,
+                    access: AccessMode::Read,
+                },
+                BindingRef {
+                    slot: 1,
+                    buffer: &entry.1,
+                    range,
+                    access: AccessMode::Read,
+                },
+                BindingRef {
+                    slot: 2,
+                    buffer: &entry.2,
+                    range,
+                    access: AccessMode::Write,
+                },
+            ];
+            let event = backend
+                .submit(&queue, &program, &bindings, Timeout::Infinite)
+                .expect("pipelined resubmit");
+            in_flight.push_back((next_round, set, event));
+        }
+    }
+    assert_eq!(completed, SETS * ROUNDS);
+
+    for (input, unused, output) in sets {
+        backend.free_buffer(input).expect("free input");
+        backend.free_buffer(unused).expect("free unused");
+        backend.free_buffer(output).expect("free output");
+    }
+    backend.unload_program(program).expect("unload");
+    backend.destroy_queue(queue).expect("destroy queue");
+    backend.destroy_context(context).expect("destroy context");
+    assert_eq!(backend.resource_counts(), XdnaResourceCounts::default());
+}
+
+#[cfg(feature = "test-control")]
 #[test]
 fn pending_releases_return_the_same_live_resources_for_retry() {
-    let Some(backend) = backend() else { return };
+    // A deterministic pending window: the worker holds this dispatch for 300ms, so the release
+    // rejections below never race real completion (which pipelined dispatch made fast enough to
+    // win occasionally).
+    let backend = XdnaAccelerator::new_for_testing(XdnaTestConfig {
+        watchdog_timeout: Duration::from_secs(2),
+        fault: XdnaTestFault::HoldDispatch {
+            hold: Duration::from_millis(300),
+        },
+    })
+    .expect("hold-controlled backend");
     let PassthroughResources {
         context,
         queue,
@@ -695,7 +977,7 @@ fn dropping_a_completed_event_reclaims_its_ring_slot() {
         },
     ];
 
-    // Two rounds through the single ring slot, releasing the first event by dropping it.
+    // Two rounds through one ring slot, releasing the first event by dropping it.
     for round in 0..2 {
         let event = match backend.submit(&queue, &program, &bindings, Timeout::Infinite) {
             Ok(event) => event,
@@ -811,7 +1093,7 @@ fn precompiled_passthrough_runs_the_full_lifecycle() {
         Err(failure) => panic!("submit rejected: {failure:?}"),
     };
 
-    // Poll to a terminal state (nonblocking poll; the worker bridges the blocking synchronize).
+    // Poll to a terminal state (nonblocking poll; the worker bridges the completion wait).
     let state = poll_to_terminal(&backend, &event, Duration::from_secs(10))
         .expect("dispatch did not complete in 10s");
     assert!(
@@ -1505,6 +1787,215 @@ fn tosa_int32_to_int8_rescale_matches_the_shared_exact_oracle_on_the_npu() {
     backend.free_buffer(input).expect("free input");
     backend.free_buffer(output).expect("free output");
     backend.unload_program(program).expect("unload program");
+    backend.destroy_queue(queue).expect("destroy queue");
+    backend.destroy_context(context).expect("destroy context");
+}
+
+/// Pipelined throughput of the exact INT8 MATMUL: four distinct buffer sets kept in flight, so
+/// consecutive submissions overlap on the stream and the per-submission host cost amortizes.
+/// Every warmup and every final in-flight completion is validated against the shared exact
+/// oracle; the timed window itself is unvalidated (its buffers are rebound before the window
+/// ends), which the printed line states.
+#[test]
+#[ignore = "manual native performance evidence"]
+fn measures_pipelined_int8_matmul_throughput() {
+    const M: usize = 64;
+    const K: usize = 64;
+    const N: usize = 32;
+    const LEFT_ZP: i8 = -2;
+    const RIGHT_ZP: i8 = 3;
+    const SETS: usize = 4;
+    const WARMUP_ROUNDS: usize = 10;
+    const MEASURED: usize = 400;
+    let Some(backend) = backend() else { return };
+    if !toolchain_present() {
+        assert!(
+            !hardware_required(),
+            "{REQUIRE_HARDWARE_ENV}=1 but VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN is not configured"
+        );
+        eprintln!("no XDNA toolchain configured; skipping INT8 pipeline benchmark");
+        return;
+    }
+    let context = backend
+        .create_context(ContextDesc::default())
+        .expect("context");
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .expect("queue");
+    let tosa = int8_matmul_tosa(M as i32, K as i32, N as i32, LEFT_ZP, RIGHT_ZP);
+    let program = backend
+        .load_program(
+            &context,
+            ArtifactRef {
+                format: ARTIFACT_FORMAT,
+                target: XDNA_TOSA_INTEGER_TARGET.to_identity(),
+                payload: &Slice(&tosa),
+                resident_bytes: u64::MAX,
+            },
+        )
+        .expect("load INT8 matmul");
+
+    let lhs_len = M * K;
+    let rhs_len = K * N;
+    let output_len = M * N * 4;
+    let input_desc = |bytes: usize| {
+        BufferDesc::new(
+            bytes as u64,
+            4096,
+            MemoryDomain::Shared,
+            BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+        )
+        .unwrap()
+    };
+    let mut sets = Vec::new();
+    for set in 0..SETS {
+        let (mut lhs, _) = backend
+            .allocate_buffer(&context, input_desc(lhs_len))
+            .expect("lhs")
+            .into_parts();
+        let (mut rhs, _) = backend
+            .allocate_buffer(&context, input_desc(rhs_len))
+            .expect("rhs")
+            .into_parts();
+        let (output, _) = backend
+            .allocate_buffer(
+                &context,
+                BufferDesc::new(
+                    output_len as u64,
+                    4096,
+                    MemoryDomain::Shared,
+                    BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+                )
+                .unwrap(),
+            )
+            .expect("output")
+            .into_parts();
+        let lhs_bytes: Vec<u8> = (0..lhs_len)
+            .map(|i| (i * 37 + 11 + set * 3) as u8)
+            .collect();
+        let rhs_bytes: Vec<u8> = (0..rhs_len)
+            .map(|i| (i * 53 + 197 + set * 7) as u8)
+            .collect();
+        backend
+            .write_buffer(&mut lhs, 0, &Slice(&lhs_bytes))
+            .expect("write lhs");
+        backend
+            .write_buffer(&mut rhs, 0, &Slice(&rhs_bytes))
+            .expect("write rhs");
+        sets.push((lhs, rhs, output, lhs_bytes, rhs_bytes));
+    }
+    let range = |bytes: usize| BufferRange::new(0, bytes as u64).unwrap();
+    let submit_set = |set: &(XdnaBuffer, XdnaBuffer, XdnaBuffer, Vec<u8>, Vec<u8>)| {
+        backend
+            .submit(
+                &queue,
+                &program,
+                &[
+                    BindingRef {
+                        slot: 0,
+                        buffer: &set.0,
+                        range: range(lhs_len),
+                        access: AccessMode::Read,
+                    },
+                    BindingRef {
+                        slot: 1,
+                        buffer: &set.1,
+                        range: range(rhs_len),
+                        access: AccessMode::Read,
+                    },
+                    BindingRef {
+                        slot: 2,
+                        buffer: &set.2,
+                        range: range(output_len),
+                        access: AccessMode::Write,
+                    },
+                ],
+                Timeout::Infinite,
+            )
+            .expect("pipelined submit")
+    };
+    let verify_set = |set: &(XdnaBuffer, XdnaBuffer, XdnaBuffer, Vec<u8>, Vec<u8>)| {
+        let mut result = vec![0u8; output_len];
+        backend
+            .read_buffer(&set.2, 0, &mut SliceMut(&mut result))
+            .expect("read output");
+        for row in 0..M {
+            for column in 0..N {
+                let left_row = &set.3[row * K..(row + 1) * K];
+                let right_column: Vec<u8> = (0..K).map(|i| set.4[i * N + column]).collect();
+                let expected =
+                    dot_i8_i32(left_row, &right_column, LEFT_ZP, RIGHT_ZP, 0).expect("oracle");
+                let actual = i32::from_le_bytes(
+                    result[(row * N + column) * 4..][..4]
+                        .try_into()
+                        .expect("chunk"),
+                );
+                assert_eq!(actual, expected, "C[{row},{column}] oracle mismatch");
+            }
+        }
+    };
+
+    // Warmups: sequential rounds of the full pipeline, each completion oracle-validated.
+    for _ in 0..WARMUP_ROUNDS {
+        let mut events = std::collections::VecDeque::new();
+        for set in &sets {
+            events.push_back(submit_set(set));
+        }
+        for (index, event) in events.into_iter().enumerate() {
+            let state = poll_to_terminal(&backend, &event, Duration::from_secs(10))
+                .expect("warmup completion");
+            assert!(matches!(state, EventState::Complete), "warmup: {state:?}");
+            backend.destroy_event(event).expect("destroy warmup event");
+            verify_set(&sets[index]);
+        }
+    }
+
+    // Timed window: keep the ring full; count completions.
+    let started = Instant::now();
+    let mut in_flight: std::collections::VecDeque<(usize, _)> = std::collections::VecDeque::new();
+    for (index, set) in sets.iter().enumerate() {
+        in_flight.push_back((index, submit_set(set)));
+    }
+    let mut completed = 0usize;
+    while completed < MEASURED {
+        let (index, event) = in_flight.pop_front().expect("in-flight event");
+        let state = poll_to_terminal(&backend, &event, Duration::from_secs(10))
+            .expect("pipelined completion");
+        assert!(matches!(state, EventState::Complete), "measured: {state:?}");
+        backend.destroy_event(event).expect("destroy event");
+        completed += 1;
+        if completed + in_flight.len() < MEASURED {
+            in_flight.push_back((index, submit_set(&sets[index])));
+        }
+    }
+    let elapsed = started.elapsed();
+    assert!(in_flight.is_empty());
+
+    // The final in-flight generation is still in the output buffers: validate it.
+    for set in &sets {
+        verify_set(set);
+    }
+
+    let per_inference = elapsed.as_secs_f64() / MEASURED as f64;
+    // Two operations per multiply-accumulate, matching `measures_exact_int8_matmul_latency`.
+    let ops = 2.0 * (M * K * N) as f64;
+    let gops = ops / per_inference / 1e9;
+    println!(
+        "XDNA pipelined exact INT8 MATMUL: shape=1x{M}x{K} . 1x{K}x{N}; \
+         zero_points=[{LEFT_ZP},{RIGHT_ZP}]; ring_depth=4; sets={SETS}; \
+         warmup_rounds={WARMUP_ROUNDS} (validated); measured={MEASURED} completions \
+         (window unvalidated; final generation validated); \
+         amortized={:.3}us/inference; effective={:.3} GOPS",
+        per_inference * 1e6,
+        gops,
+    );
+
+    for (lhs, rhs, output, _, _) in sets {
+        backend.free_buffer(lhs).expect("free lhs");
+        backend.free_buffer(rhs).expect("free rhs");
+        backend.free_buffer(output).expect("free output");
+    }
+    backend.unload_program(program).expect("unload");
     backend.destroy_queue(queue).expect("destroy queue");
     backend.destroy_context(context).expect("destroy context");
 }

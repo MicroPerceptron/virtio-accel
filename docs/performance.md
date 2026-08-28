@@ -213,6 +213,20 @@ per-submission overhead floor (the 1,024-element FP8 case measures 86 microsecon
 remaining latency is submission-path cost, not kernel cost. Issue #151 tracks the next steps
 (submission overlap, worker striping) without weakening exactness or direct binding.
 
+The pipelined-throughput benchmark keeps four submissions in flight over four rotating buffer
+sets (`measures_pipelined_int8_matmul_throughput`, same shape and oracle). On August 27, 2026 it
+measured 73.3-74.9 microseconds amortized per inference across three 400-completion runs --
+statistically identical to the sequential submit-to-complete median (69.3-74.6 microseconds
+across three runs of the latency benchmark on the same worker). A batched-flush variant (all
+in-flight dispatches submitted under one `hrx_stream_flush`) measured 70.1 microseconds, also
+identical. The conclusion this evidence supports: the per-submission floor is per-command
+driver/firmware round-trip cost inside one hardware context, and neither deeper host-side
+pipelining nor flush batching moves it. Raising effective throughput therefore requires more work
+per dispatch (larger admitted envelopes, worker striping -- issue #151 steps 5-6) or parallel
+hardware contexts (issue #121), not further submission-path restructuring. The ring depth of four
+still pays for itself in semantics: submissions overlap with host-side polling and readback, and
+completion waits no longer serialize against `allocate_buffer`.
+
 ## Qualcomm Hexagon evidence status
 
 `virtio-accel-hexagon` includes an ignored release-mode measurement for fixed submission overhead:

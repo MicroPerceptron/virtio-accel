@@ -68,9 +68,21 @@ the buffer's `TRANSFER_DESTINATION`/`TRANSFER_SOURCE` usage.
 ## Concurrency and the dispatch worker
 
 The HRX stream is not safe for concurrent use, so all stream access is serialized by the `Lane`
-stream mutex: `allocate_buffer` locks it briefly, and the worker holds it across
-`hrx_stream_dispatch` + `hrx_stream_synchronize`. `Stream` is `unsafe impl Send` (moved to the
-worker, only ever dereferenced under that mutex).
+stream mutex: `allocate_buffer` locks it briefly, and the worker locks it briefly per dispatch
+(`hrx_stream_dispatch` + `hrx_stream_flush` + the timeline-position read). The completion wait
+holds no lock at all: it blocks on the stream's timeline semaphore (`hrx_semaphore_wait` in
+bounded slices), a standalone synchronization object that is valid while the lane retains the
+stream and safe to wait on while another thread holds the stream mutex — so `allocate_buffer`
+never queues behind a running dispatch. `Stream` is `unsafe impl Send` (moved to the worker, only
+ever dereferenced under that mutex).
+
+Up to the ring depth (four) submissions are in flight on the stream at once; the stream executes
+them in order and the worker retires them oldest-first. Each job's completion tick is the first
+timeline value observed past its predecessor's: the flushed batch's value is assigned
+asynchronously, so a position read on an unlucky schedule still reports the previous batch's
+target, and waiting on that retires early (observed on metal as stale outputs before the
+induction-anchored spin was added). The stream is instance-private and dispatches are serialized
+under the mutex, which is what makes the induction sound.
 
 `submit` validates the bindings in one pass (a nonempty, within-limit list; a queue, program, and
 every buffer from one context; unique slots via a 256-bit occupancy mask; per-slot access; ranges;
@@ -88,18 +100,23 @@ dereferenced only on the worker while the stream mutex is held. The in-flight ga
 those `BufferInner` Arcs, not caller structs: the contract requires the caller keep handles *alive*
 until the event is terminal, not address-stable, so a caller may legally move an `XdnaBuffer`
 mid-flight; the shared allocation keeps both handle and gate valid regardless. The worker, per job,
-dispatches, synchronizes,
+dispatches, waits for the job's timeline tick,
 `invalidate_range`s each output, clears the `in_flight` gates, and latches the event's terminal
-state exactly once. While a buffer's gate is set, `write_buffer`/`read_buffer`/`free_buffer` reject
+state exactly once — releasing the job's ring capacity before the terminal state becomes
+observable, so a caller that polls completion and immediately resubmits never bounces off a stale
+count. While a buffer's gate is set, `write_buffer`/`read_buffer`/`free_buffer` reject
 with `Busy`, so no host access or release races the device.
 
-Finite timeouts are rejected before admission (no cancellation exists at any layer). A synchronize
+Finite timeouts are rejected before admission (no cancellation exists at any layer). A dispatch or wait
 error latches the event `Failed` (a normal terminal state — the kernel TDR has quiesced the device)
-and then poisons the instance, which refuses further work with `DeviceLost`. `poll_event` reads the
-latched atomic state without touching HRX. The worker arms a 120-second watchdog immediately before
-dispatch, longer than the kernel's 60-second NPU TDR. If HRX still has not returned, the watchdog
-poisons the lane but deliberately leaves the accepted event pending and every gate armed: there is
-no trustworthy completion boundary. `poll_event` then reports `DeviceLost`; event release remains
+and then poisons the instance, which refuses further work with `DeviceLost`; jobs already accepted
+behind the failure latch `Failed(DeviceLost)` without touching the dead stream. `poll_event` reads
+the latched atomic state without touching HRX. The worker arms a 120-second watchdog around each
+dispatch and each completion wait, longer than the kernel's 60-second NPU TDR. If the boundary is
+declared lost, the watchdog poisons the lane but deliberately leaves the accepted events pending
+and every gate armed: there is no trustworthy completion boundary. The worker then parks forever
+holding every in-flight job's retained resources and the stream — the quarantine — and `Drop`
+detaches it. `poll_event` then reports `DeviceLost`; event release remains
 retryably rejected as `Busy`; discarding the backend enters the quarantine described above.
 `EVENT_CANCELLATION` is not advertised.
 
