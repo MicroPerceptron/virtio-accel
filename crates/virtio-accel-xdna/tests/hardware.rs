@@ -1238,6 +1238,168 @@ fn tosa_int8_matmul_matches_the_shared_exact_oracle_on_the_npu() {
     backend.destroy_context(context).expect("destroy context");
 }
 
+/// The DMA-tiled INT8 MATMUL path (shapes on the native 8x8x8 MMUL tiling) matches the shared
+/// exact oracle. The corpus fixture (2x3x2) exercises only the scalar fallback, so without this
+/// test the tier's fast path would be oracle-checked exclusively by an `#[ignore]`d benchmark.
+/// Shapes cover the minimal tile, an asymmetric multi-tile, and both zero-point extremes; inputs
+/// sweep the full INT8 range including -128.
+#[test]
+fn tosa_int8_matmul_tiled_path_matches_the_exact_oracle_on_the_npu() {
+    let Some(backend) = backend() else { return };
+    if !toolchain_present() {
+        assert!(
+            !hardware_required(),
+            "{REQUIRE_HARDWARE_ENV}=1 but VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN is not configured"
+        );
+        eprintln!("no XDNA toolchain configured; skipping TOSA execution test");
+        return;
+    }
+    let context = backend
+        .create_context(ContextDesc::default())
+        .expect("context");
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .expect("queue");
+
+    for (m, k, n, left_zero_point, right_zero_point) in [
+        (16usize, 16usize, 16usize, -128i8, 127i8),
+        (32, 24, 16, 127, -128),
+        (64, 64, 32, 0, -1),
+    ] {
+        let tosa = int8_matmul_tosa(
+            m as i32,
+            k as i32,
+            n as i32,
+            left_zero_point,
+            right_zero_point,
+        );
+        let program = backend
+            .load_program(
+                &context,
+                ArtifactRef {
+                    format: ARTIFACT_FORMAT,
+                    target: XDNA_TOSA_INTEGER_TARGET.to_identity(),
+                    payload: &Slice(&tosa),
+                    resident_bytes: u64::MAX,
+                },
+            )
+            .expect("load tiled INT8 matmul");
+
+        let lhs_len = m * k;
+        let rhs_len = k * n;
+        let output_len = m * n * 4;
+        let input_desc = |bytes: usize| {
+            BufferDesc::new(
+                bytes as u64,
+                4096,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+            )
+            .unwrap()
+        };
+        let (mut lhs, _) = backend
+            .allocate_buffer(&context, input_desc(lhs_len))
+            .expect("lhs buffer")
+            .into_parts();
+        let (mut rhs, _) = backend
+            .allocate_buffer(&context, input_desc(rhs_len))
+            .expect("rhs buffer")
+            .into_parts();
+        let (output, _) = backend
+            .allocate_buffer(
+                &context,
+                BufferDesc::new(
+                    output_len as u64,
+                    4096,
+                    MemoryDomain::Shared,
+                    BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+                )
+                .unwrap(),
+            )
+            .expect("output buffer")
+            .into_parts();
+
+        // Deterministic full-range INT8 patterns (both extremes appear in every operand).
+        let lhs_bytes: Vec<u8> = (0..lhs_len).map(|i| (i * 37 + 11) as u8).collect();
+        let rhs_bytes: Vec<u8> = (0..rhs_len).map(|i| (i * 53 + 197) as u8).collect();
+        backend
+            .write_buffer(&mut lhs, 0, &Slice(&lhs_bytes))
+            .expect("write lhs");
+        backend
+            .write_buffer(&mut rhs, 0, &Slice(&rhs_bytes))
+            .expect("write rhs");
+
+        let event = backend
+            .submit(
+                &queue,
+                &program,
+                &[
+                    BindingRef {
+                        slot: 0,
+                        buffer: &lhs,
+                        range: BufferRange::new(0, lhs_len as u64).unwrap(),
+                        access: AccessMode::Read,
+                    },
+                    BindingRef {
+                        slot: 1,
+                        buffer: &rhs,
+                        range: BufferRange::new(0, rhs_len as u64).unwrap(),
+                        access: AccessMode::Read,
+                    },
+                    BindingRef {
+                        slot: 2,
+                        buffer: &output,
+                        range: BufferRange::new(0, output_len as u64).unwrap(),
+                        access: AccessMode::Write,
+                    },
+                ],
+                Timeout::Infinite,
+            )
+            .expect("submit tiled INT8 matmul");
+        let state = poll_to_terminal(&backend, &event, Duration::from_secs(30))
+            .expect("tiled INT8 matmul did not complete");
+        assert!(matches!(state, EventState::Complete), "got {state:?}");
+
+        let mut result = vec![0u8; output_len];
+        backend
+            .read_buffer(&output, 0, &mut SliceMut(&mut result))
+            .expect("read INT32 output");
+        for row in 0..m {
+            for column in 0..n {
+                let left_row = &lhs_bytes[row * k..(row + 1) * k];
+                let right_column: Vec<u8> = (0..k).map(|i| rhs_bytes[i * n + column]).collect();
+                let expected = dot_i8_i32(
+                    left_row,
+                    &right_column,
+                    left_zero_point,
+                    right_zero_point,
+                    0,
+                )
+                .expect("exact oracle");
+                let actual = i32::from_le_bytes(
+                    result[(row * n + column) * 4..][..4]
+                        .try_into()
+                        .expect("four-byte element"),
+                );
+                assert_eq!(
+                    actual, expected,
+                    "{m}x{k}x{n} zp=[{left_zero_point},{right_zero_point}]: \
+                     C[{row},{column}] oracle mismatch"
+                );
+            }
+        }
+
+        backend.destroy_event(event).expect("destroy event");
+        backend.free_buffer(lhs).expect("free lhs");
+        backend.free_buffer(rhs).expect("free rhs");
+        backend.free_buffer(output).expect("free output");
+        backend.unload_program(program).expect("unload program");
+    }
+
+    backend.destroy_queue(queue).expect("destroy queue");
+    backend.destroy_context(context).expect("destroy context");
+}
+
 #[test]
 fn tosa_int32_to_int8_rescale_matches_the_shared_exact_oracle_on_the_npu() {
     let Some(backend) = backend() else { return };

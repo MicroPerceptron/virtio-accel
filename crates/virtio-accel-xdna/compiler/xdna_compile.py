@@ -369,69 +369,14 @@ def _build_matmul(tile_m: int, tile_k: int, tile_n: int):
 def _int8_matmul_kernel_source(
     m: int, k: int, n: int, left_zero_point: int, right_zero_point: int
 ) -> str:
-    """Generate the exact fixed-shape TOSA INT8 MATMUL device kernel.
+    """Generate the exact scalar fallback for shapes off the native MMUL tiling.
 
     OpenVINO expresses zero-point handling as INT32 widen/subtract nodes before MatMul. IRON has no
     equivalent provider graph, so XDNA specializes the same arithmetic into the AIE core kernel.
-    The caller has already bounded K so every exact dot product fits INT32.
+    The caller has already bounded K so every exact dot product fits INT32. Shapes on the native
+    tiling never reach this template; they take the DMA-tiled design in
+    `_build_int8_matmul_tiled`, whose zero-point terms are corrected exactly after a raw MMUL pass.
     """
-    if m % 4 == 0 and k % 4 == 0 and n % 8 == 0:
-        # XDNA2's AIE2P INT16 MMUL is 4x4x8. Widening after zero-point subtraction is exact for
-        # every INT8 value (the adjusted range is -255..255), and avoids the overflow that would
-        # occur if adjusted values were squeezed back into INT8. Packing costs scalar loads, while
-        # the dominant multiply-accumulate work stays on the native vector unit.
-        return f"""
-#include <cstdint>
-#include <aie_api/aie.hpp>
-
-extern "C" void matmul_i8_i32_zp(
-    const int8_t *__restrict lhs,
-    const int8_t *__restrict rhs,
-    int32_t *__restrict output) {{
-    constexpr unsigned M = {m};
-    constexpr unsigned K = {k};
-    constexpr unsigned N = {n};
-    constexpr int32_t LEFT_ZERO_POINT = {left_zero_point};
-    constexpr int32_t RIGHT_ZERO_POINT = {right_zero_point};
-    using MMUL = aie::mmul<4, 4, 8, int16, int16, acc32>;
-    alignas(aie::vector_decl_align) int16 left_tile[MMUL::size_A];
-    alignas(aie::vector_decl_align) int16 right_tile[MMUL::size_B];
-    alignas(aie::vector_decl_align) int32 output_tile[MMUL::size_C];
-
-    for (unsigned row_base = 0; row_base < M; row_base += 4) {{
-        for (unsigned column_base = 0; column_base < N; column_base += 8) {{
-            MMUL accumulator;
-            for (unsigned inner_base = 0; inner_base < K; inner_base += 4) {{
-                for (unsigned row = 0; row < 4; ++row) {{
-                    for (unsigned inner = 0; inner < 4; ++inner) {{
-                        left_tile[row * 4 + inner] = static_cast<int16>(
-                            static_cast<int32_t>(lhs[(row_base + row) * K + inner_base + inner])
-                            - LEFT_ZERO_POINT);
-                    }}
-                }}
-                for (unsigned inner = 0; inner < 4; ++inner) {{
-                    for (unsigned column = 0; column < 8; ++column) {{
-                        right_tile[inner * 8 + column] = static_cast<int16>(
-                            static_cast<int32_t>(rhs[(inner_base + inner) * N + column_base + column])
-                            - RIGHT_ZERO_POINT);
-                    }}
-                }}
-                accumulator.mac(
-                    aie::load_v<MMUL::size_A>(left_tile),
-                    aie::load_v<MMUL::size_B>(right_tile));
-            }}
-            aie::store_v(output_tile, accumulator.to_vector<int32>());
-            for (unsigned row = 0; row < 4; ++row) {{
-                for (unsigned column = 0; column < 8; ++column) {{
-                    output[(row_base + row) * N + column_base + column] =
-                        output_tile[row * 8 + column];
-                }}
-            }}
-        }}
-    }}
-}}
-"""
-
     # Arbitrary small shapes (including the shared 2x3x2 corpus case) cannot use a complete MMUL
     # tile. Keep this fallback scalar and explicitly disable Peano's unsupported generic vector
     # legalization; no host fallback is involved.
@@ -464,13 +409,231 @@ extern "C" void matmul_i8_i32_zp(
 """
 
 
+def _int8_zp_correction_kernel_source(
+    m: int, k: int, n: int, left_zero_point: int, right_zero_point: int
+) -> str:
+    """Generate the exact zero-point correction pass for the DMA-tiled INT8 MATMUL.
+
+    The main pass computes the raw product `R = A . B` on the native INT8 MMUL with no widening.
+    TOSA's contract expands exactly as
+
+        C[i][j] = R[i][j] - zb * rowsum(A)[i] - za * colsum(B)[j] + K * za * zb
+
+    so this pass derives both sums from the same tiled L1 buffers (via MMUL against a constant
+    ones tile - the matrix unit is the cheapest reducer available) and applies the correction to
+    the raw tile-major output in place.
+
+    Exactness/overflow proof, for K <= 512 (`max_dim`) and INT8 values/zero points:
+    |R| <= K*128*128 < 2^23; |rowsum|,|colsum| <= K*128 = 2^16; |zb*rowsum|,|za*colsum| <= 2^23;
+    |K*za*zb| <= 512*2^14 = 2^23. |C| <= 2^25 < 2^31: every term and total is exact in INT32,
+    and the MMUL accumulates in acc32 with the same bound. This is the same arithmetic the
+    widening formulation computed, term-for-term rearranged; no rounding exists anywhere.
+    """
+    ones_b = ", ".join(["1"] * 64)
+    ones_a = ", ".join(["1"] * 64)
+    return f"""
+#include <cstdint>
+#include <aie_api/aie.hpp>
+
+extern "C" void zp_correct_i8_i32(
+    const int8_t *__restrict lhs_tiled,
+    const int8_t *__restrict rhs_tiled,
+    int32_t *__restrict output_tiled) {{
+    constexpr unsigned M = {m};
+    constexpr unsigned K = {k};
+    constexpr unsigned N = {n};
+    constexpr int32_t LEFT_ZERO_POINT = {left_zero_point};
+    constexpr int32_t RIGHT_ZERO_POINT = {right_zero_point};
+    // The DMA delivers A, B, and the raw output in (8, 8, 8) micro-tile-major order; these
+    // constants must match the mm kernel's mac_dims on npu2 (asserted at design build time).
+    constexpr unsigned R = 8, S = 8, T = 8;
+    using MMUL = aie::mmul<R, S, T, int8, int8, acc32>;
+    alignas(aie::vector_decl_align) static constexpr int8 ONES_B[S * T] = {{{ones_b}}};
+    alignas(aie::vector_decl_align) static constexpr int8 ONES_A[R * S] = {{{ones_a}}};
+    // Static, not stack: the AIE core stack is small and M, N reach 512 (4 KiB total here).
+    alignas(aie::vector_decl_align) static int32_t row_sums[M];
+    alignas(aie::vector_decl_align) static int32_t column_sums[N];
+    alignas(aie::vector_decl_align) int32_t scratch[R * T];
+
+    const aie::vector<int8, S * T> ones_b = aie::load_v<S * T>(ONES_B);
+    const aie::vector<int8, R * S> ones_a = aie::load_v<R * S>(ONES_A);
+
+    // rowsum(A): A_tile(4x8) . ONES(8x8) accumulated over K/S leaves rowsums in every output
+    // column; read column 0.
+    // The accumulators are constructed explicitly zeroed rather than default-constructed. A
+    // default-constructed aie::mmul carries a "zero on first mac" flag, and this pinned Peano
+    // release mis-rotates that flag's config register in the software-pipelined loop epilogue at
+    // trip count exactly 2 (K/S == 2): the final mac re-zeroes the accumulator and the sum
+    // collapses to the last tile. An explicit zero accumulator makes every mac's config uniform,
+    // which sidesteps the rotation entirely and is correct at every trip count. Proven on metal
+    // by `tosa_int8_matmul_tiled_path_matches_the_exact_oracle_on_the_npu` (16x16x16 hits the
+    // trip-count-2 case).
+    for (unsigned i = 0; i < M / R; ++i) {{
+        MMUL accumulator(aie::zeros<acc32, MMUL::size_C>());
+        for (unsigned kk = 0; kk < K / S; ++kk) {{
+            accumulator.mac(
+                aie::load_v<MMUL::size_A>(lhs_tiled + (i * (K / S) + kk) * R * S), ones_b);
+        }}
+        aie::store_v(scratch, accumulator.template to_vector<int32>());
+        for (unsigned row = 0; row < R; ++row) {{
+            row_sums[i * R + row] = scratch[row * T];
+        }}
+    }}
+    // colsum(B): ONES(4x8) . B_tile(8x8) accumulated over K/S leaves colsums in every output
+    // row; read row 0.
+    for (unsigned j = 0; j < N / T; ++j) {{
+        MMUL accumulator(aie::zeros<acc32, MMUL::size_C>());
+        for (unsigned kk = 0; kk < K / S; ++kk) {{
+            accumulator.mac(
+                ones_a, aie::load_v<MMUL::size_B>(rhs_tiled + (kk * (N / T) + j) * S * T));
+        }}
+        aie::store_v(scratch, accumulator.template to_vector<int32>());
+        for (unsigned column = 0; column < T; ++column) {{
+            column_sums[j * T + column] = scratch[column];
+        }}
+    }}
+
+    constexpr int32_t BASE = static_cast<int32_t>(K) * LEFT_ZERO_POINT * RIGHT_ZERO_POINT;
+    for (unsigned i = 0; i < M / R; ++i) {{
+        for (unsigned j = 0; j < N / T; ++j) {{
+            int32_t *tile = output_tiled + (i * (N / T) + j) * R * T;
+            for (unsigned row = 0; row < R; ++row) {{
+                const int32_t row_term =
+                    BASE - RIGHT_ZERO_POINT * row_sums[i * R + row];
+#pragma clang loop vectorize(disable) interleave(disable)
+                for (unsigned column = 0; column < T; ++column) {{
+                    tile[row * T + column] +=
+                        row_term - LEFT_ZERO_POINT * column_sums[j * T + column];
+                }}
+            }}
+        }}
+    }}
+}}
+"""
+
+
+def _build_int8_matmul_tiled(
+    m: int, k: int, n: int, left_zero_point: int, right_zero_point: int
+):
+    """Return the DMA-tiled exact one-core INT8 -> INT32 MATMUL design.
+
+    Structurally the BF16 `_build_matmul` (itself the fork's single-core design): the DMA layout
+    transforms deliver A, B, and C in the MMUL's micro-tile order, so no core cycle is spent on
+    packing or widening. The raw product runs on the fork's vectorized i8 -> i32 `mm` kernel
+    against the caller's raw INT8 bytes, and one correction pass applies the zero-point terms
+    exactly (see `_int8_zp_correction_kernel_source` for the identity and the overflow proof).
+    The admitted envelope keeps the whole tensor set inside one core's L1, so the compute tile is
+    the whole tensor and each operand streams exactly once.
+    """
+    import aie.iron as iron
+    import numpy as np
+    from aie.helpers.taplib import TensorAccessPattern, TensorTiler2D
+    from aie.iron import In, ObjectFifo, Out, Program, Runtime, TaskGroup, Worker, kernels
+    from aie.iron.kernel import ExternalFunction
+
+    @iron.jit
+    def matmul_int8_int32(lhs_in: In, rhs_in: In, output_out: Out):
+        matmul_kernel = kernels.mm(
+            dim_m=m, dim_k=k, dim_n=n,
+            input_dtype=np.int8, output_dtype=np.int32, vectorized=True,
+        )
+        zero_kernel = matmul_kernel.zero
+        r, s, t = matmul_kernel.mac_dims
+        # The correction kernel hardcodes npu2's (8, 8, 8) INT8 micro-tile; a toolchain that
+        # changes the mm kernel's geometry must fail the compile, not corrupt the layout contract.
+        if (r, s, t) != (8, 8, 8):
+            raise RuntimeError(f"unexpected i8 mm micro-tile: {(r, s, t)}")
+        correction_kernel = ExternalFunction(
+            "zp_correct_i8_i32",
+            source_string=_int8_zp_correction_kernel_source(
+                m, k, n, left_zero_point, right_zero_point
+            ),
+            arg_types=[
+                np.ndarray[(m * k,), np.dtype[np.int8]],
+                np.ndarray[(k * n,), np.dtype[np.int8]],
+                np.ndarray[(m * n,), np.dtype[np.int32]],
+            ],
+        )
+
+        A_ty = np.ndarray[(m, k), np.dtype[np.int8]]
+        B_ty = np.ndarray[(k, n), np.dtype[np.int8]]
+        C_ty = np.ndarray[(m, n), np.dtype[np.int32]]
+        a_ty = np.ndarray[(m * k,), np.dtype[np.int8]]
+        b_ty = np.ndarray[(k * n,), np.dtype[np.int8]]
+        c_ty = np.ndarray[(m * n,), np.dtype[np.int32]]
+
+        fifo_a_l3l2 = ObjectFifo(a_ty, name="A_L3L2")
+        tap_a = TensorTiler2D.group_tiler((m, k), (r, s), (m // r, k // s))[0]
+        fifo_a_l2l1 = fifo_a_l3l2.cons().forward(
+            dims_to_stream=tap_a.transformation_dims, name="A_L2L1"
+        )
+
+        fifo_b_l3l2 = ObjectFifo(b_ty, name="B_L3L2")
+        tap_b = TensorTiler2D.group_tiler((k, n), (s, t), (k // s, n // t))[0]
+        fifo_b_l2l1 = fifo_b_l3l2.cons().forward(
+            dims_to_stream=tap_b.transformation_dims, name="B_L2L1"
+        )
+
+        fifo_c_l1l2 = ObjectFifo(c_ty, name="C_L1L2")
+        tap_c = TensorAccessPattern(
+            tensor_dims=(m, n), offset=0,
+            sizes=[m // r, r, n // t, t], strides=[r * n, t, r * t, 1],
+        )
+        fifo_c_l2l3 = fifo_c_l1l2.cons().forward(
+            dims_to_stream=list(tap_c.transformation_dims), name="C_L2L3"
+        )
+
+        def core_fn(of_a, of_b, of_c, zero, matmul, correct):
+            elem_a = of_a.acquire(1)
+            elem_b = of_b.acquire(1)
+            elem_c = of_c.acquire(1)
+            zero(elem_c)
+            matmul(elem_a, elem_b, elem_c)
+            correct(elem_a, elem_b, elem_c)
+            of_a.release(1)
+            of_b.release(1)
+            of_c.release(1)
+
+        worker = Worker(
+            core_fn,
+            [
+                fifo_a_l2l1.cons(),
+                fifo_b_l2l1.cons(),
+                fifo_c_l1l2.prod(),
+                zero_kernel,
+                matmul_kernel,
+                correction_kernel,
+            ],
+        )
+
+        a_tap = TensorTiler2D.group_tiler((m, k), (m, k), (1, 1))[0]
+        b_tap = TensorTiler2D.group_tiler((k, n), (k, n), (1, 1))[0]
+        c_tap = TensorTiler2D.group_tiler((m, n), (m, n), (1, 1))[0]
+
+        def sequence(lhs, rhs, output, a_prod, b_prod, c_cons):
+            task_group = TaskGroup()
+            a_prod.fill(lhs, tap=a_tap, group=task_group)
+            b_prod.fill(rhs, tap=b_tap, group=task_group)
+            c_cons.drain(output, tap=c_tap, group=task_group, wait=True)
+            task_group.finish()
+
+        rt = Runtime(
+            sequence,
+            [A_ty, B_ty, C_ty, fifo_a_l3l2.prod(), fifo_b_l3l2.prod(), fifo_c_l2l3.cons()],
+        )
+        return Program(iron.get_current_device(), rt, workers=[worker]).resolve_program()
+
+    return matmul_int8_int32
+
+
 def _build_int8_matmul(
     m: int, k: int, n: int, left_zero_point: int, right_zero_point: int
 ):
-    """Return the exact one-core INT8 -> INT32 MATMUL design.
+    """Return the exact one-core scalar INT8 -> INT32 MATMUL design (off-tiling shapes).
 
     Complete bounded tensors are direct-DMA'd into depth-two object FIFOs. The worker invokes one
     Peano-compiled AIE kernel; no host staging, host arithmetic, or floating-point conversion occurs.
+    Shapes on the native (4, 8, 8) MMUL tiling take `_build_int8_matmul_tiled` instead.
     """
     import aie.iron as iron
     import numpy as np
@@ -803,10 +966,26 @@ def _compile(workdir: Path) -> int:
                 return _fail(workdir, "spec-rejected", "INT8 MATMUL local-memory bound exceeded")
             input_bytes, output_bytes = [lhs_bytes, rhs_bytes], [m * n * 4]
 
-            def build():
-                return _build_int8_matmul(
-                    m, k, n, left_zero_point, right_zero_point
-                ).specialize()
+            # The mm kernel's native INT8 micro-tile on npu2 is (8, 8, 8), and its vectorized
+            # variant additionally unrolls 2x2 micro-tiles (mm.cc asserts m % 2r and n % 2t).
+            # K must also span at least two tiles: a single-tile K dimension degenerates the DMA
+            # layout transform into a zero step size, which aie.dma_bd rejects. Shapes on that
+            # grid take the DMA-tiled raw-MMUL design with an exact zero-point correction pass.
+            # Everything else stays on the scalar whole-tensor design (including the shared 2x3x2
+            # corpus case). Both compute the identical TOSA integer contract.
+            if m % 16 == 0 and k % 8 == 0 and k >= 16 and n % 16 == 0:
+
+                def build():
+                    return _build_int8_matmul_tiled(
+                        m, k, n, left_zero_point, right_zero_point
+                    ).specialize()
+
+            else:
+
+                def build():
+                    return _build_int8_matmul(
+                        m, k, n, left_zero_point, right_zero_point
+                    ).specialize()
     elif op == "RESCALE":
         in_dtype = spec.get("in_dtype")
         out_dtype = spec.get("out_dtype")
