@@ -19,6 +19,9 @@ Two modes:
      "elements": <n>, "device": "npu2", "fold_ddr_addr_offset": false}
     {"op": "MATMUL", "in_dtype": "bf16", "out_dtype": "f32", "m": <M>, "k": <K>, "n": <N>,
      "device": "npu2", "fold_ddr_addr_offset": false}
+    {"op": "MATMUL", "in_dtype": "fp8e4m3" | "fp8e5m2", "out_dtype": "f32", "m": <M>, "k": <K>,
+     "n": <N>, "tile_m": <TM>, "tile_k": <TK>, "tile_n": <TN>, "max_dim": <D>, "device": "npu2",
+     "fold_ddr_addr_offset": false}   # fused: FP8 in, BF16 promotion in L1, FP32 out
     {"op": "MATMUL", "in_dtype": "i8", "out_dtype": "i32", "m": <M>, "k": <K>, "n": <N>,
      "left_zero_point": <i8>, "right_zero_point": <i8>, "device": "npu2",
      "fold_ddr_addr_offset": false}
@@ -134,7 +137,7 @@ def _find_hrx_dir(prefix: Path) -> Path | None:
     return None
 
 
-_FP8_CAST_KERNEL_SOURCE = r"""
+_FP8_DECODERS = r"""
 #include <cstdint>
 
 static inline uint16_t fp8e4m3_to_bf16(uint8_t bits) {
@@ -167,7 +170,10 @@ static inline uint16_t fp8e5m2_to_bf16(uint8_t bits) {
     return sign | static_cast<uint16_t>((exponent + 112) << 7) | (fraction << 5);
 }
 
-extern "C" void cast_fp8e4m3_to_bf16(
+"""
+
+# The standalone CAST tier's two fixed 1,024-element entry points, unchanged.
+_FP8_CAST_KERNEL_SOURCE = _FP8_DECODERS + r"""extern "C" void cast_fp8e4m3_to_bf16(
     const uint8_t *__restrict input, uint16_t *__restrict output) {
 #pragma clang loop vectorize(enable) interleave(enable)
     for (unsigned i = 0; i < 1024; ++i) {
@@ -183,6 +189,25 @@ extern "C" void cast_fp8e5m2_to_bf16(
     }
 }
 """
+
+
+def _fp8_cast_kernel_source(symbol: str, fp8_dtype: str, length: int) -> str:
+    """One sized FP8-to-BF16 entry point over the shared exact decoders.
+
+    The fused MATMUL widens whole L1 tiles, whose length is the tile geometry rather than the
+    CAST tier's transport line, so the loop bound is emitted rather than fixed.
+    """
+    decoder = "fp8e4m3_to_bf16" if fp8_dtype == "fp8e4m3" else "fp8e5m2_to_bf16"
+    return _FP8_DECODERS + f'''
+extern "C" void {symbol}(
+    const uint8_t *__restrict input, uint16_t *__restrict output) {{
+#pragma clang loop vectorize(enable) interleave(enable)
+    for (unsigned i = 0; i < {length}; ++i) {{
+        output[i] = {decoder}(input[i]);
+    }}
+}}
+'''
+
 
 
 def _build_identity(line_size: int, dtype: str):
@@ -270,6 +295,148 @@ def _build_fp8_to_bf16(line_size: int, in_dtype: str):
         return Program(iron.get_current_device(), rt, workers=[worker]).resolve_program()
 
     return fp8_to_bf16
+
+
+
+def _build_fp8_matmul(tile_m: int, tile_k: int, tile_n: int, fp8_dtype: str):
+    """Return the fused FP8 -> BF16 -> FP32 MATMUL design (`C[M,N] = A[M,K] . B[K,N]`).
+
+    Structurally `_build_matmul`, with one difference: A and B arrive from DDR as FP8 storage
+    bytes, and each L1 tile is widened to BF16 by the same exact decoders the standalone CAST tier
+    uses. The BF16 operands exist only as core-local scratch, so the caller never allocates a BF16
+    tensor and the promotion costs no DDR round trip.
+
+    Numerically this is CAST-then-MATMUL with the intermediate never materialized: FP8 -> BF16 is
+    exact for every encoding, and the multiply is the identical `kernels.mm` bf16 -> f32 kernel, so
+    the result is bit-identical to running the two admitted tiers back to back. The graph still
+    states the promotion explicitly (two TOSA CAST operators); fusing is a placement choice, not a
+    relabeling of the arithmetic.
+
+    The L2 -> L1 layout transform is expressed in elements, so it is dtype-agnostic; widening
+    afterwards is elementwise and preserves the micro-tile ordering the matmul kernel expects.
+    """
+    import aie.iron as iron
+    import ml_dtypes
+    import numpy as np
+    from aie.helpers.taplib import TensorAccessPattern, TensorTiler2D
+    from aie.iron import (
+        Buffer,
+        CompileTime,
+        In,
+        ObjectFifo,
+        Out,
+        Program,
+        Runtime,
+        TaskGroup,
+        Worker,
+        kernels,
+    )
+    from aie.iron.controlflow import range_
+    from aie.iron.kernel import ExternalFunction
+
+    in_ty = ml_dtypes.bfloat16
+    out_ty = np.float32
+    tm, tk, tn = tile_m, tile_k, tile_n
+
+    @iron.jit
+    def matmul_fp8_f32(
+        input0: In,
+        input1: In,
+        output: Out,
+        *,
+        M: CompileTime[int],
+        K: CompileTime[int],
+        N: CompileTime[int],
+    ):
+        matmul_kernel = kernels.mm(
+            dim_m=tm, dim_k=tk, dim_n=tn,
+            input_dtype=in_ty, output_dtype=out_ty, vectorized=True,
+        )
+        r, s, t = matmul_kernel.mac_dims
+
+        A_ty = np.ndarray[(M, K), np.dtype[np.uint8]]
+        B_ty = np.ndarray[(K, N), np.dtype[np.uint8]]
+        C_ty = np.ndarray[(M, N), np.dtype[out_ty]]
+        a_storage_ty = np.ndarray[(tm * tk,), np.dtype[np.uint8]]
+        b_storage_ty = np.ndarray[(tk * tn,), np.dtype[np.uint8]]
+        a_ty = np.ndarray[(tm * tk,), np.dtype[in_ty]]
+        b_ty = np.ndarray[(tk * tn,), np.dtype[in_ty]]
+        c_ty = np.ndarray[(tm * tn,), np.dtype[out_ty]]
+
+        widen_a_symbol = f"widen_a_{fp8_dtype}"
+        widen_b_symbol = f"widen_b_{fp8_dtype}"
+        widen_a = ExternalFunction(
+            widen_a_symbol,
+            source_string=_fp8_cast_kernel_source(widen_a_symbol, fp8_dtype, tm * tk),
+            arg_types=[a_storage_ty, a_ty],
+        )
+        widen_b = ExternalFunction(
+            widen_b_symbol,
+            source_string=_fp8_cast_kernel_source(widen_b_symbol, fp8_dtype, tk * tn),
+            arg_types=[b_storage_ty, b_ty],
+        )
+
+        fifo_a_l3l2 = ObjectFifo(a_storage_ty, name="A_L3L2")
+        tap_a = TensorTiler2D.group_tiler((tm, tk), (r, s), (tm // r, tk // s))[0]
+        fifo_a_l2l1 = fifo_a_l3l2.cons().forward(dims_to_stream=tap_a.transformation_dims, name="A_L2L1")
+
+        fifo_b_l3l2 = ObjectFifo(b_storage_ty, name="B_L3L2")
+        tap_b = TensorTiler2D.group_tiler((tk, tn), (s, t), (tk // s, tn // t))[0]
+        fifo_b_l2l1 = fifo_b_l3l2.cons().forward(dims_to_stream=tap_b.transformation_dims, name="B_L2L1")
+
+        fifo_c_l1l2 = ObjectFifo(c_ty, name="C_L1L2")
+        tap_c = TensorAccessPattern(
+            tensor_dims=(tm, tn), offset=0,
+            sizes=[tm // r, r, tn // t, t], strides=[r * tn, t, r * t, 1],
+        )
+        fifo_c_l2l3 = fifo_c_l1l2.cons().forward(dims_to_stream=list(tap_c.transformation_dims), name="C_L2L3")
+
+        # The promoted operands: core-local only, never a runtime binding.
+        a_scratch = Buffer(a_ty, name="A_bf16_scratch")
+        b_scratch = Buffer(b_ty, name="B_bf16_scratch")
+
+        def core_fn(of_a, of_b, of_c, a_bf16, b_bf16, widen_lhs, widen_rhs, matmul):
+            for _ in range_(M // tm * N // tn):
+                elem_out = of_c.acquire(1)
+                for i in range_(tm * tn):
+                    elem_out[i] = 0
+                for _ in range_(K // tk):
+                    elem_in_a = of_a.acquire(1)
+                    elem_in_b = of_b.acquire(1)
+                    widen_lhs(elem_in_a, a_bf16)
+                    widen_rhs(elem_in_b, b_bf16)
+                    matmul(a_bf16, b_bf16, elem_out)
+                    of_a.release(1)
+                    of_b.release(1)
+                of_c.release(1)
+
+        worker = Worker(
+            core_fn,
+            [
+                fifo_a_l2l1.cons(), fifo_b_l2l1.cons(), fifo_c_l1l2.prod(),
+                a_scratch, b_scratch, widen_a, widen_b, matmul_kernel,
+            ],
+        )
+
+        a_taps = TensorTiler2D.group_tiler((M, K), (tm, tk), (1, K // tk), pattern_repeat=(N // tn))
+        b_tap = TensorTiler2D.group_tiler((K, N), (tk, tn), (K // tk, N // tn), tile_group_col_major=True)[0]
+        c_taps = TensorTiler2D.group_tiler((M, N), (tm, tn), (1, N // tn))
+
+        def sequence(a_src, b_src, c_dst, a_prod, b_prod, c_cons):
+            for tile_row in range(M // tm):
+                task_group = TaskGroup()
+                a_prod.fill(a_src, tap=a_taps[tile_row], group=task_group)
+                b_prod.fill(b_src, tap=b_tap, group=task_group)
+                c_cons.drain(c_dst, tap=c_taps[tile_row], group=task_group, wait=True)
+                task_group.finish()
+
+        rt = Runtime(
+            sequence,
+            [A_ty, B_ty, C_ty, fifo_a_l3l2.prod(), fifo_b_l3l2.prod(), fifo_c_l2l3.cons()],
+        )
+        return Program(iron.get_current_device(), rt, workers=[worker]).resolve_program()
+
+    return matmul_fp8_f32
 
 
 def _build_matmul(tile_m: int, tile_k: int, tile_n: int):
@@ -753,7 +920,12 @@ def _compile(workdir: Path) -> int:
         out_dtype = spec.get("out_dtype")
         m, k, n = spec.get("m"), spec.get("k"), spec.get("n")
         max_dim = spec.get("max_dim")
-        if (in_dtype, out_dtype) not in (("bf16", "f32"), ("i8", "i32")):
+        if (in_dtype, out_dtype) not in (
+            ("bf16", "f32"),
+            ("i8", "i32"),
+            ("fp8e4m3", "f32"),
+            ("fp8e5m2", "f32"),
+        ):
             return _fail(
                 workdir, "spec-rejected", f"unsupported dtype pair: {in_dtype}->{out_dtype}"
             )
@@ -764,7 +936,29 @@ def _compile(workdir: Path) -> int:
                 return _fail(
                     workdir, "spec-rejected", f"{name}={dim} must be positive and <= {max_dim}"
                 )
-        if in_dtype == "bf16":
+        if in_dtype in ("fp8e4m3", "fp8e5m2"):
+            tile_m, tile_k, tile_n = (
+                spec.get("tile_m"),
+                spec.get("tile_k"),
+                spec.get("tile_n"),
+            )
+            for name, dim, tile in (("m", m, tile_m), ("k", k, tile_k), ("n", n, tile_n)):
+                if not isinstance(tile, int) or tile <= 0:
+                    return _fail(workdir, "spec-rejected", f"invalid tile_{name}: {tile}")
+                if dim % tile != 0:
+                    return _fail(
+                        workdir,
+                        "spec-rejected",
+                        f"{name}={dim} must be a multiple of {tile}",
+                    )
+            # FP8 operands bind one byte per element; only the FP32 result reaches DDR at full
+            # width. The promoted BF16 operands never leave the compute core.
+            input_bytes, output_bytes = [m * k, k * n], [m * n * 4]
+
+            def build():
+                return _build_fp8_matmul(tile_m, tile_k, tile_n, in_dtype).specialize(M=m, K=k, N=n)
+
+        elif in_dtype == "bf16":
             tile_m, tile_k, tile_n = (
                 spec.get("tile_m"),
                 spec.get("tile_k"),

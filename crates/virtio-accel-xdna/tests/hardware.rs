@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 
 mod common;
 use common::{
-    bf16_identity_tosa, bf16_matmul_tosa, fp8e4m3_to_bf16_tosa, int8_matmul_tosa, poll_to_terminal,
+    bf16_identity_tosa, bf16_matmul_tosa, fp8e4m3_matmul_tosa, fp8e4m3_to_bf16_tosa,
+    int8_matmul_tosa, poll_to_terminal,
 };
 
 use virtio_accel_conformance::numerics::{
@@ -2010,6 +2011,156 @@ fn tosa_bf16_matmul_compiles_to_a_wellformed_artifact() {
         compile_artifact(&untiled, XDNA_TOSA_TARGET),
         Err(BackendError::Unsupported)
     ));
+}
+
+/// The fused FP8 MATMUL must be bit-identical to running the two admitted tiers back to back.
+///
+/// This is the tier's whole correctness claim: fusing changes *where* the graph's explicit BF16
+/// promotion happens (core-local scratch instead of a DDR round trip), never the arithmetic. Both
+/// paths run on the NPU here and their FP32 results are compared byte for byte, so the comparison
+/// cannot drift with a host-side oracle.
+#[test]
+fn fused_fp8_matmul_is_bit_identical_to_cast_then_matmul() {
+    let Some(backend) = backend() else { return };
+    if !toolchain_present() {
+        assert!(
+            !hardware_required(),
+            "{REQUIRE_HARDWARE_ENV}=1 but VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN is not configured"
+        );
+        eprintln!("no XDNA toolchain configured; skipping TOSA execution test");
+        return;
+    }
+    // Multi-tile in every dimension, and both operand element counts are multiples of the CAST
+    // tier's 1,024-element line so the unfused reference path is admissible too.
+    const M: usize = 64;
+    const K: usize = 128;
+    const N: usize = 96;
+
+    // Finite FP8E4M3 encodings only (0x7f/0xff are NaN), including the subnormals at 0x00..=0x07.
+    let lhs_fp8: Vec<u8> = (0..M * K).map(|i| (i % 120) as u8).collect();
+    let rhs_fp8: Vec<u8> = (0..K * N).map(|i| ((i * 7 + 3) % 120) as u8).collect();
+
+    let context = backend
+        .create_context(ContextDesc::default())
+        .expect("context");
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .expect("queue");
+
+    let load = |tosa: &[u8], target: virtio_accel_tosa::Target| {
+        backend
+            .load_program(
+                &context,
+                ArtifactRef {
+                    format: ARTIFACT_FORMAT,
+                    target: target.to_identity(),
+                    payload: &Slice(tosa),
+                    resident_bytes: u64::MAX,
+                },
+            )
+            .expect("load + compile TOSA program")
+    };
+    let in_desc = |bytes: usize| {
+        BufferDesc::new(
+            bytes as u64,
+            4096,
+            MemoryDomain::Shared,
+            BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+        )
+        .unwrap()
+    };
+    let out_desc = |bytes: usize| {
+        BufferDesc::new(
+            bytes as u64,
+            4096,
+            MemoryDomain::Shared,
+            BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+        )
+        .unwrap()
+    };
+
+    // One binary program run: write every input, submit, poll, read the output back.
+    let run = |program: &_, inputs: &[&[u8]], output_len: usize| -> Vec<u8> {
+        let mut in_buffers = Vec::new();
+        for bytes in inputs {
+            let (mut buffer, _) = backend
+                .allocate_buffer(&context, in_desc(bytes.len()))
+                .expect("input buffer")
+                .into_parts();
+            backend
+                .write_buffer(&mut buffer, 0, &Slice(bytes))
+                .expect("write input");
+            in_buffers.push(buffer);
+        }
+        let (out_buffer, _) = backend
+            .allocate_buffer(&context, out_desc(output_len))
+            .expect("output buffer")
+            .into_parts();
+
+        let mut bindings: Vec<BindingRef<'_, _>> = in_buffers
+            .iter()
+            .enumerate()
+            .map(|(slot, buffer)| BindingRef {
+                slot: slot as u32,
+                buffer,
+                range: BufferRange::new(0, inputs[slot].len() as u64).unwrap(),
+                access: AccessMode::Read,
+            })
+            .collect();
+        bindings.push(BindingRef {
+            slot: in_buffers.len() as u32,
+            buffer: &out_buffer,
+            range: BufferRange::new(0, output_len as u64).unwrap(),
+            access: AccessMode::Write,
+        });
+
+        let event = backend
+            .submit(&queue, program, &bindings, Timeout::Infinite)
+            .expect("submit");
+        let state = poll_to_terminal(&backend, &event, Duration::from_secs(30))
+            .expect("program did not complete");
+        assert!(matches!(state, EventState::Complete), "got {state:?}");
+
+        let mut result = vec![0u8; output_len];
+        backend
+            .read_buffer(&out_buffer, 0, &mut SliceMut(&mut result))
+            .expect("read output");
+        backend.destroy_event(event).expect("destroy event");
+        for buffer in in_buffers {
+            backend.free_buffer(buffer).expect("free input");
+        }
+        backend.free_buffer(out_buffer).expect("free output");
+        result
+    };
+
+    // Fused: FP8 in, FP32 out, no BF16 tensor anywhere.
+    let fused_program = load(
+        &fp8e4m3_matmul_tosa(M as i32, K as i32, N as i32),
+        XDNA_TOSA_FP8_TARGET,
+    );
+    let fused = run(&fused_program, &[&lhs_fp8, &rhs_fp8], M * N * 4);
+
+    // Reference: promote each operand with the standalone CAST tier, then multiply in BF16.
+    let lhs_cast = load(&fp8e4m3_to_bf16_tosa(M * K), XDNA_TOSA_FP8_TARGET);
+    let lhs_bf16 = run(&lhs_cast, &[&lhs_fp8], M * K * 2);
+    let rhs_cast = load(&fp8e4m3_to_bf16_tosa(K * N), XDNA_TOSA_FP8_TARGET);
+    let rhs_bf16 = run(&rhs_cast, &[&rhs_fp8], K * N * 2);
+    let matmul = load(
+        &bf16_matmul_tosa(M as i32, K as i32, N as i32),
+        XDNA_TOSA_TARGET,
+    );
+    let unfused = run(&matmul, &[&lhs_bf16, &rhs_bf16], M * N * 4);
+
+    assert_eq!(
+        fused, unfused,
+        "fusing the promotion must not change a single result bit"
+    );
+
+    for program in [fused_program, lhs_cast, rhs_cast, matmul] {
+        backend.unload_program(program).expect("unload");
+    }
+    backend.destroy_queue(queue).expect("destroy queue");
+    backend.destroy_context(context).expect("destroy context");
 }
 
 #[test]
