@@ -1,6 +1,7 @@
 # AMD XDNA2 `bfp16ebs8` characterization (issue #146)
 
-Status: **in progress** — toolchain surface frozen 2026-08-27; silicon probes not yet run.
+Status: **in progress** — toolchain surface frozen 2026-08-27; probe P0 run on silicon
+2026-08-27 (results in §6); P1–P5 pending.
 Part of #110. Companion to
 [tosa-int8-block-fp-status.md](tosa-int8-block-fp-status.md) and the forward spec
 `docs/research/amdxdna-blockfp-tier.md` (branch `grilling/first-numerical-tier`).
@@ -157,7 +158,53 @@ Neither AMD surface matches the draft's `BLOCK_SHAPE_32` vocabulary natively. An
 MX contract will be executed on this part through a decomposition, which strengthens the case for
 keeping the vendor tier and the (future) MX tier separately labeled, as ADR-0001 requires.
 
-## 6. Out of scope for #146
+## 6. P0 results (silicon, 2026-08-27)
+
+Probe sources: `research/bfp16ebs8/` (kernel `kernel_p0.cc`, IRON driver `probe_compile.py`,
+runner `runner/`); raw output `research/bfp16ebs8/results/p0-2026-08-27.txt`; the compiled
+artifact is preserved under `research/bfp16ebs8/artifacts/`. Run on the reference `1022:17f0`
+rev `0x20` NPU with HRX `hrx-amdxdna-2026.07.30-amdxdna-hal-native` through the released
+`Accelerator` lifecycle (direct binding, `XDNA_PRECOMPILED_FORMAT`).
+
+**H1 — element semantics: CONFIRMED.** For every non-flagged case,
+`value = m · 2^(e − 127 − 6)` with `m` a two's-complement signed int8 mantissa and `e` the
+unsigned shared exponent byte. Negative values produce negative mantissa bytes (two's
+complement, not sign-magnitude): `−1.0 → m = −32` at `e = 128`, `−0.5 → m = −16`. Powers of
+two encode as `m = 64` with `e = 127 + log2(v)` when they are the block maximum
+(case A: `0.125..16 → e = 124..131`, all `m = 64`). **This is OCP MXINT8's element contract**
+(int8, 2 integer + 6 fraction bits, E8-biased scale), differing only in block size.
+
+**H2 — layout: PINNED.** The native in-memory form of `v64bfp16ebs8` is the 64-byte mantissa
+plane followed by the 8-byte exponent plane (element order within blocks, block order across
+the vector; confirmed by comparing an explicit plane dump against the struct stored as-is).
+An all-zero block encodes as `e = 0, m = 0`.
+
+**H3 — rounding: REFUTED as assumed.** `get_rnd()` at kernel entry is **0 = `rnd_floor`**
+(round toward −∞), not round-to-nearest-even. Observed: `127/64` at forced `e = 128` has exact
+mantissa 63.5 and encodes as `m = 63` (floor), `1/128` at `e = 127` (exact 0.5) encodes as
+`m = 0`, and `1.5/64` (exact 1.5) as `m = 1`. Consequence for #110/#148: an MX-exact kernel
+must explicitly `set_rnd(rnd_conv_even)` (12) around every conversion — the forward spec's
+"kernels force round-to-nearest-even" is a requirement on our kernels, not a hardware default.
+Probe P1 sweeps the modes and the negative-tie cases to pin each mode's exact function.
+
+**H4 — normalization: characterized, sharper than hypothesized.** The shared exponent is the
+maximum member's *IEEE FP32 exponent* — not the smallest exponent that fits the int8 range.
+Case B (max member `−2.0`) chose `e = 128` with `m = −64`, although `e = 127` with `m = −128`
+is representable and would have kept a full extra bit for every other member (it would have
+made `127/64` exact). The conversion therefore normalizes the largest-magnitude member into
+`|m| ∈ [64, 127]` (exactly 64 for powers of two) and never emits `m = −128`. Mixed-magnitude
+members are quantized at that exponent and lose low bits under the active rounding mode
+(case C: at `e = 127`, `1/128 → m = 0`, `1.5/64 → m = 1`, while `1 ± 1/64 → m = ±65` exactly).
+This matches OCP MX v1.0's scale rule (`X = 2^(floor(log2(max|v|)) − emax_elem)` with
+`emax_elem = 0` for INT8's 2.0 ceiling — same outcome as "max member's IEEE exponent" for all
+P0 cases); P2 adds the boundary cases where the two formulations could differ.
+
+**Bonus finding.** The conversion path `vector<float,64> → accum<accfloat,64> →
+to_v64bfp16ebs8` compiles and runs on the first attempt through the standalone probe pipeline,
+which validates the P4/P5 plan of crafting raw planes host-side: the layout is now known well
+enough to construct arbitrary mantissa/exponent combinations without the converter.
+
+## 7. Out of scope for #146
 
 Sparse block vectors; `bfp16ebs16`; performance of any kind; TOSA schema or protocol work
 (#110 stages 2+); any advertisement or capability row (#148 prototypes only after this ticket's
