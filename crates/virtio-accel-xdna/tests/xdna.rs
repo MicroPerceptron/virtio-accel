@@ -74,19 +74,27 @@ fn targets_survive_an_identity_round_trip() {
 }
 
 #[test]
-fn fp8_capability_is_storage_conversion_only() {
+fn fp8_target_never_produces_fp8() {
+    // FP8 is a *storage* encoding here: it is only ever consumed. Both admitted tiers read FP8 and
+    // write a wider type (BF16 for the standalone CAST, FP32 for the fused MATMUL), so no graph on
+    // this target may produce an FP8 value. MATMUL joined this surface with the fused tier; see
+    // `fused_fp8_matmul_capability_covers_its_graph`.
     assert_eq!(XDNA_TOSA_FP8_CAPABILITY.target, XDNA_TOSA_FP8_TARGET);
     assert!(XDNA_TOSA_FP8_CAPABILITY.supports_operator(Op::CAST));
-    assert!(!XDNA_TOSA_FP8_CAPABILITY.supports_operator(Op::MATMUL));
     for dtype in [
         virtio_accel_tosa::DType::FP8E4M3,
         virtio_accel_tosa::DType::FP8E5M2,
     ] {
         assert!(XDNA_TOSA_FP8_CAPABILITY.supports_dtype(dtype, ValueRoles::INPUT));
         assert!(!XDNA_TOSA_FP8_CAPABILITY.supports_dtype(dtype, ValueRoles::OUTPUT));
+        assert!(!XDNA_TOSA_FP8_CAPABILITY.supports_dtype(dtype, ValueRoles::INTERMEDIATE));
     }
     assert!(
         XDNA_TOSA_FP8_CAPABILITY.supports_dtype(virtio_accel_tosa::DType::BF16, ValueRoles::OUTPUT)
+    );
+    // Nothing on this target may produce or consume FP32 as anything but the fused result.
+    assert!(
+        !XDNA_TOSA_FP8_CAPABILITY.supports_dtype(virtio_accel_tosa::DType::FP32, ValueRoles::INPUT)
     );
 }
 
@@ -200,4 +208,112 @@ fn compile_artifact_works_without_hrx() {
     assert_eq!((parsed.inputs, parsed.outputs), (1, 1));
     assert_eq!(parsed.slot_bytes, [(ELEMENTS * 2) as u64; 2]);
     assert!(parsed.xclbin.starts_with(b"xclbin2"));
+}
+
+/// The fused tier's capability must cover the graph it admits, including the interior: a promoted
+/// BF16 value that the descriptor does not admit as `INTERMEDIATE` would advertise a surface the
+/// backend contradicts.
+#[test]
+fn fused_fp8_matmul_capability_covers_its_graph() {
+    use virtio_accel_tosa::DType;
+
+    for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+        assert!(XDNA_TOSA_FP8_CAPABILITY.supports_dtype(dtype, ValueRoles::INPUT));
+    }
+    // The promotion is graph-interior for the fused tier and a block output for the CAST tier.
+    assert!(XDNA_TOSA_FP8_CAPABILITY.supports_dtype(DType::BF16, ValueRoles::INTERMEDIATE));
+    assert!(XDNA_TOSA_FP8_CAPABILITY.supports_dtype(DType::BF16, ValueRoles::OUTPUT));
+    // The fused tier ends at the TOSA-mandated FP32 accumulator.
+    assert!(XDNA_TOSA_FP8_CAPABILITY.supports_dtype(DType::FP32, ValueRoles::OUTPUT));
+    for op in [Op::CAST, Op::CONST, Op::MATMUL] {
+        assert!(XDNA_TOSA_FP8_CAPABILITY.supports_operator(op));
+    }
+    let matmul = XDNA_TOSA_FP8_CAPABILITY
+        .operator(Op::MATMUL)
+        .expect("MATMUL capability");
+    assert!(
+        matmul
+            .constraints
+            .contains(OperatorConstraints::ZERO_ZERO_POINTS)
+    );
+}
+
+/// The offline path compiles the fused graph to a container that binds FP8 operands directly and
+/// never binds a BF16 tensor — the whole point of the tier.
+#[test]
+fn fused_fp8_matmul_compiles_to_a_wellformed_artifact() {
+    use virtio_accel_tosa::DType;
+    use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
+    use virtio_accel_xdna::{PrecompiledArtifact, compile_artifact};
+
+    if std::env::var_os("VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN").is_none() {
+        eprintln!("no XDNA toolchain configured; skipping fused offline compile test");
+        return;
+    }
+    let (m, k, n) = (32i32, 64i32, 32i32);
+    let mut graph = OwnedGraph::new("main");
+    graph
+        .push_tensor(OwnedTensor::new("lhs_fp8", vec![1, m, k], DType::FP8E4M3))
+        .push_tensor(OwnedTensor::new("rhs_fp8", vec![1, k, n], DType::FP8E4M3))
+        .push_tensor(OwnedTensor::new("lhs_bf16", vec![1, m, k], DType::BF16))
+        .push_tensor(OwnedTensor::new("rhs_bf16", vec![1, k, n], DType::BF16))
+        .push_tensor(OwnedTensor::constant(
+            "lhs_zp",
+            vec![1],
+            DType::BF16,
+            vec![0u8; 2],
+        ))
+        .push_tensor(OwnedTensor::constant(
+            "rhs_zp",
+            vec![1],
+            DType::BF16,
+            vec![0u8; 2],
+        ))
+        .push_tensor(OwnedTensor::new("output", vec![1, m, n], DType::FP32))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Cast,
+            vec!["lhs_fp8".into()],
+            vec!["lhs_bf16".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Cast,
+            vec!["rhs_fp8".into()],
+            vec!["rhs_bf16".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Const,
+            vec![],
+            vec!["lhs_zp".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Const,
+            vec![],
+            vec!["rhs_zp".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::MatMul,
+            vec![
+                "lhs_bf16".into(),
+                "rhs_bf16".into(),
+                "lhs_zp".into(),
+                "rhs_zp".into(),
+            ],
+            vec!["output".into()],
+        ))
+        .push_input("lhs_fp8")
+        .push_input("rhs_fp8")
+        .push_output("output");
+    let tosa = graph
+        .build(XDNA_TOSA_FP8_TARGET)
+        .expect("build fused fp8 matmul graph");
+    let container =
+        compile_artifact(&tosa, XDNA_TOSA_FP8_TARGET).expect("compile fused fp8 matmul");
+    let parsed = PrecompiledArtifact::parse(&container).expect("valid container");
+    assert_eq!(parsed.inputs, 2);
+    assert_eq!(parsed.outputs, 1);
+    assert_eq!(
+        parsed.slot_bytes,
+        vec![(m * k) as u64, (k * n) as u64, (m * n * 4) as u64],
+        "FP8 operands bind one byte per element and no BF16 tensor is bound"
+    );
 }
