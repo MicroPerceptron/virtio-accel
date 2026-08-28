@@ -56,13 +56,12 @@ unknown magic/version/flavor, non-envelope shapes, and length mismatches before 
 mirroring `artifact.rs`'s checked framing. The target identity carried in `ArtifactRef` must be
 the experiment's own constant identity; anything else is `Incompatible`.
 
-Scale-byte validation (`e != 255` for every group) happens at load, scanning the… **not
-possible at load** — planes arrive at submit time through buffers. Correction: the *kernel*
-cannot cheaply reject, so the contract documents that `e = 255` input is guest error with
-unspecified-but-safe results (the hardware computes finite/Inf FP32; no memory unsafety), and
-the conformance suite pins the rejection at the reference-oracle level instead. This is the
-honest option that keeps zero submission-time scanning; revisit if #110 standardization lands
-a stricter obligation.
+Scale-byte validation (`e != 255`) cannot happen at load: the planes are runtime buffer
+content, not artifact bytes, and scanning them at submit would violate the zero-staging
+boundary. The contract therefore documents `e = 255` input as guest error with
+unspecified-but-safe results (the hardware computes finite/Inf FP32 — structurally safe, never
+memory-unsafe), and the conformance suite pins the rejection at the reference-oracle level.
+Revisit if #110 standardization lands a stricter obligation.
 
 ## Crate integration
 
