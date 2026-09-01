@@ -11,7 +11,8 @@ build time; a compile-only unsupported-runtime placeholder elsewhere.
 In a `va_xdna` build it runs the full `Accelerator`
 lifecycle — device/stream owner, `hrx_buffer` primitives (persistent mapping, range
 flush/invalidate, release), and a serialized dispatch worker bridging
-`hrx_stream_dispatch`/`synchronize` to a latched nonblocking `poll_event`. `load_program` accepts
+`hrx_stream_dispatch`/timeline-semaphore completion to a latched nonblocking `poll_event`, with
+up to four submissions in flight per instance. `load_program` accepts
 the crate-local precompiled artifact format directly, and a TOSA artifact by admitting it and
 compiling it with the bounded aiecc helper subprocess (`compiler/xdna_compile.py`, run under the
 pinned toolchain venv in a cleared environment, content-addressed in a cache). The compilable TOSA
@@ -19,6 +20,14 @@ subset today is BF16 IDENTITY (a DMA copy), BF16 → FP32 MATMUL (the spec-manda
 shape, batch 1, at multiples of the tested compute tile), BF16 NHWC MAX_POOL2D, and explicit
 FP8E4M3/FP8E5M2 → BF16 CAST, plus exact INT8 IDENTITY, zero-point-aware INT8 → INT32 MATMUL,
 and signed per-tensor INT32 → INT8 RESCALE.
+The FP8 storage tier has two admitted shapes. A standalone CAST promotes an FP8 tensor to a BF16
+block output. The *fused* FP8 → FP32 MATMUL admits the same explicit promotion feeding a MATMUL,
+and performs it per L1 tile on the compute core instead of through DDR: the caller binds two FP8
+operands and one FP32 result, and no BF16 tensor is ever allocated or transferred. Fusing changes
+only where the promotion happens — FP8 → BF16 is exact and the multiply is the same BF16 → FP32
+kernel — so results are bit-identical to running the two tiers back to back, which
+`fused_fp8_matmul_is_bit_identical_to_cast_then_matmul` checks on the NPU by running both.
+
 FP8 is a storage tier, not an arithmetic tier: the guest keeps the
 conversion visible in its graph, the NPU expands each value exactly, and subsequent programs use
 the existing BF16 compute kernels. MAX_POOL2D is
@@ -96,10 +105,10 @@ RESCALE applies its signed INT8 output zero point only after exact 64-bit multip
 ## Completion and fault model
 
 One worker serializes each instance's accepted submissions. Finite timeouts are rejected before
-admission because HRX exposes no cancellation primitive. A definite dispatch/synchronize failure
+admission because HRX exposes no cancellation primitive. A definite dispatch or completion-wait failure
 becomes a stable terminal `Failed` event and poisons that backend instance (device-loss tier 1);
 the event and its buffers can still be released normally. A 120-second userspace watchdog, longer
-than the kernel's 60-second NPU TDR, detects a synchronize call that never returns (tier 2). In that
+than the kernel's 60-second NPU TDR, detects a dispatch or completion wait that never finishes (tier 2). In that
 case `poll_event` reports `DeviceLost`, the event remains pending and cannot be released, and the
 host must discard the backend instance. The detached worker retains the stream, executable, and
 buffer allocations so discarding cannot free native memory that HRX might still touch.
@@ -162,6 +171,12 @@ ordinary developer-machine skip. Together they prevent the manual hardware lane 
 without exercising the native backend.
 
 ## Performance evidence
+
+For a promotion that immediately feeds a multiply, the fused tier is the one to reach for: the
+standalone CAST writes a BF16 tensor twice the size of its input to DDR and the consumer reads it
+back, so the unfused pair moves roughly 2.3x the bytes and costs an extra submission. Peak
+working-set drops correspondingly — an M=K=N=256 multiply holds 384 KiB fused against 640 KiB
+unfused, because the two BF16 operands never exist.
 
 The FP8 storage conversion streams 1,024-element tiles through one AIE2P worker. That is an
 intentional first-tier implementation boundary, not a claim that one worker is the final throughput

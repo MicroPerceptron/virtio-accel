@@ -81,13 +81,24 @@ pub const XDNA_TOSA_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
     },
 };
 
+// The roles must cover every admitted tier's boundary *and* interior. The standalone CAST tier
+// ends at a BF16 block output; the fused MATMUL tier keeps the same explicit BF16 promotion as a
+// graph-interior value and ends at FP32, so BF16 carries `INTERMEDIATE` and FP32 carries `OUTPUT`.
 const FP8_STORAGE_DTYPES: &[DTypeCapability] = &[
     DTypeCapability::new(DType::FP8E4M3, ValueRoles::INPUT),
     DTypeCapability::new(DType::FP8E5M2, ValueRoles::INPUT),
-    DTypeCapability::new(DType::BF16, ValueRoles::OUTPUT),
+    DTypeCapability::new(
+        DType::BF16,
+        ValueRoles::OUTPUT.union(ValueRoles::INTERMEDIATE),
+    ),
+    DTypeCapability::new(DType::FP32, ValueRoles::OUTPUT),
 ];
 
-const FP8_STORAGE_OPERATORS: &[OperatorCapability] = &[OperatorCapability::new(Op::CAST)];
+const FP8_STORAGE_OPERATORS: &[OperatorCapability] = &[
+    OperatorCapability::new(Op::CAST),
+    OperatorCapability::new(Op::CONST),
+    OperatorCapability::constrained(Op::MATMUL, OperatorConstraints::ZERO_ZERO_POINTS),
+];
 
 /// Conservative capability boundary for explicit FP8 storage conversion.
 pub const XDNA_TOSA_FP8_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
@@ -213,6 +224,19 @@ pub enum CompilerSpec {
     /// `k`, `n` is a positive multiple of the corresponding MATMUL tile dimension and at most
     /// 512. The FP32 output is the TOSA-mandated accumulator (issue #82).
     Matmul { m: usize, k: usize, n: usize },
+    /// Fused FP8 × FP8 → FP32 matrix multiply (batch 1): the graph's explicit BF16 promotion is
+    /// performed on the compute core, per L1 tile, instead of through DDR.
+    ///
+    /// Numerically identical to [`CompilerSpec::Fp8ToBf16`] followed by [`CompilerSpec::Matmul`] —
+    /// FP8 → BF16 is exact for every encoding and the multiply is the same BF16 → FP32 kernel — so
+    /// fusing is a placement choice, not a change of numerical contract. It removes the
+    /// caller-visible BF16 tensors and their DDR round trip.
+    Fp8Matmul {
+        format: Fp8Format,
+        m: usize,
+        k: usize,
+        n: usize,
+    },
     /// Exact zero-point-aware INT8 × INT8 → INT32 matrix multiply (batch 1).
     ///
     /// The serialized TOSA zero points are part of the specialization and therefore also part of
@@ -327,7 +351,8 @@ pub fn admit(bytes: &[u8], target: Target) -> Result<CompilerSpec, AdmitError> {
     // to the two zero-points.
     let mut matmul = None;
     let mut max_pool = None;
-    let mut cast = None;
+    let mut casts: [Option<virtio_accel_tosa::OperatorId>; 2] = [None, None];
+    let mut cast_count = 0usize;
     let mut rescale = None;
     let mut identities = 0usize;
     let mut constants = 0usize;
@@ -337,33 +362,46 @@ pub fn admit(bytes: &[u8], target: Target) -> Result<CompilerSpec, AdmitError> {
             Op::CONST => constants += 1,
             Op::MATMUL if matmul.is_none() => matmul = Some(*operator),
             Op::MAX_POOL2D if max_pool.is_none() => max_pool = Some(*operator),
-            Op::CAST if cast.is_none() => cast = Some(*operator),
+            Op::CAST if cast_count < casts.len() => {
+                casts[cast_count] = Some(*operator);
+                cast_count += 1;
+            }
             Op::RESCALE if rescale.is_none() => rescale = Some(*operator),
             _ => return Err(AdmitError::Unsupported),
         }
     }
     match (
-        target, matmul, max_pool, cast, rescale, identities, constants,
+        target, matmul, max_pool, cast_count, rescale, identities, constants,
     ) {
         // All-IDENTITY (zero operators included: the block output then *is* the block input, and a
         // DMA copy is exact for it).
-        (XDNA_TOSA_TARGET, None, None, None, None, _, 0) => admit_identity(&analysis, block),
-        (XDNA_TOSA_TARGET, Some(matmul), None, None, None, 0, _) => {
+        (XDNA_TOSA_TARGET, None, None, 0, None, _, 0) => admit_identity(&analysis, block),
+        (XDNA_TOSA_TARGET, Some(matmul), None, 0, None, 0, _) => {
             admit_matmul(&analysis, block, matmul)
         }
-        (XDNA_TOSA_TARGET, None, Some(max_pool), None, None, 0, 0) => {
+        (XDNA_TOSA_TARGET, None, Some(max_pool), 0, None, 0, 0) => {
             admit_max_pool2d(&analysis, block, max_pool)
         }
-        (XDNA_TOSA_FP8_TARGET, None, None, Some(cast), None, 0, 0) => {
-            admit_fp8_to_bf16(&analysis, block, cast)
+        (XDNA_TOSA_FP8_TARGET, None, None, 1, None, 0, 0) => {
+            admit_fp8_to_bf16(&analysis, block, casts[0].ok_or(AdmitError::Unsupported)?)
         }
-        (XDNA_TOSA_INTEGER_TARGET, None, None, None, None, _, 0) => {
+        // Fused: both MATMUL operands are promoted from FP8 by their own explicit CAST.
+        (XDNA_TOSA_FP8_TARGET, Some(matmul), None, 2, None, 0, _) => admit_fp8_matmul(
+            &analysis,
+            block,
+            matmul,
+            [
+                casts[0].ok_or(AdmitError::Unsupported)?,
+                casts[1].ok_or(AdmitError::Unsupported)?,
+            ],
+        ),
+        (XDNA_TOSA_INTEGER_TARGET, None, None, 0, None, _, 0) => {
             admit_int8_identity(&analysis, block)
         }
-        (XDNA_TOSA_INTEGER_TARGET, Some(matmul), None, None, None, 0, _) => {
+        (XDNA_TOSA_INTEGER_TARGET, Some(matmul), None, 0, None, 0, _) => {
             admit_int8_matmul(&analysis, block, matmul)
         }
-        (XDNA_TOSA_INTEGER_TARGET, None, None, None, Some(rescale), 0, 4) => {
+        (XDNA_TOSA_INTEGER_TARGET, None, None, 0, Some(rescale), 0, 4) => {
             admit_int32_to_int8_rescale(&analysis, block, rescale)
         }
         _ => Err(AdmitError::Unsupported),
@@ -777,6 +815,141 @@ fn admit_matmul(
     }
 
     Ok(CompilerSpec::Matmul { m, k, n })
+}
+
+/// Admit a fused FP8 MATMUL: `CAST(A_fp8) . CAST(B_fp8) -> FP32`, batch 1.
+///
+/// This is the only admitted tier with graph-interior values, so the dataflow is pinned exactly:
+/// each MATMUL operand must be produced by its own CAST, each CAST must consume a distinct block
+/// input, and the promoted BF16 values must not escape as block outputs. Anything looser would let
+/// the compiled kernel — which binds two FP8 inputs and one FP32 output and promotes internally —
+/// stand in for a graph it does not implement.
+///
+/// The promotion stays explicit in the graph, exactly as the standalone CAST tier requires; only
+/// its *placement* changes, from a DDR round trip to core-local scratch. The arithmetic is
+/// unchanged, so results are bit-identical to running CAST and MATMUL as separate programs.
+fn admit_fp8_matmul(
+    analysis: &virtio_accel_tosa::TosaAnalysis<'_>,
+    block: virtio_accel_tosa::BlockId,
+    matmul: virtio_accel_tosa::OperatorId,
+    casts: [virtio_accel_tosa::OperatorId; 2],
+) -> Result<CompilerSpec, AdmitError> {
+    let inputs = analysis.operator_inputs(matmul);
+    let outputs = analysis.operator_outputs(matmul);
+    if inputs.len() != 4 || outputs.len() != 1 {
+        return Err(AdmitError::Unsupported);
+    }
+    if analysis.block_outputs(block) != [outputs[0]] {
+        return Err(AdmitError::Unsupported);
+    }
+
+    // Pair each CAST with the MATMUL operand it produces; the two must cover lhs and rhs exactly
+    // once each, in binding order.
+    let mut promoted: [Option<virtio_accel_tosa::ValueId>; 2] = [None, None];
+    for cast in casts {
+        let cast_inputs = analysis.operator_inputs(cast);
+        let cast_outputs = analysis.operator_outputs(cast);
+        if cast_inputs.len() != 1 || cast_outputs.len() != 1 {
+            return Err(AdmitError::Unsupported);
+        }
+        let operand = if cast_outputs[0] == inputs[0] {
+            0
+        } else if cast_outputs[0] == inputs[1] {
+            1
+        } else {
+            // A CAST feeding anything but a MATMUL operand is graph the kernel cannot reproduce.
+            return Err(AdmitError::Unsupported);
+        };
+        if promoted[operand].is_some() {
+            return Err(AdmitError::Unsupported);
+        }
+        // The promoted value is interior: it feeds the multiply and must not also be a block
+        // output, which would require materializing the BF16 tensor this tier exists to avoid.
+        if analysis.block_outputs(block).contains(&cast_outputs[0]) {
+            return Err(AdmitError::Unsupported);
+        }
+        promoted[operand] = Some(cast_inputs[0]);
+    }
+    let ([Some(lhs_storage), Some(rhs_storage)], _) = (promoted, ()) else {
+        return Err(AdmitError::Unsupported);
+    };
+
+    // The block's dataflow: the two FP8 storage tensors are the block inputs in binding order. One
+    // value feeding both operands is rejected for the same reason as the BF16 tier.
+    if lhs_storage == rhs_storage || analysis.block_inputs(block) != [lhs_storage, rhs_storage] {
+        return Err(AdmitError::Unsupported);
+    }
+    // Every CONST feeds only the zero points (operands 2 and 3).
+    for operator in analysis.execution_order(block) {
+        if analysis.operator(*operator).op() != Op::CONST {
+            continue;
+        }
+        for produced in analysis.operator_outputs(*operator) {
+            if *produced != inputs[2] && *produced != inputs[3] {
+                return Err(AdmitError::Unsupported);
+            }
+        }
+    }
+
+    // Both operands must carry the same FP8 encoding: the compiled kernel instantiates one decoder.
+    let lhs_format = fp8_storage_format(analysis, lhs_storage)?;
+    let rhs_format = fp8_storage_format(analysis, rhs_storage)?;
+    if lhs_format != rhs_format {
+        return Err(AdmitError::Unsupported);
+    }
+
+    let lhs = matmul_dims(analysis, lhs_storage, fp8_dtype(lhs_format))?;
+    let rhs = matmul_dims(analysis, rhs_storage, fp8_dtype(rhs_format))?;
+    let lhs_bf16 = matmul_dims(analysis, inputs[0], DType::BF16)?;
+    let rhs_bf16 = matmul_dims(analysis, inputs[1], DType::BF16)?;
+    let out = matmul_dims(analysis, outputs[0], DType::FP32)?;
+
+    // Promotion is elementwise, so each CAST must preserve its operand's shape exactly.
+    if lhs != lhs_bf16 || rhs != rhs_bf16 {
+        return Err(AdmitError::Unsupported);
+    }
+    let ([1, m, k], [1, k2, n], [1, m2, n2]) = (lhs, rhs, out) else {
+        return Err(AdmitError::Unsupported);
+    };
+    if k != k2 || m != m2 || n != n2 {
+        return Err(AdmitError::Unsupported);
+    }
+    if !tile_admissible(m, MATMUL_TILE_M)
+        || !tile_admissible(k, MATMUL_TILE_K)
+        || !tile_admissible(n, MATMUL_TILE_N)
+    {
+        return Err(AdmitError::Unsupported);
+    }
+
+    Ok(CompilerSpec::Fp8Matmul {
+        format: lhs_format,
+        m,
+        k,
+        n,
+    })
+}
+
+/// The FP8 storage encoding of `value`, or `Unsupported` for any other dtype.
+fn fp8_storage_format(
+    analysis: &virtio_accel_tosa::TosaAnalysis<'_>,
+    value: virtio_accel_tosa::ValueId,
+) -> Result<Fp8Format, AdmitError> {
+    let AnalyzedValueKind::Tensor(tensor) = analysis.value(value).kind() else {
+        return Err(AdmitError::Unsupported);
+    };
+    match tensor.dtype() {
+        DType::FP8E4M3 => Ok(Fp8Format::E4M3),
+        DType::FP8E5M2 => Ok(Fp8Format::E5M2),
+        _ => Err(AdmitError::Unsupported),
+    }
+}
+
+/// The TOSA dtype of an FP8 storage encoding.
+fn fp8_dtype(format: Fp8Format) -> DType {
+    match format {
+        Fp8Format::E4M3 => DType::FP8E4M3,
+        Fp8Format::E5M2 => DType::FP8E5M2,
+    }
 }
 
 /// The rank-3 dimensions of `value`, requiring the given dtype and every dimension statically
@@ -1589,6 +1762,171 @@ mod tests {
             admit(&int8, XDNA_TOSA_INTEGER_TARGET),
             Err(AdmitError::Unsupported)
         );
+    }
+
+    /// Build a fused FP8 MATMUL graph: two FP8 block inputs, each promoted by its own explicit
+    /// CAST, multiplied to FP32. `escape` additionally exposes the promoted lhs as a block output.
+    fn fp8_matmul_graph(
+        m: i32,
+        k: i32,
+        n: i32,
+        lhs_dtype: DType,
+        rhs_dtype: DType,
+        alias_operands: bool,
+        escape: bool,
+    ) -> OwnedGraph<'static> {
+        let mut graph = OwnedGraph::new("main");
+        let rhs_name = if alias_operands { "lhs_fp8" } else { "rhs_fp8" };
+        graph
+            .push_tensor(OwnedTensor::new("lhs_fp8", vec![1, m, k], lhs_dtype))
+            .push_tensor(OwnedTensor::new("lhs_bf16", vec![1, m, k], DType::BF16))
+            .push_tensor(OwnedTensor::new("rhs_bf16", vec![1, k, n], DType::BF16))
+            .push_tensor(OwnedTensor::constant(
+                "lhs_zp",
+                vec![1],
+                DType::BF16,
+                vec![0u8; 2],
+            ))
+            .push_tensor(OwnedTensor::constant(
+                "rhs_zp",
+                vec![1],
+                DType::BF16,
+                vec![0u8; 2],
+            ))
+            .push_tensor(OwnedTensor::new("output", vec![1, m, n], DType::FP32));
+        if !alias_operands {
+            graph.push_tensor(OwnedTensor::new("rhs_fp8", vec![1, k, n], rhs_dtype));
+        }
+        graph
+            .push_operator(OwnedOperator::new(
+                OperatorKind::Cast,
+                vec!["lhs_fp8".into()],
+                vec!["lhs_bf16".into()],
+            ))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::Cast,
+                vec![rhs_name.into()],
+                vec!["rhs_bf16".into()],
+            ))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::Const,
+                vec![],
+                vec!["lhs_zp".into()],
+            ))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::Const,
+                vec![],
+                vec!["rhs_zp".into()],
+            ))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::MatMul,
+                vec![
+                    "lhs_bf16".into(),
+                    "rhs_bf16".into(),
+                    "lhs_zp".into(),
+                    "rhs_zp".into(),
+                ],
+                vec!["output".into()],
+            ))
+            .push_input("lhs_fp8");
+        if !alias_operands {
+            graph.push_input("rhs_fp8");
+        } else {
+            graph.push_input("lhs_fp8");
+        }
+        graph.push_output("output");
+        if escape {
+            graph.push_output("lhs_bf16");
+        }
+        graph
+    }
+
+    #[test]
+    fn admits_fused_fp8_matmul_for_both_encodings() {
+        for (dtype, format) in [
+            (DType::FP8E4M3, Fp8Format::E4M3),
+            (DType::FP8E5M2, Fp8Format::E5M2),
+        ] {
+            let bytes = fp8_matmul_graph(32, 64, 32, dtype, dtype, false, false)
+                .build(XDNA_TOSA_FP8_TARGET)
+                .expect("build fused fp8 matmul");
+            assert_eq!(
+                admit(&bytes, XDNA_TOSA_FP8_TARGET),
+                Ok(CompilerSpec::Fp8Matmul {
+                    format,
+                    m: 32,
+                    k: 64,
+                    n: 32
+                })
+            );
+        }
+    }
+
+    /// The compiled kernel instantiates exactly one decoder, so mixing encodings across the two
+    /// operands must not be admitted under either encoding's label.
+    #[test]
+    fn rejects_fused_fp8_matmul_with_mixed_encodings() {
+        let bytes = fp8_matmul_graph(32, 64, 32, DType::FP8E4M3, DType::FP8E5M2, false, false)
+            .build(XDNA_TOSA_FP8_TARGET)
+            .expect("build mixed-encoding fused matmul");
+        assert_eq!(
+            admit(&bytes, XDNA_TOSA_FP8_TARGET),
+            Err(AdmitError::Unsupported)
+        );
+    }
+
+    /// The promoted BF16 value is graph-interior. If the graph also demands it as a block output,
+    /// the fused kernel cannot serve it — it never writes BF16 to DDR.
+    #[test]
+    fn rejects_fused_fp8_matmul_whose_promoted_operand_escapes() {
+        let bytes = fp8_matmul_graph(32, 64, 32, DType::FP8E4M3, DType::FP8E4M3, false, true)
+            .build(XDNA_TOSA_FP8_TARGET)
+            .expect("build escaping fused matmul");
+        assert_eq!(
+            admit(&bytes, XDNA_TOSA_FP8_TARGET),
+            Err(AdmitError::Unsupported)
+        );
+    }
+
+    /// Square shape so that one FP8 tensor can legally feed both CASTs; the rejection must then
+    /// come from admission, not from TOSA shape validation.
+    #[test]
+    fn rejects_fused_fp8_matmul_with_one_value_feeding_both_operands() {
+        let bytes = fp8_matmul_graph(64, 64, 64, DType::FP8E4M3, DType::FP8E4M3, true, false)
+            .build(XDNA_TOSA_FP8_TARGET)
+            .expect("build aliased fused matmul");
+        assert_eq!(
+            admit(&bytes, XDNA_TOSA_FP8_TARGET),
+            Err(AdmitError::Unsupported)
+        );
+        // Positive control: the same shape with two distinct operands is admitted, so the
+        // rejection above is specifically the aliasing and not the shape.
+        let distinct = fp8_matmul_graph(64, 64, 64, DType::FP8E4M3, DType::FP8E4M3, false, false)
+            .build(XDNA_TOSA_FP8_TARGET)
+            .expect("build distinct fused matmul");
+        assert!(admit(&distinct, XDNA_TOSA_FP8_TARGET).is_ok());
+    }
+
+    #[test]
+    fn rejects_fused_fp8_matmul_off_the_tested_tiling() {
+        for (m, k, n) in [(48, 64, 32), (32, 64, MATMUL_MAX_DIM as i32 + 32)] {
+            let bytes = fp8_matmul_graph(m, k, n, DType::FP8E4M3, DType::FP8E4M3, false, false)
+                .build(XDNA_TOSA_FP8_TARGET)
+                .expect("build fused matmul");
+            assert_eq!(
+                admit(&bytes, XDNA_TOSA_FP8_TARGET),
+                Err(AdmitError::Unsupported)
+            );
+        }
+    }
+
+    /// The fused tier lives on the FP8 target; the BF16 target must not admit an FP8 graph.
+    #[test]
+    fn fused_fp8_matmul_is_not_admitted_on_the_bf16_target() {
+        let bytes = fp8_matmul_graph(32, 64, 32, DType::FP8E4M3, DType::FP8E4M3, false, false)
+            .build(XDNA_TOSA_FP8_TARGET)
+            .expect("build fused matmul");
+        assert_eq!(admit(&bytes, XDNA_TOSA_TARGET), Err(AdmitError::Analysis));
     }
 
     #[test]

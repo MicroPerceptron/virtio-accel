@@ -19,8 +19,9 @@
 //! (execution-model spec, issue #85). `load_program` accepts the crate-local precompiled format
 //! ([`artifact`]) directly, and a TOSA artifact by admitting it and compiling it with the bounded
 //! aiecc helper subprocess (issue #84). The compilable TOSA subsets today are BF16 IDENTITY,
-//! BF16 → FP32 MATMUL, BF16 MAX_POOL2D, explicit FP8 → BF16 storage conversion, and exact INT8
-//! IDENTITY plus zero-point-aware INT8 → INT32 MATMUL.
+//! BF16 → FP32 MATMUL, BF16 MAX_POOL2D, explicit FP8 → BF16 storage conversion, the fused
+//! FP8 → FP32 MATMUL that keeps that promotion on the compute core, exact INT8 IDENTITY,
+//! zero-point-aware INT8 → INT32 MATMUL, and exact INT32 → INT8 RESCALE.
 //! Admission (`lower`) unit-tests on every host.
 
 #![cfg_attr(not(va_xdna), forbid(unsafe_code))]
