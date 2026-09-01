@@ -142,3 +142,65 @@ pub fn poll_to_terminal<A: Accelerator>(
         }
     }
 }
+
+/// A fused FP8 MATMUL graph: two FP8E4M3 block inputs, each promoted by its own explicit CAST,
+/// multiplied to FP32. The promotion stays in the graph; only its placement is the backend's
+/// choice.
+#[allow(dead_code)] // Used by the hardware suite; this module is compiled into conformance.rs too.
+pub fn fp8e4m3_matmul_tosa(m: i32, k: i32, n: i32) -> Vec<u8> {
+    let mut graph = OwnedGraph::new("main");
+    graph
+        .push_tensor(OwnedTensor::new("lhs_fp8", vec![1, m, k], DType::FP8E4M3))
+        .push_tensor(OwnedTensor::new("rhs_fp8", vec![1, k, n], DType::FP8E4M3))
+        .push_tensor(OwnedTensor::new("lhs_bf16", vec![1, m, k], DType::BF16))
+        .push_tensor(OwnedTensor::new("rhs_bf16", vec![1, k, n], DType::BF16))
+        .push_tensor(OwnedTensor::constant(
+            "lhs_zp",
+            vec![1],
+            DType::BF16,
+            vec![0u8; 2],
+        ))
+        .push_tensor(OwnedTensor::constant(
+            "rhs_zp",
+            vec![1],
+            DType::BF16,
+            vec![0u8; 2],
+        ))
+        .push_tensor(OwnedTensor::new("output", vec![1, m, n], DType::FP32))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Cast,
+            vec!["lhs_fp8".into()],
+            vec!["lhs_bf16".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Cast,
+            vec!["rhs_fp8".into()],
+            vec!["rhs_bf16".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Const,
+            vec![],
+            vec!["lhs_zp".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Const,
+            vec![],
+            vec!["rhs_zp".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::MatMul,
+            vec![
+                "lhs_bf16".into(),
+                "rhs_bf16".into(),
+                "lhs_zp".into(),
+                "rhs_zp".into(),
+            ],
+            vec!["output".into()],
+        ))
+        .push_input("lhs_fp8")
+        .push_input("rhs_fp8")
+        .push_output("output");
+    graph
+        .build(XDNA_TOSA_FP8_TARGET)
+        .expect("build fused fp8 matmul")
+}

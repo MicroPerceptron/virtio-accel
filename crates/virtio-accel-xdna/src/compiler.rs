@@ -86,6 +86,18 @@ fn spec_json(spec: CompilerSpec) -> String {
              \"tile_k\":{MATMUL_TILE_K},\"tile_n\":{MATMUL_TILE_N},\
              \"max_dim\":{MATMUL_MAX_DIM},{device}}}"
         ),
+        CompilerSpec::Fp8Matmul { format, m, k, n } => {
+            let input = match format {
+                Fp8Format::E4M3 => "fp8e4m3",
+                Fp8Format::E5M2 => "fp8e5m2",
+            };
+            format!(
+                "{{\"op\":\"MATMUL\",\"in_dtype\":\"{input}\",\"out_dtype\":\"f32\",\
+                 \"m\":{m},\"k\":{k},\"n\":{n},\"tile_m\":{MATMUL_TILE_M},\
+                 \"tile_k\":{MATMUL_TILE_K},\"tile_n\":{MATMUL_TILE_N},\
+                 \"max_dim\":{MATMUL_MAX_DIM},{device}}}"
+            )
+        }
         CompilerSpec::Int8Matmul {
             m,
             k,
