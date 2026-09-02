@@ -27,6 +27,7 @@
 #![cfg_attr(not(va_xdna), forbid(unsafe_code))]
 
 pub mod artifact;
+pub mod bfp_experiment;
 mod lower;
 
 pub use artifact::{PrecompiledArtifact, XDNA_PRECOMPILED_FORMAT};

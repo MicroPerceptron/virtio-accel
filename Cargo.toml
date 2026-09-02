@@ -57,6 +57,7 @@ categories = ["no-std", "hardware-support", "virtualization"]
 
 [workspace.dependencies]
 bitflags = { version = "2.13.1", default-features = false }
+blake3 = { version = "1.8.3", default-features = false }
 cc = "1.4.4"
 flatbuffers = { version = "=25.2.10", default-features = false }
 serde_json = "1.0.151"

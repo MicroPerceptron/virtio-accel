@@ -1308,9 +1308,19 @@ impl Accelerator for XdnaAccelerator {
             }
         };
 
-        // The precompiled format loads directly; a TOSA artifact is admitted and compiled to one.
+        // The precompiled format loads directly; a TOSA artifact is admitted and compiled to
+        // one; an XBFP experiment container is envelope-validated and translated to one. Every
+        // path funnels through the single audited executable-construction step below.
         let container = if artifact.format == artifact::XDNA_PRECOMPILED_FORMAT {
             std::borrow::Cow::Borrowed(bytes)
+        } else if artifact.format == crate::bfp_experiment::XDNA_BFP_EXPERIMENT_FORMAT {
+            // The experiment's numerical label is its own immutable identity; a load under any
+            // other identity (including a TOSA target) is a relabeling attempt and is rejected.
+            if artifact.target != crate::bfp_experiment::XDNA_BFP_EXPERIMENT_TARGET_IDENTITY {
+                return Err(BackendError::Incompatible);
+            }
+            let parsed = crate::bfp_experiment::BfpExperimentArtifact::parse(bytes)?;
+            std::borrow::Cow::Owned(parsed.to_precompiled_container())
         } else if artifact.format == virtio_accel_tosa::ARTIFACT_FORMAT {
             let target = virtio_accel_tosa::Target::from_identity(artifact.target)
                 .map_err(|_| BackendError::Incompatible)?;
