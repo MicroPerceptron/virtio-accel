@@ -1,0 +1,7 @@
+XBFP step-1 run 2026-08-28T00:58:01Z
+host: 7.1.8-200.fc44.x86_64, NPU 1022:17f0 rev 0x20, toolchain amdxdna-hrx-v2026.08 (mlir-aie 1.4.1, llvm-aie 21.0.0.2026080301+c9c5ecb7), HRX hrx-amdxdna-2026.07.30-amdxdna-hal-native-rel-eb0b39f-linux-x86_64
+
+== XBFP flavor-1 accumulation-order contract (K = 512)
+   fold-order oracle: 64/64 lanes bit-exact
+   order sensitivity: fold differs from single-rounded f64 sum on 51/64 lanes
+xbfp complete

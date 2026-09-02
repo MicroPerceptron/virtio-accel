@@ -1,0 +1,16 @@
+# Standalone probe runner (issue #146) — deliberately NOT a workspace member: nothing here is
+# published, and the parent workspace's release policy must not see it.
+[package]
+name = "bfp16ebs8-probe-runner"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+virtio-accel-core = { path = "../../../crates/virtio-accel-core" }
+virtio-accel-xdna = { path = "../../../crates/virtio-accel-xdna" }
+
+[dev-dependencies]
+blake3 = { version = "1.8.3", default-features = false }
+
+[workspace]
