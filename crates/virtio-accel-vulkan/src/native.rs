@@ -1803,6 +1803,19 @@ impl Accelerator for VulkanAccelerator {
         if bindings.len() != plan.slots.len() {
             return Err(reject(BackendError::Incompatible));
         }
+        // A TOSA graph's inputs and outputs are distinct tensors, so one allocation may back
+        // several read-only slots but never a written slot together with any other slot: that
+        // aliasing is a program incompatibility, reported here rather than as a transient `Busy`
+        // from the in-flight gates below.
+        for (index, binding) in bindings.iter().enumerate() {
+            let aliased = bindings[..index].iter().any(|prior| {
+                Rc::ptr_eq(&prior.buffer.state, &binding.buffer.state)
+                    && (prior.access != AccessMode::Read || binding.access != AccessMode::Read)
+            });
+            if aliased {
+                return Err(reject(BackendError::Incompatible));
+            }
+        }
 
         let slot_index = context
             .claim_slot()
@@ -1811,8 +1824,8 @@ impl Accelerator for VulkanAccelerator {
             [const { None }; MAX_BINDINGS_PER_SUBMISSION as usize];
         for (index, binding) in bindings.iter().enumerate() {
             let exclusive = binding.access != AccessMode::Read;
-            // The same buffer bound twice (an input feeding an output slot) is rejected above by
-            // the role check, so each guard is a distinct allocation.
+            // Aliasing with a written slot was rejected above, so a conflict here can only come
+            // from another in-flight submission: a transient `Busy`.
             match Guard::acquire(&binding.buffer.state, exclusive) {
                 Ok(guard) => guards[index] = Some(guard),
                 Err(error) => {

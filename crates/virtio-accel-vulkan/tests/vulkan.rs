@@ -93,7 +93,7 @@ impl ByteSink for SegmentedSink {
 }
 
 fn device_required() -> bool {
-    std::env::var_os("VIRTIO_ACCEL_VULKAN_REQUIRE_DEVICE").is_some_and(|value| value == "1")
+    std::env::var("VIRTIO_ACCEL_VULKAN_REQUIRE_DEVICE").is_ok_and(|value| value == "1")
 }
 
 /// Every suitable device by enumerated name, or empty when the host has none.
@@ -554,6 +554,25 @@ fn rejects_misaligned_and_mis_sized_bindings_as_incompatible() {
             BackendError::Incompatible,
             "{device}: scalar-misaligned offset"
         );
+        // In-place identity: one allocation aliased across the input and output slots.
+        let aliased = [
+            BindingRef {
+                slot: 0,
+                buffer: &input,
+                range: exact,
+                access: AccessMode::Read,
+            },
+            BindingRef {
+                slot: 1,
+                buffer: &input,
+                range: exact,
+                access: AccessMode::Write,
+            },
+        ];
+        assert!(matches!(
+            backend.submit(&queue, &program, &aliased, Timeout::Infinite),
+            Err(SubmitFailure::Rejected(BackendError::Incompatible))
+        ));
         // Only one binding for a two-slot program.
         let single = [BindingRef {
             slot: 0,
