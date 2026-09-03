@@ -7,8 +7,8 @@
 
 1. **Nonblocking completion without a worker thread.** `vkGetFenceStatus` is a genuine
    nonblocking status read; `poll_event` consults it directly. Unlike the Hexagon and XDNA
-   backends, no dispatch/synchronization worker is serialized. Ticket 8 proves this — the clause
-   in SAFETY.md says "no worker thread (proven in ticket 6, not assumed)" in proof form: if ticket
+   backends, no dispatch/synchronization worker is serialized. Ticket 8 proves this — SAFETY.md records the requirement
+   as "no worker thread (to be proven in ticket 6, not assumed)" in proof form: if ticket
    8's I/O reaches indeterminate under blocking-poll, this design reopens.
 2. **Bounded preallocated pools sized against `DeviceLimits`.** Each context preallocates a
    fixed ring of (command buffer, fence, descriptor set) triples sized at
