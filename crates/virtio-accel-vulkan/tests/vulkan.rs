@@ -682,18 +682,17 @@ fn permits_overlapping_read_only_inputs_across_in_flight_submissions() {
             );
         }
         // While the reads are in flight the shared input may not be transferred or freed, and
-        // the program may not be unloaded.
-        if events
-            .iter()
-            .any(|event| backend.poll_event(event).unwrap() == EventState::Pending)
-        {
-            assert_eq!(
-                backend
-                    .write_buffer(&mut shared_input, 0, &SliceSource(&payload))
-                    .unwrap_err(),
-                BackendError::Busy
-            );
-        }
+        // the program may not be unloaded. Both refusals are asserted before anything is polled:
+        // a submission stays in flight only until its terminal state is *observed*, so polling
+        // first lets a device quick enough to retire all `IN_FLIGHT` submissions drop the guards
+        // and make either release legitimately succeed.
+        assert_eq!(
+            backend
+                .write_buffer(&mut shared_input, 0, &SliceSource(&payload))
+                .unwrap_err(),
+            BackendError::Busy,
+            "{device}"
+        );
         let program = match backend.unload_program(program) {
             Err(ReleaseFailure::Rejected {
                 error: BackendError::Busy,
