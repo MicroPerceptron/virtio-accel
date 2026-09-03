@@ -42,7 +42,8 @@
    device creation (core removes extension dependency, not the feature enable).
 2. **Required-feature set (baseline).** `synchronization2` and `shaderIntegerDotProduct` enabled
    unconditionally. All remaining items are *queries*, not requirements: FP16 tier advertises only
-   when `shaderFloat16` and `vkGetPhysicalDeviceFeatures2` float-controls prove per-device (ADR 0004);
+   when `shaderFloat16` (`vkGetPhysicalDeviceFeatures2`) and the `VkPhysicalDeviceVulkan12Properties`
+   float-controls fields (`vkGetPhysicalDeviceProperties2`) prove per-device (ADR 0004);
    INT8 operator tiers advertise only when `shaderInt8` is present (MATMUL additionally needs
    `shaderIntegerDotProduct`, which is baseline here).
 3. **Memory-domain map.** `Host` → `HOST_VISIBLE|HOST_COHERENT`, persistently mapped. `Device` →
