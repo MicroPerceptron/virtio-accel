@@ -12,6 +12,10 @@ description = "Vendor-neutral Vulkan compute host backend for virtio-accel"
 readme = "README.md"
 
 [dependencies]
+# Pinned exactly (ADR 0002): raw bindings generated from vk.xml. `loaded` dlopens the platform
+# Vulkan loader at run time through `libloading`; no Vulkan-Headers, SDK, or link-time dependency.
+# The `debug` default is off so no `Debug` formatting machinery for every Vulkan flag type ships.
+ash = { version = "=0.38.0", default-features = false, features = ["loaded", "std"] }
 virtio-accel-core.workspace = true
 virtio-accel-tosa.workspace = true
 

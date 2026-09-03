@@ -380,6 +380,17 @@ preserve OpenVINO's static admission, direct-binding, capability, and conformanc
 process, serialized stream, and XDNA-specific local-memory envelopes are documented hardware/runtime
 constraints rather than portable API changes or silent fallback paths.
 
+The Vulkan provider is the first GPU-class consumer of the seam and keeps the data plane
+graph-shaped (ADR 0001): one admitted TOSA graph becomes one compute pipeline created at load from
+a crate-authored SPIR-V module specialized by validated shape constants, so guest bytes never reach
+a driver's shader compiler. Buffers are dedicated `VkDeviceMemory` allocations bound directly as
+storage buffers; host-visible domains stay persistently mapped, and device-local memory is reached
+only through bounded staging inside the explicit transfer calls. Each context owns a bounded ring
+of command buffers, fences, and descriptor sets; `vkQueueSubmit2` success is the admission
+boundary and `vkGetFenceStatus` is the whole completion path, so no worker thread bridges the
+runtime. Device loss poisons the instance. The backend runs the conformance suite and the shared
+FP32 identity corpus on every enumerated device, a real GPU and a software ICD alike.
+
 The Qualcomm adapter uses the same seam. Its safe planner admits 41 of the 42 floating-point
 operators shared by Core ML and OpenVINO, including owned constants/data movement, FP16 unary and
 binary computation, BOOL comparison/selection/logical tensors, and INT32 indexing results. `ERF` is

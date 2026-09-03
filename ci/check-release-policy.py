@@ -87,6 +87,11 @@ UNSAFE_AUDITS = {
         'cfg_attr(not(target_os = "macos"), forbid(unsafe_code))',
         ("Objective-C bridge", "AlignedAllocation", "atomic two-reference"),
     ),
+    ROOT / "crates" / "virtio-accel-vulkan" / "src" / "lib.rs": (
+        ROOT / "crates" / "virtio-accel-vulkan" / "SAFETY.md",
+        "cfg_attr(not(va_vulkan), forbid(unsafe_code))",
+        ("ash 0.38.0", "persistent mapping", "VK_ERROR_DEVICE_LOST"),
+    ),
     ROOT / "crates" / "virtio-accel-openvino" / "src" / "lib.rs": (
         ROOT / "crates" / "virtio-accel-openvino" / "SAFETY.md",
         "cfg_attr(not(va_openvino), forbid(unsafe_code))",
