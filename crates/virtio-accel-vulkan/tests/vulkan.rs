@@ -311,19 +311,21 @@ fn preserves_fp32_edge_values_bit_exactly_on_every_device() {
 }
 
 #[test]
-fn copies_multi_workgroup_tensors_exactly() {
-    // 8 elements spans a fraction of one workgroup; every element must still be covered, and
-    // the guarded tail must not write past the tensor.
+fn copies_aligned_offset_bindings_exactly() {
+    // Exercise a nonzero descriptor offset that satisfies every device's advertised storage
+    // buffer alignment. The guarded ranges must remain untouched.
     for device in devices() {
         let backend = open(&device);
         let case = &IDENTITY_EDGES_FP32;
         let context = backend.create_context(ContextDesc::default()).unwrap();
         let program = load(&backend, &context, case.artifact, VULKAN_TOSA_TARGET).unwrap();
         let bytes = 8 * 4;
+        let offset = BUFFER_ALIGNMENT;
+        let buffer_bytes = offset + bytes + offset;
         // Allocate a larger buffer and bind the tensor in the middle: bytes outside the bound
         // range must stay untouched.
         let desc = BufferDesc::new(
-            bytes * 3,
+            buffer_bytes,
             BUFFER_ALIGNMENT,
             MemoryDomain::Host,
             BufferUsage::TRANSFER_SOURCE
@@ -342,9 +344,9 @@ fn copies_multi_workgroup_tensors_exactly() {
             .into_parts();
         let payload = float_bytes(case.inputs[0].values.iter().copied());
         backend
-            .write_buffer(&mut input, bytes, &SliceSource(&payload))
+            .write_buffer(&mut input, offset, &SliceSource(&payload))
             .unwrap();
-        let sentinel = vec![0xa5; (bytes * 3) as usize];
+        let sentinel = vec![0xa5; buffer_bytes as usize];
         backend
             .write_buffer(&mut output, 0, &SliceSource(&sentinel))
             .unwrap();
@@ -355,13 +357,13 @@ fn copies_multi_workgroup_tensors_exactly() {
             BindingRef {
                 slot: 0,
                 buffer: &input,
-                range: BufferRange::new(bytes, bytes).unwrap(),
+                range: BufferRange::new(offset, bytes).unwrap(),
                 access: AccessMode::Read,
             },
             BindingRef {
                 slot: 1,
                 buffer: &output,
-                range: BufferRange::new(bytes, bytes).unwrap(),
+                range: BufferRange::new(offset, bytes).unwrap(),
                 access: AccessMode::Write,
             },
         ];
@@ -370,19 +372,19 @@ fn copies_multi_workgroup_tensors_exactly() {
             .unwrap_or_else(|_| panic!("{device}: offset submission rejected"));
         assert_eq!(wait_for_terminal(&backend, &event), EventState::Complete);
         release(backend.destroy_event(event));
-        let mut result = VecSink(vec![0; (bytes * 3) as usize]);
+        let mut result = VecSink(vec![0; buffer_bytes as usize]);
         backend.read_buffer(&output, 0, &mut result).unwrap();
-        let (head, rest) = result.0.split_at(bytes as usize);
+        let (head, rest) = result.0.split_at(offset as usize);
         let (middle, tail) = rest.split_at(bytes as usize);
         assert_eq!(
             head,
-            &sentinel[..bytes as usize],
+            &sentinel[..offset as usize],
             "{device}: head clobbered"
         );
         assert_eq!(middle, payload.as_slice(), "{device}");
         assert_eq!(
             tail,
-            &sentinel[..bytes as usize],
+            &sentinel[(offset + bytes) as usize..],
             "{device}: tail clobbered"
         );
         release(backend.destroy_queue(queue));
