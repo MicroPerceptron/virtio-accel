@@ -36,6 +36,7 @@ PUBLISHED_PACKAGES = {
     "crates/virtio-accel-openvino": "virtio-accel-openvino",
     "crates/virtio-accel-proto": "virtio-accel-proto",
     "crates/virtio-accel-vaccel": "virtio-accel-vaccel",
+    "crates/virtio-accel-vulkan": "virtio-accel-vulkan",
     "crates/virtio-accel-split-queue": "virtio-accel-split-queue",
     "crates/virtio-accel-tosa": "virtio-accel-tosa",
     "crates/virtio-accel-tosa-build": "virtio-accel-tosa-build",

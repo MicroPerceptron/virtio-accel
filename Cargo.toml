@@ -36,6 +36,7 @@ members = [
     "crates/virtio-accel-hexagon",
     "crates/virtio-accel-mock",
     "crates/virtio-accel-vaccel",
+    "crates/virtio-accel-vulkan",
     "crates/virtio-accel-openvino",
     "crates/virtio-accel-proto",
     "crates/virtio-accel-split-queue",
@@ -79,6 +80,7 @@ virtio-accel-tosa = { path = "crates/virtio-accel-tosa", version = "0.3.4" }
 virtio-accel-tosa-build = { path = "crates/virtio-accel-tosa-build", version = "0.3.4" }
 virtio-accel-transport = { path = "crates/virtio-accel-transport", version = "0.3.4" }
 virtio-accel-vaccel = { path = "crates/virtio-accel-vaccel", version = "0.3.4" }
+virtio-accel-vulkan = { path = "crates/virtio-accel-vulkan", version = "0.3.4" }
 
 [dependencies]
 virtio-accel-core.workspace = true

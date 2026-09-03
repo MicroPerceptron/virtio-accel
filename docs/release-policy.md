@@ -140,7 +140,7 @@ declares its own `description` and `readme`, and carries its own byte-identical 
 root license files do not reach the sub-crate tarballs; the copies exist for that reason and are
 copies rather than symlinks because CI runs `windows-latest`.
 
-`ci/check-release-policy.py` enforces all of this against an explicit seventeen-crate allowlist. A new
+`ci/check-release-policy.py` enforces all of this against an explicit eighteen-crate allowlist. A new
 package fails that check until it is added to the allowlist, which forces a decision about whether
 it is public rather than letting it default either way. The check also validates the crates.io
 keyword and category limits, which neither `cargo package` nor `cargo publish --dry-run` catches
@@ -150,7 +150,8 @@ The `fuzz/` harness is a separate workspace at version `0.0.0` and stays `publis
 
 ## Publication, yank, and rollback
 
-Seventeen packages are published to crates.io. Publication is ordered: a crate cannot be published before
+Eighteen packages are published to crates.io. Publication is ordered: a crate cannot be published
+before
 every crate it depends on, and that includes development dependencies, because a published crate's
 versioned dev-dependencies must resolve from the registry for `cargo test` to run on the packaged
 source.
@@ -173,14 +174,15 @@ source.
 | 14 | `virtio-accel-coreml` | `core`, `tosa` | `conformance` |
 | 15 | `virtio-accel-openvino` | `core`, `tosa` | `conformance` |
 | 16 | `virtio-accel-hexagon` | `core`, `tosa` | `conformance` |
-| 17 | `virtio-accel` | the six runtime crates | `conformance`, `mock`, `cleanroom` |
+| 17 | `virtio-accel-vulkan` | `core`, `tosa` | `conformance` |
+| 18 | `virtio-accel` | the six runtime crates | `conformance`, `mock`, `cleanroom` |
 
 This order is executable, not just documentary: `ci/publish-dry-run.py` walks it against an isolated
 local registry, adding each crate only after it has been built, tested, and documented from its own
 extracted tarball. A crate can therefore only ever resolve its predecessors, so a wrong order fails
 with an unresolvable dependency instead of passing quietly. The same script is a required CI job.
 
-All seventeen packages share the workspace version and are published together. A GitHub release tag
+All eighteen packages share the workspace version and are published together. A GitHub release tag
 must be exactly `v<workspace-version>` and must point at the commit being released. Publishing a
 GitHub release triggers `.github/workflows/publish.yml`, which checks out that tag, runs the release
 policy checks and publication-driver tests, repeats the full ordered local-registry dry run on the
