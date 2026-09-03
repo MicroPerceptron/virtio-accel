@@ -94,7 +94,7 @@ tier of an existing crate.
 
 Project-authored code in portable crates, reference crates, and fuzz harness support code forbids or
 denies unsafe code at the crate root. This is an intentional v1 invariant, not incidental linting.
-There are five reviewed, confined exceptions. The host-native `virtio-accel-coreml` adapter's Rust
+There are six reviewed, confined exceptions. The host-native `virtio-accel-coreml` adapter's Rust
 FFI and aligned-allocation code is documented in `crates/virtio-accel-coreml/SAFETY.md`; non-macOS
 builds still forbid unsafe code. The host-native `virtio-accel-openvino` adapter's OpenVINO C API
 FFI and aligned-allocation code is documented in `crates/virtio-accel-openvino/SAFETY.md`; builds
@@ -106,7 +106,10 @@ boundary is documented in `crates/virtio-accel-hexagon/SAFETY.md`; builds withou
 runtime still forbid unsafe code. The host-native `virtio-accel-xdna` adapter's HRX C ABI,
 persistent mappings, and dispatch ownership are documented in
 `crates/virtio-accel-xdna/SAFETY.md`; builds without a detected HRX runtime still forbid unsafe
-code.
+code. The host-native `virtio-accel-vulkan` adapter's `ash` entry-point inventory, persistent
+mappings, submission ring, and device-loss handling are documented in
+`crates/virtio-accel-vulkan/SAFETY.md`; builds forced to the placeholder (or on a host outside the
+Vulkan loader target set) still forbid unsafe code.
 
 A future unsafe exception requires all of the following in one reviewed change:
 
@@ -151,8 +154,7 @@ The `fuzz/` harness is a separate workspace at version `0.0.0` and stays `publis
 ## Publication, yank, and rollback
 
 Eighteen packages are published to crates.io. Publication is ordered: a crate cannot be published
-before
-every crate it depends on, and that includes development dependencies, because a published crate's
+before every crate it depends on, and that includes development dependencies, because a published crate's
 versioned dev-dependencies must resolve from the registry for `cargo test` to run on the packaged
 source.
 

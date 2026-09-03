@@ -36,6 +36,18 @@
 - The bounded ring is exactly the single "pool member owned by the event" language SAFETY.md
   already requires of the audit ticket.
 
+## Ticket 8 evidence (2026-09-03)
+
+- The "to be proven in ticket 6, not assumed" clause is discharged: the crate's SAFETY.md now
+  states the no-worker-thread property as an invariant of the audited implementation.
+- `poll_event` is exactly one `vkGetFenceStatus` call; the conformance suite (including
+  `event.pending-release-terminal-stability`) passes on Intel ANV (Arc 140V) and llvmpipe with no
+  thread other than the caller's.
+- Warm FP32 identity (release build, 200 samples after 20 warm-ups): ANV admission p50 16.6 µs,
+  submit-to-complete p50 259 µs; llvmpipe admission p50 4.3 µs, submit-to-complete p50 58 µs.
+  Polling cost is not the steady-state term; the falsification guard below did not fire.
+- Ring exhaustion at `max_events_per_context` (64) is refused as `ResourceLimit` without blocking.
+
 ## Falsification guard
 
 If ticket 8 benchmarks show `vkGetFenceStatus` polling dominates steady-state (e.g. under

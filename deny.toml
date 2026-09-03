@@ -18,6 +18,9 @@ unsound = "all"
 allow = [
     "Apache-2.0",
     "BSD-2-Clause",
+    # `libloading`, the runtime loader beneath `ash` (`virtio-accel-vulkan`, ADR 0002), is ISC:
+    # functionally equivalent to MIT and OSI-approved.
+    "ISC",
     "MIT",
     "Unicode-3.0",
 ]

@@ -16,6 +16,23 @@
 | `minStorageBufferOffsetAlignment` | RADV 4, ANV 4, lavapipe 16 | same sources |
 | `nonCoherentAtomSize` | RADV 64, ANV 64, lavapipe 64; gpuinfo shows 64/128 | same sources |
 
+### Ticket 8 evidence (2026-09-03, Intel Arc 140V / Lunar Lake, Mesa 26.0.8 ANV; llvmpipe)
+
+- ANV reports six memory types, all `DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT` (two also
+  `HOST_CACHED`, one `PROTECTED`), but a storage buffer's `memoryTypeBits` excludes some of them.
+  The memory-domain map must be chosen against a probe buffer's `memoryTypeBits`, not the heap
+  list alone; ADR 0002's `ash` path does this at device open.
+- On both ICDs every usable type is `HOST_COHERENT`, so no flush/invalidate path was exercised.
+  The backend therefore requires coherence for `Host` and `Shared` and never issues one.
+- Measured: `minStorageBufferOffsetAlignment` 4 (ANV) / 16 (lavapipe); `nonCoherentAtomSize` 64;
+  `maxMemoryAllocationCount` `UINT32_MAX` on both; `maxStorageBufferRange` `UINT32_MAX` (ANV) /
+  128 MiB (lavapipe), which bounds `DeviceLimits.max_buffer_bytes` per device.
+- Float controls: ANV preserves signed zero/inf/NaN and denormals for fp16 and fp32; llvmpipe
+  reports `denormPreserve` false for both, so the lavapipe lane cannot prove the FP16 subnormal
+  edge on its own (ticket 5). The feature bit comes from `vkGetPhysicalDeviceFeatures2`; the
+  float-controls fields live in `VkPhysicalDeviceVulkan12Properties` via
+  `vkGetPhysicalDeviceProperties2`.
+
 ## Decision
 
 1. **Vulkan 1.3 is the minimum API baseline.** Lavapipe has been ≥ 1.3 since Mesa 23.1; every
@@ -25,7 +42,8 @@
    device creation (core removes extension dependency, not the feature enable).
 2. **Required-feature set (baseline).** `synchronization2` and `shaderIntegerDotProduct` enabled
    unconditionally. All remaining items are *queries*, not requirements: FP16 tier advertises only
-   when `shaderFloat16` and `vkGetPhysicalDeviceFeatures2` float-controls prove per-device (ADR 0004);
+   when `shaderFloat16` (`vkGetPhysicalDeviceFeatures2`) and the `VkPhysicalDeviceVulkan12Properties`
+   float-controls fields (`vkGetPhysicalDeviceProperties2`) prove per-device (ADR 0004);
    INT8 operator tiers advertise only when `shaderInt8` is present (MATMUL additionally needs
    `shaderIntegerDotProduct`, which is baseline here).
 3. **Memory-domain map.** `Host` → `HOST_VISIBLE|HOST_COHERENT`, persistently mapped. `Device` →

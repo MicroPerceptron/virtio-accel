@@ -15,5 +15,13 @@ readme = "README.md"
 virtio-accel-core.workspace = true
 virtio-accel-tosa.workspace = true
 
+# Pinned exactly (ADR 0002): raw bindings generated from vk.xml. `loaded` dlopens the platform
+# Vulkan loader at run time through `libloading`; no Vulkan-Headers, SDK, or link-time dependency.
+# The `debug` default is off so no `Debug` formatting machinery for every Vulkan flag type ships.
+# The target set mirrors `build.rs`: elsewhere (wasm, bare metal) the crate is the placeholder and
+# `libloading` has nothing to load, so the dependency is absent rather than uncompilable.
+[target.'cfg(any(target_os = "android", target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
+ash = { version = "=0.38.0", default-features = false, features = ["loaded", "std"] }
+
 [dev-dependencies]
 virtio-accel-conformance.workspace = true
