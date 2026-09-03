@@ -10,7 +10,7 @@
 //! amdxdna-native HRX prefix (`VIRTIO_ACCEL_HRX_DIR`/`HRX_DIR`, or the `VIRTIO_ACCEL_HRX_LIB_DIR`
 //! escape hatch) and sets the `va_xdna` cfg; `VIRTIO_ACCEL_XDNA` forces the probe on (`1`, failing
 //! loudly) or off (`0`). Hosts without HRX build the portable admission surface (`lower`), the
-//! artifact codec, the offline compiler driver ([`compile_artifact`], unix), and a placeholder —
+//! artifact codec, the offline compiler driver (`compile_artifact`, unix), and a placeholder —
 //! and compile no `unsafe` at all.
 //!
 //! **Scope today:** the full `Accelerator` lifecycle — the HRX device/stream owner, `hrx_buffer`

@@ -18,7 +18,8 @@ with all features enabled. The generated documentation is served under
 | [`virtio-accel-coreml`](api/virtio_accel_coreml/index.html) | macOS `std` | TOSA-to-Core ML lowering and ANE-capable prediction |
 | [`virtio-accel-openvino`](api/virtio_accel_openvino/index.html) | Linux `std` | TOSA-to-OpenVINO IR lowering and NPU/GPU/CPU inference |
 | [`virtio-accel-hexagon`](api/virtio_accel_hexagon/index.html) | Windows ARM64 `std` | Strict FP16/INT8 TOSA-to-QNN lowering |
-| [`virtio-accel-xdna`](api/virtio_accel_xdna/index.html) | `std` | AMD XDNA2 NPU backend over the HRX runtime; scaffold with build probe today |
+| [`virtio-accel-xdna`](api/virtio_accel_xdna/index.html) | `std` | AMD XDNA2 NPU backend over HRX with BF16/FP8/INT8 TOSA tiers |
+| [`virtio-accel-vulkan`](api/virtio_accel_vulkan/index.html) | `std` | Vendor-neutral Vulkan 1.3 compute backend with FP32 IDENTITY execution |
 | [`virtio-accel-split-queue`](api/virtio_accel_split_queue/index.html) | `core + alloc` | Bounded in-memory split-ring reference model |
 | [`virtio-accel-guest`](api/virtio_accel_guest/index.html) | `core + alloc` | Typed reference client |
 | [`virtio-accel-device`](api/virtio_accel_device/index.html) | `core + alloc` | Device-owned state with generational IDs |

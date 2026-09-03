@@ -13,6 +13,7 @@ Rust 2024 edition selected by the workspace. Every package inherits the same `ru
 | `style-and-api` | Current stable on Ubuntu | Formatting, complete normative-requirement ledger, release-policy invariants, Clippy with warnings denied, and warning-free public docs |
 | `native-test` | Current stable on Ubuntu, macOS, and Windows | All workspace unit, integration, target, feature, and documentation tests, runnable examples, and release-profile checking |
 | `openvino-host-test` | Current stable on Ubuntu with a pinned Intel OpenVINO runtime | The real (probed) OpenVINO backend: lint, unit, integration, semantic-conformance, and example runs against the CPU plugin |
+| `vulkan-lavapipe-test` | Current stable on Ubuntu with the Mesa lavapipe ICD pinned | The native Vulkan 1.3 backend: lint, unit, integration, semantic-conformance, and FP32 IDENTITY example runs without allowing a placeholder skip |
 | `msrv` | Rust 1.85.0 on Ubuntu | Every workspace target and test continues to compile at the declared MSRV |
 | `portable-target` | Stable `aarch64-unknown-none`, `riscv64gc-unknown-none-elf`, and `wasm32-unknown-unknown` | `cleanroom`, `proto`, `transport`, and `core` remain `no_std`; guest, split-queue, device, and facade layers require at most `alloc`; Wasm also checks the std reference crates |
 | `feature-sets-and-dependencies` | Stable on Ubuntu | Every Cargo feature combination plus dependency and `std`/`alloc` leakage guards for the portable codecs, queue ports, and core |
@@ -119,6 +120,9 @@ surfaces as `InitError`. `VIRTIO_ACCEL_VULKAN=0` forces the placeholder everywhe
 in `docs/adr/`). Buffers are dedicated allocations bound directly as storage buffers; `Host` and
 `Shared` domains are persistently mapped host-coherent memory, `Device` is device-local memory
 reached only through bounded staging inside the explicit transfer calls (ADR 0005).
+The dedicated `vulkan-lavapipe-test` job forces the native build, requires an enumerated device,
+and pins Mesa's software ICD before running Clippy, all Vulkan tests, and the example. This keeps
+the run deterministic while ensuring loader discovery and the real Vulkan lifecycle execute in CI.
 
 Concrete VMM, kernel, OS, and vendor adapters are outside the portable-v1 milestone and must not
 become default dependencies of a portable crate.

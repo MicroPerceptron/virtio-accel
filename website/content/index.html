@@ -292,15 +292,12 @@ section { border-bottom: 1px solid var(--rule); }
   transition: border-color 0.2s;
 }
 .backend:hover { border-color: var(--accent-line); }
-.backend.planned { background: none; border-style: dashed; }
-.backend.planned:hover { border-color: var(--rule); }
 .backend-top {
   display: flex; align-items: flex-start; justify-content: space-between;
   gap: 12px; margin-bottom: 12px;
 }
 .backend-top b { font-family: var(--mono); font-size: 13px; font-weight: 700; }
 .backend p { font-size: 13.5px; line-height: 1.55; color: var(--fg-muted); }
-.backend.planned b, .backend.planned p { color: var(--fg-dim); }
 .tag {
   font-family: var(--mono); font-size: 10.5px; white-space: nowrap;
   border-radius: 4px; padding: 2px 7px; border: 1px solid;
@@ -438,8 +435,8 @@ footer { padding-block: 44px 52px; }
       <h1>Give a guest an accelerator, not a driver.</h1>
       <p class="lede">virtio-accel is a transport-neutral virtual accelerator device: a frozen wire
         contract plus executable <code>no_std</code> guest, device, transport and TOSA layers in
-        Rust. First target is NPU execution &mdash; with a core model that leaves room for GPUs,
-        DSPs and other program-driven accelerators.</p>
+        Rust. Native backends now reach NPUs, GPUs and CPUs while the core model remains neutral
+        enough for DSPs and other program-driven accelerators.</p>
       <div class="actions">
         <a class="btn btn-primary" href="docs/specification.html">Read the specification</a>
         <a class="btn btn-ghost" href="getting-started.html">Getting started</a>
@@ -470,7 +467,7 @@ footer { padding-block: 44px 52px; }
 <section>
   <div class="stats-shell">
     <div class="stats">
-      <div class="stat"><b>17</b><span>crates, one release train</span></div>
+      <div class="stat"><b>18</b><span>crates, one release train</span></div>
       <div class="stat"><b style="color: var(--accent)">12</b><span>forbid unsafe outright</span></div>
       <div class="stat"><b>3</b><span>bare-metal CI targets</span></div>
       <div class="stat"><b>1.85</b><span>minimum rustc</span></div>
@@ -497,9 +494,9 @@ footer { padding-block: 44px 52px; }
           <code style="font-size: 0.9em">riscv64gc-unknown-none-elf</code> and
           <code style="font-size: 0.9em">wasm32-unknown-unknown</code>, so a crate cannot quietly
           acquire a host dependency.</p>
-        <p style="margin-top: 16px;">Twelve of the seventeen crates forbid <code style="font-size: 0.9em">unsafe</code>
+        <p style="margin-top: 16px;">Twelve of the eighteen crates forbid <code style="font-size: 0.9em">unsafe</code>
           outright. The rest quarantine it: <code style="font-size: 0.9em">virtio-accel-tosa</code> to
-          flatc-generated schema accessors, and the four host backends to their FFI shims, which
+          flatc-generated schema accessors, and the five host backends to their audited native code, which
           compile only when the native runtime is present &mdash; every other build of them forbids
           <code style="font-size: 0.9em">unsafe</code> too.</p>
         <p style="margin-top: 18px;"><a href="docs/architecture.html" style="font-family: var(--mono); font-size: 13px;">Architecture &rarr;</a></p>
@@ -543,11 +540,11 @@ footer { padding-block: 44px 52px; }
       <h2>Real backends, real silicon</h2>
       <a href="docs/device-support-matrix.html">Device support matrix &rarr;</a>
     </div>
-    <p class="lede" style="max-width: 52rem; margin-bottom: 26px;">Four backends run end to end
-      today. Each takes the same device-neutral TOSA&nbsp;1.0 artifact, lowers it with its own
-      native toolchain, and binds the caller's own allocations &mdash; no staging copy in or out.
-      &ldquo;Supported&rdquo; means the backend admits that program and dtype and runs it on
-      hardware; parsing a graph is not executing one.</p>
+    <p class="lede" style="max-width: 52rem; margin-bottom: 26px;">Five backends run end to end
+      today. Each takes the same device-neutral TOSA&nbsp;1.0 artifact, owns its native lowering
+      and execution path, and submits directly bound program-visible buffers. &ldquo;Supported&rdquo;
+      means the backend admits that program and dtype and executes it through the provider;
+      parsing a graph is not executing one.</p>
     <div class="backends">
       <div class="backend">
         <div class="backend-top">
@@ -579,8 +576,7 @@ footer { padding-block: 44px 52px; }
           completion only if the runtime actually wrote into the caller's output allocation, which
           is a stronger claim than &ldquo;the call returned&rdquo;. Its INT8 tier legalizes zero
           points explicitly in INT32.</p>
-        <p class="bk-device"><b>Intel NPU, GPU or CPU</b>CPU plugin proven in CI; the only
-          CI-verified device path here</p>
+        <p class="bk-device"><b>Intel NPU, GPU or CPU</b>CPU plugin proven in CI</p>
         <p class="bk-label">Program dtypes</p>
         <ul class="bk-dtypes">
           <li class="dt on">FP32<span class="sr-only"> supported</span></li>
@@ -616,7 +612,7 @@ footer { padding-block: 44px 52px; }
           <span class="tag tag-exp">experimental &middot; QAIRT 2.49</span>
         </div>
         <p>Lowers a strict FP16 and INT8 subset to QNN and runs it on Hexagon HTP with direct client
-          buffers. FP16 covers 41 of the 42 operators the other backends share &mdash; ERF has no
+          buffers. FP16 covers 41 of the 42 operators Core ML and OpenVINO share &mdash; ERF has no
           QAIRT node. FP32 is refused on purpose: the v73 precision probe caught MATMUL rounding to
           FP16 even for FLOAT_32 tensors, so admitting it would be a lie about precision.</p>
         <p class="bk-device"><b>Hexagon HTP v73</b>Snapdragon X126100 on Windows 11 ARM64</p>
@@ -629,10 +625,30 @@ footer { padding-block: 44px 52px; }
           <li class="dt">INT4<span class="sr-only"> not supported</span></li>
         </ul>
       </div>
+      <div class="backend">
+        <div class="backend-top">
+          <span class="bk-id"><b>Vulkan 1.3 compute</b><span class="bk-crate">virtio-accel-vulkan</span></span>
+          <span class="tag tag-ok">vendor-neutral &middot; FP32</span>
+        </div>
+        <p>Executes FP32 IDENTITY with checked-in SPIR-V specialized when the TOSA program loads.
+          Host, shared and device-local storage buffers bind directly for submission; explicit
+          staging is confined to reads and writes of device-local memory. Fence status provides
+          nonblocking completion without a worker thread.</p>
+        <p class="bk-device"><b>Vulkan 1.3 compute devices</b>validated on Intel Arc 140V with
+          Mesa ANV and continuously tested against lavapipe</p>
+        <p class="bk-label">Program dtypes</p>
+        <ul class="bk-dtypes">
+          <li class="dt on">FP32<span class="sr-only"> IDENTITY supported</span></li>
+          <li class="dt">FP16<span class="sr-only"> not supported</span></li>
+          <li class="dt">FP8<span class="sr-only"> not supported</span></li>
+          <li class="dt">INT8<span class="sr-only"> target declared but not advertised</span></li>
+          <li class="dt">INT4<span class="sr-only"> not supported</span></li>
+        </ul>
+      </div>
     </div>
     <p style="margin-top: 18px; font-size: 14px; color: var(--fg-dim);">None of these silently
-      dequantize an unsupported graph: an FP8, unsupported INT8 or packed INT4 graph is rejected at
-      load, where you can see it. Vulkan is planned and has no crate yet. The
+      dequantize an unsupported graph: unsupported FP8 or INT8 and packed INT4 graphs are rejected
+      at load, where you can see it. Vulkan currently advertises only FP32 IDENTITY. The
       <a href="docs/device-support-matrix.html">device support matrix</a> records which parts are
       validated on hardware, which are merely reachable, and which are one named change away; the
       <a href="docs/hexagon-operator-matrix.html">Hexagon operator matrix</a> has the per-operator
@@ -643,7 +659,7 @@ footer { padding-block: 44px 52px; }
 <section>
   <div class="shell sec">
     <div class="sec-head">
-      <h2>Seventeen crates, one release train</h2>
+      <h2>Eighteen crates, one release train</h2>
       <a href="api.html">Full crate reference &rarr;</a>
     </div>
     <div class="crates">
@@ -658,7 +674,8 @@ footer { padding-block: 44px 52px; }
       <div class="crate-row"><div>virtio-accel-coreml</div><div class="tier">macOS std</div><div class="role">TOSA-to-Core ML lowering and ANE-capable prediction</div></div>
       <div class="crate-row"><div>virtio-accel-openvino</div><div class="tier">Linux std</div><div class="role">TOSA-to-OpenVINO IR lowering and NPU/GPU/CPU inference</div></div>
       <div class="crate-row"><div>virtio-accel-hexagon</div><div class="tier">Windows ARM64 std</div><div class="role">Strict FP16/INT8 TOSA-to-QNN lowering</div></div>
-      <div class="crate-row"><div>virtio-accel-xdna</div><div class="tier">std</div><div class="role">AMD XDNA2 NPU backend over the HRX runtime; scaffold today</div></div>
+      <div class="crate-row"><div>virtio-accel-xdna</div><div class="tier">std</div><div class="role">AMD XDNA2 NPU backend over HRX with BF16/FP8/INT8 TOSA tiers</div></div>
+      <div class="crate-row"><div>virtio-accel-vulkan</div><div class="tier">std</div><div class="role">Vendor-neutral Vulkan 1.3 compute with direct buffers and FP32 IDENTITY</div></div>
       <div class="crate-row"><div>virtio-accel-split-queue</div><div class="tier">core + alloc</div><div class="role">Bounded in-memory split-ring reference model</div></div>
       <div class="crate-row"><div>virtio-accel-guest</div><div class="tier">core + alloc</div><div class="role">Typed reference client with bounded request tracking</div></div>
       <div class="crate-row"><div>virtio-accel-device</div><div class="tier">core + alloc</div><div class="role">Device-owned state with generational IDs</div></div>

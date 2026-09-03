@@ -42,7 +42,7 @@ This table is organized by program and dtype. For the physical devices behind it
 | Intel OpenVINO (`virtio-accel-openvino`)    | Implemented; OpenVINO 2026.x              | Static TOSA 1.0 FP + INT8 tier                           | Supported                         | Supported                              | Not implemented             | Identity + MATMUL | Not implemented | Direct host/shared bindings |
 | AMD XDNA (`virtio-accel-xdna`)              | Experimental; HRX on XDNA2                | Static BF16 TOSA + explicit FP8 storage CAST + INT8 tier | Accumulator outputs only          | Not implemented                        | E4M3/E5M2 → BF16 CAST       | Identity + MATMUL + RESCALE | Not implemented | Direct host/shared bindings |
 | Qualcomm Hexagon (`virtio-accel-hexagon`)   | Experimental; QAIRT 2.49 on Windows ARM64 | Static TOSA 1.0 FP16 + BOOL/INT32 auxiliaries; INT8 tier | Blocked by v73 precision evidence | 41/42 shared operators (`ERF` blocked) | Blocked: ambiguous encoding | Identity + MATMUL | Not implemented | Direct host/shared bindings |
-| Vulkan (planned)                            | Planned                                   | Not implemented                                          | Not implemented                   | Not implemented                        | Not implemented             | Not implemented   | Not implemented | Not implemented             |
+| Vulkan (`virtio-accel-vulkan`)              | Implemented; Vulkan 1.3 loader            | Static TOSA 1.0 FP32 IDENTITY                            | Identity                          | Not implemented                        | Not implemented             | Target declared, not advertised | Not implemented | Direct host/shared/device bindings |
 
 ### Core ML (_Apple Neural Engine_)
 
@@ -94,7 +94,7 @@ See the [`virtio-accel-hexagon` support boundary](crates/virtio-accel-hexagon/RE
 checked-in SPIR-V specialized at `load_program`, with dedicated directly bound storage buffers,
 `Host`/`Shared`/`Device` memory domains, a bounded per-context submission ring polled through
 `vkGetFenceStatus`, and the full backend conformance suite passing on Intel ANV (Arc 140V) and
-lavapipe. Operator tiers beyond IDENTITY, FP16 gating, and the CI lane hardening land under the
+lavapipe. Operator tiers beyond IDENTITY, FP16/INT8 gating, and broader numerical coverage remain under the
 [Vulkan wayfinder map](https://github.com/MicroPerceptron/virtio-accel/issues/154); design
 decisions are recorded in `docs/adr/`.
 
@@ -177,7 +177,11 @@ The facade is `no_std`. Add the reference backend as a dev-dependency to run the
 virtio-accel-mock = "0.3"
 ```
 
-On an ANE-capable Mac, add `virtio-accel-coreml = "0.3"` separately for the host-native backend. On a Linux host with an OpenVINO 2026.x runtime, add `virtio-accel-openvino = "0.3"` instead. Both adapters accept the production TOSA 1.0 program format; validation, analysis, and native model generation all happen inside the adapter. Neither is re-exported by the portable facade.
+Host backends are separate dependencies and are never re-exported by the portable facade. Add
+`virtio-accel-coreml = "0.3"` on an ANE-capable Mac, `virtio-accel-openvino = "0.3"` on a host
+with OpenVINO 2026.x, or `virtio-accel-vulkan = "0.3"` on a supported host with a Vulkan 1.3
+loader and compute device. Each accepts the device-neutral TOSA 1.0 program format and owns its
+provider-specific validation, lowering, and execution path.
 
 For portable adapter-boundary validation while the native vAccel path is wired, add `virtio-accel-vaccel = "0.3"`. The crate exposes a vAccel seam with an in-repo representative conformance recipe and explicit copy-path diagnostics.
 
@@ -188,16 +192,20 @@ For portable adapter-boundary validation while the native vAccel path is wired, 
 - **Adapter profile:** add `virtio-accel-vaccel` when you need an adapter seam for native/vAccel-like
   implementations that still re-export the `Accelerator` contract from `virtio-accel-core`.
 - **Production host profile:** add `virtio-accel-coreml`, `virtio-accel-openvino`,
-  `virtio-accel-hexagon`, and/or `virtio-accel-xdna` instead of any mock backend once provider
-  licensing and native runtime availability are in place.
+  `virtio-accel-hexagon`, `virtio-accel-xdna`, and/or `virtio-accel-vulkan` instead of any mock
+  backend once provider licensing and native runtime availability are in place.
 
 `virtio-accel-hexagon = "0.3"` exposes the separate Qualcomm adapter. A complete QAIRT/QNN SDK on Windows ARM64 enables its HTP backend; SDK-free builds validate its strict FP16 graph planner and constructors return `RuntimeUnavailable`.
+
+`virtio-accel-vulkan = "0.3"` loads the platform Vulkan loader at run time. It currently admits
+FP32 IDENTITY and returns `RuntimeUnavailable` or `DeviceUnavailable` when no suitable Vulkan 1.3
+compute path exists; it does not silently fall back to the mock backend.
 
 Add `virtio-accel-tosa = "0.3"` separately to validate TOSA 1.0 artifacts, inspect safe borrowed graph and typed-attribute views, enforce complete stable-op semantics for a declared target, and construct the device-neutral TOSA artifact envelope. `Model::analyze_for` also produces bounded dense IDs, topological order, liveness, runtime obligations, and specialization keys for Core ML, OpenVINO, or another provider. It is intentionally not re-exported by the facade.
 
 Add `virtio-accel-tosa-build = "0.3"` to produce static single-block TOSA artifacts through typed tensor and operator definitions. Borrowed definitions suit graph literals; owned definitions let compiler frontends assemble runtime-discovered metadata without a parallel owned-to-borrowed adapter, while existing constant storage can remain borrowed. Both surfaces pass the same parser and target validator providers use at admission.
 
-## Production TOSA-to-Core ML example
+## Production backend examples
 
 On macOS 14+ with an accessible Apple Neural Engine, the backend-local example sends a TOSA 1.0 `IDENTITY` graph through the real lowering, compilation, direct-binding, asynchronous prediction, and teardown path:
 
@@ -226,7 +234,17 @@ cargo run -p virtio-accel-hexagon --example tosa_hexagon
 cargo run -p virtio-accel-hexagon --example mock_classifier
 ```
 
-The portable facade, device engine, transport, and guest layers see only the TOSA artifact format, target identity, and opaque bytes. Core ML protobufs, temporary compilation assets, Foundation, and the Objective-C bridge remain owned by `virtio-accel-coreml`.
+On any supported host with a Vulkan 1.3 loader and compute-capable device, the Vulkan example runs
+the FP32 identity artifact on the preferred device (discrete, integrated, virtual, then CPU). It
+reports a clean skip when no loader or device is available:
+
+```sh
+cargo run -p virtio-accel-vulkan --example tosa_vulkan
+```
+
+The portable facade, device engine, transport, and guest layers see only the TOSA artifact format,
+target identity, and opaque bytes. Provider objects, shaders, generated models, native runtimes,
+and FFI bridges remain owned by their adapter crates.
 
 ## Portable lifecycle example
 
@@ -353,15 +371,17 @@ The [backend implementer guide](docs/backend-implementer-guide.md) walks through
 
 ## Portability
 
-Project-authored portable and reference code forbids or denies unsafe code. The audited Core ML adapter keeps its unsafe FFI isolated to macOS; the TOSA crate confines official generated FlatBuffers accessors to a private module behind bounded verification. CI enforces each portability tier, including compile-only checks of the adapter's unsupported-platform surface.
+Project-authored portable and reference code forbids or denies unsafe code. The TOSA crate confines
+official generated FlatBuffers accessors to a private module behind bounded verification, while
+the five host backends isolate audited native FFI behind their host/runtime gates. CI enforces each
+portability tier, including compile-only checks of every adapter's unsupported-platform surface.
 
 | Tier                | Allowed runtime surface                                                       |
 | ------------------- | ----------------------------------------------------------------------------- |
 | `core`              | `core` only; no allocation                                                    |
 | `core + alloc`      | `core + alloc`; no OS, filesystem, sockets, threads, or host synchronization  |
 | `std`               | Portable `std`; no host-OS or vendor-specific API                             |
-| macOS `std`         | Host-native Core ML/Foundation adapter; never a portable default dependency   |
-| Windows ARM64 `std` | SDK-probed Qualcomm QNN adapter with a pinned experimental HTP execution tier |
+| `host-native`       | Core ML, OpenVINO, QNN, HRX, or Vulkan behind an adapter-specific runtime gate |
 
 Concrete VMM, kernel, OS, and vendor adapters do not change the portable v1 protocol and must not become default dependencies of a portable crate. Cargo features must be additive: disabling default features may remove convenience behavior, but must never select a different protocol interpretation.
 
@@ -380,6 +400,7 @@ cargo run -p virtio-accel-coreml --example tosa_coreml # macOS 14+ with ANE
 cargo run -p virtio-accel-openvino --example tosa_openvino # Linux with OpenVINO 2026.x
 cargo run -p virtio-accel-hexagon --example tosa_hexagon # Windows ARM64 with the documented QAIRT setup
 cargo run -p virtio-accel-hexagon --example mock_classifier # FP16 linear classifier on Hexagon HTP
+cargo run -p virtio-accel-vulkan --example tosa_vulkan # Vulkan 1.3 loader and compute device
 python3 ci/publish-dry-run.py
 ```
 
