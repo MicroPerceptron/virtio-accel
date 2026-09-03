@@ -89,7 +89,11 @@ See the [`virtio-accel-hexagon` support boundary](crates/virtio-accel-hexagon/RE
 
 ### Vulkan (_planned_)
 
-The Vulkan row is a placeholder for a future Vulkan compute backend. It is not yet implemented, and no Vulkan crate or runtime build probe is currently included.
+The Vulkan row is a scaffold-in-progress for a vendor-neutral Vulkan compute backend
+(`virtio-accel-vulkan`): the crate ships admission constants and a placeholder; the `ash` FFI and
+native `Accelerator` implementation land under the
+[Vulkan wayfinder map](https://github.com/MicroPerceptron/virtio-accel/issues/154), with design
+decisions recorded in `docs/adr/`.
 
 ### TOSA 1.0
 
@@ -102,6 +106,7 @@ Independently of backend execution, `virtio-accel-tosa` validates the TOSA 1.0 p
 | `virtio-accel-vaccel`      | `core`                | Adapter seam for mapping native provider contracts (including vAccel-style backends) to `virtio-accel-core`  |
 | `virtio-accel-coreml`      | `std`                 | TOSA-to-Core ML lowering, direct buffers, and asynchronous ANE-capable prediction                            |
 | `virtio-accel-openvino`    | `std`                 | TOSA-to-OpenVINO IR lowering, direct host-pointer tensors, and asynchronous NPU/GPU/CPU inference            |
+| `virtio-accel-vulkan`      | `std`                 | Vendor-neutral Vulkan compute backend (scaffold; native backend lands under the wayfinder map)               |
 | `virtio-accel-xdna`        | `std`                 | AMD XDNA2 NPU backend over HRX with direct buffers, asynchronous dispatch, and strict BF16/FP8/INT8 TOSA tiers |
 | `virtio-accel-hexagon`     | `std` (Windows ARM64) | Strict FP16/INT8 TOSA-to-QNN lowering, direct buffers, and asynchronous Hexagon HTP execution                |
 | `virtio-accel`             | `core + alloc`        | Facade re-exporting the portable layers                                                                      |
@@ -141,6 +146,9 @@ virtio-accel-coreml ----------+--------------> virtio-accel-core
                               |
                               +--------------> virtio-accel-tosa
 virtio-accel-openvino --------+--------------> virtio-accel-core
+                              |
+                              +--------------> virtio-accel-tosa
+virtio-accel-vulkan ----------+--------------> virtio-accel-core
                               |
                               +--------------> virtio-accel-tosa
 virtio-accel-hexagon ---------+--------------> virtio-accel-core

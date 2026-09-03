@@ -295,6 +295,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "virtio-accel-vulkan"
+version = "0.3.4"
+dependencies = [
+ "virtio-accel-conformance",
+ "virtio-accel-core",
+ "virtio-accel-tosa",
+]
+
+[[package]]
 name = "virtio-accel-xdna"
 version = "0.3.4"
 dependencies = [

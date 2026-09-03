@@ -38,7 +38,7 @@ directly, and they must keep working on any platform the portable crates support
 | `core-only` | `virtio-accel-cleanroom`, `virtio-accel-proto`, `virtio-accel-transport`, `virtio-accel-core` | `core`; the clean-room codec and transport ports have no normal/build dependencies, while proc-macros used by other crates may execute with `std` on the build host |
 | `alloc-portable` | `virtio-accel-guest`, `virtio-accel-split-queue`, `virtio-accel-device`, `virtio-accel-tosa`, `virtio-accel-tosa-build`, `virtio-accel` | `core + alloc`; no OS, filesystem, sockets, threads, or host synchronization |
 | `std-reference` | `virtio-accel-mock`, `virtio-accel-conformance` | Portable `std`; no host-OS or vendor-specific API |
-| `host-native` | `virtio-accel-coreml`, `virtio-accel-openvino`, `virtio-accel-hexagon`, `virtio-accel-xdna` | Core ML/Foundation on macOS 14+, the OpenVINO C runtime (`libopenvino_c` 2026.x), the complete QAIRT/QNN C SDK on Windows ARM64, or the amdxdna-native HRX runtime (`libhrx`) when detected at build time; a compile-only unsupported-platform or unsupported-runtime placeholder elsewhere |
+| `host-native` | `virtio-accel-coreml`, `virtio-accel-openvino`, `virtio-accel-hexagon`, `virtio-accel-xdna`, `virtio-accel-vulkan` | Core ML/Foundation on macOS 14+, the OpenVINO C runtime (`libopenvino_c` 2026.x), the complete QAIRT/QNN C SDK on Windows ARM64, the amdxdna-native HRX runtime (`libhrx`), or a dynamically loaded Vulkan loader (via `ash`) on the build.rs-enumerated host targets; a compile-only unsupported-platform or unsupported-runtime placeholder elsewhere |
 
 No host-native crate is a dependency of the facade or any portable layer. The Core ML crate's
 Objective-C bridge and TOSA-to-Core ML model compilation are built only when the Cargo target is
@@ -108,6 +108,14 @@ is represented as explicit per-slot padding in the compiled artifact, never as h
 submission-time staging. Tile-compatible MATMUL shapes widen/subtract zero points on the NPU and
 use the native 4x4x8 INT16 matrix unit; smaller shapes and exact 64-bit RESCALE arithmetic use
 scalar on-NPU kernels. RESCALE clears the at-most-three-byte padded output tail on the NPU.
+
+The Vulkan crate is a scaffold: it compiles its planned `Target` constants (`lower`) and a
+placeholder on every host. Unlike the SDK-probing backends, there is nothing to detect at build
+time — `ash` (planned for the FFI ticket) loads the platform's Vulkan loader dynamically at run
+time — so the `va_vulkan` cfg enumerates the host target operating systems (Linux, Android,
+Windows, macOS) and runtime loader absence surfaces as `InitError::RuntimeUnavailable`.
+`VIRTIO_ACCEL_VULKAN=0` forces the placeholder everywhere; `VIRTIO_ACCEL_VULKAN=1` makes an
+unsupported target a loud build failure; unset is auto (ADR 0002 in `docs/adr/`).
 
 Concrete VMM, kernel, OS, and vendor adapters are outside the portable-v1 milestone and must not
 become default dependencies of a portable crate.
