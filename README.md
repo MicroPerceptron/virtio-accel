@@ -42,7 +42,7 @@ This table is organized by program and dtype. For the physical devices behind it
 | Intel OpenVINO (`virtio-accel-openvino`)    | Implemented; OpenVINO 2026.x              | Static TOSA 1.0 FP + INT8 tier                           | Supported                         | Supported                              | Not implemented             | Identity + MATMUL | Not implemented | Direct host/shared bindings |
 | AMD XDNA (`virtio-accel-xdna`)              | Experimental; HRX on XDNA2                | Static BF16 TOSA + explicit FP8 storage CAST + INT8 tier | Accumulator outputs only          | Not implemented                        | E4M3/E5M2 → BF16 CAST       | Identity + MATMUL + RESCALE | Not implemented | Direct host/shared bindings |
 | Qualcomm Hexagon (`virtio-accel-hexagon`)   | Experimental; QAIRT 2.49 on Windows ARM64 | Static TOSA 1.0 FP16 + BOOL/INT32 auxiliaries; INT8 tier | Blocked by v73 precision evidence | 41/42 shared operators (`ERF` blocked) | Blocked: ambiguous encoding | Identity + MATMUL | Not implemented | Direct host/shared bindings |
-| Vulkan (`virtio-accel-vulkan`)              | Experimental; Vulkan 1.3 loader           | Static TOSA 1.0 FP32 IDENTITY                            | Identity                          | Not implemented                        | Not implemented             | Target declared, not advertised | Not implemented | Direct host/shared/device bindings |
+| Vulkan (`virtio-accel-vulkan`)              | Experimental; Vulkan 1.3 loader           | Static TOSA 1.0 FP32 IDENTITY + MATMUL                   | Identity + MATMUL                 | Not implemented                        | Not implemented             | Target declared, not advertised | Not implemented | Direct host/shared/device bindings |
 
 ### Core ML (_Apple Neural Engine_)
 
@@ -87,14 +87,16 @@ See the [`virtio-accel-hexagon` support boundary](crates/virtio-accel-hexagon/RE
 - **Runtime:** Native execution requires the pinned amdxdna-native HRX runtime and compiler
   toolchain. Portable admission and offline artifact compilation remain available without a device.
 
-### Vulkan (_FP32 IDENTITY end-to-end_)
+### Vulkan (_FP32 IDENTITY + MATMUL end-to-end_)
 
 `virtio-accel-vulkan` is a vendor-neutral Vulkan 1.3 compute backend bound through the pinned
-`ash` crate with run-time loader discovery. It executes the FP32 IDENTITY tier end-to-end on
-checked-in SPIR-V specialized at `load_program`, with dedicated directly bound storage buffers,
-`Host`/`Shared`/`Device` memory domains, a bounded per-context submission ring polled through
-`vkGetFenceStatus`, and the full backend conformance suite passing on Intel ANV (Arc 140V) and
-lavapipe. Operator tiers beyond IDENTITY, FP16/INT8 gating, and broader numerical coverage remain under the
+`ash` crate with run-time loader discovery. It executes the FP32 IDENTITY and MATMUL tier
+end-to-end on checked-in SPIR-V specialized at `load_program`, with dedicated directly bound
+storage buffers, `Host`/`Shared`/`Device` memory domains, a bounded per-context submission ring
+polled through `vkGetFenceStatus`, and the full backend conformance suite passing on Intel ANV,
+Apple M3 via MoltenVK (local validation only, not a CI lane), and Mesa lavapipe in CI. MATMUL
+admits only zero zero-point graphs (the TOSA 1.0 `CONST`-producer form). FP16/INT8 gating and
+broader operator coverage remain under the
 [Vulkan wayfinder map](https://github.com/MicroPerceptron/virtio-accel/issues/154); design
 decisions are recorded in `docs/adr/`.
 
@@ -109,7 +111,7 @@ Independently of backend execution, `virtio-accel-tosa` validates the TOSA 1.0 p
 | `virtio-accel-vaccel`      | `core`                | Adapter seam for mapping native provider contracts (including vAccel-style backends) to `virtio-accel-core`  |
 | `virtio-accel-coreml`      | `std`                 | TOSA-to-Core ML lowering, direct buffers, and asynchronous ANE-capable prediction                            |
 | `virtio-accel-openvino`    | `std`                 | TOSA-to-OpenVINO IR lowering, direct host-pointer tensors, and asynchronous NPU/GPU/CPU inference            |
-| `virtio-accel-vulkan`      | `std`                 | Vendor-neutral Vulkan 1.3 compute backend over `ash`: checked-in SPIR-V, direct storage-buffer binding, FP32 IDENTITY |
+| `virtio-accel-vulkan`      | `std`                 | Vendor-neutral Vulkan 1.3 compute backend over `ash`: checked-in SPIR-V, direct storage-buffer binding, FP32 IDENTITY + MATMUL |
 | `virtio-accel-xdna`        | `std`                 | AMD XDNA2 NPU backend over HRX with direct buffers, asynchronous dispatch, and strict BF16/FP8/INT8 TOSA tiers |
 | `virtio-accel-hexagon`     | `std` (Windows ARM64) | Strict FP16/INT8 TOSA-to-QNN lowering, direct buffers, and asynchronous Hexagon HTP execution                |
 | `virtio-accel`             | `core + alloc`        | Facade re-exporting the portable layers                                                                      |
@@ -198,8 +200,9 @@ For portable adapter-boundary validation while the native vAccel path is wired, 
 `virtio-accel-hexagon = "0.3"` exposes the separate Qualcomm adapter. A complete QAIRT/QNN SDK on Windows ARM64 enables its HTP backend; SDK-free builds validate its strict FP16 graph planner and constructors return `RuntimeUnavailable`.
 
 `virtio-accel-vulkan = "0.3"` loads the platform Vulkan loader at run time. It currently admits
-FP32 IDENTITY and returns `RuntimeUnavailable` or `DeviceUnavailable` when no suitable Vulkan 1.3
-compute path exists; it does not silently fall back to the mock backend.
+FP32 IDENTITY and FP32 MATMUL (zero zero-points) and returns `RuntimeUnavailable` or
+`DeviceUnavailable` when no suitable Vulkan 1.3 compute path exists; it does not silently fall
+back to the mock backend.
 
 Add `virtio-accel-tosa = "0.3"` separately to validate TOSA 1.0 artifacts, inspect safe borrowed graph and typed-attribute views, enforce complete stable-op semantics for a declared target, and construct the device-neutral TOSA artifact envelope. `Model::analyze_for` also produces bounded dense IDs, topological order, liveness, runtime obligations, and specialization keys for Core ML, OpenVINO, or another provider. It is intentionally not re-exported by the facade.
 

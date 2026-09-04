@@ -108,9 +108,15 @@ impl Instance {
         let application = vk::ApplicationInfo::default()
             .application_name(c"virtio-accel-vulkan")
             .api_version(vk::API_VERSION_1_3);
-        let info = vk::InstanceCreateInfo::default().application_info(&application);
-        // SAFETY: `info` and the structures it points to outlive the call; no layers or
-        // extensions are requested, so the loader validates nothing beyond the API version.
+        // MoltenVK and other portability drivers refuse enumeration unless the instance opts
+        // into the portability extension; requesting it is a no-op on conformant native drivers.
+        let extension_names = [c"VK_KHR_portability_enumeration".as_ptr()];
+        let info = vk::InstanceCreateInfo::default()
+            .application_info(&application)
+            .flags(vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR)
+            .enabled_extension_names(&extension_names);
+        // SAFETY: `info` and the structures it points to outlive the call; no layers are
+        // requested, and the extension name is a static literal whose pointer outlives the call.
         let instance = match unsafe { entry.create_instance(&info, None) } {
             Ok(instance) => instance,
             Err(vk::Result::ERROR_INCOMPATIBLE_DRIVER) => {
@@ -404,6 +410,9 @@ impl Shared {
             return Err(InitError::DeviceUnavailable);
         };
 
+        // The shared set layout declares the widest kernel's binding count: slots 0..2 so both
+        // the two-slot elementwise kernels and the three-slot MATMUL kernel update a contiguous
+        // prefix of one descriptor set.
         let bindings = [
             vk::DescriptorSetLayoutBinding::default()
                 .binding(shader::INPUT_BINDING)
@@ -412,6 +421,11 @@ impl Shared {
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(shader::OUTPUT_BINDING)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(shader::MATMUL_OUTPUT_BINDING)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
@@ -577,9 +591,11 @@ impl ContextInner {
         let command_buffers = unsafe { device.allocate_command_buffers(&allocate_info) }
             .map_err(|result| shared.fail(result))?;
 
+        // The shared set layout declares three storage-buffer bindings (the widest kernel), so
+        // each allocated set charges three descriptors against the pool.
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: RING_DEPTH * 2,
+            descriptor_count: RING_DEPTH * 3,
         }];
         let descriptor_pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(RING_DEPTH)
@@ -1010,7 +1026,7 @@ pub struct VulkanProgram {
     context: Rc<ContextInner>,
     pipeline: vk::Pipeline,
     plan: ProgramPlan,
-    workgroups: u32,
+    workgroups: [u32; 3],
     state: Rc<ProgramState>,
 }
 
@@ -1379,18 +1395,18 @@ impl VulkanAccelerator {
     ) -> Result<(), vk::Result> {
         let shared = &self.shared;
         let device = &shared.device;
-        let writes = [
-            vk::WriteDescriptorSet::default()
-                .dst_set(slot.descriptor_set)
-                .dst_binding(shader::INPUT_BINDING)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(&descriptors[..1]),
-            vk::WriteDescriptorSet::default()
-                .dst_set(slot.descriptor_set)
-                .dst_binding(shader::OUTPUT_BINDING)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(&descriptors[1..2]),
-        ];
+        // Descriptor bindings match the slot index of the plan: slot `i` writes binding `i`
+        // against the shared set layout's declared binding range.
+        let mut writes = Vec::with_capacity(descriptors.len());
+        for (index, info) in descriptors.iter().enumerate() {
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(slot.descriptor_set)
+                    .dst_binding(index as u32)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(std::slice::from_ref(info)),
+            );
+        }
         let begin = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         // Make the shader's storage writes visible to host reads after the fence signals.
@@ -1426,7 +1442,12 @@ impl VulkanAccelerator {
                 &[slot.descriptor_set],
                 &[],
             );
-            device.cmd_dispatch(slot.command_buffer, program.workgroups, 1, 1);
+            device.cmd_dispatch(
+                slot.command_buffer,
+                program.workgroups[0],
+                program.workgroups[1],
+                program.workgroups[2],
+            );
             device.cmd_pipeline_barrier2(slot.command_buffer, &dependency);
             device.end_command_buffer(slot.command_buffer)?;
             device.queue_submit2(shared.queue, &submits, slot.fence)
@@ -1638,12 +1659,23 @@ impl Accelerator for VulkanAccelerator {
             }
         };
         let plan = lower_tosa(bytes, target).map_err(Self::lowering_error)?;
-        let workgroups = shader::elementwise_workgroups(plan.element_count);
-        if workgroups > shared.physical.limits.max_compute_work_group_count[0] {
+        let workgroups = match plan.kernel {
+            Kernel::CopyU32 => [shader::elementwise_workgroups(plan.element_count), 1, 1],
+            Kernel::MatmulFp32 => {
+                let geometry = plan.matmul.expect("MATMUL plan carries geometry");
+                shader::matmul_workgroups(geometry.m, geometry.n, geometry.batch)
+            }
+        };
+        let limits = &shared.physical.limits;
+        if workgroups[0] > limits.max_compute_work_group_count[0]
+            || workgroups[1] > limits.max_compute_work_group_count[1]
+            || workgroups[2] > limits.max_compute_work_group_count[2]
+        {
             return Err(BackendError::ResourceLimit);
         }
         let code = match plan.kernel {
             Kernel::CopyU32 => shader::copy_u32_spirv(),
+            Kernel::MatmulFp32 => shader::matmul_fp32_spirv(),
         };
 
         let device = &shared.device;
@@ -1651,15 +1683,54 @@ impl Accelerator for VulkanAccelerator {
         // SAFETY: `code` is the crate-authored SPIR-V module, live for the call.
         let module = unsafe { device.create_shader_module(&module_info, None) }
             .map_err(|result| shared.fail(result))?;
-        let element_count = plan.element_count.to_ne_bytes();
-        let entries = [vk::SpecializationMapEntry {
-            constant_id: shader::ELEMENT_COUNT_SPEC_ID,
-            offset: 0,
-            size: std::mem::size_of::<u32>(),
-        }];
+        // Specialization data is laid out in one buffer whose layout matches the entries: a
+        // single u32 for the elementwise kernel, or m/n/k/batch in that order for MATMUL.
+        let (entries, spec_data) = match plan.kernel {
+            Kernel::CopyU32 => (
+                vec![vk::SpecializationMapEntry {
+                    constant_id: shader::ELEMENT_COUNT_SPEC_ID,
+                    offset: 0,
+                    size: std::mem::size_of::<u32>(),
+                }],
+                plan.element_count.to_ne_bytes().to_vec(),
+            ),
+            Kernel::MatmulFp32 => {
+                let geometry = plan.matmul.expect("MATMUL plan carries geometry");
+                let mut data = Vec::with_capacity(16);
+                data.extend_from_slice(&geometry.m.to_ne_bytes());
+                data.extend_from_slice(&geometry.n.to_ne_bytes());
+                data.extend_from_slice(&geometry.k.to_ne_bytes());
+                data.extend_from_slice(&geometry.batch.to_ne_bytes());
+                (
+                    vec![
+                        vk::SpecializationMapEntry {
+                            constant_id: shader::MATMUL_SPEC_ID_M,
+                            offset: 0,
+                            size: 4,
+                        },
+                        vk::SpecializationMapEntry {
+                            constant_id: shader::MATMUL_SPEC_ID_N,
+                            offset: 4,
+                            size: 4,
+                        },
+                        vk::SpecializationMapEntry {
+                            constant_id: shader::MATMUL_SPEC_ID_K,
+                            offset: 8,
+                            size: 4,
+                        },
+                        vk::SpecializationMapEntry {
+                            constant_id: shader::MATMUL_SPEC_ID_BATCH,
+                            offset: 12,
+                            size: 4,
+                        },
+                    ],
+                    data,
+                )
+            }
+        };
         let specialization = vk::SpecializationInfo::default()
             .map_entries(&entries)
-            .data(&element_count);
+            .data(&spec_data);
         let stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(module)

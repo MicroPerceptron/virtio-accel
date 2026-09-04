@@ -18,7 +18,8 @@ use std::fmt;
 use virtio_accel_tosa::{
     AnalysisError, AnalyzedValueKind, CapabilityDescriptor, DType, DTypeCapability,
     Error as ParseError, ExtensionSet, GraphCapabilities, Level, Op, OperatorCapability,
-    ProfileSet, RuntimeConditionSupport, Target, TosaAnalysis, ValueId, ValueRoles, Version, parse,
+    OperatorId, ProfileSet, RuntimeConditionSupport, Target, TosaAnalysis, ValueId, ValueRoles,
+    Version, parse,
 };
 
 /// The FP32 base tier: TOSA 1.0, floating-point profile, level 8K, no extensions.
@@ -42,7 +43,10 @@ pub const VULKAN_TOSA_INTEGER_TARGET: Target = Target::new(
 
 const FLOAT_DTYPES: &[DTypeCapability] = &[DTypeCapability::new(DType::FP32, ValueRoles::ALL)];
 
-const FLOAT_OPERATORS: &[OperatorCapability] = &[OperatorCapability::new(Op::IDENTITY)];
+const FLOAT_OPERATORS: &[OperatorCapability] = &[
+    OperatorCapability::new(Op::IDENTITY),
+    OperatorCapability::new(Op::MATMUL),
+];
 
 /// The FP32 base tier's admitted boundary: exactly what the checked-in shaders execute.
 pub const VULKAN_TOSA_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
@@ -96,6 +100,8 @@ impl std::error::Error for LoweringError {}
 pub(crate) enum Kernel {
     /// Elementwise 32-bit word copy (`shader::copy_u32_spirv`).
     CopyU32,
+    /// FP32 batched matrix multiplication (`shader::matmul_fp32_spirv`).
+    MatmulFp32,
 }
 
 /// One binding slot of an admitted program.
@@ -125,6 +131,17 @@ pub(crate) struct ProgramPlan {
     /// Elements processed by one invocation domain; the shader's specialization constant.
     pub element_count: u32,
     pub slots: Vec<SlotPlan>,
+    /// MATMUL geometry: (batch, m, n, k). Zero for non-MATMUL kernels.
+    pub matmul: Option<MatmulGeometry>,
+}
+
+/// Batched matrix-multiplication dimensions captured from an admitted graph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MatmulGeometry {
+    pub batch: u32,
+    pub m: u32,
+    pub n: u32,
+    pub k: u32,
 }
 
 #[cfg(test)]
@@ -152,26 +169,44 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<ProgramPlan, Lo
     let outputs = analysis.block_outputs(block);
     let order = analysis.execution_order(block);
 
-    // The tier admits exactly one boundary-to-boundary IDENTITY today. Everything else is
+    // The tier admits graphs whose execution order carries `CONST` producers for constant
+    // parameters plus exactly one boundary-to-boundary compute operator. Everything else is
     // rejected here, before any Vulkan object exists, with the reason a host can act on.
-    let [operator_id] = order else {
+    let compute_operators: Vec<_> = order
+        .iter()
+        .filter(|operator_id| analysis.operator(**operator_id).op() != Op::CONST)
+        .collect();
+    let [operator_id] = compute_operators[..] else {
         return Err(LoweringError::UnsupportedGraph);
     };
     let operator = analysis.operator(*operator_id);
     if !supports_tosa_operator(operator.op()) {
         return Err(LoweringError::UnsupportedOperator(operator.op()));
     }
+    match operator.op() {
+        Op::IDENTITY => lower_identity(&analysis, *operator_id, inputs, outputs),
+        Op::MATMUL => lower_matmul(&analysis, *operator_id, inputs, outputs),
+        other => Err(LoweringError::UnsupportedOperator(other)),
+    }
+}
+
+fn lower_identity(
+    analysis: &TosaAnalysis<'_>,
+    operator_id: OperatorId,
+    inputs: &[ValueId],
+    outputs: &[ValueId],
+) -> Result<ProgramPlan, LoweringError> {
     let ([input], [output]) = (inputs, outputs) else {
         return Err(LoweringError::UnsupportedGraph);
     };
-    if analysis.operator_inputs(*operator_id) != [*input]
-        || analysis.operator_outputs(*operator_id) != [*output]
+    if analysis.operator_inputs(operator_id) != [*input]
+        || analysis.operator_outputs(operator_id) != [*output]
     {
         return Err(LoweringError::UnsupportedGraph);
     }
 
-    let input_tensor = boundary_tensor(&analysis, *input)?;
-    let output_tensor = boundary_tensor(&analysis, *output)?;
+    let input_tensor = boundary_tensor(analysis, *input)?;
+    let output_tensor = boundary_tensor(analysis, *output)?;
     if input_tensor != output_tensor {
         return Err(LoweringError::UnsupportedGraph);
     }
@@ -198,7 +233,101 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<ProgramPlan, Lo
                 scalar_bytes: input_tensor.scalar_bytes,
             },
         ],
+        matmul: None,
     })
+}
+
+fn lower_matmul(
+    analysis: &TosaAnalysis<'_>,
+    operator_id: OperatorId,
+    inputs: &[ValueId],
+    outputs: &[ValueId],
+) -> Result<ProgramPlan, LoweringError> {
+    let ([lhs, rhs], [output]) = (inputs, outputs) else {
+        return Err(LoweringError::UnsupportedGraph);
+    };
+    let operator_inputs = analysis.operator_inputs(operator_id);
+    if operator_inputs.len() != 4
+        || operator_inputs[0] != *lhs
+        || operator_inputs[1] != *rhs
+        || analysis.operator_outputs(operator_id) != [*output]
+    {
+        return Err(LoweringError::UnsupportedGraph);
+    }
+    // TOSA 1.0 FP32 MATMUL admits only zero zero-points: the two trailing inputs must be
+    // `CONST` tensors whose serialized payload is all-zero (signed zero included).
+    for zero_point in &operator_inputs[2..4] {
+        let bytes = analysis
+            .serialized_constant(*zero_point)
+            .ok_or(LoweringError::UnsupportedGraph)?;
+        if !serialized_float_is_zero(bytes) {
+            return Err(LoweringError::UnsupportedGraph);
+        }
+    }
+
+    let lhs_tensor = boundary_tensor(analysis, *lhs)?;
+    let rhs_tensor = boundary_tensor(analysis, *rhs)?;
+    let output_tensor = boundary_tensor(analysis, *output)?;
+
+    let [batch_l, m, k] = lhs_tensor.dims;
+    let [batch_r, k_r, n] = rhs_tensor.dims;
+    let [batch_o, m_o, n_o] = output_tensor.dims;
+    if batch_l != batch_r || batch_l != batch_o || k != k_r || m != m_o || n != n_o {
+        return Err(LoweringError::UnsupportedGraph);
+    }
+
+    let batch = u32::try_from(batch_l).map_err(|_| LoweringError::ResourceLimit)?;
+    let m = u32::try_from(m).map_err(|_| LoweringError::ResourceLimit)?;
+    let n = u32::try_from(n).map_err(|_| LoweringError::ResourceLimit)?;
+    let k = u32::try_from(k).map_err(|_| LoweringError::ResourceLimit)?;
+
+    let lhs_bytes = lhs_tensor
+        .elements
+        .checked_mul(lhs_tensor.scalar_bytes)
+        .ok_or(LoweringError::ResourceLimit)?;
+    let rhs_bytes = rhs_tensor
+        .elements
+        .checked_mul(rhs_tensor.scalar_bytes)
+        .ok_or(LoweringError::ResourceLimit)?;
+    let output_bytes = output_tensor
+        .elements
+        .checked_mul(output_tensor.scalar_bytes)
+        .ok_or(LoweringError::ResourceLimit)?;
+
+    Ok(ProgramPlan {
+        kernel: Kernel::MatmulFp32,
+        element_count: batch
+            .checked_mul(m)
+            .and_then(|v| v.checked_mul(n))
+            .ok_or(LoweringError::ResourceLimit)?,
+        slots: vec![
+            SlotPlan {
+                slot: 0,
+                role: SlotRole::Input,
+                byte_len: lhs_bytes,
+                scalar_bytes: lhs_tensor.scalar_bytes,
+            },
+            SlotPlan {
+                slot: 1,
+                role: SlotRole::Input,
+                byte_len: rhs_bytes,
+                scalar_bytes: rhs_tensor.scalar_bytes,
+            },
+            SlotPlan {
+                slot: 2,
+                role: SlotRole::Output,
+                byte_len: output_bytes,
+                scalar_bytes: output_tensor.scalar_bytes,
+            },
+        ],
+        matmul: Some(MatmulGeometry { batch, m, n, k }),
+    })
+}
+
+/// Whether a serialized FP32 constant payload is zero (any sign) byte for byte.
+fn serialized_float_is_zero(bytes: &[u8]) -> bool {
+    bytes.len() == 4
+        && u32::from_le_bytes(bytes.try_into().expect("length checked")) & 0x7fff_ffff == 0
 }
 
 /// Static shape summary of a boundary tensor.
@@ -207,6 +336,7 @@ struct BoundaryTensor {
     dtype: DType,
     elements: u64,
     scalar_bytes: u64,
+    dims: [u64; 3],
 }
 
 fn boundary_tensor(
@@ -229,11 +359,17 @@ fn boundary_tensor(
         return Err(LoweringError::UnsupportedGraph);
     }
     let mut elements = 1_u64;
-    for dimension in tensor.dimensions() {
+    let mut dims = [1_u64; 3];
+    for (index, dimension) in tensor.dimensions().enumerate() {
+        if index >= 3 {
+            // Rank > 3 has no slot in the checked-in kernels.
+            return Err(LoweringError::UnsupportedGraph);
+        }
         let dimension = u64::try_from(dimension)
             .ok()
             .filter(|dimension| *dimension > 0)
             .ok_or(LoweringError::UnsupportedGraph)?;
+        dims[index] = dimension;
         elements = elements
             .checked_mul(dimension)
             .ok_or(LoweringError::ResourceLimit)?;
@@ -242,6 +378,7 @@ fn boundary_tensor(
         dtype,
         elements,
         scalar_bytes,
+        dims,
     })
 }
 
@@ -249,7 +386,7 @@ fn boundary_tensor(
 mod tests {
     use super::*;
     use virtio_accel_conformance::numerics::{
-        IDENTITY_EDGES_FP16, IDENTITY_EDGES_FP32, IDENTITY_INT8, MATMUL_FP32,
+        IDENTITY_EDGES_FP16, IDENTITY_EDGES_FP32, IDENTITY_INT8, MATMUL_FP32, MAX_POOL2D_FP32,
     };
 
     const IDENTITY_FP32_LOCAL: &[u8] = include_bytes!("../tests/data/identity-fp32-v1.0.0.tosa");
@@ -266,7 +403,8 @@ mod tests {
     #[test]
     fn capability_names_exactly_the_executed_boundary() {
         assert!(supports_tosa_operator(Op::IDENTITY));
-        assert!(!supports_tosa_operator(Op::MATMUL));
+        assert!(supports_tosa_operator(Op::MATMUL));
+        assert!(!supports_tosa_operator(Op::MAX_POOL2D));
         assert!(supports_tosa_dtype(DType::FP32));
         assert!(!supports_tosa_dtype(DType::FP16));
         assert!(!supports_tosa_dtype(DType::INT8));
@@ -322,10 +460,32 @@ mod tests {
 
     #[test]
     fn rejects_operators_outside_the_tier() {
+        // MAX_POOL2D is not yet admitted: the FP32 base tier grows one operator at a time.
         assert!(matches!(
-            lower_tosa(MATMUL_FP32.artifact, VULKAN_TOSA_TARGET),
-            Err(LoweringError::UnsupportedOperator(Op::MATMUL) | LoweringError::UnsupportedGraph)
+            lower_tosa(MAX_POOL2D_FP32.artifact, VULKAN_TOSA_TARGET),
+            Err(LoweringError::UnsupportedOperator(Op::MAX_POOL2D))
         ));
+    }
+
+    #[test]
+    fn lowers_the_shared_fp32_matmul_artifact() {
+        let plan = lower_tosa(MATMUL_FP32.artifact, VULKAN_TOSA_TARGET).unwrap();
+        assert_eq!(plan.kernel, Kernel::MatmulFp32);
+        let geometry = plan.matmul.expect("MATMUL plan carries geometry");
+        assert_eq!(geometry.batch, 1);
+        assert_eq!(geometry.m, 2);
+        assert_eq!(geometry.n, 2);
+        assert_eq!(geometry.k, 3);
+        assert_eq!(plan.element_count, 4);
+        assert_eq!(plan.slots.len(), 3);
+        assert_eq!(plan.slot(0).unwrap().role, SlotRole::Input);
+        assert_eq!(plan.slot(0).unwrap().byte_len, 6 * 4);
+        assert_eq!(plan.slot(1).unwrap().role, SlotRole::Input);
+        assert_eq!(plan.slot(1).unwrap().byte_len, 6 * 4);
+        assert_eq!(plan.slot(2).unwrap().role, SlotRole::Output);
+        assert_eq!(plan.slot(2).unwrap().byte_len, 4 * 4);
+        assert_eq!(plan.slot(2).unwrap().scalar_bytes, 4);
+        assert!(plan.slot(3).is_none());
     }
 
     #[test]

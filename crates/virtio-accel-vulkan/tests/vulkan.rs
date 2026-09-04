@@ -9,7 +9,9 @@
 
 use std::time::{Duration, Instant};
 
-use virtio_accel_conformance::numerics::{IDENTITY_EDGES_FP32, IDENTITY_INT8, MATMUL_FP32};
+use virtio_accel_conformance::numerics::{
+    IDENTITY_EDGES_FP32, IDENTITY_INT8, MATMUL_FP32, MAX_POOL2D_FP32,
+};
 use virtio_accel_conformance::{
     BindingFixture, ConformanceHooks, ProgramFixture, ResourceCounts, SubmissionPathDiagnostics,
     TargetDescription, run,
@@ -244,6 +246,99 @@ fn run_identity(
     bytes.0
 }
 
+/// Full lifecycle for the shared FP32 MATMUL case: allocate two inputs plus an output in
+/// `domain`, execute, and read the product back.
+fn run_matmul(
+    backend: &VulkanAccelerator,
+    lhs: &[u8],
+    rhs: &[u8],
+    output_len: usize,
+    domain: MemoryDomain,
+) -> Vec<u8> {
+    let device = backend.device_name();
+    let context = backend.create_context(ContextDesc::default()).unwrap();
+    let program = load(backend, &context, MATMUL_FP32.artifact, VULKAN_TOSA_TARGET)
+        .unwrap_or_else(|error| panic!("{device}: matmul load failed: {error:?}"));
+    let input_usage = BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT;
+    let lhs_desc =
+        BufferDesc::new(lhs.len() as u64, BUFFER_ALIGNMENT, domain, input_usage).unwrap();
+    let (mut lhs_buffer, _) = backend
+        .allocate_buffer(&context, lhs_desc)
+        .unwrap()
+        .into_parts();
+    backend
+        .write_buffer(&mut lhs_buffer, 0, &SliceSource(lhs))
+        .unwrap();
+    let rhs_desc =
+        BufferDesc::new(rhs.len() as u64, BUFFER_ALIGNMENT, domain, input_usage).unwrap();
+    let (mut rhs_buffer, _) = backend
+        .allocate_buffer(&context, rhs_desc)
+        .unwrap()
+        .into_parts();
+    backend
+        .write_buffer(&mut rhs_buffer, 0, &SliceSource(rhs))
+        .unwrap();
+    let output_desc = BufferDesc::new(
+        output_len as u64,
+        BUFFER_ALIGNMENT,
+        domain,
+        BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+    )
+    .unwrap();
+    let (output, _) = backend
+        .allocate_buffer(&context, output_desc)
+        .unwrap()
+        .into_parts();
+    let queue = backend
+        .create_queue(&context, QueueDesc::default())
+        .unwrap();
+    let bindings = [
+        BindingRef {
+            slot: 0,
+            buffer: &lhs_buffer,
+            range: BufferRange::new(0, lhs.len() as u64).unwrap(),
+            access: AccessMode::Read,
+        },
+        BindingRef {
+            slot: 1,
+            buffer: &rhs_buffer,
+            range: BufferRange::new(0, rhs.len() as u64).unwrap(),
+            access: AccessMode::Read,
+        },
+        BindingRef {
+            slot: 2,
+            buffer: &output,
+            range: BufferRange::new(0, output_len as u64).unwrap(),
+            access: AccessMode::Write,
+        },
+    ];
+    let event = backend
+        .submit(&queue, &program, &bindings, Timeout::Infinite)
+        .unwrap_or_else(|failure| match failure {
+            SubmitFailure::Rejected(error) => panic!("{device}: submission rejected: {error:?}"),
+            SubmitFailure::Indeterminate { error, .. } => {
+                panic!("{device}: submission indeterminate: {error:?}")
+            }
+        });
+    assert_eq!(
+        wait_for_terminal(backend, &event),
+        EventState::Complete,
+        "{device}"
+    );
+    release(backend.destroy_event(event));
+
+    let mut bytes = VecSink(vec![0; output_len]);
+    backend.read_buffer(&output, 0, &mut bytes).unwrap();
+    release(backend.destroy_queue(queue));
+    release(backend.unload_program(program));
+    release(backend.free_buffer(output));
+    release(backend.free_buffer(rhs_buffer));
+    release(backend.free_buffer(lhs_buffer));
+    release(backend.destroy_context(context));
+    assert_eq!(backend.live_resources(), Default::default(), "{device}");
+    bytes.0
+}
+
 fn advertised_domains(backend: &VulkanAccelerator) -> Vec<MemoryDomain> {
     let capabilities = backend.device_info().unwrap().capabilities;
     [
@@ -254,6 +349,26 @@ fn advertised_domains(backend: &VulkanAccelerator) -> Vec<MemoryDomain> {
     .into_iter()
     .filter(|domain| capabilities.supports_memory_domain(*domain))
     .collect()
+}
+
+#[test]
+fn executes_the_shared_fp32_matmul_in_every_advertised_domain() {
+    let case = &MATMUL_FP32;
+    let lhs = float_bytes(case.inputs[0].values.iter().copied());
+    let rhs = float_bytes(case.inputs[1].values.iter().copied());
+    let output_len = case.outputs[0].values.len() * 4;
+    for device in devices() {
+        let backend = open(&device);
+        for domain in advertised_domains(&backend) {
+            let bytes = run_matmul(&backend, &lhs, &rhs, output_len, domain);
+            let actual = floats(&bytes);
+            assert!(
+                case.output_matches(0, &actual),
+                "{device}: {domain:?}: {actual:?} does not match {:?}",
+                case.outputs[0].values
+            );
+        }
+    }
 }
 
 #[test]
@@ -446,8 +561,14 @@ fn rejects_out_of_tier_artifacts_before_any_pipeline_exists() {
     for device in devices() {
         let backend = open(&device);
         let context = backend.create_context(ContextDesc::default()).unwrap();
+        // MAX_POOL2D is not yet admitted: the FP32 base tier grows one operator at a time.
         assert!(matches!(
-            load(&backend, &context, MATMUL_FP32.artifact, VULKAN_TOSA_TARGET),
+            load(
+                &backend,
+                &context,
+                MAX_POOL2D_FP32.artifact,
+                VULKAN_TOSA_TARGET
+            ),
             Err(BackendError::Unsupported)
         ));
         assert!(matches!(
