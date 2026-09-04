@@ -67,8 +67,8 @@ into the rustdoc tree rather than reporting them as dangling, so
 ## What gets published
 
 - The curated narrative docs under `docs/` (specification, wire ABI, virtqueue,
-  architecture, threat model, portability, performance, public API, release
-  policy, backend guide, Hexagon matrix, and the 1.0 release notes).
+  architecture, threat model, portability, device support, performance, public
+  API, release policy, backend guide, Hexagon matrix, and the 1.0 release notes).
 - The repository `README.md` as "Getting started".
 - rustdoc for the whole workspace under `/api/`.
 

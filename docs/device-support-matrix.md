@@ -4,11 +4,12 @@ The [backend support table](../README.md#backend-support) answers "which dtypes 
 each backend admit". This document answers the different question underneath it: **which physical
 devices actually execute the work, and what exactly stops the rest from doing so.**
 
-The distinction matters because two of the four host backends are heterogeneous by construction.
-Core ML and OpenVINO are runtimes that dispatch across a machine's whole inference estate, not NPU
-drivers, so parts of this project already run on CPUs and can run on GPUs. The other two, XDNA and
-Hexagon, are single-device by design. Naming that split explicitly is more useful than an "NPU"
-label that is true of the intent and only partly true of the code.
+The distinction matters because the host backends choose devices differently. Core ML and OpenVINO
+are runtimes that dispatch across a machine's inference estate, not NPU drivers, so parts of this
+project already run on CPUs and GPUs. XDNA and Hexagon are single-device by design. Vulkan spans
+vendors and enumerates every suitable physical device, but each backend instance binds to one of
+them. Naming those differences explicitly is more useful than an "NPU" label that is true of the
+intent and only partly true of the code.
 
 ## How to read this
 
@@ -46,9 +47,11 @@ try; it does not promise the program admits, the numerics match, or the performa
 | **Qualcomm Hexagon HTP v75+**, newer Snapdragon | NPU | `hexagon` | Windows 11 ARM64 | **Reachable** — ungated, misreports v73 |
 | **Qualcomm Adreno GPU / Kryo CPU** via QNN | GPU / CPU | `hexagon` | Windows 11 ARM64 | **One change away** — backend library path is fixed, and deliberately so |
 | **Snapdragon on Linux or Android** | NPU | `hexagon` | — | **One change away** — build target gate |
+| **Intel Arc 140V**, Lunar Lake | GPU | `vulkan` | Linux x86-64 | **Validated** — Mesa 26.0.8 ANV ([baseline](adr/0005-vulkan-baseline-probe.md)) |
+| **Other Vulkan 1.3 compute devices** | GPU / virtual GPU / CPU | `vulkan` | Linux, Android, Windows, macOS | **Reachable** — enumerated and selected at run time; no other hardware evidence pin yet |
+| **lavapipe / llvmpipe software ICD** | CPU | `vulkan` | Linux x86-64 | **Validated** — pinned by the `vulkan-lavapipe-test` CI lane and exercised by the full backend suite |
 | **No device**, executed in software | — | `mock` | Any | Deterministic in-memory reference; outside this vocabulary |
 | **Whatever a wrapped provider drives** | — | `vaccel` | Any (`std`) | Pass-through; the wrapped backend decides |
-| **Vulkan-capable GPUs** | GPU | — | — | **Out of scope** — planned, not started |
 
 ## Per-backend detail
 
@@ -119,9 +122,9 @@ strict: `"GPU"` matches `GPU` and `GPU.1`, never `GPUX`.
 **Not an Intel-only backend.** The build gate is a pkg-config probe for the runtime, not a target
 OS or vendor check ([`build.rs:35`](../crates/virtio-accel-openvino/build.rs#L35)). Consequently the
 CPU plugin admits any x86-64 host including AMD, and an ARM CPU-plugin build enumerates `CPU` on
-Apple silicon or Ampere just as readily. **This is the only backend in the repository whose device
-execution is proven by CI** — `openvino-host-test` installs OpenVINO 2026.3.0 on an x86-64 Ubuntu
-runner and executes the real path against the CPU plugin.
+Apple silicon or Ampere just as readily. The `openvino-host-test` CI lane installs OpenVINO 2026.3.0
+on an x86-64 Ubuntu runner and executes the real path against the CPU plugin. Vulkan has a separate
+native CI lane pinned to the lavapipe software ICD.
 
 **Two truthfulness gaps.** `device_info_for`
 ([`native.rs:642`](../crates/virtio-accel-openvino/src/native.rs#L642)) hardcodes
@@ -200,11 +203,39 @@ README covers — and the FP32/FP8 rejections recorded for v73 may not describe 
 libraries. The `windows`/`aarch64` assertion and the hardcoded `lib/aarch64-windows-msvc` path are
 the only two things naming the OS.
 
+### Vendor-neutral Vulkan (`virtio-accel-vulkan`)
+
+**One physical device per instance.** The run-time-loaded Vulkan 1.3 path enumerates every device
+with a compute queue and `synchronization2`, then prefers discrete GPU, integrated GPU, virtual GPU,
+CPU, and other devices in that order. `with_device` selects an exact enumerated name instead:
+
+```rust
+let physical = devices
+    .into_iter()
+    .min_by_key(PhysicalDeviceRecord::rank)
+```
+
+— [`native.rs:1205`](../crates/virtio-accel-vulkan/src/native.rs#L1205)
+
+**The identity is probed, not branded.** UUID, vendor ID, and device ID come from Vulkan physical
+device properties. GPU-like devices report `AcceleratorClass::GPU`; a CPU ICD such as lavapipe
+reports `OTHER`, because the protocol 1.0 class set has no CPU value. Memory domains are likewise
+per-device: host-coherent `Host` is required, `Shared` is advertised only for a device-local and
+host-visible type, and `Device` only for device-local memory. Every submitted buffer remains a
+direct storage-buffer binding; staging occurs only during explicit reads and writes of
+device-local memory.
+
+**Current execution boundary.** The advertised tier is static FP32 IDENTITY using checked-in SPIR-V.
+The provisional integer target is declared but not advertised, and FP16 remains undeclared pending
+per-device float-controls evidence. The native path and full backend conformance suite are validated
+on Intel Arc 140V through Mesa ANV and on llvmpipe/lavapipe; CI pins lavapipe so the native path
+cannot silently turn into the portable placeholder.
+
 ## What each backend reports
 
-Useful when reading `DeviceInfo` in a trace. Only the OpenVINO row varies at runtime, and only from
-the enumerated device *name* — not from the hardware. Every other value here is a compile-time
-constant, which is why a v75 Snapdragon still reports `qualcomm-htp-v73`.
+Useful when reading `DeviceInfo` in a trace. OpenVINO varies its UUID and class from the enumerated
+device name; Vulkan reports the physical device's actual Vulkan identity. The other provider rows
+are compile-time constants, which is why a v75 Snapdragon still reports `qualcomm-htp-v73`.
 
 | Backend | `uuid` | `class` | `vendor_id` | `device_id` |
 | ------- | ------ | ------- | ----------- | ----------- |
@@ -212,6 +243,7 @@ constant, which is why a v75 Snapdragon still reports `qualcomm-htp-v73`.
 | `openvino` | `intel-ov-<device>` | `NPU` / `GPU` / `OTHER` | `0x8086` (always) | `0` |
 | `xdna` | `amd.xdna.npu` | `NPU` | `0x1022` (AMD) | `0x17f0` (always) |
 | `hexagon` | `qualcomm-htp-v73` | `NPU` | `0x17cb` (Qualcomm) | `73` (always) |
+| `vulkan` | Vulkan `deviceUUID` | `GPU` / `OTHER` for a CPU ICD | Vulkan physical-device property | Vulkan physical-device property |
 | `mock` | `virtio-accelmock` | `NPU` | `0` | `0` |
 
 `class` comes from [`AcceleratorClass`](../crates/virtio-accel-core/src/lib.rs#L44), an extensible
@@ -220,8 +252,9 @@ across implementations, so new classes are additive.
 
 ## Out of scope
 
-- **Vulkan compute.** Listed as planned in the README backend table; no crate exists.
-- **NVIDIA, via any path.** No CUDA, TensorRT, or cuDNN backend, and none implied.
+- **Vendor-specific GPU APIs beyond Vulkan.** There is no CUDA, TensorRT, cuDNN, ROCm, or Metal
+  backend. A conformant NVIDIA, AMD, Intel, or Apple portability-layer device may still be reachable
+  through the Vulkan backend.
 - **Guest-side device passthrough.** The project claims no Virtio device ID yet; guests reach
   hardware through a host backend behind the [vAccel adapter](../crates/virtio-accel-vaccel/README.md).
 - **Non-Apple ANE-class fixed-function blocks** with no runtime this project speaks to.
@@ -232,7 +265,7 @@ This document tracks device *reachability*, which changes for different reasons 
 coverage. Revisit it when:
 
 - a device selection constant moves — the compute-unit budget, the QNN library path, the HRX device
-  index, or the OpenVINO preference order;
+  index, the OpenVINO preference order, or Vulkan's physical-device ranking;
 - a `build.rs` target or runtime gate changes, which is what most often converts "one change away"
   into "reachable";
 - a hardware evidence pin lands in a crate README or [performance.md](performance.md), which is what

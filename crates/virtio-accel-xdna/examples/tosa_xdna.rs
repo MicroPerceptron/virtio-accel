@@ -1,4 +1,4 @@
-//! Scaffold example: report backend availability.
+//! Availability example: report whether the native backend can initialize.
 //!
 //! Without a detected HRX runtime this prints the placeholder state. With one, it initializes the
 //! device/stream and reports the enumerated NPU. This example only reports availability; see the
