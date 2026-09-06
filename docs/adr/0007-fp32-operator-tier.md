@@ -42,7 +42,7 @@ operators to the shared FP32 set raised exactly that question three times over:
    list of dispatches. `CONST` tensors and intermediates are placed in one per-program arena
    allocation (device-local when the device has such memory) by a first-fit allocator over
    execution-position lifetimes, 256-byte aligned; constants are uploaded once at `load_program`
-   through the staging path with a `TRANSFER → COMPUTE` barrier. `RESHAPE` and `IDENTITY` whose
+   through the staging path with a `TRANSFER → COMPUTE|COPY` barrier. `RESHAPE` and `IDENTITY` whose
    input already lives in the arena become views (no dispatch, lifetimes merged). Operators the
    analysis marks `DEAD` are not dispatched. A `COMPUTE_SHADER` storage-write → storage-read/write
    memory barrier precedes any dispatch that reads memory an earlier dispatch wrote, or writes

@@ -55,10 +55,15 @@ const MAX_QUEUES_PER_CONTEXT: u32 = 16;
 const RING_DEPTH: u32 = 64;
 const MAX_BINDINGS_PER_SUBMISSION: u32 = 16;
 
+/// Explicit transfers and constant uploads hold at most one transient staging allocation at a
+/// time, on top of the guest buffers and program arenas.
+const TRANSIENT_STAGING_ALLOCATIONS: u32 = 1;
+
 const _: () = assert!(
     MAX_CONTEXTS * (MAX_BUFFERS_PER_CONTEXT + MAX_PROGRAMS_PER_CONTEXT)
-        < ASSUMED_MAX_MEMORY_ALLOCATIONS,
-    "advertised buffers plus program arenas must fit the assumed allocation count with one staging slot"
+        + TRANSIENT_STAGING_ALLOCATIONS
+        <= ASSUMED_MAX_MEMORY_ALLOCATIONS,
+    "advertised buffers, program arenas, and the staging allocation must fit the assumed allocation count"
 );
 
 /// Preferred 1-D workgroup size of the grid-stride kernels, and the size used on a device whose
@@ -829,13 +834,19 @@ impl ContextInner {
             .src_stage_mask(vk::PipelineStageFlags2::COPY)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE);
         let barrier = match visibility {
-            CopyVisibility::None => barrier,
             CopyVisibility::HostRead => barrier
                 .dst_stage_mask(vk::PipelineStageFlags2::HOST)
                 .dst_access_mask(vk::AccessFlags2::HOST_READ),
-            CopyVisibility::ShaderRead => barrier
-                .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ),
+            CopyVisibility::Device => barrier
+                .dst_stage_mask(
+                    vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::COPY,
+                )
+                .dst_access_mask(
+                    vk::AccessFlags2::SHADER_STORAGE_READ
+                        | vk::AccessFlags2::SHADER_STORAGE_WRITE
+                        | vk::AccessFlags2::TRANSFER_READ
+                        | vk::AccessFlags2::TRANSFER_WRITE,
+                ),
         };
         let barriers = [barrier];
         let dependency = vk::DependencyInfo::default().memory_barriers(&barriers);
@@ -854,9 +865,7 @@ impl ContextInner {
                 .begin_command_buffer(command_buffer, &begin)
                 .map_err(|result| shared.fail(result))?;
             device.cmd_copy_buffer(command_buffer, source, destination, &[region]);
-            if visibility != CopyVisibility::None {
-                device.cmd_pipeline_barrier2(command_buffer, &dependency);
-            }
+            device.cmd_pipeline_barrier2(command_buffer, &dependency);
             device
                 .end_command_buffer(command_buffer)
                 .map_err(|result| shared.fail(result))?;
@@ -878,14 +887,15 @@ impl ContextInner {
 }
 
 /// Who consumes the destination of a blocking copy, and therefore which barrier follows it.
+/// Submissions carry no implicit memory dependency between one another, so every consumer of a
+/// copied range is named explicitly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CopyVisibility {
-    /// Host writes into device memory: the queue submission itself orders later device reads.
-    None,
     /// The host reads the destination through a mapping after the fence signals.
     HostRead,
-    /// Compute dispatches in later submissions read the destination.
-    ShaderRead,
+    /// Later submissions read or write the destination: compute dispatches over a bound buffer
+    /// or the arena, and further staging copies out of or into it.
+    Device,
 }
 
 /// Destroys partially created context objects if creation fails midway.
@@ -1562,7 +1572,7 @@ impl VulkanAccelerator {
                     dst_offset: start + done,
                     size: chunk,
                 },
-                CopyVisibility::None,
+                CopyVisibility::Device,
             )?;
             increment(&shared.counters.explicit_transfer_bytes, chunk);
             done += chunk;
@@ -1632,12 +1642,17 @@ impl VulkanAccelerator {
             )];
         let compute_dependency = vk::DependencyInfo::default().memory_barriers(&compute_barrier);
         // After the last dispatch: make the shader's storage writes visible to host reads once
-        // the fence signals.
+        // the fence signals, and to the staging copies a later `read_buffer`/`write_buffer` of a
+        // device-local buffer submits (there is no implicit dependency between submissions).
         let host_barrier = [vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
             .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::HOST)
-            .dst_access_mask(vk::AccessFlags2::HOST_READ)];
+            .dst_stage_mask(vk::PipelineStageFlags2::HOST | vk::PipelineStageFlags2::COPY)
+            .dst_access_mask(
+                vk::AccessFlags2::HOST_READ
+                    | vk::AccessFlags2::TRANSFER_READ
+                    | vk::AccessFlags2::TRANSFER_WRITE,
+            )];
         let host_dependency = vk::DependencyInfo::default().memory_barriers(&host_barrier);
         let submit_buffers =
             [vk::CommandBufferSubmitInfo::default().command_buffer(slot.command_buffer)];
@@ -1713,7 +1728,7 @@ impl VulkanAccelerator {
                         dst_offset: constant.offset + done as u64,
                         size: chunk as u64,
                     },
-                    CopyVisibility::ShaderRead,
+                    CopyVisibility::Device,
                 )?;
                 done += chunk;
             }

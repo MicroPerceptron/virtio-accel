@@ -1334,12 +1334,17 @@ fn byte_storage_outputs_leave_neighbouring_bytes_untouched() {
         let backend = open(&device);
         let context = backend.create_context(ContextDesc::default()).unwrap();
         let program = load(&backend, &context, &artifact, VULKAN_TOSA_TARGET).unwrap();
-        let alignment = backend
+        // Two inputs and one output need three bindings; every device this backend opens
+        // advertises at least that many.
+        let max_bindings = backend
             .device_info()
             .unwrap()
             .limits
-            .max_bindings_per_submission; // touch limits so the info call is exercised
-        assert!(alignment >= 3);
+            .max_bindings_per_submission;
+        assert!(
+            max_bindings >= 3,
+            "{device}: {max_bindings} bindings per submission"
+        );
         let offset = 64_u64;
         let total = 192_u64;
         let mut lhs = allocate(
@@ -1564,18 +1569,6 @@ fn software_transcendentals_track_binary64_references() {
                     assert_eq!(
                         got.to_bits(),
                         expected.to_bits(),
-                        "{device}: {}({x}) = {got}, expected {expected}",
-                        reference.name
-                    );
-                    continue;
-                }
-                // sin/cos beyond the polynomial range come from the driver: Vulkan only bounds
-                // them to an absolute 2^-11, so hold them to that and nothing tighter.
-                if x.abs() >= 8192.0
-                    && matches!(reference.kind, OperatorKind::Sin | OperatorKind::Cos)
-                {
-                    assert!(
-                        (got - expected).abs() <= 2.0_f32.powi(-11),
                         "{device}: {}({x}) = {got}, expected {expected}",
                         reference.name
                     );

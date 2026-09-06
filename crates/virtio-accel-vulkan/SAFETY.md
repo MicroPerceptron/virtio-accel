@@ -82,17 +82,20 @@ released and rejected as `ResourceLimit`.
 Device-local transfers stage through a bounded (4 MiB) host-coherent `Staging` allocation and a
 per-context transfer command buffer and fence: record `vkCmdCopyBuffer`, submit, wait for the fence
 (30 s bound, after which the device is treated as lost), then copy through the staging mapping.
-Reads add a `COPY → HOST` memory barrier; writes rely on the implicit host-write ordering guarantee
-at `vkQueueSubmit2`. The staging allocation is destroyed before the call returns.
+Every copy is followed by a memory barrier naming its consumers, because submissions carry no
+implicit memory dependency between one another: a read into staging adds `COPY → HOST/HOST_READ`;
+a write into a device-local buffer adds `COPY/TRANSFER_WRITE → COMPUTE_SHADER|COPY` with storage
+and transfer read/write access so later dispatches and staging copies observe it. The host's own
+writes into the staging mapping are ordered by the implicit host-write guarantee at
+`vkQueueSubmit2`. The staging allocation is destroyed before the call returns.
 
 ## Program arenas
 
 A program whose graph carries `CONST` tensors or intermediates owns one `Arena`: a dedicated,
 never-mapped `RawAllocation` in device-local memory when the device has any (else the host type),
 sized by the lowering's lifetime-packed layout and bounded by `maxStorageBufferRange`. Constants
-are uploaded once at `load_program` through the same staging path as device-local transfers, each
-copy followed by a `COPY/TRANSFER_WRITE → COMPUTE_SHADER/SHADER_STORAGE_READ` barrier so later
-submissions read them. The arena is destroyed with its `VulkanProgram` (after `vkDeviceWaitIdle`
+are uploaded once at `load_program` through the same staging path as device-local transfers, with
+the same `COPY → COMPUTE_SHADER|COPY` barrier so later submissions read them. The arena is destroyed with its `VulkanProgram` (after `vkDeviceWaitIdle`
 if the contract was violated and submissions are still in flight), so no dispatch can address freed
 memory. One arena per program is charged against the assumed `maxMemoryAllocationCount` alongside
 the guest buffers: `16 × (190 + 64) + 1 < 4096`, enforced by a compile-time assertion.
@@ -109,7 +112,9 @@ for writes), writes the whole descriptor array (slots in slot order, the arena, 
 for every element the program never addresses; byte-storage ranges rounded up to the containing
 word), resets the fence, records (bind set; per dispatch an optional
 `COMPUTE_SHADER/SHADER_STORAGE_WRITE → COMPUTE_SHADER/SHADER_STORAGE_READ|WRITE` barrier, bind
-pipeline, dispatch; a final `COMPUTE_SHADER/SHADER_STORAGE_WRITE → HOST/HOST_READ` barrier), and
+pipeline, dispatch; a final `COMPUTE_SHADER/SHADER_STORAGE_WRITE → HOST|COPY` barrier with host-read
+and transfer read/write access, so the host mapping and any later staging copy of a device-local
+output observe the results), and
 calls `vkQueueSubmit2` with the slot's fence. Which dispatches need a barrier is decided by the
 lowering from the plan's read/write sets, not at record time. `vkQueueSubmit2` success is the
 admission boundary: any failure before it releases the slot and gates and rejects; an
