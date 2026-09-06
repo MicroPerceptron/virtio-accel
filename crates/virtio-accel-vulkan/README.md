@@ -15,6 +15,10 @@ build time (ADR 0002 in `docs/adr/`).
   graph, admitted hardware-free in `lower` and executed by a checked-in SPIR-V word-copy kernel
   specialized with the element count at `load_program`. Guest bytes never reach the driver's
   shader compiler (ADR 0003).
+- **FP32 MATMUL** (same target): batched 3-D matrix multiplication with zero zero-points (the
+  TOSA 1.0 `CONST`-producer form), executed by a checked-in SPIR-V kernel with M/N/K/batch
+  specialization constants, one thread per output element over an (n, m, batch) dispatch, and no
+  fused multiply-add so the shared oracle's tolerance holds under every float-controls mode.
 - **Memory domains** (ADR 0005): `Host` and `Shared` are persistently mapped host-coherent
   allocations; `Device` is device-local memory reached only through bounded staging inside
   `write_buffer`/`read_buffer`. `Shared` and `Device` are advertised only when the device exposes
@@ -48,6 +52,12 @@ The example executes the FP32 identity artifact on the preferred device (discret
 virtual, then CPU) and exits successfully, or reports that no device is available. The native tests
 run against every enumerated device and skip without one; `VIRTIO_ACCEL_VULKAN_REQUIRE_DEVICE=1`
 turns absence into a failure, and `VK_DRIVER_FILES` pins the ICD (the CI lane pins lavapipe).
+
+## Verified driver stacks
+
+The full backend suite — admission, lifecycle, conformance, and the shared FP32 IDENTITY/MATMUL
+oracles — passes on Intel ANV, on Apple M3 via MoltenVK (local validation only, not a CI lane),
+and on Mesa lavapipe in the `vulkan-lavapipe-test` CI lane. One crate, no per-driver code paths.
 
 Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an
 experimental native-Rust protocol and implementation stack for a transport-neutral virtual

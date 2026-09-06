@@ -389,7 +389,7 @@ only through bounded staging inside the explicit transfer calls. Each context ow
 of command buffers, fences, and descriptor sets; `vkQueueSubmit2` success is the admission
 boundary and `vkGetFenceStatus` is the whole completion path, so no worker thread bridges the
 runtime. Device loss poisons the instance. The backend runs the conformance suite and the shared
-FP32 identity corpus on every enumerated device, a real GPU and a software ICD alike.
+FP32 identity and matmul corpus on every enumerated device, a real GPU and a software ICD alike.
 
 The Qualcomm adapter uses the same seam. Its safe planner admits 41 of the 42 floating-point
 operators shared by Core ML and OpenVINO, including owned constants/data movement, FP16 unary and

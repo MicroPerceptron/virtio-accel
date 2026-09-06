@@ -227,6 +227,38 @@ hardware contexts (issue #121), not further submission-path restructuring. The r
 still pays for itself in semantics: submissions overlap with host-side polling and readback, and
 completion waits no longer serialize against `allocate_buffer`.
 
+## Vulkan provider evidence status
+
+`virtio-accel-vulkan`'s warm path is a descriptor update plus `vkQueueSubmit` on a preallocated
+bounded ring of (command buffer, fence, descriptor set) slots — no worker thread, no
+submission-time staging; completion is a nonblocking `vkGetFenceStatus` poll (ADR 0006). Programs
+compile once at `load_program` (checked-in SPIR-V + specialization constants) and are charged
+against `ArtifactRef::resident_bytes`.
+
+Manual hardware commands (per the #75 precedent — no self-hosted runner on a public repo):
+
+```sh
+# Real GPU (any Vulkan 1.3 compute device; pin the ICD explicitly):
+VIRTIO_ACCEL_VULKAN_REQUIRE_DEVICE=1 \
+  cargo test -p virtio-accel-vulkan --test vulkan -- --nocapture
+
+# Software ICD rehearsal (the CI lane's shape):
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json \
+VIRTIO_ACCEL_VULKAN_REQUIRE_DEVICE=1 \
+  cargo test -p virtio-accel-vulkan --test vulkan -- --nocapture
+```
+
+Verified driver stacks: Intel ANV (full suite, `VIRTIO_ACCEL_VULKAN_REQUIRE_DEVICE=1`), Apple M3
+via MoltenVK (local validation only, not a CI lane), and Mesa lavapipe in the `vulkan-lavapipe-test`
+CI lane. Copy-path diagnostics across all three: every submission is a direct binding;
+`explicit_transfer_bytes` stays zero for `Host` and `Shared` domains, and `Device` staging is
+confined to `write_buffer`/`read_buffer` as the memory-domain contract requires.
+
+Warm-latency numbers for the IDENTITY and MATMUL kernels are not yet published: the first
+measurement should follow the XDNA structure (load once, warm 20, measure 200) on the Intel ANV
+reference box before this section claims any timing. What is claimed today is correctness and
+copy-path shape, not wall-clock values.
+
 ## Qualcomm Hexagon evidence status
 
 `virtio-accel-hexagon` includes an ignored release-mode measurement for fixed submission overhead:

@@ -50,11 +50,12 @@ fn targets_survive_an_identity_round_trip() {
 }
 
 #[test]
-fn capability_advertises_only_the_fp32_identity_boundary() {
+fn capability_advertises_exactly_the_executed_fp32_boundary() {
     assert_eq!(VULKAN_TOSA_CAPABILITY.target, VULKAN_TOSA_TARGET);
     assert!(VULKAN_TOSA_CAPABILITY.supports_dtype(DType::FP32, ValueRoles::ALL));
     assert!(supports_tosa_operator(Op::IDENTITY));
-    assert!(!supports_tosa_operator(Op::MATMUL));
+    assert!(supports_tosa_operator(Op::MATMUL));
+    assert!(!supports_tosa_operator(Op::MAX_POOL2D));
     assert!(supports_tosa_dtype(DType::FP32));
     for rejected in [
         DType::FP16,
@@ -76,5 +77,12 @@ fn checked_in_shader_module_is_stable() {
     assert!(std::ptr::eq(
         words,
         virtio_accel_vulkan::shader::copy_u32_spirv()
+    ));
+    let matmul = virtio_accel_vulkan::shader::matmul_fp32_spirv();
+    assert_eq!(matmul[0], 0x0723_0203, "SPIR-V magic");
+    assert_eq!(matmul[1], 0x0001_0300, "SPIR-V 1.3");
+    assert!(std::ptr::eq(
+        matmul,
+        virtio_accel_vulkan::shader::matmul_fp32_spirv()
     ));
 }
