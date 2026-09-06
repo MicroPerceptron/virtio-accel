@@ -167,6 +167,6 @@ read-only bindings across sixteen in-flight submissions with `Busy` on the share
 exhaustion as `ResourceLimit`, parent-release refusal, and the standard conformance suite
 (`virtio-accel-conformance::run`) with the accounting and copy-path diagnostics hooks in every
 advertised domain. On 2026-09-03 the IDENTITY + MATMUL suite passed on an Intel Arc 140V (Lunar
-Lake, Mesa 26.0.8 ANV, Vulkan 1.4.335) and on the same host's llvmpipe; the broadened FP32 tier
-(ADR 0007) is verified on Mesa lavapipe (25.2.8, LLVM 20.1.2) and awaits re-verification on the
-real-GPU stacks.
+Lake, Mesa 26.0.8 ANV, Vulkan 1.4.335) and on the same host's llvmpipe; on 2026-09-06 the full
+suite for the broadened FP32 tier (ADR 0007) passed on the same Arc 140V and its llvmpipe (LLVM
+21.1.8), and on Mesa lavapipe (25.2.8, LLVM 20.1.2) in CI.

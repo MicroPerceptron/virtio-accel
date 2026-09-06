@@ -248,10 +248,13 @@ VIRTIO_ACCEL_VULKAN_REQUIRE_DEVICE=1 \
   cargo test -p virtio-accel-vulkan --test vulkan -- --nocapture
 ```
 
-Verified driver stacks for the IDENTITY + MATMUL tier: Intel ANV (full suite,
-`VIRTIO_ACCEL_VULKAN_REQUIRE_DEVICE=1`), Apple M3 via MoltenVK (local validation only, not a CI
-lane), and Mesa lavapipe in the `vulkan-lavapipe-test` CI lane; the broadened FP32 operator tier
-(ADR 0007) is so far verified on lavapipe only. Copy-path diagnostics across all three: every submission is a direct binding;
+Verified driver stacks for the FP32 operator tier (ADR 0007): Intel Arc 140V (Lunar Lake, Mesa 26.0.8 ANV, Vulkan 1.4.335)
+(full suite, 2026-09-06, alongside the same host's llvmpipe LLVM 21.1.8) and Mesa lavapipe in the
+`vulkan-lavapipe-test` CI lane. Apple M3 via MoltenVK (local validation only, not a CI lane)
+verified the earlier IDENTITY + MATMUL tier. On ANV and llvmpipe alike the crate-authored
+transcendentals measured 1 ulp (sin, cos, tanh) and 2 ulp (erf) worst case against binary64 over
+4096 samples spanning ±8000, ±1e6, `f32::MAX`, and the non-finite edges — the same numbers, which
+is what the `NoContraction` and software-reduction policy exists to guarantee. Copy-path diagnostics across all three: every submission is a direct binding;
 `explicit_transfer_bytes` stays zero for `Host` and `Shared` domains, and `Device` staging is
 confined to `write_buffer`/`read_buffer` as the memory-domain contract requires.
 
@@ -267,8 +270,8 @@ element, and `SIN`/`COS` evaluate both range reductions and select.
 
 Warm-latency numbers are not yet published: the first measurement should follow the XDNA structure
 (load once, warm 20, measure 200) on the Intel ANV reference box before this section claims any
-timing, and the broadened tier itself still owes a real-GPU run (the same commands above, on ANV
-and MoltenVK). What is claimed today is correctness and copy-path shape, not wall-clock values.
+timing; the broadened tier still owes a MoltenVK run (the same commands above). What is claimed
+today is correctness and copy-path shape, not wall-clock values.
 
 ## Qualcomm Hexagon evidence status
 

@@ -1,7 +1,7 @@
 # 7. FP32 operator tier: descriptor-array kernels, program arenas, and crate-owned numerics
 
-- Status: accepted (implemented; verified on Mesa lavapipe in CI, real-GPU re-verification of the
-  broadened tier pending per `docs/performance.md`)
+- Status: accepted (implemented; verified on Mesa lavapipe in CI and, on 2026-09-06, on
+  Intel Arc 140V (Lunar Lake, Mesa 26.0.8 ANV, Vulkan 1.4.335) — see `docs/performance.md`)
 - Extends: ADR 0003 (checked-in shaders specialized by constants), ADR 0004 (FP32 base tier),
   ADR 0006 (execution model)
 - Resolves: the operator-coverage half of wayfinder map #154 ticket 9 — the FP32 tier now admits
@@ -94,11 +94,14 @@ operators to the shared FP32 set raised exactly that question three times over:
   holds unchanged.
 - The tier is validated by the shared FP32 operator corpus (35 new fixtures plus the three
   existing ones, oracles evaluated in binary64) and by kernel-level tests: transcendental ulp
-  sweeps against binary64 references (worst case 1 ulp on lavapipe, including arguments up to
-  `f32::MAX`), tiled-MATMUL bit identity at ragged sizes and batches, rank-4 broadcasting, and
+  sweeps against binary64 references (worst case 1 ulp for sin/cos/tanh and 2 ulp for erf on
+  both ANV and llvmpipe, including arguments up to `f32::MAX`), tiled-MATMUL bit identity at
+  ragged sizes and batches, rank-4 broadcasting, and
   byte-tensor neighbour safety.
 - Per-element atomics make predicate outputs slower than word stores; a packed fast path for
   contiguous `BOOL` kernels is the obvious follow-on. `SIN`/`COS` evaluate both reductions and
   select, trading throughput for a branch-free kernel.
-- Real-GPU evidence (ANV, MoltenVK) for the broadened tier is owed before any claim beyond the
-  lavapipe lane; `docs/performance.md` carries the commands and the no-timing-claims note.
+- Real-GPU evidence: the full suite passed on Intel Arc 140V (Mesa 26.0.8 ANV) on 2026-09-06
+  with the same worst-case transcendental errors as llvmpipe (1 ulp sin/cos/tanh, 2 ulp erf);
+  MoltenVK is still owed. `docs/performance.md` carries the commands and the no-timing-claims
+  note.

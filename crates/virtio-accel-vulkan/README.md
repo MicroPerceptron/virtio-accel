@@ -80,10 +80,12 @@ skip without one; `VIRTIO_ACCEL_VULKAN_REQUIRE_DEVICE=1` turns absence into a fa
 The full backend suite — admission, lifecycle, the conformance suite, every case of the shared
 FP32 operator corpus in every advertised memory domain, and the kernel-level tests (transcendental
 ulp sweeps, tiled-MATMUL bit identity, rank-4 broadcasting, byte-tensor neighbour safety) — passes
-on Mesa lavapipe in the `vulkan-lavapipe-test` CI lane. The earlier IDENTITY + MATMUL tier was
-additionally verified on Intel ANV and on Apple M3 via MoltenVK (local validation only, not a CI
-lane); the broadened tier has not yet been re-run on those stacks, and this README claims only what
-the lavapipe lane demonstrates until it is. One crate, no per-driver code paths.
+on Mesa lavapipe in the `vulkan-lavapipe-test` CI lane and, on 2026-09-06, on
+Intel Arc 140V (Lunar Lake, Mesa 26.0.8 ANV, Vulkan 1.4.335) together with the same host's llvmpipe (LLVM 21.1.8), in
+`Host`, `Shared`, and `Device` domains; the transcendental kernels measured 1 ulp (sin, cos, tanh)
+and 2 ulp (erf) worst case against binary64 on both devices. Apple M3 via MoltenVK (local
+validation only, not a CI lane) has verified the earlier IDENTITY + MATMUL tier and awaits a re-run
+of the broadened one. One crate, no per-driver code paths.
 
 Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an
 experimental native-Rust protocol and implementation stack for a transport-neutral virtual

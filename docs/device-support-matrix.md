@@ -47,7 +47,7 @@ try; it does not promise the program admits, the numerics match, or the performa
 | **Qualcomm Hexagon HTP v75+**, newer Snapdragon | NPU | `hexagon` | Windows 11 ARM64 | **Reachable** — ungated, misreports v73 |
 | **Qualcomm Adreno GPU / Kryo CPU** via QNN | GPU / CPU | `hexagon` | Windows 11 ARM64 | **One change away** — backend library path is fixed, and deliberately so |
 | **Snapdragon on Linux or Android** | NPU | `hexagon` | — | **One change away** — build target gate |
-| **Intel Arc 140V**, Lunar Lake | GPU | `vulkan` | Linux x86-64 | **Validated** — Mesa 26.0.8 ANV ([baseline](adr/0005-vulkan-baseline-probe.md)) for the IDENTITY + MATMUL tier; the broadened FP32 operator tier (ADR 0007) awaits a re-run there |
+| **Intel Arc 140V**, Lunar Lake | GPU | `vulkan` | Linux x86-64 | **Validated** — Mesa 26.0.8 ANV ([baseline](adr/0005-vulkan-baseline-probe.md)); full FP32 operator tier suite passed 2026-09-06 ([ADR 0007](adr/0007-fp32-operator-tier.md)) |
 | **Other Vulkan 1.3 compute devices** | GPU / virtual GPU / CPU | `vulkan` | Linux, Android, Windows, macOS | **Reachable** — enumerated and selected at run time; no other hardware evidence pin yet |
 | **lavapipe / llvmpipe software ICD** | CPU | `vulkan` | Linux x86-64 | **Validated** — pinned by the `vulkan-lavapipe-test` CI lane and exercised by the full backend suite, including the FP32 operator corpus |
 | **No device**, executed in software | — | `mock` | Any | Deterministic in-memory reference; outside this vocabulary |

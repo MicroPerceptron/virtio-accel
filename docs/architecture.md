@@ -393,9 +393,9 @@ through bounded staging inside the explicit transfer calls. Each context owns a 
 command buffers, fences, and descriptor sets; `vkQueueSubmit2` success is the admission boundary
 and `vkGetFenceStatus` is the whole completion path, so no worker thread bridges the runtime.
 Device loss poisons the instance. The backend runs the conformance suite and the shared FP32
-operator corpus on every device it enumerates; the broadened FP32 tier is verified on the Mesa
-lavapipe CI lane, while the real-GPU stacks (Intel ANV, Apple M3 via MoltenVK) have so far
-verified only the earlier IDENTITY + MATMUL tier.
+operator corpus on every device it enumerates; the FP32 operator tier is verified on the Mesa
+lavapipe CI lane and on Intel ANV (Arc 140V), while Apple M3 via MoltenVK has so far verified
+only the earlier IDENTITY + MATMUL tier.
 
 The Qualcomm adapter uses the same seam. Its safe planner admits 41 of the 42 floating-point
 operators shared by Core ML and OpenVINO, including owned constants/data movement, FP16 unary and
