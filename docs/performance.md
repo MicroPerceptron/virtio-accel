@@ -248,9 +248,10 @@ VIRTIO_ACCEL_VULKAN_REQUIRE_DEVICE=1 \
   cargo test -p virtio-accel-vulkan --test vulkan -- --nocapture
 ```
 
-Verified driver stacks: Intel ANV (full suite, `VIRTIO_ACCEL_VULKAN_REQUIRE_DEVICE=1`), Apple M3
-via MoltenVK (local validation only, not a CI lane), and Mesa lavapipe in the `vulkan-lavapipe-test`
-CI lane. Copy-path diagnostics across all three: every submission is a direct binding;
+Verified driver stacks for the IDENTITY + MATMUL tier: Intel ANV (full suite,
+`VIRTIO_ACCEL_VULKAN_REQUIRE_DEVICE=1`), Apple M3 via MoltenVK (local validation only, not a CI
+lane), and Mesa lavapipe in the `vulkan-lavapipe-test` CI lane; the broadened FP32 operator tier
+(ADR 0007) is so far verified on lavapipe only. Copy-path diagnostics across all three: every submission is a direct binding;
 `explicit_transfer_bytes` stays zero for `Host` and `Shared` domains, and `Device` staging is
 confined to `write_buffer`/`read_buffer` as the memory-domain contract requires.
 
