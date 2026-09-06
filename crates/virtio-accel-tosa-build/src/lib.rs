@@ -167,6 +167,7 @@ pub enum OperatorKind {
     Equal,
     Greater,
     GreaterEqual,
+    Erf,
     Reshape,
     Cast,
     Rescale {
@@ -211,6 +212,7 @@ impl OperatorKind {
             Self::Equal => Op::EQUAL,
             Self::Greater => Op::GREATER,
             Self::GreaterEqual => Op::GREATER_EQUAL,
+            Self::Erf => Op::ERF,
             Self::Reshape => Op::RESHAPE,
             Self::Cast => Op::CAST,
             Self::Rescale { .. } => Op::RESCALE,
@@ -1006,6 +1008,7 @@ mod tests {
     fn every_operator_kind_serializes_its_pinned_opcode_and_union_tag() {
         let cases = [
             (OperatorKind::MatMul, Op::MATMUL, 7),
+            (OperatorKind::Erf, Op::ERF, 12),
             (
                 OperatorKind::MaxPool2d {
                     kernel: [2, 2],

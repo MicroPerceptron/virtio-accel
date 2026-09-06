@@ -1382,7 +1382,7 @@ fn validate_attributes(
                 && (rounding_mode != RoundingMode::INEXACT_ROUND
                     || target.extensions.contains(ExtensionSet::INEXACT_ROUND))
                 && !(scale32 && input == DType::INT48)
-                && !(!scale32 && rounding_mode == RoundingMode::DOUBLE_ROUND)
+                && (scale32 || rounding_mode != RoundingMode::DOUBLE_ROUND)
                 && !(input_unsigned && output_unsigned)
                 && !(output == DType::INT32 && input_unsigned)
                 && !(matches!(input, DType::INT32 | DType::INT48) && input_unsigned)
