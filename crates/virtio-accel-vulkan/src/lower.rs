@@ -333,8 +333,31 @@ enum Location {
     Region(usize),
 }
 
-/// Memory identity for hazard tracking: two tensors sharing a location share hazards.
-type MemKey = Location;
+/// Memory identity for hazard tracking. Arena tensors are keyed by the bytes they occupy, not by
+/// region index: lifetime packing hands a freed region's bytes to later tensors, possibly
+/// straddling several earlier regions, and a dispatch touching any of those bytes must be ordered
+/// after every earlier dispatch that touched them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MemKey {
+    Slot(u32),
+    Arena { offset: u64, end: u64 },
+}
+
+impl MemKey {
+    fn overlaps(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::Slot(a), Self::Slot(b)) => a == b,
+            (
+                Self::Arena { offset, end },
+                Self::Arena {
+                    offset: other_offset,
+                    end: other_end,
+                },
+            ) => offset < other_end && other_offset < end,
+            _ => false,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 struct Region {
@@ -657,6 +680,19 @@ impl<'a, 'b> Lowering<'a, 'b> {
 
     // -- dispatch recording -------------------------------------------------------------------
 
+    fn mem_key(&self, location: Location) -> MemKey {
+        match location {
+            Location::Slot(slot) => MemKey::Slot(slot),
+            Location::Region(index) => {
+                let region = &self.regions[index];
+                MemKey::Arena {
+                    offset: region.offset,
+                    end: region.offset + region.bytes,
+                }
+            }
+        }
+    }
+
     fn dispatch(
         &mut self,
         kernel: KernelSpec,
@@ -666,20 +702,26 @@ impl<'a, 'b> Lowering<'a, 'b> {
         writes: Location,
         written_value: ValueId,
     ) {
-        let raw = reads
-            .iter()
-            .any(|read| self.written.iter().any(|(written, _)| written == read));
-        let war = self.read.contains(&writes);
+        let reads: Vec<MemKey> = reads.iter().map(|read| self.mem_key(*read)).collect();
+        let writes = self.mem_key(writes);
+        let raw = reads.iter().any(|read| {
+            self.written
+                .iter()
+                .any(|(written, _)| written.overlaps(*read))
+        });
+        let war = self.read.iter().any(|read| read.overlaps(writes));
+        // Segments of one `CONCAT` write disjoint parts of one tensor and need no ordering; any
+        // other overlap with earlier written bytes does.
         let waw = self
             .written
             .iter()
-            .any(|(written, value)| *written == writes && *value != written_value);
+            .any(|(written, value)| written.overlaps(writes) && *value != written_value);
         let barrier_before = raw || war || waw;
         if barrier_before {
             self.written.clear();
             self.read.clear();
         }
-        self.read.extend_from_slice(reads);
+        self.read.extend_from_slice(&reads);
         self.written.push((writes, written_value));
         self.dispatches.push(DispatchPlan {
             kernel,
@@ -1554,6 +1596,106 @@ mod tests {
         let d = lowering.allocate_region(1, 9).unwrap();
         assert_eq!(lowering.regions[d].offset, 2 * ARENA_ALIGNMENT);
         assert_eq!(lowering.arena_bytes, 3 * ARENA_ALIGNMENT);
+    }
+
+    /// Region `a` is read at position 1 and dies; at position 2 the packer hands its bytes to a
+    /// new tensor `b`. The dispatch writing `b` reads nothing that was written since the last
+    /// barrier, so only byte-range hazard tracking can order it after `a`'s reader.
+    #[test]
+    fn reused_arena_bytes_force_a_barrier_before_the_new_writer() {
+        let model = parse(IDENTITY_FP32_LOCAL).unwrap();
+        let analysis = model.analyze_for(VULKAN_TOSA_TARGET).unwrap();
+        let mut lowering = Lowering::new(&analysis).unwrap();
+        let values: Vec<ValueId> = analysis.values().iter().map(|value| value.id()).collect();
+        let (a_value, b_value) = (values[0], values[1]);
+        let kernel = KernelSpec::Move {
+            storage: Storage::Word,
+            contiguous: true,
+        };
+
+        // Position 0: a producer writes `a`.
+        lowering.position = 0;
+        let a = lowering.allocate_region(64, 1).unwrap();
+        lowering.dispatch(
+            kernel,
+            Vec::new(),
+            Work::Linear(16),
+            &[Location::Slot(0)],
+            Location::Region(a),
+            a_value,
+        );
+        // Position 1: the last reader of `a` writes a bound slot.
+        lowering.position = 1;
+        lowering.dispatch(
+            kernel,
+            Vec::new(),
+            Work::Linear(16),
+            &[Location::Region(a)],
+            Location::Slot(1),
+            b_value,
+        );
+        // Position 2: `a` is dead, so `b` is packed into its bytes and written from a slot.
+        lowering.position = 2;
+        let b = lowering.allocate_region(64, 3).unwrap();
+        assert_eq!(lowering.regions[b].offset, lowering.regions[a].offset);
+        assert_ne!(a, b, "a fresh region index over the same bytes");
+        lowering.dispatch(
+            kernel,
+            Vec::new(),
+            Work::Linear(16),
+            &[Location::Slot(0)],
+            Location::Region(b),
+            b_value,
+        );
+
+        let barriers: Vec<bool> = lowering
+            .dispatches
+            .iter()
+            .map(|dispatch| dispatch.barrier_before)
+            .collect();
+        assert_eq!(
+            barriers,
+            [false, true, true],
+            "the reader depends on the producer (RAW); the new writer on the reader (WAR)"
+        );
+
+        // Disjoint arena bytes carry no hazard: a writer into a fresh region needs no barrier.
+        lowering.position = 3;
+        let c = lowering.allocate_region(64, 4).unwrap();
+        assert_ne!(lowering.regions[c].offset, lowering.regions[b].offset);
+        lowering.dispatch(
+            kernel,
+            Vec::new(),
+            Work::Linear(16),
+            &[Location::Slot(0)],
+            Location::Region(c),
+            a_value,
+        );
+        assert!(!lowering.dispatches[3].barrier_before);
+        assert!(
+            MemKey::Arena {
+                offset: 0,
+                end: 256
+            }
+            .overlaps(MemKey::Arena {
+                offset: 255,
+                end: 512
+            })
+        );
+        assert!(
+            !MemKey::Arena {
+                offset: 0,
+                end: 256
+            }
+            .overlaps(MemKey::Arena {
+                offset: 256,
+                end: 512
+            })
+        );
+        assert!(!MemKey::Slot(0).overlaps(MemKey::Arena {
+            offset: 0,
+            end: 256
+        }));
     }
 
     #[test]

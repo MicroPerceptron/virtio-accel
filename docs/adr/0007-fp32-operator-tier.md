@@ -45,8 +45,10 @@ operators to the shared FP32 set raised exactly that question three times over:
    through the staging path with a `TRANSFER → COMPUTE|COPY` barrier. `RESHAPE` and `IDENTITY` whose
    input already lives in the arena become views (no dispatch, lifetimes merged). Operators the
    analysis marks `DEAD` are not dispatched. A `COMPUTE_SHADER` storage-write → storage-read/write
-   memory barrier precedes any dispatch that reads memory an earlier dispatch wrote, or writes
-   memory an earlier dispatch touched; `CONCAT` segments writing disjoint regions of one output
+   memory barrier precedes any dispatch that reads bytes an earlier dispatch wrote, or writes
+   bytes an earlier dispatch touched — hazards are tracked by arena byte range, so a region
+   whose bytes the packer hands to a later tensor still orders that tensor's writer after the
+   region's last reader; `CONCAT` segments writing disjoint regions of one output
    need none. The lowering re-derives every shape, axis, permutation, and pooling window from the
    declared tensors and rejects disagreement, because the kernels address storage with that
    geometry and no robust-buffer-access mode is relied upon.
