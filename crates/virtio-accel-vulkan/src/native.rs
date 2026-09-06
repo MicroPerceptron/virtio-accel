@@ -1631,8 +1631,12 @@ impl VulkanAccelerator {
             .buffer_info(descriptors);
         let begin = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        // Between dependent dispatches: storage writes become visible to the next dispatch's
-        // storage reads and writes.
+        // Between dependent dispatches. A `COMPUTE_SHADER → COMPUTE_SHADER` barrier is an
+        // execution dependency on every prior compute command, which alone orders a later write
+        // after earlier reads (WAR: an arena region reused after its last reader). The access
+        // masks add the memory dependency the RAW and WAW cases need: prior storage writes made
+        // available, then visible to the next dispatch's storage reads and writes. Read accesses
+        // never appear in a source mask because a read leaves nothing to make available.
         let compute_barrier = [vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
             .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)

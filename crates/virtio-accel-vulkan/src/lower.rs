@@ -24,10 +24,10 @@ use std::fmt;
 
 use virtio_accel_tosa::{
     AnalysisError, AnalyzedValueKind, CapabilityDescriptor, DType, DTypeCapability,
-    Error as ParseError, ExtensionSet, GraphCapabilities, Level, NanPropagationMode, Op,
-    OpAttributes, OperatorCapability, OperatorConstraints, OperatorId, OptimizationHints,
-    ProfileSet, RuntimeCondition, RuntimeConditionSupport, Target, TosaAnalysis, ValueId,
-    ValueRoles, Version, parse,
+    DTypeConstraints, Error as ParseError, ExtensionSet, GraphCapabilities, Level,
+    NanPropagationMode, Op, OpAttributes, OperatorCapability, OperatorConstraints, OperatorId,
+    OptimizationHints, ProfileSet, RuntimeCondition, RuntimeConditionSupport, Target, TosaAnalysis,
+    ValueId, ValueRoles, Version, parse,
 };
 
 use crate::shader::{
@@ -58,6 +58,13 @@ const FLOAT_DTYPES: &[DTypeCapability] = &[
     DTypeCapability::new(DType::FP32, ValueRoles::ALL),
     DTypeCapability::new(DType::BOOL, ValueRoles::ALL),
     DTypeCapability::new(DType::INT32, ValueRoles::ALL),
+    // The TOSA 1.0 `MUL` shift operand is an INT8 constant consumed at admission (it must be
+    // zero); INT8 never becomes a graph-visible provider tensor.
+    DTypeCapability::constrained(
+        DType::INT8,
+        ValueRoles::CONSTANT,
+        DTypeConstraints::PARAMETER_ONLY,
+    ),
 ];
 
 /// The 42 operators shared with the Core ML and OpenVINO FP32 tiers. NaN modes and pool padding
@@ -1410,7 +1417,10 @@ mod tests {
         assert!(supports_tosa_dtype(DType::BOOL));
         assert!(supports_tosa_dtype(DType::INT32));
         assert!(!supports_tosa_dtype(DType::FP16));
+        // INT8 is a compile-time parameter only (the `MUL` shift), never a boundary dtype.
         assert!(!supports_tosa_dtype(DType::INT8));
+        assert!(VULKAN_TOSA_CAPABILITY.supports_dtype(DType::INT8, ValueRoles::CONSTANT));
+        assert!(!VULKAN_TOSA_CAPABILITY.supports_dtype(DType::INT8, ValueRoles::INTERMEDIATE));
         assert_eq!(VULKAN_TOSA_CAPABILITY.target, VULKAN_TOSA_TARGET);
     }
 

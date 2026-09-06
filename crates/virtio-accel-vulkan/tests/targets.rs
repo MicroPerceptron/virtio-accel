@@ -124,6 +124,12 @@ fn capability_advertises_the_shared_fp32_operator_set() {
     ] {
         assert!(!supports_tosa_dtype(rejected), "{rejected:?}");
     }
+    // The `MUL` shift is an INT8 constant parameter consumed at admission, so the descriptor
+    // admits INT8 in the constant role only — exactly as the Core ML and OpenVINO tiers do.
+    assert!(VULKAN_TOSA_CAPABILITY.supports_dtype(DType::INT8, ValueRoles::CONSTANT));
+    assert!(!VULKAN_TOSA_CAPABILITY.supports_dtype(DType::INT8, ValueRoles::INPUT));
+    assert!(!VULKAN_TOSA_CAPABILITY.supports_dtype(DType::INT8, ValueRoles::OUTPUT));
+    assert!(!VULKAN_TOSA_CAPABILITY.supports_dtype(DType::INT8, ValueRoles::INTERMEDIATE));
     assert_eq!(VULKAN_TOSA_CAPABILITY.graph.max_blocks, 1);
 }
 
