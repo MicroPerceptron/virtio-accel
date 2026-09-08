@@ -141,9 +141,9 @@ impl<T> ObjectTable<T> {
     /// Borrow the currently occupied identities without allocating.
     ///
     /// IDs retain this table's namespace, resource kind and current generation.
-    /// Vacant and permanently retired slots are skipped. The iterator borrows
-    /// the table, so mutation requires ending the iteration first; a saved ID
-    /// must still pass ordinary lookup checks after subsequent mutation.
+    /// Vacant and permanently retired slots are skipped. IDs are yielded
+    /// in ascending slot index order. The iterator borrows the table, so
+    /// mutation requires ending the iteration first; a saved ID must still pass ordinary lookup checks after subsequent mutation.
     pub fn ids(&self) -> impl Iterator<Item = ObjectId> + '_ {
         self.slots.iter().enumerate().filter_map(|(index, slot)| {
             slot.value
