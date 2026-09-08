@@ -109,7 +109,8 @@ barriers between dependent dispatches. Buffers are dedicated directly bound stor
   tests pass on Mesa lavapipe in CI; on 2026-09-06 on Intel Arc 140V (Lunar Lake, Mesa 26.0.8 ANV,
   Vulkan 1.4.335) and the same host's llvmpipe (LLVM 21.1.8); and on 2026-09-08 on AMD Radeon 860M
   (Krackan Point, RADV Mesa 26.1.8, Vulkan 1.4.354), which also runs clean under Khronos
-  synchronization validation. sin/cos/tanh land within 1 ulp and erf within 2 ulp of binary64 on
+  synchronization validation in every advertised memory domain. sin/cos/tanh land within 1 ulp and
+  erf within 2 ulp of binary64 on
   every one. Apple M3 via MoltenVK has verified only the earlier IDENTITY + MATMUL tier. FP16/INT8
   gating remains under the
   [Vulkan wayfinder map](https://github.com/MicroPerceptron/virtio-accel/issues/154); design
