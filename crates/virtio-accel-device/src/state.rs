@@ -541,6 +541,34 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
         self.events.len()
     }
 
+    /// Occupied context identities, including records awaiting release commit.
+    /// Iteration allocates nothing and does not authorize release or bypass child checks.
+    pub fn context_ids(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        self.contexts.ids()
+    }
+
+    /// Occupied buffer identities, including records awaiting release commit.
+    /// Iteration allocates nothing and does not bypass in-flight reference checks.
+    pub fn buffer_ids(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        self.buffers.ids()
+    }
+
+    /// Occupied program identities, including records awaiting release commit.
+    pub fn program_ids(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        self.programs.ids()
+    }
+
+    /// Occupied queue identities, including records awaiting release commit.
+    pub fn queue_ids(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        self.queues.ids()
+    }
+
+    /// Occupied event identities, including records awaiting release commit.
+    /// An enumerated event may still be pending; enumeration is not completion evidence.
+    pub fn event_ids(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        self.events.ids()
+    }
+
     pub fn context_record(&self, id: ObjectId) -> Result<&ContextRecord<C>, DeviceStateError> {
         self.contexts.get(id).map_err(map_table_error)
     }
@@ -1332,6 +1360,11 @@ mod tests {
         assert_eq!(state.buffer_record(buffer).unwrap().in_flight(), 2);
         assert_eq!(state.program_record(program).unwrap().in_flight(), 1);
         assert_eq!(state.queue_record(queue).unwrap().in_flight(), 1);
+        assert_eq!(state.context_ids().collect::<Vec<_>>(), [context]);
+        assert_eq!(state.buffer_ids().collect::<Vec<_>>(), [buffer]);
+        assert_eq!(state.program_ids().collect::<Vec<_>>(), [program]);
+        assert_eq!(state.queue_ids().collect::<Vec<_>>(), [queue]);
+        assert_eq!(state.event_ids().collect::<Vec<_>>(), [event]);
         assert_eq!(
             state.begin_context_release(context),
             Err(DeviceStateError::Busy)
@@ -1351,6 +1384,8 @@ mod tests {
 
         let event_resource = state.begin_event_release(event).unwrap();
         assert_eq!(event_resource, 50);
+        // Releasing records still own references until the release commits.
+        assert_eq!(state.event_ids().collect::<Vec<_>>(), [event]);
         assert_eq!(
             state.event_record(event).unwrap().release_state(),
             ReleaseState::Releasing
@@ -1360,6 +1395,7 @@ mod tests {
         let event_resource = state.begin_event_release(event).unwrap();
         assert_eq!(event_resource, 50);
         state.commit_event_release(event).unwrap();
+        assert_eq!(state.event_ids().next(), None);
         assert!(matches!(
             state.event_record(event),
             Err(DeviceStateError::StaleObject)
@@ -1407,6 +1443,10 @@ mod tests {
         assert_eq!(state.program_count(), 0);
         assert_eq!(state.queue_count(), 0);
         assert_eq!(state.event_count(), 0);
+        assert_eq!(state.context_ids().next(), None);
+        assert_eq!(state.buffer_ids().next(), None);
+        assert_eq!(state.program_ids().next(), None);
+        assert_eq!(state.queue_ids().next(), None);
     }
 
     #[test]

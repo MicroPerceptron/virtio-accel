@@ -138,6 +138,20 @@ impl<T> ObjectTable<T> {
         self.live == 0
     }
 
+    /// Borrow the currently occupied identities without allocating.
+    ///
+    /// IDs retain this table's namespace, resource kind and current generation.
+    /// Vacant and permanently retired slots are skipped. The iterator borrows
+    /// the table, so mutation requires ending the iteration first; a saved ID
+    /// must still pass ordinary lookup checks after subsequent mutation.
+    pub fn ids(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        self.slots.iter().enumerate().filter_map(|(index, slot)| {
+            slot.value
+                .as_ref()
+                .map(|_| ObjectId::new(index as u32, self.namespace, slot.generation, self.kind))
+        })
+    }
+
     pub fn insert(&mut self, value: T) -> Result<ObjectId, ObjectTableError> {
         self.try_reserve_insert()?;
         Ok(self.insert_prepared(value))
@@ -260,6 +274,36 @@ impl<T> ObjectTable<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iteration_preserves_identity_through_vacancy_reuse_and_exhaustion() {
+        let namespace = ObjectNamespace::new(19).unwrap();
+        let mut table = ObjectTable::with_namespace(ObjectKind::Buffer, 2, namespace);
+        assert_eq!(table.ids().next(), None);
+        let first = table.insert(1).unwrap();
+        let second = table.insert(2).unwrap();
+        assert_eq!(table.ids().collect::<Vec<_>>(), [first, second]);
+        table.remove(first).unwrap();
+        assert_eq!(table.ids().collect::<Vec<_>>(), [second]);
+        let replacement = table.insert(3).unwrap();
+        assert_ne!(first, replacement);
+        assert_eq!(table.ids().collect::<Vec<_>>(), [replacement, second]);
+        assert_eq!(table.get(first), Err(ObjectTableError::StaleId));
+        for id in table.ids() {
+            assert!(table.get(id).is_ok());
+            let other = ObjectTable::<u32>::with_namespace(
+                ObjectKind::Buffer,
+                2,
+                ObjectNamespace::new(20).unwrap(),
+            );
+            assert!(other.get(id).is_err());
+        }
+        table.slots[0].generation = GENERATION_MASK;
+        let exhausted = table.ids().next().unwrap();
+        table.remove(exhausted).unwrap();
+        assert_eq!(table.ids().collect::<Vec<_>>(), [second]);
+        assert_eq!(table.insert(4), Err(ObjectTableError::Full));
+    }
 
     #[test]
     fn stale_ids_never_resolve_after_slot_reuse() {
