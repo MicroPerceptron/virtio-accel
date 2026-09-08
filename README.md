@@ -106,9 +106,11 @@ barriers between dependent dispatches. Buffers are dedicated directly bound stor
 - **Constraints:** `MATMUL` and `NEGATE` admit zero zero-points only, `MUL` a zero shift, and
   `RESHAPE` a constant shape (the TOSA 1.0 `CONST`-producer forms).
 - **Evidence:** the shared FP32 operator corpus, the conformance suite, and the kernel-level
-  tests pass on Mesa lavapipe in CI and, on 2026-09-06, on Intel Arc 140V (Lunar Lake, Mesa 26.0.8 ANV, Vulkan 1.4.335) and the same
-  host's llvmpipe (LLVM 21.1.8): sin/cos/tanh within 1 ulp and erf within 2 ulp of binary64 on
-  both. Apple M3 via MoltenVK has verified only the earlier IDENTITY + MATMUL tier. FP16/INT8
+  tests pass on Mesa lavapipe in CI; on 2026-09-06 on Intel Arc 140V (Lunar Lake, Mesa 26.0.8 ANV,
+  Vulkan 1.4.335) and the same host's llvmpipe (LLVM 21.1.8); and on 2026-09-08 on AMD Radeon 860M
+  (Krackan Point, RADV Mesa 26.1.8, Vulkan 1.4.354), which also runs clean under Khronos
+  synchronization validation. sin/cos/tanh land within 1 ulp and erf within 2 ulp of binary64 on
+  every one. Apple M3 via MoltenVK has verified only the earlier IDENTITY + MATMUL tier. FP16/INT8
   gating remains under the
   [Vulkan wayfinder map](https://github.com/MicroPerceptron/virtio-accel/issues/154); design
   decisions are recorded in `docs/adr/` (ADR 0007 covers this tier).

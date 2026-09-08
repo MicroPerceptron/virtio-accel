@@ -48,6 +48,7 @@ try; it does not promise the program admits, the numerics match, or the performa
 | **Qualcomm Adreno GPU / Kryo CPU** via QNN | GPU / CPU | `hexagon` | Windows 11 ARM64 | **One change away** — backend library path is fixed, and deliberately so |
 | **Snapdragon on Linux or Android** | NPU | `hexagon` | — | **One change away** — build target gate |
 | **Intel Arc 140V**, Lunar Lake | GPU | `vulkan` | Linux x86-64 | **Validated** — Mesa 26.0.8 ANV ([baseline](adr/0005-vulkan-baseline-probe.md)); full FP32 operator tier suite passed 2026-09-06 ([ADR 0007](adr/0007-fp32-operator-tier.md)) |
+| **AMD Radeon 860M**, Krackan Point | GPU | `vulkan` | Linux x86-64, `amdgpu` | **Validated** — RADV Mesa 26.1.8, Vulkan 1.4.354; full FP32 operator tier suite passed 2026-09-08 in every advertised memory domain, and clean under Khronos synchronization validation |
 | **Other Vulkan 1.3 compute devices** | GPU / virtual GPU / CPU | `vulkan` | Linux, Android, Windows, macOS | **Reachable** — enumerated and selected at run time; no other hardware evidence pin yet |
 | **lavapipe / llvmpipe software ICD** | CPU | `vulkan` | Linux x86-64 | **Validated** — pinned by the `vulkan-lavapipe-test` CI lane and exercised by the full backend suite, including the FP32 operator corpus |
 | **No device**, executed in software | — | `mock` | Any | Deterministic in-memory reference; outside this vocabulary |
