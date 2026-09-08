@@ -50,39 +50,113 @@ fn targets_survive_an_identity_round_trip() {
 }
 
 #[test]
-fn capability_advertises_exactly_the_executed_fp32_boundary() {
+fn capability_advertises_the_shared_fp32_operator_set() {
     assert_eq!(VULKAN_TOSA_CAPABILITY.target, VULKAN_TOSA_TARGET);
     assert!(VULKAN_TOSA_CAPABILITY.supports_dtype(DType::FP32, ValueRoles::ALL));
-    assert!(supports_tosa_operator(Op::IDENTITY));
-    assert!(supports_tosa_operator(Op::MATMUL));
-    assert!(!supports_tosa_operator(Op::MAX_POOL2D));
-    assert!(supports_tosa_dtype(DType::FP32));
+    assert!(VULKAN_TOSA_CAPABILITY.supports_dtype(DType::BOOL, ValueRoles::ALL));
+    assert!(VULKAN_TOSA_CAPABILITY.supports_dtype(DType::INT32, ValueRoles::ALL));
+    assert_eq!(VULKAN_TOSA_CAPABILITY.operators.len(), 42);
+    for op in [
+        Op::IDENTITY,
+        Op::MATMUL,
+        Op::MAX_POOL2D,
+        Op::ARGMAX,
+        Op::CLAMP,
+        Op::ERF,
+        Op::SIGMOID,
+        Op::TANH,
+        Op::ADD,
+        Op::SUB,
+        Op::MUL,
+        Op::POW,
+        Op::MAXIMUM,
+        Op::MINIMUM,
+        Op::LOGICAL_AND,
+        Op::LOGICAL_OR,
+        Op::LOGICAL_XOR,
+        Op::LOGICAL_NOT,
+        Op::ABS,
+        Op::CEIL,
+        Op::FLOOR,
+        Op::COS,
+        Op::SIN,
+        Op::EXP,
+        Op::LOG,
+        Op::NEGATE,
+        Op::RECIPROCAL,
+        Op::RSQRT,
+        Op::SELECT,
+        Op::EQUAL,
+        Op::GREATER,
+        Op::GREATER_EQUAL,
+        Op::REDUCE_MAX,
+        Op::REDUCE_MIN,
+        Op::REDUCE_PRODUCT,
+        Op::REDUCE_SUM,
+        Op::CONCAT,
+        Op::RESHAPE,
+        Op::REVERSE,
+        Op::TRANSPOSE,
+        Op::CONST,
+        Op::CONST_SHAPE,
+    ] {
+        assert!(supports_tosa_operator(op), "{op:?}");
+    }
+    for op in [
+        Op::CONV2D,
+        Op::AVG_POOL2D,
+        Op::CAST,
+        Op::RESCALE,
+        Op::PAD,
+        Op::GATHER,
+    ] {
+        assert!(!supports_tosa_operator(op), "{op:?}");
+    }
+    for accepted in [DType::FP32, DType::BOOL, DType::INT32] {
+        assert!(supports_tosa_dtype(accepted), "{accepted:?}");
+    }
     for rejected in [
         DType::FP16,
         DType::BF16,
         DType::INT8,
-        DType::INT32,
-        DType::BOOL,
+        DType::INT4,
+        DType::INT16,
     ] {
         assert!(!supports_tosa_dtype(rejected), "{rejected:?}");
     }
+    // The `MUL` shift is an INT8 constant parameter consumed at admission, so the descriptor
+    // admits INT8 in the constant role only — exactly as the Core ML and OpenVINO tiers do.
+    assert!(VULKAN_TOSA_CAPABILITY.supports_dtype(DType::INT8, ValueRoles::CONSTANT));
+    assert!(!VULKAN_TOSA_CAPABILITY.supports_dtype(DType::INT8, ValueRoles::INPUT));
+    assert!(!VULKAN_TOSA_CAPABILITY.supports_dtype(DType::INT8, ValueRoles::OUTPUT));
+    assert!(!VULKAN_TOSA_CAPABILITY.supports_dtype(DType::INT8, ValueRoles::INTERMEDIATE));
     assert_eq!(VULKAN_TOSA_CAPABILITY.graph.max_blocks, 1);
 }
 
 #[test]
-fn checked_in_shader_module_is_stable() {
-    let words = virtio_accel_vulkan::shader::copy_u32_spirv();
-    assert_eq!(words[0], 0x0723_0203, "SPIR-V magic");
-    assert_eq!(words[1], 0x0001_0300, "SPIR-V 1.3");
-    assert!(std::ptr::eq(
-        words,
-        virtio_accel_vulkan::shader::copy_u32_spirv()
-    ));
-    let matmul = virtio_accel_vulkan::shader::matmul_fp32_spirv();
-    assert_eq!(matmul[0], 0x0723_0203, "SPIR-V magic");
-    assert_eq!(matmul[1], 0x0001_0300, "SPIR-V 1.3");
-    assert!(std::ptr::eq(
-        matmul,
-        virtio_accel_vulkan::shader::matmul_fp32_spirv()
-    ));
+fn every_kernel_variant_assembles_to_valid_spirv_headers() {
+    use virtio_accel_vulkan::shader::{KernelKey, NanMode, ReduceOp, Storage};
+    let keys = [
+        KernelKey::Matmul {
+            tile: 16,
+            buffers: 17,
+        },
+        KernelKey::Reduce {
+            op: ReduceOp::ArgMax(NanMode::Propagate),
+            workgroup: 256,
+            buffers: 17,
+        },
+        KernelKey::Move {
+            storage: Storage::Byte,
+            contiguous: false,
+            workgroup: 128,
+            buffers: 5,
+        },
+    ];
+    for key in keys {
+        let words = key.assemble();
+        assert_eq!(words[0], 0x0723_0203, "SPIR-V magic for {key:?}");
+        assert_eq!(words[1], 0x0001_0300, "SPIR-V 1.3 for {key:?}");
+        assert_eq!(key.assemble(), words, "deterministic assembly for {key:?}");
+    }
 }

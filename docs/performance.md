@@ -248,16 +248,30 @@ VIRTIO_ACCEL_VULKAN_REQUIRE_DEVICE=1 \
   cargo test -p virtio-accel-vulkan --test vulkan -- --nocapture
 ```
 
-Verified driver stacks: Intel ANV (full suite, `VIRTIO_ACCEL_VULKAN_REQUIRE_DEVICE=1`), Apple M3
-via MoltenVK (local validation only, not a CI lane), and Mesa lavapipe in the `vulkan-lavapipe-test`
-CI lane. Copy-path diagnostics across all three: every submission is a direct binding;
+Verified driver stacks for the FP32 operator tier (ADR 0007): Intel Arc 140V (Lunar Lake, Mesa 26.0.8 ANV, Vulkan 1.4.335)
+(full suite, 2026-09-06, alongside the same host's llvmpipe LLVM 21.1.8) and Mesa lavapipe in the
+`vulkan-lavapipe-test` CI lane. Apple M3 via MoltenVK (local validation only, not a CI lane)
+verified the earlier IDENTITY + MATMUL tier. On ANV and llvmpipe alike the crate-authored
+transcendentals measured 1 ulp (sin, cos, tanh) and 2 ulp (erf) worst case against binary64 over
+4096 samples spanning ±8000, ±1e6, `f32::MAX`, and the non-finite edges — the same numbers, which
+is what the `NoContraction` and software-reduction policy exists to guarantee. Copy-path diagnostics across all three: every submission is a direct binding;
 `explicit_transfer_bytes` stays zero for `Host` and `Shared` domains, and `Device` staging is
 confined to `write_buffer`/`read_buffer` as the memory-domain contract requires.
 
-Warm-latency numbers for the IDENTITY and MATMUL kernels are not yet published: the first
-measurement should follow the XDNA structure (load once, warm 20, measure 200) on the Intel ANV
-reference box before this section claims any timing. What is claimed today is correctness and
-copy-path shape, not wall-clock values.
+The FP32 operator tier (ADR 0007) adds the structural optimizations a real graph needs before any
+timing is worth publishing: a whole graph is one command buffer with barriers only between
+dependent dispatches; constants and intermediates live in one device-local arena per program with
+lifetime-packed regions, `RESHAPE`/`IDENTITY` views instead of copies, and dead operators elided;
+`MATMUL` is a shared-memory tiled kernel (16×16, bit-identical to the sequential sum); pipelines
+are created against a per-instance `VkPipelineCache`; every 1-D kernel is a grid-stride loop so
+dispatch counts stay inside `maxComputeWorkGroupCount` at any tensor size. Known costs, recorded so
+they are measured rather than assumed: predicate (`BOOL`) outputs are written with two atomics per
+element, and `SIN`/`COS` evaluate both range reductions and select.
+
+Warm-latency numbers are not yet published: the first measurement should follow the XDNA structure
+(load once, warm 20, measure 200) on the Intel ANV reference box before this section claims any
+timing; the broadened tier still owes a MoltenVK run (the same commands above). What is claimed
+today is correctness and copy-path shape, not wall-clock values.
 
 ## Qualcomm Hexagon evidence status
 

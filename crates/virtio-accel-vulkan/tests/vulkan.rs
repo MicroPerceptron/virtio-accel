@@ -10,7 +10,8 @@
 use std::time::{Duration, Instant};
 
 use virtio_accel_conformance::numerics::{
-    IDENTITY_EDGES_FP32, IDENTITY_INT8, MATMUL_FP32, MAX_POOL2D_FP32,
+    FP32_OPERATOR_CASE_GROUPS, Fp32TierTensor, IDENTITY_EDGES_FP32, IDENTITY_INT8,
+    LINEAR_TANH_FP32, MATMUL_FP32, TosaFp32OperatorCase,
 };
 use virtio_accel_conformance::{
     BindingFixture, ConformanceHooks, ProgramFixture, ResourceCounts, SubmissionPathDiagnostics,
@@ -21,7 +22,8 @@ use virtio_accel_core::{
     BufferUsage, ByteSink, ByteSource, Capabilities, ContextDesc, EventState, MemoryDomain,
     QueueDesc, ReleaseFailure, SubmitFailure, Timeout,
 };
-use virtio_accel_tosa::{Target, parse};
+use virtio_accel_tosa::{DType, Target, parse};
+use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
 use virtio_accel_vulkan::{
     InitError, REQUIRED_RESIDENT_BYTES, VULKAN_TOSA_INTEGER_TARGET, VULKAN_TOSA_TARGET,
     VulkanAccelerator, VulkanEvent,
@@ -561,14 +563,22 @@ fn rejects_out_of_tier_artifacts_before_any_pipeline_exists() {
     for device in devices() {
         let backend = open(&device);
         let context = backend.create_context(ContextDesc::default()).unwrap();
-        // MAX_POOL2D is not yet admitted: the FP32 base tier grows one operator at a time.
+        // CAST is outside the FP32 tier: rejected as unsupported before any pipeline exists.
+        let mut cast = OwnedGraph::new("main");
+        cast.push_tensor(OwnedTensor::new("x", vec![4], DType::FP32))
+            .push_tensor(OwnedTensor::new("y", vec![4], DType::INT32))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::Cast,
+                vec!["x".into()],
+                vec!["y".into()],
+            ))
+            .push_input("x")
+            .push_output("y");
+        let cast = cast
+            .build(VULKAN_TOSA_TARGET)
+            .expect("valid FP32 CAST graph");
         assert!(matches!(
-            load(
-                &backend,
-                &context,
-                MAX_POOL2D_FP32.artifact,
-                VULKAN_TOSA_TARGET
-            ),
+            load(&backend, &context, &cast, VULKAN_TOSA_TARGET),
             Err(BackendError::Unsupported)
         ));
         assert!(matches!(
@@ -1079,6 +1089,672 @@ fn vulkan_backend_passes_the_standard_semantic_suite_on_every_device() {
                 "{device}: {domain:?}: the pending-event precondition raced on every attempt"
             );
         }
+    }
+}
+
+/// Allocate one buffer of `bytes` in `domain`.
+fn allocate(
+    backend: &VulkanAccelerator,
+    context: &<VulkanAccelerator as Accelerator>::Context,
+    bytes: u64,
+    domain: MemoryDomain,
+    usage: BufferUsage,
+) -> <VulkanAccelerator as Accelerator>::Buffer {
+    let desc = BufferDesc::new(bytes, BUFFER_ALIGNMENT, domain, usage).unwrap();
+    backend
+        .allocate_buffer(context, desc)
+        .unwrap_or_else(|error| panic!("{}: allocate failed: {error:?}", backend.device_name()))
+        .into_parts()
+        .0
+}
+
+/// Submit `program` over `inputs` (slots `0..n`) and one output (slot `n`), wait, and read the
+/// output back.
+fn execute(
+    backend: &VulkanAccelerator,
+    context: &<VulkanAccelerator as Accelerator>::Context,
+    program: &<VulkanAccelerator as Accelerator>::Program,
+    inputs: &[Vec<u8>],
+    output_len: usize,
+    domain: MemoryDomain,
+) -> Vec<u8> {
+    let device = backend.device_name();
+    let mut input_buffers = Vec::with_capacity(inputs.len());
+    for bytes in inputs {
+        let mut buffer = allocate(
+            backend,
+            context,
+            bytes.len() as u64,
+            domain,
+            BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+        );
+        backend
+            .write_buffer(&mut buffer, 0, &SliceSource(bytes))
+            .unwrap();
+        input_buffers.push(buffer);
+    }
+    let output = allocate(
+        backend,
+        context,
+        output_len as u64,
+        domain,
+        BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+    );
+    let queue = backend.create_queue(context, QueueDesc::default()).unwrap();
+    let mut bindings: Vec<BindingRef<'_, _>> = input_buffers
+        .iter()
+        .zip(inputs)
+        .enumerate()
+        .map(|(slot, (buffer, bytes))| BindingRef {
+            slot: slot as u32,
+            buffer,
+            range: BufferRange::new(0, bytes.len() as u64).unwrap(),
+            access: AccessMode::Read,
+        })
+        .collect();
+    bindings.push(BindingRef {
+        slot: inputs.len() as u32,
+        buffer: &output,
+        range: BufferRange::new(0, output_len as u64).unwrap(),
+        access: AccessMode::Write,
+    });
+    let event = backend
+        .submit(&queue, program, &bindings, Timeout::Infinite)
+        .unwrap_or_else(|failure| match failure {
+            SubmitFailure::Rejected(error) => panic!("{device}: submission rejected: {error:?}"),
+            SubmitFailure::Indeterminate { error, .. } => {
+                panic!("{device}: submission indeterminate: {error:?}")
+            }
+        });
+    assert_eq!(
+        wait_for_terminal(backend, &event),
+        EventState::Complete,
+        "{device}"
+    );
+    release(backend.destroy_event(event));
+    let mut bytes = VecSink(vec![0; output_len]);
+    backend.read_buffer(&output, 0, &mut bytes).unwrap();
+    release(backend.destroy_queue(queue));
+    release(backend.free_buffer(output));
+    for buffer in input_buffers {
+        release(backend.free_buffer(buffer));
+    }
+    bytes.0
+}
+
+/// Load `artifact`, execute it once over `inputs`, and return the output bytes.
+fn run_graph(
+    backend: &VulkanAccelerator,
+    artifact: &[u8],
+    inputs: &[Vec<u8>],
+    output_len: usize,
+    domain: MemoryDomain,
+) -> Vec<u8> {
+    let device = backend.device_name();
+    let context = backend.create_context(ContextDesc::default()).unwrap();
+    let program = load(backend, &context, artifact, VULKAN_TOSA_TARGET)
+        .unwrap_or_else(|error| panic!("{device}: load failed: {error:?}"));
+    let output = execute(backend, &context, &program, inputs, output_len, domain);
+    release(backend.unload_program(program));
+    release(backend.destroy_context(context));
+    assert_eq!(backend.live_resources(), Default::default(), "{device}");
+    output
+}
+
+fn run_operator_case(
+    backend: &VulkanAccelerator,
+    case: &TosaFp32OperatorCase,
+    domain: MemoryDomain,
+) {
+    let inputs: Vec<Vec<u8>> = case.inputs.iter().map(|input| input.bytes()).collect();
+    let actual = run_graph(
+        backend,
+        case.artifact,
+        &inputs,
+        case.output.byte_len(),
+        domain,
+    );
+    assert!(
+        case.output_matches(&actual),
+        "{}: {} in {domain:?}: expected {:?}, got {:?}",
+        backend.device_name(),
+        case.name,
+        case.output,
+        describe(case.output, &actual)
+    );
+}
+
+/// Render output bytes in the oracle's element type for failure messages.
+fn describe(shape: Fp32TierTensor, bytes: &[u8]) -> String {
+    match shape {
+        Fp32TierTensor::Fp32(_) => format!("{:?}", floats_le(bytes)),
+        Fp32TierTensor::Bool(_) => format!("{bytes:?}"),
+        Fp32TierTensor::Int32(_) => format!(
+            "{:?}",
+            bytes
+                .chunks_exact(4)
+                .map(|chunk| i32::from_le_bytes(chunk.try_into().unwrap()))
+                .collect::<Vec<_>>()
+        ),
+    }
+}
+
+fn floats_le(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect()
+}
+
+fn float_bytes_le(values: &[f32]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
+}
+
+/// Every operator of the FP32 tier, every corpus case, every advertised memory domain.
+#[test]
+fn executes_every_fp32_operator_case_in_every_advertised_domain() {
+    for device in devices() {
+        let backend = open(&device);
+        for domain in advertised_domains(&backend) {
+            for case in FP32_OPERATOR_CASE_GROUPS
+                .iter()
+                .flat_map(|group| group.iter())
+            {
+                run_operator_case(&backend, case, domain);
+            }
+        }
+    }
+}
+
+/// The three-operator graph is one submission: three dispatches over one program arena holding
+/// the zero points, the bias, and both intermediates; RESHAPE-free, so no view aliasing here.
+#[test]
+fn multi_operator_graphs_run_as_one_submission_over_an_arena() {
+    for device in devices() {
+        let backend = open(&device);
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        let program = load(
+            &backend,
+            &context,
+            LINEAR_TANH_FP32.artifact,
+            VULKAN_TOSA_TARGET,
+        )
+        .unwrap();
+        assert_eq!(program.dispatch_count(), 3, "{device}");
+        assert!(program.arena_bytes() > 0, "{device}");
+        let inputs: Vec<Vec<u8>> = LINEAR_TANH_FP32
+            .inputs
+            .iter()
+            .map(|input| input.bytes())
+            .collect();
+        let events_before = backend.live_resources().events;
+        let actual = execute(
+            &backend,
+            &context,
+            &program,
+            &inputs,
+            LINEAR_TANH_FP32.output.byte_len(),
+            MemoryDomain::Host,
+        );
+        assert_eq!(backend.live_resources().events, events_before, "{device}");
+        assert!(
+            LINEAR_TANH_FP32.output_matches(&actual),
+            "{device}: {:?}",
+            floats_le(&actual)
+        );
+        release(backend.unload_program(program));
+        release(backend.destroy_context(context));
+    }
+}
+
+/// A five-element BOOL output bound inside a larger buffer: the kernel's atomic byte writes must
+/// leave every neighbouring byte, including the three trailing bytes of the last word, intact.
+#[test]
+fn byte_storage_outputs_leave_neighbouring_bytes_untouched() {
+    let mut graph = OwnedGraph::new("main");
+    graph
+        .push_tensor(OwnedTensor::new("a", vec![5], DType::FP32))
+        .push_tensor(OwnedTensor::new("b", vec![5], DType::FP32))
+        .push_tensor(OwnedTensor::new("y", vec![5], DType::BOOL))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Greater,
+            vec!["a".into(), "b".into()],
+            vec!["y".into()],
+        ))
+        .push_input("a")
+        .push_input("b")
+        .push_output("y");
+    let artifact = graph.build(VULKAN_TOSA_TARGET).unwrap();
+    let a = float_bytes_le(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+    let b = float_bytes_le(&[5.0, 4.0, 3.0, 2.0, 1.0]);
+    for device in devices() {
+        let backend = open(&device);
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        let program = load(&backend, &context, &artifact, VULKAN_TOSA_TARGET).unwrap();
+        // Two inputs and one output need three bindings; every device this backend opens
+        // advertises at least that many.
+        let max_bindings = backend
+            .device_info()
+            .unwrap()
+            .limits
+            .max_bindings_per_submission;
+        assert!(
+            max_bindings >= 3,
+            "{device}: {max_bindings} bindings per submission"
+        );
+        let offset = 64_u64;
+        let total = 192_u64;
+        let mut lhs = allocate(
+            &backend,
+            &context,
+            a.len() as u64,
+            MemoryDomain::Host,
+            BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+        );
+        let mut rhs = allocate(
+            &backend,
+            &context,
+            b.len() as u64,
+            MemoryDomain::Host,
+            BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+        );
+        backend.write_buffer(&mut lhs, 0, &SliceSource(&a)).unwrap();
+        backend.write_buffer(&mut rhs, 0, &SliceSource(&b)).unwrap();
+        let mut output = allocate(
+            &backend,
+            &context,
+            total,
+            MemoryDomain::Host,
+            BufferUsage::TRANSFER_SOURCE
+                | BufferUsage::TRANSFER_DESTINATION
+                | BufferUsage::PROGRAM_OUTPUT,
+        );
+        let sentinel = vec![0xaa_u8; total as usize];
+        backend
+            .write_buffer(&mut output, 0, &SliceSource(&sentinel))
+            .unwrap();
+        let queue = backend
+            .create_queue(&context, QueueDesc::default())
+            .unwrap();
+        let bindings = [
+            BindingRef {
+                slot: 0,
+                buffer: &lhs,
+                range: BufferRange::new(0, a.len() as u64).unwrap(),
+                access: AccessMode::Read,
+            },
+            BindingRef {
+                slot: 1,
+                buffer: &rhs,
+                range: BufferRange::new(0, b.len() as u64).unwrap(),
+                access: AccessMode::Read,
+            },
+            BindingRef {
+                slot: 2,
+                buffer: &output,
+                range: BufferRange::new(offset, 5).unwrap(),
+                access: AccessMode::Write,
+            },
+        ];
+        let event = backend
+            .submit(&queue, &program, &bindings, Timeout::Infinite)
+            .unwrap_or_else(|_| panic!("{device}: submission rejected"));
+        assert_eq!(wait_for_terminal(&backend, &event), EventState::Complete);
+        release(backend.destroy_event(event));
+        let mut bytes = VecSink(vec![0; total as usize]);
+        backend.read_buffer(&output, 0, &mut bytes).unwrap();
+        let bytes = bytes.0;
+        let (start, end) = (offset as usize, offset as usize + 5);
+        assert_eq!(
+            &bytes[start..end],
+            &[0, 0, 0, 1, 1],
+            "{device}: predicate bytes"
+        );
+        assert!(
+            bytes[..start].iter().all(|byte| *byte == 0xaa),
+            "{device}: bytes before the tensor were modified"
+        );
+        assert!(
+            bytes[end..].iter().all(|byte| *byte == 0xaa),
+            "{device}: bytes after the tensor were modified: {:?}",
+            &bytes[end..end + 8]
+        );
+        release(backend.destroy_queue(queue));
+        release(backend.unload_program(program));
+        release(backend.free_buffer(output));
+        release(backend.free_buffer(rhs));
+        release(backend.free_buffer(lhs));
+        release(backend.destroy_context(context));
+    }
+}
+
+/// BOOL inputs are read as "any nonzero byte is true" and written back canonically as 0/1.
+#[test]
+fn byte_storage_inputs_treat_any_nonzero_byte_as_true() {
+    let mut graph = OwnedGraph::new("main");
+    graph
+        .push_tensor(OwnedTensor::new("x", vec![5], DType::BOOL))
+        .push_tensor(OwnedTensor::new("y", vec![5], DType::BOOL))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::LogicalNot,
+            vec!["x".into()],
+            vec!["y".into()],
+        ))
+        .push_input("x")
+        .push_output("y");
+    let artifact = graph.build(VULKAN_TOSA_TARGET).unwrap();
+    for device in devices() {
+        let backend = open(&device);
+        let actual = run_graph(
+            &backend,
+            &artifact,
+            &[vec![0xff, 0, 2, 0, 1]],
+            5,
+            MemoryDomain::Host,
+        );
+        assert_eq!(actual, vec![0, 1, 0, 1, 0], "{device}");
+    }
+}
+
+/// Distance in binary32 ulps between two finite values of the same sign.
+fn ulp_distance(a: f32, b: f32) -> u64 {
+    fn ordered(value: f32) -> i64 {
+        let bits = value.to_bits() as i32;
+        i64::from(if bits < 0 { i32::MIN - bits } else { bits })
+    }
+    ordered(a).abs_diff(ordered(b))
+}
+
+/// One unary FP32 graph of `elements` elements built with the shared graph builder.
+fn unary_artifact(kind: OperatorKind, elements: usize) -> Vec<u8> {
+    let mut graph = OwnedGraph::new("main");
+    graph
+        .push_tensor(OwnedTensor::new("x", vec![elements as i32], DType::FP32))
+        .push_tensor(OwnedTensor::new("y", vec![elements as i32], DType::FP32))
+        .push_operator(OwnedOperator::new(kind, vec!["x".into()], vec!["y".into()]))
+        .push_input("x")
+        .push_output("y");
+    graph.build(VULKAN_TOSA_TARGET).unwrap()
+}
+
+/// The crate-authored SIN, COS, TANH, and ERF evaluations against binary64 references: within
+/// a few ulps across the polynomial range and exact for the non-finite edges. This is the
+/// evidence behind the FP32 tier's numerics policy (ADR 0007), independent of the driver's own
+/// transcendental precision.
+#[test]
+fn software_transcendentals_track_binary64_references() {
+    const ELEMENTS: usize = 4096;
+    let mut inputs = Vec::with_capacity(ELEMENTS);
+    // Dense sweep of [-40, 40], a coarse sweep to the 8192 range-reduction boundary, tiny
+    // values, and the non-finite edges.
+    for index in 0..3000 {
+        inputs.push(-40.0 + 80.0 * index as f32 / 2999.0);
+    }
+    for index in 0..1000 {
+        inputs.push(-8000.0 + 16_000.0 * index as f32 / 999.0);
+    }
+    inputs.extend_from_slice(&[
+        0.0,
+        -0.0,
+        1.0e-30,
+        -1.0e-30,
+        1.0e-7,
+        f32::MIN_POSITIVE,
+        1.0e6,
+        -1.0e6,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NAN,
+        f32::MAX,
+    ]);
+    inputs.resize(ELEMENTS, 0.5);
+    struct Reference {
+        kind: OperatorKind,
+        name: &'static str,
+        f: fn(f64) -> f64,
+        max_ulps: u64,
+    }
+    let references = [
+        Reference {
+            kind: OperatorKind::Sin,
+            name: "sin",
+            f: f64::sin,
+            max_ulps: 2,
+        },
+        Reference {
+            kind: OperatorKind::Cos,
+            name: "cos",
+            f: f64::cos,
+            max_ulps: 2,
+        },
+        Reference {
+            kind: OperatorKind::Tanh,
+            name: "tanh",
+            f: f64::tanh,
+            max_ulps: 2,
+        },
+        Reference {
+            kind: OperatorKind::Erf,
+            name: "erf",
+            f: |x| libm_erf(x),
+            max_ulps: 4,
+        },
+    ];
+    for device in devices() {
+        let backend = open(&device);
+        for reference in &references {
+            let artifact = unary_artifact(reference.kind, ELEMENTS);
+            let actual = floats_le(&run_graph(
+                &backend,
+                &artifact,
+                &[float_bytes_le(&inputs)],
+                ELEMENTS * 4,
+                MemoryDomain::Host,
+            ));
+            let mut worst = 0_u64;
+            for (x, got) in inputs.iter().zip(&actual) {
+                let expected = (reference.f)(f64::from(*x)) as f32;
+                if expected.is_nan() {
+                    assert!(
+                        got.is_nan(),
+                        "{device}: {}({x}) = {got}, expected NaN",
+                        reference.name
+                    );
+                    continue;
+                }
+                if expected.is_infinite() || expected == 0.0 {
+                    assert_eq!(
+                        got.to_bits(),
+                        expected.to_bits(),
+                        "{device}: {}({x}) = {got}, expected {expected}",
+                        reference.name
+                    );
+                    continue;
+                }
+                let ulps = ulp_distance(*got, expected);
+                worst = worst.max(ulps);
+                assert!(
+                    ulps <= reference.max_ulps,
+                    "{device}: {}({x}) = {got}, expected {expected} ({ulps} ulps)",
+                    reference.name
+                );
+            }
+            eprintln!(
+                "{device}: {} worst-case error {worst} ulp over {ELEMENTS} samples",
+                reference.name
+            );
+        }
+    }
+}
+
+/// `erf` in binary64 (the Rust standard library has no `erf`): the Abramowitz–Stegun 7.1.26
+/// form is far too coarse, so use the classic Numerical Recipes Chebyshev `erfc` with
+/// fractional error below 1.2e-7 — well inside binary32 for an oracle.
+fn libm_erf(x: f64) -> f64 {
+    // `erf(±0) = ±0`; the series below would round the sign away.
+    if x == 0.0 {
+        return x;
+    }
+    // Use the series for small |x| so the oracle has full relative accuracy near zero.
+    if x.abs() < 1.0 {
+        let z = x * x;
+        let mut term = x;
+        let mut sum = x;
+        for n in 1..40 {
+            term *= -z / n as f64;
+            sum += term / (2 * n + 1) as f64;
+        }
+        return sum * 2.0 / std::f64::consts::PI.sqrt();
+    }
+    let t = 1.0 / (1.0 + 0.5 * x.abs());
+    let poly = -1.265_512_23
+        + t * (1.000_023_68
+            + t * (0.374_091_96
+                + t * (0.096_784_18
+                    + t * (-0.186_288_06
+                        + t * (0.278_868_07
+                            + t * (-1.135_203_98
+                                + t * (1.488_515_87 + t * (-0.822_152_23 + t * 0.170_872_77))))))));
+    let erfc = t * (-x * x + poly).exp();
+    if x < 0.0 { erfc - 1.0 } else { 1.0 - erfc }
+}
+
+/// A MATMUL graph with constant zero points over `[batch, m, k] × [batch, k, n]`.
+fn matmul_artifact(batch: i32, m: i32, k: i32, n: i32) -> Vec<u8> {
+    let zero = 0_f32.to_le_bytes().to_vec();
+    let mut graph = OwnedGraph::new("main");
+    graph
+        .push_tensor(OwnedTensor::new("a", vec![batch, m, k], DType::FP32))
+        .push_tensor(OwnedTensor::new("b", vec![batch, k, n], DType::FP32))
+        .push_tensor(OwnedTensor::constant(
+            "a_zp",
+            vec![1],
+            DType::FP32,
+            zero.clone(),
+        ))
+        .push_tensor(OwnedTensor::constant("b_zp", vec![1], DType::FP32, zero))
+        .push_tensor(OwnedTensor::new("y", vec![batch, m, n], DType::FP32))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Const,
+            vec![],
+            vec!["a_zp".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Const,
+            vec![],
+            vec!["b_zp".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::MatMul,
+            vec!["a".into(), "b".into(), "a_zp".into(), "b_zp".into()],
+            vec!["y".into()],
+        ))
+        .push_input("a")
+        .push_input("b")
+        .push_output("y");
+    graph.build(VULKAN_TOSA_TARGET).unwrap()
+}
+
+/// Deterministic pseudo-random values in `[-2, 2)`.
+fn pseudo_random(count: usize, seed: u32) -> Vec<f32> {
+    let mut state = seed;
+    (0..count)
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) as f32 / (1_u32 << 24) as f32 * 4.0 - 2.0
+        })
+        .collect()
+}
+
+/// The tiled MATMUL kernel is bit-identical to a sequential ascending-k loop with separately
+/// rounded multiplies and adds, at sizes that are not tile multiples and across batches.
+#[test]
+fn tiled_matmul_is_bit_identical_to_the_sequential_reference() {
+    for device in devices() {
+        let backend = open(&device);
+        for (batch, m, k, n) in [
+            (1, 1, 1, 1),
+            (2, 33, 45, 17),
+            (1, 16, 16, 16),
+            (3, 7, 100, 5),
+        ] {
+            let a = pseudo_random((batch * m * k) as usize, 7);
+            let b = pseudo_random((batch * k * n) as usize, 11);
+            let mut expected = vec![0_f32; (batch * m * n) as usize];
+            for z in 0..batch as usize {
+                for i in 0..m as usize {
+                    for j in 0..n as usize {
+                        let mut acc = 0_f32;
+                        for kk in 0..k as usize {
+                            let product = a[(z * m as usize + i) * k as usize + kk]
+                                * b[(z * k as usize + kk) * n as usize + j];
+                            acc += product;
+                        }
+                        expected[(z * m as usize + i) * n as usize + j] = acc;
+                    }
+                }
+            }
+            let actual = floats_le(&run_graph(
+                &backend,
+                &matmul_artifact(batch, m, k, n),
+                &[float_bytes_le(&a), float_bytes_le(&b)],
+                expected.len() * 4,
+                MemoryDomain::Host,
+            ));
+            for (index, (got, want)) in actual.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "{device}: [{batch},{m},{k}]x[{batch},{k},{n}] element {index}: {got} vs {want}"
+                );
+            }
+        }
+    }
+}
+
+/// Rank-4 broadcasting through the strided elementwise path, with a `[2, 1, 3, 1]` operand
+/// against `[1, 4, 1, 5]`, and a rank-4 reduction over the middle axis.
+#[test]
+fn broadcast_elementwise_uses_the_strided_index_path() {
+    let mut graph = OwnedGraph::new("main");
+    graph
+        .push_tensor(OwnedTensor::new("a", vec![2, 1, 3, 1], DType::FP32))
+        .push_tensor(OwnedTensor::new("b", vec![1, 4, 1, 5], DType::FP32))
+        .push_tensor(OwnedTensor::new("y", vec![2, 4, 3, 5], DType::FP32))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Sub,
+            vec!["a".into(), "b".into()],
+            vec!["y".into()],
+        ))
+        .push_input("a")
+        .push_input("b")
+        .push_output("y");
+    let artifact = graph.build(VULKAN_TOSA_TARGET).unwrap();
+    let a: Vec<f32> = (0..6).map(|i| i as f32 * 100.0).collect();
+    let b: Vec<f32> = (0..20).map(|i| i as f32).collect();
+    let mut expected = Vec::with_capacity(120);
+    for i0 in 0..2 {
+        for i1 in 0..4 {
+            for i2 in 0..3 {
+                for i3 in 0..5 {
+                    expected.push(a[i0 * 3 + i2] - b[i1 * 5 + i3]);
+                }
+            }
+        }
+    }
+    for device in devices() {
+        let backend = open(&device);
+        let actual = floats_le(&run_graph(
+            &backend,
+            &artifact,
+            &[float_bytes_le(&a), float_bytes_le(&b)],
+            expected.len() * 4,
+            MemoryDomain::Host,
+        ));
+        assert_eq!(actual, expected, "{device}");
     }
 }
 

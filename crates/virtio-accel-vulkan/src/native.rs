@@ -10,6 +10,7 @@
 //! pools are externally synchronized objects, and the contract permits thread-affine providers.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ffi::CStr;
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -24,8 +25,8 @@ use virtio_accel_core::{
 };
 use virtio_accel_tosa::{CapabilityDescriptor, TosaCapabilityProvider};
 
-use crate::lower::{Kernel, LoweringError, ProgramPlan, SlotRole, lower_tosa};
-use crate::shader;
+use crate::lower::{KernelSpec, LoweringError, ProgramPlan, SlotRole, Work, lower_tosa};
+use crate::shader::{self, KernelKey};
 use crate::{InitError, REQUIRED_RESIDENT_BYTES};
 
 /// Maximal TOSA artifact bytes admitted before parsing (mirrors the other TOSA backends).
@@ -45,7 +46,8 @@ const TRANSFER_TIMEOUT_NS: u64 = 30_000_000_000;
 /// allocation must stay inside it.
 const ASSUMED_MAX_MEMORY_ALLOCATIONS: u32 = 4096;
 const MAX_CONTEXTS: u32 = 16;
-const MAX_BUFFERS_PER_CONTEXT: u32 = 255;
+const MAX_BUFFERS_PER_CONTEXT: u32 = 190;
+/// Every program may own one arena allocation for its constants and intermediates.
 const MAX_PROGRAMS_PER_CONTEXT: u32 = 64;
 const MAX_QUEUES_PER_CONTEXT: u32 = 16;
 /// Ring depth per context: one (command buffer, fence, descriptor set) triple per outstanding
@@ -53,10 +55,136 @@ const MAX_QUEUES_PER_CONTEXT: u32 = 16;
 const RING_DEPTH: u32 = 64;
 const MAX_BINDINGS_PER_SUBMISSION: u32 = 16;
 
+/// Explicit transfers and constant uploads hold at most one transient staging allocation at a
+/// time, on top of the guest buffers and program arenas.
+const TRANSIENT_STAGING_ALLOCATIONS: u32 = 1;
+
 const _: () = assert!(
-    MAX_CONTEXTS * MAX_BUFFERS_PER_CONTEXT < ASSUMED_MAX_MEMORY_ALLOCATIONS,
-    "advertised buffer aggregate must fit the assumed allocation count with one staging slot"
+    MAX_CONTEXTS * (MAX_BUFFERS_PER_CONTEXT + MAX_PROGRAMS_PER_CONTEXT)
+        + TRANSIENT_STAGING_ALLOCATIONS
+        <= ASSUMED_MAX_MEMORY_ALLOCATIONS,
+    "advertised buffers, program arenas, and the staging allocation must fit the assumed allocation count"
 );
+
+/// Preferred 1-D workgroup size of the grid-stride kernels, and the size used on a device whose
+/// `maxComputeWorkGroupInvocations` is only the specification minimum (128).
+const PREFERRED_WORKGROUP: u32 = 256;
+const FALLBACK_WORKGROUP: u32 = 128;
+/// Preferred MATMUL tile (16 × 16 = 256 invocations, 2 KiB shared), and the fallback tile.
+const PREFERRED_MATMUL_TILE: u32 = 16;
+const FALLBACK_MATMUL_TILE: u32 = 8;
+/// Bytes every `VkBuffer` size is rounded up to so byte-storage tensors can be addressed by
+/// whole words at their tail; the logical buffer size the guest sees is unchanged.
+const WORD_BYTES: u64 = 4;
+
+/// Kernel parameters fixed per device from its limits (ADR 0007).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Tuning {
+    /// 1-D workgroup size of the elementwise, reduction, pooling, and copy kernels.
+    workgroup: u32,
+    /// Side of the square MATMUL tile.
+    matmul_tile: u32,
+    /// Length of the storage-buffer descriptor array: bound slots plus the program arena.
+    buffers: u32,
+}
+
+impl Tuning {
+    /// Derive the tuning, or `None` when the device cannot host even the smallest kernels.
+    fn from_limits(limits: &vk::PhysicalDeviceLimits) -> Option<Self> {
+        let invocations = limits.max_compute_work_group_invocations;
+        let size = limits.max_compute_work_group_size;
+        let workgroup = if invocations >= PREFERRED_WORKGROUP && size[0] >= PREFERRED_WORKGROUP {
+            PREFERRED_WORKGROUP
+        } else if invocations >= FALLBACK_WORKGROUP && size[0] >= FALLBACK_WORKGROUP {
+            FALLBACK_WORKGROUP
+        } else {
+            return None;
+        };
+        let tile_fits = |tile: u32| {
+            invocations >= tile * tile
+                && size[0] >= tile
+                && size[1] >= tile
+                && limits.max_compute_shared_memory_size >= 2 * tile * tile * 4
+        };
+        let matmul_tile = if tile_fits(PREFERRED_MATMUL_TILE) {
+            PREFERRED_MATMUL_TILE
+        } else if tile_fits(FALLBACK_MATMUL_TILE) {
+            FALLBACK_MATMUL_TILE
+        } else {
+            return None;
+        };
+        // Every element of the descriptor array counts against both per-stage and per-set
+        // storage-buffer limits; at least one input, one output, and the arena must fit.
+        let descriptors = limits
+            .max_per_stage_descriptor_storage_buffers
+            .min(limits.max_descriptor_set_storage_buffers)
+            .min(MAX_BINDINGS_PER_SUBMISSION + 1);
+        if descriptors < 3 {
+            return None;
+        }
+        Some(Self {
+            workgroup,
+            matmul_tile,
+            buffers: descriptors,
+        })
+    }
+
+    /// Bindings a submission may carry: every descriptor but the arena's.
+    const fn max_bindings(self) -> u32 {
+        self.buffers - 1
+    }
+
+    fn key(self, kernel: KernelSpec) -> KernelKey {
+        match kernel {
+            KernelSpec::Elementwise { op, broadcast } => KernelKey::Elementwise {
+                op,
+                broadcast,
+                workgroup: self.workgroup,
+                buffers: self.buffers,
+            },
+            KernelSpec::Reduce { op } => KernelKey::Reduce {
+                op,
+                workgroup: self.workgroup,
+                buffers: self.buffers,
+            },
+            KernelSpec::Matmul => KernelKey::Matmul {
+                tile: self.matmul_tile,
+                buffers: self.buffers,
+            },
+            KernelSpec::MaxPool { nan_mode } => KernelKey::MaxPool {
+                nan_mode,
+                workgroup: self.workgroup,
+                buffers: self.buffers,
+            },
+            KernelSpec::Move {
+                storage,
+                contiguous,
+            } => KernelKey::Move {
+                storage,
+                contiguous,
+                workgroup: self.workgroup,
+                buffers: self.buffers,
+            },
+        }
+    }
+
+    /// Workgroup counts for `work`, or `None` when they exceed the device's dispatch limits.
+    fn workgroups(self, work: Work, limits: &vk::PhysicalDeviceLimits) -> Option<[u32; 3]> {
+        let max = limits.max_compute_work_group_count;
+        match work {
+            Work::Linear(count) => Some([
+                shader::linear_workgroups(count, self.workgroup, max[0].max(1)),
+                1,
+                1,
+            ]),
+            Work::Matmul { m, n, batch } => {
+                let groups = shader::matmul_workgroups(m, n, batch, self.matmul_tile);
+                (groups[0] <= max[0] && groups[1] <= max[1] && groups[2] <= max[2])
+                    .then_some(groups)
+            }
+        }
+    }
+}
 
 const EXCLUSIVE_ACCESS: u64 = 1 << 63;
 
@@ -152,6 +280,7 @@ struct PhysicalDeviceRecord {
     limits: vk::PhysicalDeviceLimits,
     memory: vk::PhysicalDeviceMemoryProperties,
     buffer_device_address: bool,
+    tuning: Tuning,
 }
 
 impl PhysicalDeviceRecord {
@@ -166,6 +295,7 @@ impl PhysicalDeviceRecord {
         if properties.api_version < vk::API_VERSION_1_3 {
             return None;
         }
+        let tuning = Tuning::from_limits(&properties.limits)?;
 
         let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default();
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default();
@@ -207,6 +337,7 @@ impl PhysicalDeviceRecord {
             limits: properties.limits,
             memory,
             buffer_device_address: vulkan12.buffer_device_address == vk::TRUE,
+            tuning,
         })
     }
 
@@ -265,7 +396,10 @@ impl MemoryPlan {
         let usable = |index: usize, flags: vk::MemoryPropertyFlags| {
             buffer_type_mask & (1 << index) != 0
                 && !flags.intersects(
-                    vk::MemoryPropertyFlags::PROTECTED | vk::MemoryPropertyFlags::LAZILY_ALLOCATED,
+                    vk::MemoryPropertyFlags::PROTECTED
+                        | vk::MemoryPropertyFlags::LAZILY_ALLOCATED
+                        | vk::MemoryPropertyFlags::DEVICE_COHERENT_AMD
+                        | vk::MemoryPropertyFlags::RDMA_CAPABLE_NV,
                 )
         };
         let pick = |required: vk::MemoryPropertyFlags,
@@ -356,6 +490,11 @@ struct Shared {
     queue: vk::Queue,
     set_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
+    /// Driver-side cache shared by every pipeline of this instance: programs selecting the same
+    /// kernel with the same specialization are compiled once (ADR 0007).
+    pipeline_cache: vk::PipelineCache,
+    /// Assembled kernel modules by variant; assembled once per instance, on first use.
+    modules: RefCell<HashMap<KernelKey, Rc<[u32]>>>,
     memory_plan: MemoryPlan,
     info: DeviceInfo,
     /// Sticky device-loss flag: after `VK_ERROR_DEVICE_LOST` no entry point is re-entered except
@@ -410,26 +549,14 @@ impl Shared {
             return Err(InitError::DeviceUnavailable);
         };
 
-        // The shared set layout declares the widest kernel's binding count: slots 0..2 so both
-        // the two-slot elementwise kernels and the three-slot MATMUL kernel update a contiguous
-        // prefix of one descriptor set.
-        let bindings = [
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(shader::INPUT_BINDING)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(shader::OUTPUT_BINDING)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(shader::MATMUL_OUTPUT_BINDING)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-        ];
+        // One descriptor: set 0, binding 0, an array of storage buffers. Elements `0..bindings`
+        // are the submission's bound slots and the last element is the program arena; kernels
+        // select operands by specialization constant (ADR 0007).
+        let bindings = [vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(physical.tuning.buffers)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)];
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
         // SAFETY: the device is live and `layout_info` points at live locals.
         let set_layout = match unsafe { device.create_descriptor_set_layout(&layout_info, None) } {
@@ -457,6 +584,22 @@ impl Shared {
                 }
             };
 
+        // SAFETY: the device is live; an empty create info is a valid empty cache.
+        let pipeline_cache = match unsafe {
+            device.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None)
+        } {
+            Ok(cache) => cache,
+            Err(_) => {
+                // SAFETY: the three objects were created above and nothing references them.
+                unsafe {
+                    device.destroy_pipeline_layout(pipeline_layout, None);
+                    device.destroy_descriptor_set_layout(set_layout, None);
+                    device.destroy_device(None);
+                }
+                return Err(InitError::DeviceCreationFailed);
+            }
+        };
+
         let info = device_info(&physical, memory_plan);
         Ok(Rc::new(Self {
             device,
@@ -464,6 +607,8 @@ impl Shared {
             queue,
             set_layout,
             pipeline_layout,
+            pipeline_cache,
+            modules: RefCell::new(HashMap::new()),
             memory_plan,
             info,
             poisoned: Cell::new(false),
@@ -488,6 +633,16 @@ impl Shared {
         }
     }
 
+    /// The assembled module for `key`, built on first use and shared by every program after.
+    fn module(&self, key: KernelKey) -> Rc<[u32]> {
+        Rc::clone(
+            self.modules
+                .borrow_mut()
+                .entry(key)
+                .or_insert_with(|| Rc::from(key.assemble())),
+        )
+    }
+
     /// Block until the device is idle; used only on teardown paths that must not free memory a
     /// pending submission may still touch.
     fn wait_idle(&self) {
@@ -506,6 +661,8 @@ impl Drop for Shared {
         unsafe {
             let _ = self.device.device_wait_idle();
             self.device
+                .destroy_pipeline_cache(self.pipeline_cache, None);
+            self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
             self.device
                 .destroy_descriptor_set_layout(self.set_layout, None);
@@ -522,9 +679,12 @@ fn device_info(physical: &PhysicalDeviceRecord, memory_plan: MemoryPlan) -> Devi
         .unwrap_or(0);
     // A storage-buffer descriptor cannot exceed `maxStorageBufferRange` (128 MiB on lavapipe),
     // so no buffer may either: a larger allocation could never be bound directly.
-    let max_buffer_bytes = u64::from(physical.limits.max_storage_buffer_range)
-        .min(largest_heap)
-        .max(1);
+    // Sizes are rounded up to whole words at allocation, so the advertised bound is rounded
+    // down to keep every rounded descriptor range inside `maxStorageBufferRange`.
+    let max_buffer_bytes = (u64::from(physical.limits.max_storage_buffer_range).min(largest_heap)
+        / WORD_BYTES
+        * WORD_BYTES)
+        .max(WORD_BYTES);
     DeviceInfo {
         identity: DeviceIdentity {
             uuid: physical.uuid,
@@ -539,7 +699,7 @@ fn device_info(physical: &PhysicalDeviceRecord, memory_plan: MemoryPlan) -> Devi
             max_programs_per_context: MAX_PROGRAMS_PER_CONTEXT,
             max_queues_per_context: MAX_QUEUES_PER_CONTEXT,
             max_events_per_context: RING_DEPTH,
-            max_bindings_per_submission: MAX_BINDINGS_PER_SUBMISSION,
+            max_bindings_per_submission: physical.tuning.max_bindings(),
             max_buffer_bytes,
             max_artifact_bytes: MAX_TOSA_ARTIFACT_BYTES,
         },
@@ -591,11 +751,10 @@ impl ContextInner {
         let command_buffers = unsafe { device.allocate_command_buffers(&allocate_info) }
             .map_err(|result| shared.fail(result))?;
 
-        // The shared set layout declares three storage-buffer bindings (the widest kernel), so
-        // each allocated set charges three descriptors against the pool.
+        // Each set holds the whole descriptor array, so every set charges `buffers` descriptors.
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: RING_DEPTH * 3,
+            descriptor_count: RING_DEPTH * shared.physical.tuning.buffers,
         }];
         let descriptor_pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(RING_DEPTH)
@@ -666,7 +825,7 @@ impl ContextInner {
         source: vk::Buffer,
         destination: vk::Buffer,
         region: vk::BufferCopy,
-        host_reads_destination: bool,
+        visibility: CopyVisibility,
     ) -> Result<(), BackendError> {
         let shared = &self.shared;
         let device = &shared.device;
@@ -676,9 +835,22 @@ impl ContextInner {
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         let barrier = vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COPY)
-            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::HOST)
-            .dst_access_mask(vk::AccessFlags2::HOST_READ);
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE);
+        let barrier = match visibility {
+            CopyVisibility::HostRead => barrier
+                .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+                .dst_access_mask(vk::AccessFlags2::HOST_READ),
+            CopyVisibility::Device => barrier
+                .dst_stage_mask(
+                    vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::COPY,
+                )
+                .dst_access_mask(
+                    vk::AccessFlags2::SHADER_STORAGE_READ
+                        | vk::AccessFlags2::SHADER_STORAGE_WRITE
+                        | vk::AccessFlags2::TRANSFER_READ
+                        | vk::AccessFlags2::TRANSFER_WRITE,
+                ),
+        };
         let barriers = [barrier];
         let dependency = vk::DependencyInfo::default().memory_barriers(&barriers);
         let submit_buffers =
@@ -696,9 +868,7 @@ impl ContextInner {
                 .begin_command_buffer(command_buffer, &begin)
                 .map_err(|result| shared.fail(result))?;
             device.cmd_copy_buffer(command_buffer, source, destination, &[region]);
-            if host_reads_destination {
-                device.cmd_pipeline_barrier2(command_buffer, &dependency);
-            }
+            device.cmd_pipeline_barrier2(command_buffer, &dependency);
             device
                 .end_command_buffer(command_buffer)
                 .map_err(|result| shared.fail(result))?;
@@ -717,6 +887,18 @@ impl ContextInner {
             }
         }
     }
+}
+
+/// Who consumes the destination of a blocking copy, and therefore which barrier follows it.
+/// Submissions carry no implicit memory dependency between one another, so every consumer of a
+/// copied range is named explicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CopyVisibility {
+    /// The host reads the destination through a mapping after the fence signals.
+    HostRead,
+    /// Later submissions read or write the destination: compute dispatches over a bound buffer
+    /// or the arena, and further staging copies out of or into it.
+    Device,
 }
 
 /// Destroys partially created context objects if creation fails midway.
@@ -901,8 +1083,15 @@ impl<'a> RawAllocation<'a> {
         map: bool,
     ) -> Result<Self, BackendError> {
         let device = &shared.device;
+        // Whole words: byte-storage tensors are read and atomically written by word, so the
+        // buffer behind any binding must extend to the word containing its last byte.
+        let rounded = bytes
+            .checked_add(WORD_BYTES - 1)
+            .ok_or(BackendError::ResourceLimit)?
+            / WORD_BYTES
+            * WORD_BYTES;
         let buffer_info = vk::BufferCreateInfo::default()
-            .size(bytes)
+            .size(rounded)
             .usage(buffer_usage(&shared.physical))
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
         // SAFETY: the device is live and `buffer_info` is a live local.
@@ -1021,12 +1210,27 @@ struct ProgramState {
     in_flight: Cell<u32>,
 }
 
-/// Resident compute pipeline specialized for one admitted TOSA graph.
+/// One recorded dispatch of a resident program.
+struct Dispatch {
+    pipeline: vk::Pipeline,
+    workgroups: [u32; 3],
+    barrier_before: bool,
+}
+
+/// The program-owned arena: constants and intermediates in one dedicated allocation, bound as
+/// the last element of the descriptor array. Never mapped; constants arrive through staging.
+struct Arena {
+    buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+    bytes: u64,
+}
+
+/// Resident compute pipelines specialized for one admitted TOSA graph.
 pub struct VulkanProgram {
     context: Rc<ContextInner>,
-    pipeline: vk::Pipeline,
+    dispatches: Vec<Dispatch>,
+    arena: Option<Arena>,
     plan: ProgramPlan,
-    workgroups: [u32; 3],
     state: Rc<ProgramState>,
 }
 
@@ -1035,8 +1239,22 @@ impl std::fmt::Debug for VulkanProgram {
         formatter
             .debug_struct("VulkanProgram")
             .field("context", &self.context.id)
-            .field("plan", &self.plan)
+            .field("dispatches", &self.dispatches.len())
+            .field("arena_bytes", &self.plan.arena_bytes)
+            .field("slots", &self.plan.slots.len())
             .finish_non_exhaustive()
+    }
+}
+
+impl VulkanProgram {
+    /// Number of `vkCmdDispatch` calls one submission of this program records.
+    pub fn dispatch_count(&self) -> usize {
+        self.dispatches.len()
+    }
+
+    /// Bytes of program-owned arena storage (constants plus intermediates).
+    pub fn arena_bytes(&self) -> u64 {
+        self.plan.arena_bytes
     }
 }
 
@@ -1046,8 +1264,18 @@ impl Drop for VulkanProgram {
         if self.state.in_flight.get() != 0 {
             shared.wait_idle();
         }
-        // SAFETY: this handle owns the pipeline, created in `load_program`, destroyed once.
-        unsafe { shared.device.destroy_pipeline(self.pipeline, None) };
+        // SAFETY: this handle owns every pipeline and the arena, created in `load_program` and
+        // destroyed exactly once here; no submission references them (in-flight count is zero
+        // or the device was idled above).
+        unsafe {
+            for dispatch in &self.dispatches {
+                shared.device.destroy_pipeline(dispatch.pipeline, None);
+            }
+            if let Some(arena) = &self.arena {
+                shared.device.destroy_buffer(arena.buffer, None);
+                shared.device.free_memory(arena.memory, None);
+            }
+        }
         decrement(&shared.counters.programs);
     }
 }
@@ -1347,7 +1575,7 @@ impl VulkanAccelerator {
                     dst_offset: start + done,
                     size: chunk,
                 },
-                false,
+                CopyVisibility::Device,
             )?;
             increment(&shared.counters.explicit_transfer_bytes, chunk);
             done += chunk;
@@ -1377,7 +1605,7 @@ impl VulkanAccelerator {
                     dst_offset: 0,
                     size: chunk,
                 },
-                true,
+                CopyVisibility::HostRead,
             )?;
             data.write_at(done, &staging.as_mut_slice()[..chunk_len])?;
             increment(&shared.counters.explicit_transfer_bytes, chunk);
@@ -1386,7 +1614,8 @@ impl VulkanAccelerator {
         Ok(())
     }
 
-    /// Record the dispatch for one claimed slot and submit it with the slot's fence.
+    /// Record every dispatch of `program` for one claimed slot and submit it with the slot's
+    /// fence.
     fn record_and_submit(
         &self,
         slot: &Slot,
@@ -1395,45 +1624,55 @@ impl VulkanAccelerator {
     ) -> Result<(), vk::Result> {
         let shared = &self.shared;
         let device = &shared.device;
-        // Descriptor bindings match the slot index of the plan: slot `i` writes binding `i`
-        // against the shared set layout's declared binding range.
-        let mut writes = Vec::with_capacity(descriptors.len());
-        for (index, info) in descriptors.iter().enumerate() {
-            writes.push(
-                vk::WriteDescriptorSet::default()
-                    .dst_set(slot.descriptor_set)
-                    .dst_binding(index as u32)
-                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                    .buffer_info(std::slice::from_ref(info)),
-            );
-        }
+        // One write covers the whole descriptor array: bound slots, the arena, and valid
+        // filler for elements this program never addresses.
+        let write = vk::WriteDescriptorSet::default()
+            .dst_set(slot.descriptor_set)
+            .dst_binding(0)
+            .dst_array_element(0)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .buffer_info(descriptors);
         let begin = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        // Make the shader's storage writes visible to host reads after the fence signals.
-        let barrier = vk::MemoryBarrier2::default()
+        // Between dependent dispatches. A `COMPUTE_SHADER → COMPUTE_SHADER` barrier is an
+        // execution dependency on every prior compute command, which alone orders a later write
+        // after earlier reads (WAR: an arena region reused after its last reader). The access
+        // masks add the memory dependency the RAW and WAW cases need: prior storage writes made
+        // available, then visible to the next dispatch's storage reads and writes. Read accesses
+        // never appear in a source mask because a read leaves nothing to make available.
+        let compute_barrier = [vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
             .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::HOST)
-            .dst_access_mask(vk::AccessFlags2::HOST_READ);
-        let barriers = [barrier];
-        let dependency = vk::DependencyInfo::default().memory_barriers(&barriers);
+            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .dst_access_mask(
+                vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
+            )];
+        let compute_dependency = vk::DependencyInfo::default().memory_barriers(&compute_barrier);
+        // After the last dispatch: make the shader's storage writes visible to host reads once
+        // the fence signals, and to the staging copies a later `read_buffer`/`write_buffer` of a
+        // device-local buffer submits (there is no implicit dependency between submissions).
+        let host_barrier = [vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::HOST | vk::PipelineStageFlags2::COPY)
+            .dst_access_mask(
+                vk::AccessFlags2::HOST_READ
+                    | vk::AccessFlags2::TRANSFER_READ
+                    | vk::AccessFlags2::TRANSFER_WRITE,
+            )];
+        let host_dependency = vk::DependencyInfo::default().memory_barriers(&host_barrier);
         let submit_buffers =
             [vk::CommandBufferSubmitInfo::default().command_buffer(slot.command_buffer)];
         let submits = [vk::SubmitInfo2::default().command_buffer_infos(&submit_buffers)];
         // SAFETY: the slot is free (no submission references its command buffer, fence, or
         // descriptor set), the descriptor infos name live buffers whose ranges were validated,
-        // the pipeline is live and in-flight-counted by the caller, and the pool flag lets
+        // every pipeline is live and in-flight-counted by the caller, and the pool flag lets
         // `begin_command_buffer` reset the buffer implicitly. Host writes made before this
         // submission are visible to the device by the implicit host-write ordering guarantee.
         unsafe {
-            device.update_descriptor_sets(&writes, &[]);
+            device.update_descriptor_sets(std::slice::from_ref(&write), &[]);
             device.reset_fences(&[slot.fence])?;
             device.begin_command_buffer(slot.command_buffer, &begin)?;
-            device.cmd_bind_pipeline(
-                slot.command_buffer,
-                vk::PipelineBindPoint::COMPUTE,
-                program.pipeline,
-            );
             device.cmd_bind_descriptor_sets(
                 slot.command_buffer,
                 vk::PipelineBindPoint::COMPUTE,
@@ -1442,15 +1681,90 @@ impl VulkanAccelerator {
                 &[slot.descriptor_set],
                 &[],
             );
-            device.cmd_dispatch(
-                slot.command_buffer,
-                program.workgroups[0],
-                program.workgroups[1],
-                program.workgroups[2],
-            );
-            device.cmd_pipeline_barrier2(slot.command_buffer, &dependency);
+            for dispatch in &program.dispatches {
+                if dispatch.barrier_before {
+                    device.cmd_pipeline_barrier2(slot.command_buffer, &compute_dependency);
+                }
+                device.cmd_bind_pipeline(
+                    slot.command_buffer,
+                    vk::PipelineBindPoint::COMPUTE,
+                    dispatch.pipeline,
+                );
+                device.cmd_dispatch(
+                    slot.command_buffer,
+                    dispatch.workgroups[0],
+                    dispatch.workgroups[1],
+                    dispatch.workgroups[2],
+                );
+            }
+            device.cmd_pipeline_barrier2(slot.command_buffer, &host_dependency);
             device.end_command_buffer(slot.command_buffer)?;
             device.queue_submit2(shared.queue, &submits, slot.fence)
+        }
+    }
+
+    /// Upload every constant of `plan` into `arena` through the context's staging path.
+    fn upload_constants(
+        &self,
+        context: &ContextInner,
+        arena: &Arena,
+        plan: &ProgramPlan,
+    ) -> Result<(), BackendError> {
+        let shared = &self.shared;
+        let largest = plan
+            .constants
+            .iter()
+            .map(|constant| constant.bytes.len() as u64)
+            .max()
+            .unwrap_or(0);
+        if largest == 0 {
+            return Ok(());
+        }
+        let mut staging = Staging::new(shared, largest.min(STAGING_BYTES))?;
+        for constant in &plan.constants {
+            let mut done = 0_usize;
+            while done < constant.bytes.len() {
+                let chunk = (constant.bytes.len() - done).min(staging.bytes as usize);
+                staging.as_mut_slice()[..chunk]
+                    .copy_from_slice(&constant.bytes[done..done + chunk]);
+                context.blocking_copy(
+                    staging.raw.buffer,
+                    arena.buffer,
+                    vk::BufferCopy {
+                        src_offset: 0,
+                        dst_offset: constant.offset + done as u64,
+                        size: chunk as u64,
+                    },
+                    CopyVisibility::Device,
+                )?;
+                done += chunk;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Destroys pipelines and the arena of a program whose creation fails midway.
+struct PartialProgram<'a> {
+    shared: &'a Shared,
+    pipelines: Vec<vk::Pipeline>,
+    arena: Option<Arena>,
+}
+
+impl Drop for PartialProgram<'_> {
+    fn drop(&mut self) {
+        // SAFETY: every handle here was created by `load_program` and not yet handed to a
+        // program; nothing references them.
+        unsafe {
+            for pipeline in self.pipelines.drain(..) {
+                if pipeline != vk::Pipeline::null() {
+                    self.shared.device.destroy_pipeline(pipeline, None);
+                }
+            }
+            if let Some(arena) = self.arena.take() {
+                self.shared.device.destroy_buffer(arena.buffer, None);
+                self.shared.device.free_memory(arena.memory, None);
+            }
         }
     }
 }
@@ -1659,112 +1973,177 @@ impl Accelerator for VulkanAccelerator {
             }
         };
         let plan = lower_tosa(bytes, target).map_err(Self::lowering_error)?;
-        let workgroups = match plan.kernel {
-            Kernel::CopyU32 => [shader::elementwise_workgroups(plan.element_count), 1, 1],
-            Kernel::MatmulFp32 => {
-                let geometry = plan.matmul.expect("MATMUL plan carries geometry");
-                shader::matmul_workgroups(geometry.m, geometry.n, geometry.batch)
-            }
-        };
+        let tuning = shared.physical.tuning;
         let limits = &shared.physical.limits;
-        if workgroups[0] > limits.max_compute_work_group_count[0]
-            || workgroups[1] > limits.max_compute_work_group_count[1]
-            || workgroups[2] > limits.max_compute_work_group_count[2]
+        // The plan's slots and arena must fit the descriptor array, and the arena one storage
+        // buffer descriptor.
+        if plan.buffer_count() > tuning.buffers
+            || plan.slots.len() > tuning.max_bindings() as usize
+            || plan.arena_bytes > u64::from(limits.max_storage_buffer_range)
         {
             return Err(BackendError::ResourceLimit);
         }
-        let code = match plan.kernel {
-            Kernel::CopyU32 => shader::copy_u32_spirv(),
-            Kernel::MatmulFp32 => shader::matmul_fp32_spirv(),
-        };
+        let mut workgroups = Vec::with_capacity(plan.dispatches.len());
+        for dispatch in &plan.dispatches {
+            workgroups.push(
+                tuning
+                    .workgroups(dispatch.work, limits)
+                    .ok_or(BackendError::ResourceLimit)?,
+            );
+        }
 
+        let mut partial = PartialProgram {
+            shared,
+            pipelines: Vec::new(),
+            arena: None,
+        };
+        if plan.arena_bytes != 0 {
+            // Device-local when the device has such memory: intermediates never leave the GPU.
+            let memory_type = shared.memory_plan.device.unwrap_or(shared.memory_plan.host);
+            let raw = RawAllocation::create(shared, plan.arena_bytes, memory_type, false)?;
+            let (buffer, memory, _) = raw.into_parts();
+            partial.arena = Some(Arena {
+                buffer,
+                memory,
+                bytes: plan.arena_bytes,
+            });
+            self.upload_constants(
+                &context.inner,
+                partial.arena.as_ref().expect("arena set above"),
+                &plan,
+            )?;
+        }
+
+        // One shader module per distinct kernel variant, one pipeline per dispatch, created in
+        // a single call against the instance's pipeline cache.
         let device = &shared.device;
-        let module_info = vk::ShaderModuleCreateInfo::default().code(code);
-        // SAFETY: `code` is the crate-authored SPIR-V module, live for the call.
-        let module = unsafe { device.create_shader_module(&module_info, None) }
-            .map_err(|result| shared.fail(result))?;
-        // Specialization data is laid out in one buffer whose layout matches the entries: a
-        // single u32 for the elementwise kernel, or m/n/k/batch in that order for MATMUL.
-        let (entries, spec_data) = match plan.kernel {
-            Kernel::CopyU32 => (
-                vec![vk::SpecializationMapEntry {
-                    constant_id: shader::ELEMENT_COUNT_SPEC_ID,
-                    offset: 0,
-                    size: std::mem::size_of::<u32>(),
-                }],
-                plan.element_count.to_ne_bytes().to_vec(),
-            ),
-            Kernel::MatmulFp32 => {
-                let geometry = plan.matmul.expect("MATMUL plan carries geometry");
-                let mut data = Vec::with_capacity(16);
-                data.extend_from_slice(&geometry.m.to_ne_bytes());
-                data.extend_from_slice(&geometry.n.to_ne_bytes());
-                data.extend_from_slice(&geometry.k.to_ne_bytes());
-                data.extend_from_slice(&geometry.batch.to_ne_bytes());
-                (
-                    vec![
-                        vk::SpecializationMapEntry {
-                            constant_id: shader::MATMUL_SPEC_ID_M,
-                            offset: 0,
-                            size: 4,
-                        },
-                        vk::SpecializationMapEntry {
-                            constant_id: shader::MATMUL_SPEC_ID_N,
-                            offset: 4,
-                            size: 4,
-                        },
-                        vk::SpecializationMapEntry {
-                            constant_id: shader::MATMUL_SPEC_ID_K,
-                            offset: 8,
-                            size: 4,
-                        },
-                        vk::SpecializationMapEntry {
-                            constant_id: shader::MATMUL_SPEC_ID_BATCH,
-                            offset: 12,
-                            size: 4,
-                        },
-                    ],
-                    data,
-                )
+        let mut modules: Vec<(KernelKey, vk::ShaderModule)> = Vec::new();
+        let mut module_for = |key: KernelKey| -> Result<vk::ShaderModule, BackendError> {
+            if let Some((_, module)) = modules.iter().find(|(existing, _)| *existing == key) {
+                return Ok(*module);
             }
+            let code = shared.module(key);
+            let module_info = vk::ShaderModuleCreateInfo::default().code(&code);
+            // SAFETY: `code` is the crate-assembled SPIR-V module, live for the call.
+            let module = unsafe { device.create_shader_module(&module_info, None) }
+                .map_err(|result| shared.fail(result))?;
+            modules.push((key, module));
+            Ok(module)
         };
-        let specialization = vk::SpecializationInfo::default()
-            .map_entries(&entries)
-            .data(&spec_data);
-        let stage = vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::COMPUTE)
-            .module(module)
-            .name(c"main")
-            .specialization_info(&specialization);
-        let pipeline_info = vk::ComputePipelineCreateInfo::default()
-            .stage(stage)
-            .layout(shared.pipeline_layout);
-        // SAFETY: module and layout are live; every pointed-to structure outlives the call. On
-        // failure ash returns the partially created array, which holds no live pipeline for a
-        // single-entry request but is destroyed defensively.
-        let created = unsafe {
-            device.create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
-        };
-        // SAFETY: the module is no longer needed once pipeline creation returned.
-        unsafe { device.destroy_shader_module(module, None) };
-        let pipeline = match created {
-            Ok(pipelines) => pipelines[0],
-            Err((pipelines, result)) => {
-                for pipeline in pipelines {
-                    if pipeline != vk::Pipeline::null() {
-                        // SAFETY: a non-null pipeline handed back on failure is owned by us.
-                        unsafe { device.destroy_pipeline(pipeline, None) };
-                    }
+        struct ModuleGuard<'a>(&'a ash::Device, Vec<vk::ShaderModule>);
+        impl Drop for ModuleGuard<'_> {
+            fn drop(&mut self) {
+                for module in self.1.drain(..) {
+                    // SAFETY: modules are no longer needed once pipeline creation returned (or
+                    // failed); each is destroyed exactly once.
+                    unsafe { self.0.destroy_shader_module(module, None) };
                 }
-                return Err(shared.fail(result));
             }
-        };
+        }
+        let mut stage_modules = Vec::with_capacity(plan.dispatches.len());
+        for dispatch in &plan.dispatches {
+            let key = tuning.key(dispatch.kernel);
+            debug_assert_eq!(dispatch.spec.len() as u32, key.spec_constant_count());
+            match module_for(key) {
+                Ok(module) => stage_modules.push(module),
+                Err(error) => {
+                    drop(ModuleGuard(
+                        device,
+                        modules.into_iter().map(|(_, m)| m).collect(),
+                    ));
+                    return Err(error);
+                }
+            }
+        }
+        let module_guard = ModuleGuard(device, modules.into_iter().map(|(_, m)| m).collect());
+        let entries: Vec<Vec<vk::SpecializationMapEntry>> = plan
+            .dispatches
+            .iter()
+            .map(|dispatch| {
+                (0..dispatch.spec.len() as u32)
+                    .map(|id| vk::SpecializationMapEntry {
+                        constant_id: id,
+                        offset: id * 4,
+                        size: 4,
+                    })
+                    .collect()
+            })
+            .collect();
+        let spec_data: Vec<Vec<u8>> = plan
+            .dispatches
+            .iter()
+            .map(|dispatch| {
+                dispatch
+                    .spec
+                    .iter()
+                    .flat_map(|word| word.to_ne_bytes())
+                    .collect()
+            })
+            .collect();
+        let specializations: Vec<vk::SpecializationInfo<'_>> = entries
+            .iter()
+            .zip(&spec_data)
+            .map(|(entries, data)| {
+                vk::SpecializationInfo::default()
+                    .map_entries(entries)
+                    .data(data)
+            })
+            .collect();
+        let stages: Vec<vk::PipelineShaderStageCreateInfo<'_>> = stage_modules
+            .iter()
+            .zip(&specializations)
+            .map(|(module, specialization)| {
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::COMPUTE)
+                    .module(*module)
+                    .name(c"main")
+                    .specialization_info(specialization)
+            })
+            .collect();
+        let pipeline_infos: Vec<vk::ComputePipelineCreateInfo<'_>> = stages
+            .iter()
+            .map(|stage| {
+                vk::ComputePipelineCreateInfo::default()
+                    .stage(*stage)
+                    .layout(shared.pipeline_layout)
+            })
+            .collect();
+        if !pipeline_infos.is_empty() {
+            // SAFETY: modules, layout, and cache are live; every pointed-to structure outlives
+            // the call. On failure ash returns the partially created array, whose non-null
+            // entries are destroyed by the partial-program guard.
+            let created = unsafe {
+                device.create_compute_pipelines(shared.pipeline_cache, &pipeline_infos, None)
+            };
+            match created {
+                Ok(pipelines) => partial.pipelines = pipelines,
+                Err((pipelines, result)) => {
+                    partial.pipelines = pipelines;
+                    drop(module_guard);
+                    return Err(shared.fail(result));
+                }
+            }
+        }
+        drop(module_guard);
+
+        let dispatches = partial
+            .pipelines
+            .drain(..)
+            .zip(&plan.dispatches)
+            .zip(workgroups)
+            .map(|((pipeline, dispatch), workgroups)| Dispatch {
+                pipeline,
+                workgroups,
+                barrier_before: dispatch.barrier_before,
+            })
+            .collect();
+        let arena = partial.arena.take();
         increment(&shared.counters.programs, 1);
         Ok(VulkanProgram {
             context: Rc::clone(&context.inner),
-            pipeline,
+            dispatches,
+            arena,
             plan,
-            workgroups,
             state: Rc::new(ProgramState::default()),
         })
     }
@@ -1816,7 +2195,7 @@ impl Accelerator for VulkanAccelerator {
         if let Timeout::AfterNs(_) = timeout {
             return Err(reject(BackendError::DeadlineExpired));
         }
-        if bindings.is_empty() || bindings.len() > MAX_BINDINGS_PER_SUBMISSION as usize {
+        if bindings.is_empty() || bindings.len() > shared.physical.tuning.max_bindings() as usize {
             return Err(reject(BackendError::ResourceLimit));
         }
         if !Rc::ptr_eq(&queue.context, &program.context) {
@@ -1827,9 +2206,13 @@ impl Accelerator for VulkanAccelerator {
 
         // Per-binding reasons (bounds, access, slot) are reported before the aggregate count
         // check so a host learns the most specific rejection first.
-        let offset_alignment = shared.physical.limits.min_storage_buffer_offset_alignment;
-        let mut descriptors =
-            [vk::DescriptorBufferInfo::default(); MAX_BINDINGS_PER_SUBMISSION as usize];
+        let offset_alignment = shared
+            .physical
+            .limits
+            .min_storage_buffer_offset_alignment
+            .max(WORD_BYTES);
+        let tuning = shared.physical.tuning;
+        let mut descriptors = vec![vk::DescriptorBufferInfo::default(); tuning.buffers as usize];
         let mut seen = 0_u32;
         for binding in bindings {
             if !Rc::ptr_eq(&binding.buffer.context, context) {
@@ -1858,21 +2241,35 @@ impl Accelerator for VulkanAccelerator {
             if binding.access != expected_access {
                 return Err(reject(BackendError::Incompatible));
             }
-            // The descriptor covers the range directly: exact tensor bytes, scalar- and
-            // `minStorageBufferOffsetAlignment`-aligned start.
-            if binding.range.bytes() != slot_plan.byte_len
-                || (start as u64) % slot_plan.scalar_bytes.max(offset_alignment) != 0
+            // The descriptor covers the range directly: exact tensor bytes, word- and
+            // `minStorageBufferOffsetAlignment`-aligned start. Byte-storage tensors are
+            // addressed by whole words, so their descriptor range extends to the containing
+            // word; the allocation behind every buffer is word-sized so that word exists.
+            if binding.range.bytes() != slot_plan.byte_len || (start as u64) % offset_alignment != 0
             {
                 return Err(reject(BackendError::Incompatible));
             }
             descriptors[index] = vk::DescriptorBufferInfo {
                 buffer: binding.buffer.buffer,
                 offset: start as u64,
-                range: binding.range.bytes(),
+                range: binding.range.bytes().div_ceil(WORD_BYTES) * WORD_BYTES,
             };
         }
         if bindings.len() != plan.slots.len() {
             return Err(reject(BackendError::Incompatible));
+        }
+        // The arena follows the slots; every element the program never addresses is filled
+        // with the first bound buffer so the whole array is valid.
+        if let Some(arena) = &program.arena {
+            descriptors[plan.arena_buffer_index() as usize] = vk::DescriptorBufferInfo {
+                buffer: arena.buffer,
+                offset: 0,
+                range: arena.bytes,
+            };
+        }
+        let filler = descriptors[0];
+        for descriptor in &mut descriptors[plan.buffer_count() as usize..] {
+            *descriptor = filler;
         }
         // A TOSA graph's inputs and outputs are distinct tensors, so one allocation may back
         // several read-only slots but never a written slot together with any other slot: that
@@ -1908,7 +2305,7 @@ impl Accelerator for VulkanAccelerator {
         }
 
         let slot = &context.slots[slot_index as usize];
-        match self.record_and_submit(slot, program, &descriptors[..plan.slots.len()]) {
+        match self.record_and_submit(slot, program, &descriptors) {
             Ok(()) => {}
             Err(vk::Result::ERROR_DEVICE_LOST) => {
                 // Past the admission boundary with an ambiguous outcome: the event owns the slot
@@ -1979,5 +2376,82 @@ impl Accelerator for VulkanAccelerator {
                 resource: event,
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The memory types a Radeon 860M (RADV, Mesa 26.1.8) reports. The ordinary types come first
+    /// and `VK_AMD_device_coherent_memory` appends its own after them, which is what makes a
+    /// last-wins tie-break select exactly the types that require an enabled feature.
+    fn amd_device_coherent_memory() -> vk::PhysicalDeviceMemoryProperties {
+        use vk::MemoryPropertyFlags as Flags;
+        let amd = Flags::DEVICE_COHERENT_AMD | Flags::DEVICE_UNCACHED_AMD;
+        let host_coherent = Flags::HOST_VISIBLE | Flags::HOST_COHERENT;
+        let layout = [
+            (Flags::DEVICE_LOCAL, 1),
+            (Flags::DEVICE_LOCAL, 1),
+            (host_coherent, 0),
+            (Flags::DEVICE_LOCAL | host_coherent, 1),
+            (Flags::DEVICE_LOCAL | host_coherent, 1),
+            (host_coherent | Flags::HOST_CACHED, 0),
+            (host_coherent | Flags::HOST_CACHED, 0),
+            (Flags::DEVICE_LOCAL | amd, 1),
+            (host_coherent | amd, 0),
+            (Flags::DEVICE_LOCAL | host_coherent | amd, 1),
+            (host_coherent | Flags::HOST_CACHED | amd, 0),
+        ];
+        let mut memory = vk::PhysicalDeviceMemoryProperties::default();
+        for (slot, (flags, heap)) in layout.iter().enumerate() {
+            memory.memory_types[slot] = vk::MemoryType::default()
+                .property_flags(*flags)
+                .heap_index(*heap);
+        }
+        memory.memory_type_count =
+            u32::try_from(layout.len()).expect("the fixture declares eleven memory types");
+        memory.memory_heap_count = 2;
+        memory
+    }
+
+    /// `VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD` may not be allocated from unless the
+    /// `deviceCoherentMemory` feature is enabled, which this backend does not request, and the
+    /// spec advises against that memory anyway: it is uncached, so repeated accesses to nearby
+    /// locations — a tiled MATMUL — are slower. No CI device exposes these types, so the layout
+    /// is a fixture rather than a live probe.
+    #[test]
+    fn never_selects_memory_that_requires_an_unrequested_feature() {
+        let memory = amd_device_coherent_memory();
+        let plan = MemoryPlan::select(&memory, u32::MAX)
+            .expect("a host-visible coherent type is present in the fixture");
+
+        for (domain, selected) in [
+            ("host", Some(plan.host)),
+            ("device", plan.device),
+            ("shared", plan.shared),
+        ] {
+            let Some(index) = selected else { continue };
+            let flags = memory.memory_types[index as usize].property_flags;
+            assert!(
+                !flags.intersects(
+                    vk::MemoryPropertyFlags::DEVICE_COHERENT_AMD
+                        | vk::MemoryPropertyFlags::RDMA_CAPABLE_NV
+                ),
+                "{domain} domain selected memory type {index}, which requires a feature the \
+                 backend never enables: property flags {:#x}",
+                flags.as_raw(),
+            );
+        }
+    }
+
+    /// Excluding those types must not cost a domain: the AMD extension adds its memory types
+    /// alongside the ordinary ones rather than replacing them, so every domain stays reachable.
+    #[test]
+    fn excluding_them_strands_no_memory_domain() {
+        let plan = MemoryPlan::select(&amd_device_coherent_memory(), u32::MAX)
+            .expect("a host-visible coherent type is present in the fixture");
+        assert!(plan.device.is_some(), "device-local domain lost");
+        assert!(plan.shared.is_some(), "shared domain lost");
     }
 }

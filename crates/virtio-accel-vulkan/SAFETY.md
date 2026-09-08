@@ -10,8 +10,9 @@ the `va_vulkan` build configuration — `src/native.rs` — and the crate root c
 placeholder.
 
 Scope: loader and instance lifetime, device and queue creation, dedicated buffer allocations with
-persistent mappings, pipeline creation from the checked-in shaders, the per-context submission
-ring, nonblocking fence polling, and blocking staging copies for device-local memory.
+persistent mappings, per-program arena allocations, pipeline creation from the crate-authored
+shaders, the per-context submission ring, nonblocking fence polling, and blocking staging copies
+for device-local memory and arena constants.
 
 ## `ash` pin and entry points used
 
@@ -25,7 +26,7 @@ carries a local `SAFETY:` comment. The entry points this crate calls, and nothin
 | Loader and instance | `vkEnumerateInstanceVersion`, `vkCreateInstance`, `vkDestroyInstance`, `vkEnumeratePhysicalDevices`, `vkGetPhysicalDeviceProperties2`, `vkGetPhysicalDeviceFeatures2`, `vkGetPhysicalDeviceQueueFamilyProperties`, `vkGetPhysicalDeviceMemoryProperties` |
 | Device | `vkCreateDevice`, `vkDestroyDevice`, `vkGetDeviceQueue`, `vkDeviceWaitIdle`, `vkCreateDescriptorSetLayout`, `vkDestroyDescriptorSetLayout`, `vkCreatePipelineLayout`, `vkDestroyPipelineLayout` |
 | Buffers | `vkCreateBuffer`, `vkDestroyBuffer`, `vkGetBufferMemoryRequirements`, `vkAllocateMemory`, `vkFreeMemory`, `vkBindBufferMemory`, `vkMapMemory`, `vkUnmapMemory`, `vkGetBufferDeviceAddress` |
-| Programs | `vkCreateShaderModule`, `vkDestroyShaderModule`, `vkCreateComputePipelines`, `vkDestroyPipeline` |
+| Programs | `vkCreateShaderModule`, `vkDestroyShaderModule`, `vkCreateComputePipelines`, `vkDestroyPipeline`, `vkCreatePipelineCache`, `vkDestroyPipelineCache` |
 | Contexts | `vkCreateCommandPool`, `vkDestroyCommandPool`, `vkAllocateCommandBuffers`, `vkCreateDescriptorPool`, `vkDestroyDescriptorPool`, `vkAllocateDescriptorSets`, `vkCreateFence`, `vkDestroyFence` |
 | Submission | `vkUpdateDescriptorSets`, `vkResetFences`, `vkBeginCommandBuffer`, `vkCmdBindPipeline`, `vkCmdBindDescriptorSets`, `vkCmdDispatch`, `vkCmdCopyBuffer`, `vkCmdPipelineBarrier2`, `vkEndCommandBuffer`, `vkQueueSubmit2` |
 | Completion | `vkGetFenceStatus`, `vkWaitForFences` |
@@ -62,7 +63,11 @@ and the crate never reads a handle or pointer from an `Err`. Unmapped result cod
 ## Buffers and mappings
 
 Every buffer is one `VkBuffer` bound at offset 0 of one dedicated `VkDeviceMemory`
-(`RawAllocation`), created with `STORAGE_BUFFER | TRANSFER_SRC | TRANSFER_DST` usage. The memory
+(`RawAllocation`), created with `STORAGE_BUFFER | TRANSFER_SRC | TRANSFER_DST` usage and a size
+rounded up to a whole 32-bit word: byte-storage (`BOOL`) tensors are read and atomically written by
+word, so the word containing a tensor's last byte must exist inside the allocation even when the
+logical size (`desc.bytes()`, which every transfer and range check still uses) is not a multiple of
+four. The memory
 type comes from the ADR 0005 memory-domain map chosen at device open against the `memoryTypeBits`
 of a probe buffer with the same usage (ANV exposes types buffers may not use): `Host` and `Shared`
 require `HOST_COHERENT`, so no flush or invalidate is ever needed and none is issued; `Device`
@@ -77,17 +82,41 @@ released and rejected as `ResourceLimit`.
 Device-local transfers stage through a bounded (4 MiB) host-coherent `Staging` allocation and a
 per-context transfer command buffer and fence: record `vkCmdCopyBuffer`, submit, wait for the fence
 (30 s bound, after which the device is treated as lost), then copy through the staging mapping.
-Reads add a `COPY → HOST` memory barrier; writes rely on the implicit host-write ordering guarantee
-at `vkQueueSubmit2`. The staging allocation is destroyed before the call returns.
+Every copy is followed by a memory barrier naming its consumers, because submissions carry no
+implicit memory dependency between one another: a read into staging adds `COPY → HOST/HOST_READ`;
+a write into a device-local buffer adds `COPY/TRANSFER_WRITE → COMPUTE_SHADER|COPY` with storage
+and transfer read/write access so later dispatches and staging copies observe it. The host's own
+writes into the staging mapping are ordered by the implicit host-write guarantee at
+`vkQueueSubmit2`. The staging allocation is destroyed before the call returns.
+
+## Program arenas
+
+A program whose graph carries `CONST` tensors or intermediates owns one `Arena`: a dedicated,
+never-mapped `RawAllocation` in device-local memory when the device has any (else the host type),
+sized by the lowering's lifetime-packed layout and bounded by `maxStorageBufferRange`. Constants
+are uploaded once at `load_program` through the same staging path as device-local transfers, with
+the same `COPY → COMPUTE_SHADER|COPY` barrier so later submissions read them. The arena is destroyed with its `VulkanProgram` (after `vkDeviceWaitIdle`
+if the contract was violated and submissions are still in flight), so no dispatch can address freed
+memory. One arena per program is charged against the assumed `maxMemoryAllocationCount` alongside
+the guest buffers: `16 × (190 + 64) + 1 < 4096`, enforced by a compile-time assertion.
 
 ## Submission ring and completion
 
 Each context preallocates `RING_DEPTH` (`DeviceLimits.max_events_per_context`) triples of
-(command buffer, fence, descriptor set) plus the transfer pair (ADR 0006). `submit` validates every
-binding against the program plan, claims one free slot, acquires the buffer in-flight gates (shared
-for read-only bindings, exclusive for writes), updates the slot's descriptor set, resets the fence,
-records (bind pipeline, bind set, dispatch, `COMPUTE_SHADER/SHADER_STORAGE_WRITE → HOST/HOST_READ`
-barrier), and calls `vkQueueSubmit2` with the slot's fence. `vkQueueSubmit2` success is the
+(command buffer, fence, descriptor set) plus the transfer pair (ADR 0006). The descriptor set
+layout is one binding: an array of storage buffers sized per device (bound slots plus the arena).
+`submit` validates every binding against the program plan — exact tensor bytes, a start aligned to
+`max(4, minStorageBufferOffsetAlignment)`, the plan's access mode, no aliasing with a written slot —
+claims one free slot, acquires the buffer in-flight gates (shared for read-only bindings, exclusive
+for writes), writes the whole descriptor array (slots in slot order, the arena, then a valid filler
+for every element the program never addresses; byte-storage ranges rounded up to the containing
+word), resets the fence, records (bind set; per dispatch an optional
+`COMPUTE_SHADER/SHADER_STORAGE_WRITE → COMPUTE_SHADER/SHADER_STORAGE_READ|WRITE` barrier, bind
+pipeline, dispatch; a final `COMPUTE_SHADER/SHADER_STORAGE_WRITE → HOST|COPY` barrier with host-read
+and transfer read/write access, so the host mapping and any later staging copy of a device-local
+output observe the results), and
+calls `vkQueueSubmit2` with the slot's fence. Which dispatches need a barrier is decided by the
+lowering from the plan's read/write sets, not at record time. `vkQueueSubmit2` success is the
 admission boundary: any failure before it releases the slot and gates and rejects; an
 out-of-memory result from `vkQueueSubmit2` itself is specified to leave every resource untouched
 and is also a rejection; `VK_ERROR_DEVICE_LOST` returns `Indeterminate` with an event already
@@ -111,19 +140,33 @@ runs (its errors are latched identically) so the instance can be discarded whole
 ## Shaders
 
 The only SPIR-V the driver ever receives is assembled by this crate (`src/shader.rs`): guest bytes
-never reach the shader compiler. A TOSA artifact selects a kernel and supplies its validated element
-count through a specialization constant; the module itself is fixed. Each kernel's disassembly is
-listed beside its assembler, and the crate's tests verify the module's structure; the module was
-additionally validated with naga's SPIR-V front end and executes bit-exactly on ANV and lavapipe.
+never reach the shader compiler. A TOSA artifact selects kernel variants (`KernelKey`) and supplies
+validated geometry — operand array indices and word offsets, element counts, dims and strides,
+reduction extents, pooling windows, clamp bounds — through specialization constants; the modules
+themselves are fixed templates whose only parameters are device properties chosen when the device
+is opened (workgroup size, MATMUL tile, descriptor-array length). Modules are assembled once per
+instance and cached; the lowering re-derives every index computation from the declared tensor
+shapes and rejects any disagreement before a plan exists, because the kernels rely on that
+geometry rather than on robust buffer access. Byte-storage tensors are written only with
+`OpAtomicAnd`/`OpAtomicOr` on their containing word, so no kernel modifies a byte outside its
+tensor. Every float arithmetic result is `NoContraction`. The crate's unit tests walk every
+variant for structural well-formedness, and every variant executes on lavapipe in CI.
 
 ## Evidence
 
 `tests/vulkan.rs` runs on every enumerated device: full lifecycle in every advertised memory
-domain, the shared `IDENTITY_EDGES_FP32` corpus (bit-exact, including NaN payloads and the
-subnormal), offset bindings inside larger buffers with untouched neighbors, segmented staging
+domain, every case of the shared FP32 operator corpus in every advertised memory domain, the
+three-operator arena graph as one submission, byte-storage outputs bound inside a larger buffer
+with every neighbouring byte untouched, transcendental kernels within one ulp of binary64
+references across the full finite range, tiled MATMUL bit-identical to the sequential reference at
+ragged sizes, rank-4 broadcasting, the shared `IDENTITY_EDGES_FP32` corpus (bit-exact, including
+NaN payloads and the subnormal), offset bindings inside larger buffers with untouched neighbors,
+segmented staging
 transfers to device-local memory, binding validation and finite-timeout rejection, overlapping
 read-only bindings across sixteen in-flight submissions with `Busy` on the shared input, ring
 exhaustion as `ResourceLimit`, parent-release refusal, and the standard conformance suite
 (`virtio-accel-conformance::run`) with the accounting and copy-path diagnostics hooks in every
-advertised domain. On 2026-09-03 the suite passed on an Intel Arc 140V (Lunar Lake, Mesa 26.0.8
-ANV, Vulkan 1.4.335) and on the same host's llvmpipe.
+advertised domain. On 2026-09-03 the IDENTITY + MATMUL suite passed on an Intel Arc 140V (Lunar
+Lake, Mesa 26.0.8 ANV, Vulkan 1.4.335) and on the same host's llvmpipe; on 2026-09-06 the full
+suite for the broadened FP32 tier (ADR 0007) passed on the same Arc 140V and its llvmpipe (LLVM
+21.1.8), and on Mesa lavapipe (25.2.8, LLVM 20.1.2) in CI.
