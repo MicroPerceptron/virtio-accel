@@ -396,7 +396,10 @@ impl MemoryPlan {
         let usable = |index: usize, flags: vk::MemoryPropertyFlags| {
             buffer_type_mask & (1 << index) != 0
                 && !flags.intersects(
-                    vk::MemoryPropertyFlags::PROTECTED | vk::MemoryPropertyFlags::LAZILY_ALLOCATED,
+                    vk::MemoryPropertyFlags::PROTECTED
+                        | vk::MemoryPropertyFlags::LAZILY_ALLOCATED
+                        | vk::MemoryPropertyFlags::DEVICE_COHERENT_AMD
+                        | vk::MemoryPropertyFlags::RDMA_CAPABLE_NV,
                 )
         };
         let pick = |required: vk::MemoryPropertyFlags,
@@ -2373,5 +2376,82 @@ impl Accelerator for VulkanAccelerator {
                 resource: event,
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The memory types a Radeon 860M (RADV, Mesa 26.1.8) reports. The ordinary types come first
+    /// and `VK_AMD_device_coherent_memory` appends its own after them, which is what makes a
+    /// last-wins tie-break select exactly the types that require an enabled feature.
+    fn amd_device_coherent_memory() -> vk::PhysicalDeviceMemoryProperties {
+        use vk::MemoryPropertyFlags as Flags;
+        let amd = Flags::DEVICE_COHERENT_AMD | Flags::DEVICE_UNCACHED_AMD;
+        let host_coherent = Flags::HOST_VISIBLE | Flags::HOST_COHERENT;
+        let layout = [
+            (Flags::DEVICE_LOCAL, 1),
+            (Flags::DEVICE_LOCAL, 1),
+            (host_coherent, 0),
+            (Flags::DEVICE_LOCAL | host_coherent, 1),
+            (Flags::DEVICE_LOCAL | host_coherent, 1),
+            (host_coherent | Flags::HOST_CACHED, 0),
+            (host_coherent | Flags::HOST_CACHED, 0),
+            (Flags::DEVICE_LOCAL | amd, 1),
+            (host_coherent | amd, 0),
+            (Flags::DEVICE_LOCAL | host_coherent | amd, 1),
+            (host_coherent | Flags::HOST_CACHED | amd, 0),
+        ];
+        let mut memory = vk::PhysicalDeviceMemoryProperties::default();
+        for (slot, (flags, heap)) in layout.iter().enumerate() {
+            memory.memory_types[slot] = vk::MemoryType::default()
+                .property_flags(*flags)
+                .heap_index(*heap);
+        }
+        memory.memory_type_count =
+            u32::try_from(layout.len()).expect("the fixture declares eleven memory types");
+        memory.memory_heap_count = 2;
+        memory
+    }
+
+    /// `VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD` may not be allocated from unless the
+    /// `deviceCoherentMemory` feature is enabled, which this backend does not request, and the
+    /// spec advises against that memory anyway: it is uncached, so repeated accesses to nearby
+    /// locations — a tiled MATMUL — are slower. No CI device exposes these types, so the layout
+    /// is a fixture rather than a live probe.
+    #[test]
+    fn never_selects_memory_that_requires_an_unrequested_feature() {
+        let memory = amd_device_coherent_memory();
+        let plan = MemoryPlan::select(&memory, u32::MAX)
+            .expect("a host-visible coherent type is present in the fixture");
+
+        for (domain, selected) in [
+            ("host", Some(plan.host)),
+            ("device", plan.device),
+            ("shared", plan.shared),
+        ] {
+            let Some(index) = selected else { continue };
+            let flags = memory.memory_types[index as usize].property_flags;
+            assert!(
+                !flags.intersects(
+                    vk::MemoryPropertyFlags::DEVICE_COHERENT_AMD
+                        | vk::MemoryPropertyFlags::RDMA_CAPABLE_NV
+                ),
+                "{domain} domain selected memory type {index}, which requires a feature the \
+                 backend never enables: property flags {:#x}",
+                flags.as_raw(),
+            );
+        }
+    }
+
+    /// Excluding those types must not cost a domain: the AMD extension adds its memory types
+    /// alongside the ordinary ones rather than replacing them, so every domain stays reachable.
+    #[test]
+    fn excluding_them_strands_no_memory_domain() {
+        let plan = MemoryPlan::select(&amd_device_coherent_memory(), u32::MAX)
+            .expect("a host-visible coherent type is present in the fixture");
+        assert!(plan.device.is_some(), "device-local domain lost");
+        assert!(plan.shared.is_some(), "shared domain lost");
     }
 }
