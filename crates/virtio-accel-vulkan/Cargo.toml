@@ -25,3 +25,4 @@ ash = { version = "=0.38.0", default-features = false, features = ["loaded", "st
 
 [dev-dependencies]
 virtio-accel-conformance.workspace = true
+virtio-accel-tosa-build.workspace = true

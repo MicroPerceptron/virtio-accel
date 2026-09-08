@@ -1146,12 +1146,529 @@ pub const CAST_FP8E5M2_TO_BF16: TosaFp8ToBfloat16Case = TosaFp8ToBfloat16Case {
     },
 };
 
+/// Raw tensor storage used by the shared FP32-tier operator cases.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Fp32TierTensor {
+    /// IEEE-754 binary32 elements.
+    Fp32(&'static [f32]),
+    /// TOSA BOOL storage, one zero-or-one byte per element.
+    Bool(&'static [u8]),
+    /// Signed INT32 elements.
+    Int32(&'static [i32]),
+}
+
+impl Fp32TierTensor {
+    /// Encode the tensor in the client-visible little-endian storage layout.
+    pub fn bytes(self) -> Vec<u8> {
+        match self {
+            Self::Fp32(values) => values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
+            Self::Bool(values) => values.to_vec(),
+            Self::Int32(values) => values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
+        }
+    }
+
+    /// Exact client-visible storage size.
+    pub fn byte_len(self) -> usize {
+        match self {
+            Self::Fp32(values) => values.len() * 4,
+            Self::Bool(values) => values.len(),
+            Self::Int32(values) => values.len() * 4,
+        }
+    }
+}
+
+/// One FP32-tier operator case shared by host backends: a stable TOSA 1.0 graph over FP32
+/// tensors with BOOL and INT32 auxiliaries, and a numerical oracle for its single output.
+///
+/// Float outputs follow the [`TosaFloat32Case`] rules: NaN matches any NaN, infinities and
+/// zeros compare bit-exactly (signed zero included), and finite values must fall within the
+/// absolute or relative tolerance. BOOL and INT32 outputs compare exactly.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TosaFp32OperatorCase {
+    /// Diagnostic case name.
+    pub name: &'static str,
+    /// TOSA 1.0 FlatBuffer payload.
+    pub artifact: &'static [u8],
+    /// Block inputs in declared slot order.
+    pub inputs: &'static [Fp32TierTensor],
+    /// Single block output.
+    pub output: Fp32TierTensor,
+    /// Maximum absolute error accepted for finite float values.
+    pub absolute_tolerance: f32,
+    /// Maximum relative error accepted for finite float values.
+    pub relative_tolerance: f32,
+}
+
+impl TosaFp32OperatorCase {
+    /// Compare raw client-visible output bytes with the typed oracle.
+    pub fn output_matches(self, actual: &[u8]) -> bool {
+        if actual.len() != self.output.byte_len() {
+            return false;
+        }
+        match self.output {
+            Fp32TierTensor::Bool(expected) => actual == expected,
+            Fp32TierTensor::Int32(expected) => actual
+                .chunks_exact(4)
+                .map(|bytes| i32::from_le_bytes(bytes.try_into().expect("four-byte chunk")))
+                .eq(expected.iter().copied()),
+            Fp32TierTensor::Fp32(expected) => {
+                actual
+                    .chunks_exact(4)
+                    .zip(expected)
+                    .all(|(bytes, expected)| {
+                        let actual = f32::from_le_bytes(bytes.try_into().expect("four-byte chunk"));
+                        if expected.is_nan() {
+                            actual.is_nan()
+                        } else if expected.is_infinite() || *expected == 0.0 {
+                            expected.to_bits() == actual.to_bits()
+                        } else {
+                            let difference = (expected - actual).abs();
+                            difference <= self.absolute_tolerance
+                                || difference <= self.relative_tolerance * expected.abs()
+                        }
+                    })
+            }
+        }
+    }
+}
+
+const UNARY_INPUTS_FP32: &[Fp32TierTensor] = &[Fp32TierTensor::Fp32(&[0.5, 1.0, 2.0, 4.0])];
+
+/// Tolerance for operators every conformant device must compute exactly (sign, rounding, and
+/// selection operators, plus additions and multiplications of exactly representable values).
+const EXACT: (f32, f32) = (0.0, 0.0);
+/// Tolerance for `GLSL.std.450`-class built-ins whose relative error Vulkan bounds in ulps
+/// (`exp`: 3 + 2|x|, `log`: 3, `inversesqrt`: 2, division: 2.5), for the crate-authored
+/// polynomial evaluations of `sin`, `cos`, `tanh`, and `erf`, and for `pow`
+/// (4 + 3|y·log₂x| ulps). Roughly 30 ulps at unit magnitude, so a genuinely wrong kernel still
+/// fails by orders of magnitude.
+const TRANSCENDENTAL: (f32, f32) = (1.0e-6, 4.0e-6);
+
+const fn unary_fp32_case(
+    name: &'static str,
+    artifact: &'static [u8],
+    output: &'static [f32],
+    tolerance: (f32, f32),
+) -> TosaFp32OperatorCase {
+    TosaFp32OperatorCase {
+        name,
+        artifact,
+        inputs: UNARY_INPUTS_FP32,
+        output: Fp32TierTensor::Fp32(output),
+        absolute_tolerance: tolerance.0,
+        relative_tolerance: tolerance.1,
+    }
+}
+
+/// FP32 unary and activation operators over `[0.5, 1, 2, 4]`.
+pub const FP32_UNARY_CASES: &[TosaFp32OperatorCase] = &[
+    unary_fp32_case(
+        "abs-fp32",
+        include_bytes!("data/abs-fp32-v1.0.0.tosa"),
+        &[0.5, 1.0, 2.0, 4.0],
+        EXACT,
+    ),
+    unary_fp32_case(
+        "ceil-fp32",
+        include_bytes!("data/ceil-fp32-v1.0.0.tosa"),
+        &[1.0, 1.0, 2.0, 4.0],
+        EXACT,
+    ),
+    unary_fp32_case(
+        "cos-fp32",
+        include_bytes!("data/cos-fp32-v1.0.0.tosa"),
+        &[0.877_582_55, 0.540_302_3, -0.416_146_84, -0.653_643_6],
+        TRANSCENDENTAL,
+    ),
+    unary_fp32_case(
+        "erf-fp32",
+        include_bytes!("data/erf-fp32-v1.0.0.tosa"),
+        &[0.520_499_9, 0.842_700_8, 0.995_322_3, 1.0],
+        TRANSCENDENTAL,
+    ),
+    unary_fp32_case(
+        "exp-fp32",
+        include_bytes!("data/exp-fp32-v1.0.0.tosa"),
+        &[1.648_721_2, 2.718_281_7, 7.389_056, 54.598_15],
+        TRANSCENDENTAL,
+    ),
+    unary_fp32_case(
+        "floor-fp32",
+        include_bytes!("data/floor-fp32-v1.0.0.tosa"),
+        &[0.0, 1.0, 2.0, 4.0],
+        EXACT,
+    ),
+    unary_fp32_case(
+        "log-fp32",
+        include_bytes!("data/log-fp32-v1.0.0.tosa"),
+        &[
+            -core::f32::consts::LN_2,
+            0.0,
+            core::f32::consts::LN_2,
+            2.0 * core::f32::consts::LN_2,
+        ],
+        TRANSCENDENTAL,
+    ),
+    unary_fp32_case(
+        "negate-fp32",
+        include_bytes!("data/negate-fp32-v1.0.0.tosa"),
+        &[-0.5, -1.0, -2.0, -4.0],
+        EXACT,
+    ),
+    unary_fp32_case(
+        "reciprocal-fp32",
+        include_bytes!("data/reciprocal-fp32-v1.0.0.tosa"),
+        &[2.0, 1.0, 0.5, 0.25],
+        TRANSCENDENTAL,
+    ),
+    unary_fp32_case(
+        "rsqrt-fp32",
+        include_bytes!("data/rsqrt-fp32-v1.0.0.tosa"),
+        &[
+            core::f32::consts::SQRT_2,
+            1.0,
+            core::f32::consts::FRAC_1_SQRT_2,
+            0.5,
+        ],
+        TRANSCENDENTAL,
+    ),
+    unary_fp32_case(
+        "sin-fp32",
+        include_bytes!("data/sin-fp32-v1.0.0.tosa"),
+        &[0.479_425_55, 0.841_470_96, 0.909_297_4, -0.756_802_5],
+        TRANSCENDENTAL,
+    ),
+    unary_fp32_case(
+        "sigmoid-fp32",
+        include_bytes!("data/sigmoid-fp32-v1.0.0.tosa"),
+        &[0.622_459_35, 0.731_058_6, 0.880_797_1, 0.982_013_76],
+        TRANSCENDENTAL,
+    ),
+    unary_fp32_case(
+        "tanh-fp32",
+        include_bytes!("data/tanh-fp32-v1.0.0.tosa"),
+        &[0.462_117_16, 0.761_594_2, 0.964_027_6, 0.999_329_3],
+        TRANSCENDENTAL,
+    ),
+    unary_fp32_case(
+        "clamp-fp32",
+        include_bytes!("data/clamp-fp32-v1.0.0.tosa"),
+        &[0.5, 1.0, 1.0, 1.0],
+        EXACT,
+    ),
+];
+
+const BINARY_INPUTS_FP32: &[Fp32TierTensor] = &[
+    Fp32TierTensor::Fp32(&[2.0, 4.0]),
+    Fp32TierTensor::Fp32(&[1.0, 2.0, 3.0]),
+];
+
+const fn binary_fp32_case(
+    name: &'static str,
+    artifact: &'static [u8],
+    output: &'static [f32],
+    tolerance: (f32, f32),
+) -> TosaFp32OperatorCase {
+    TosaFp32OperatorCase {
+        name,
+        artifact,
+        inputs: BINARY_INPUTS_FP32,
+        output: Fp32TierTensor::Fp32(output),
+        absolute_tolerance: tolerance.0,
+        relative_tolerance: tolerance.1,
+    }
+}
+
+/// FP32 broadcast binary operators over `[2, 1]` and `[1, 3]` inputs producing `[2, 3]`.
+pub const FP32_BINARY_CASES: &[TosaFp32OperatorCase] = &[
+    binary_fp32_case(
+        "add-fp32",
+        include_bytes!("data/add-fp32-v1.0.0.tosa"),
+        &[3.0, 4.0, 5.0, 5.0, 6.0, 7.0],
+        EXACT,
+    ),
+    binary_fp32_case(
+        "sub-fp32",
+        include_bytes!("data/sub-fp32-v1.0.0.tosa"),
+        &[1.0, 0.0, -1.0, 3.0, 2.0, 1.0],
+        EXACT,
+    ),
+    binary_fp32_case(
+        "mul-fp32",
+        include_bytes!("data/mul-fp32-v1.0.0.tosa"),
+        &[2.0, 4.0, 6.0, 4.0, 8.0, 12.0],
+        EXACT,
+    ),
+    binary_fp32_case(
+        "pow-fp32",
+        include_bytes!("data/pow-fp32-v1.0.0.tosa"),
+        &[2.0, 4.0, 8.0, 4.0, 16.0, 64.0],
+        TRANSCENDENTAL,
+    ),
+    binary_fp32_case(
+        "maximum-fp32",
+        include_bytes!("data/maximum-fp32-v1.0.0.tosa"),
+        &[2.0, 2.0, 3.0, 4.0, 4.0, 4.0],
+        EXACT,
+    ),
+    binary_fp32_case(
+        "minimum-fp32",
+        include_bytes!("data/minimum-fp32-v1.0.0.tosa"),
+        &[1.0, 2.0, 2.0, 1.0, 2.0, 3.0],
+        EXACT,
+    ),
+];
+
+const COMPARISON_INPUTS_FP32: &[Fp32TierTensor] = &[
+    Fp32TierTensor::Fp32(&[1.0, 2.0, 3.0, 4.0]),
+    Fp32TierTensor::Fp32(&[1.0, 3.0, 2.0, 4.0]),
+];
+const LOGICAL_INPUTS_FP32_TIER: &[Fp32TierTensor] = &[
+    Fp32TierTensor::Bool(&[0, 0, 1, 1]),
+    Fp32TierTensor::Bool(&[0, 1, 0, 1]),
+];
+const LOGICAL_NOT_INPUT_FP32_TIER: &[Fp32TierTensor] = &[Fp32TierTensor::Bool(&[0, 0, 1, 1])];
+const SELECT_INPUTS_FP32: &[Fp32TierTensor] = &[
+    Fp32TierTensor::Bool(&[0, 1, 0, 1]),
+    Fp32TierTensor::Fp32(&[1.0, 2.0, 3.0, 4.0]),
+    Fp32TierTensor::Fp32(&[5.0, 6.0, 7.0, 8.0]),
+];
+
+const fn exact_fp32_case(
+    name: &'static str,
+    artifact: &'static [u8],
+    inputs: &'static [Fp32TierTensor],
+    output: Fp32TierTensor,
+) -> TosaFp32OperatorCase {
+    TosaFp32OperatorCase {
+        name,
+        artifact,
+        inputs,
+        output,
+        absolute_tolerance: 0.0,
+        relative_tolerance: 0.0,
+    }
+}
+
+/// FP32 comparisons, BOOL logic, and selection.
+pub const FP32_LOGICAL_CASES: &[TosaFp32OperatorCase] = &[
+    exact_fp32_case(
+        "equal-fp32",
+        include_bytes!("data/equal-fp32-v1.0.0.tosa"),
+        COMPARISON_INPUTS_FP32,
+        Fp32TierTensor::Bool(&[1, 0, 0, 1]),
+    ),
+    exact_fp32_case(
+        "greater-fp32",
+        include_bytes!("data/greater-fp32-v1.0.0.tosa"),
+        COMPARISON_INPUTS_FP32,
+        Fp32TierTensor::Bool(&[0, 0, 1, 0]),
+    ),
+    exact_fp32_case(
+        "greater-equal-fp32",
+        include_bytes!("data/greater-equal-fp32-v1.0.0.tosa"),
+        COMPARISON_INPUTS_FP32,
+        Fp32TierTensor::Bool(&[1, 0, 1, 1]),
+    ),
+    exact_fp32_case(
+        "logical-and-fp32-tier",
+        include_bytes!("data/logical-and-fp16-v1.0.0.tosa"),
+        LOGICAL_INPUTS_FP32_TIER,
+        Fp32TierTensor::Bool(&[0, 0, 0, 1]),
+    ),
+    exact_fp32_case(
+        "logical-or-fp32-tier",
+        include_bytes!("data/logical-or-fp16-v1.0.0.tosa"),
+        LOGICAL_INPUTS_FP32_TIER,
+        Fp32TierTensor::Bool(&[0, 1, 1, 1]),
+    ),
+    exact_fp32_case(
+        "logical-xor-fp32-tier",
+        include_bytes!("data/logical-xor-fp16-v1.0.0.tosa"),
+        LOGICAL_INPUTS_FP32_TIER,
+        Fp32TierTensor::Bool(&[0, 1, 1, 0]),
+    ),
+    exact_fp32_case(
+        "logical-not-fp32-tier",
+        include_bytes!("data/logical-not-fp16-v1.0.0.tosa"),
+        LOGICAL_NOT_INPUT_FP32_TIER,
+        Fp32TierTensor::Bool(&[1, 1, 0, 0]),
+    ),
+    exact_fp32_case(
+        "select-fp32",
+        include_bytes!("data/select-fp32-v1.0.0.tosa"),
+        SELECT_INPUTS_FP32,
+        Fp32TierTensor::Fp32(&[5.0, 2.0, 7.0, 4.0]),
+    ),
+];
+
+const REDUCTION_INPUTS_FP32: &[Fp32TierTensor] =
+    &[Fp32TierTensor::Fp32(&[1.0, 3.0, 2.0, -1.0, 4.0, 2.0])];
+
+/// FP32 reductions and INT32 argmax over a `[2, 3]` input along axis 1.
+pub const FP32_REDUCTION_CASES: &[TosaFp32OperatorCase] = &[
+    exact_fp32_case(
+        "argmax-fp32",
+        include_bytes!("data/argmax-fp32-v1.0.0.tosa"),
+        REDUCTION_INPUTS_FP32,
+        Fp32TierTensor::Int32(&[1, 1]),
+    ),
+    exact_fp32_case(
+        "reduce-max-fp32",
+        include_bytes!("data/reduce-max-fp32-v1.0.0.tosa"),
+        REDUCTION_INPUTS_FP32,
+        Fp32TierTensor::Fp32(&[3.0, 4.0]),
+    ),
+    exact_fp32_case(
+        "reduce-min-fp32",
+        include_bytes!("data/reduce-min-fp32-v1.0.0.tosa"),
+        REDUCTION_INPUTS_FP32,
+        Fp32TierTensor::Fp32(&[1.0, -1.0]),
+    ),
+    exact_fp32_case(
+        "reduce-product-fp32",
+        include_bytes!("data/reduce-product-fp32-v1.0.0.tosa"),
+        REDUCTION_INPUTS_FP32,
+        Fp32TierTensor::Fp32(&[6.0, -8.0]),
+    ),
+    exact_fp32_case(
+        "reduce-sum-fp32",
+        include_bytes!("data/reduce-sum-fp32-v1.0.0.tosa"),
+        REDUCTION_INPUTS_FP32,
+        Fp32TierTensor::Fp32(&[6.0, 5.0]),
+    ),
+];
+
+/// Static FP32 constants and data-movement operators.
+pub const FP32_MOVEMENT_CASES: &[TosaFp32OperatorCase] = &[
+    exact_fp32_case(
+        "const-add-fp32",
+        include_bytes!("data/const-fp32-v1.0.0.tosa"),
+        &[Fp32TierTensor::Fp32(&[10.0, 20.0, 30.0, 40.0])],
+        Fp32TierTensor::Fp32(&[11.0, 22.0, 33.0, 44.0]),
+    ),
+    exact_fp32_case(
+        "reshape-const-shape-fp32",
+        include_bytes!("data/reshape-fp32-v1.0.0.tosa"),
+        &[Fp32TierTensor::Fp32(&[1.0, 2.0, 3.0, 4.0])],
+        Fp32TierTensor::Fp32(&[1.0, 2.0, 3.0, 4.0]),
+    ),
+    exact_fp32_case(
+        "transpose-fp32",
+        include_bytes!("data/transpose-fp32-v1.0.0.tosa"),
+        &[Fp32TierTensor::Fp32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])],
+        Fp32TierTensor::Fp32(&[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]),
+    ),
+    exact_fp32_case(
+        "reverse-fp32",
+        include_bytes!("data/reverse-fp32-v1.0.0.tosa"),
+        &[Fp32TierTensor::Fp32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])],
+        Fp32TierTensor::Fp32(&[3.0, 2.0, 1.0, 6.0, 5.0, 4.0]),
+    ),
+    exact_fp32_case(
+        "concat-fp32",
+        include_bytes!("data/concat-fp32-v1.0.0.tosa"),
+        &[
+            Fp32TierTensor::Fp32(&[1.0, 2.0]),
+            Fp32TierTensor::Fp32(&[3.0, 4.0]),
+        ],
+        Fp32TierTensor::Fp32(&[1.0, 3.0, 2.0, 4.0]),
+    ),
+];
+
+/// Three-operator FP32 graph: `tanh(x · w + bias)` with constant zero points and a `[1, 1, 2]`
+/// bias broadcast over the `[1, 2, 2]` product. Inputs are the mock classifier's features and
+/// weights; the oracle is evaluated in binary64 and rounded.
+pub const LINEAR_TANH_FP32: TosaFp32OperatorCase = TosaFp32OperatorCase {
+    name: "linear-tanh-fp32",
+    artifact: include_bytes!("data/linear-tanh-fp32-v1.0.0.tosa"),
+    inputs: &[
+        Fp32TierTensor::Fp32(&[1.0, 2.0, 3.0, -1.0, 0.5, 2.0]),
+        Fp32TierTensor::Fp32(&[1.0, 0.0, 0.0, 1.0, 1.0, -1.0]),
+    ],
+    output: Fp32TierTensor::Fp32(&[0.999_753_24, -0.848_283_65, 0.905_148_27, -0.941_375_55]),
+    absolute_tolerance: TRANSCENDENTAL.0,
+    relative_tolerance: TRANSCENDENTAL.1,
+};
+
+/// Every FP32-tier operator case group, for backends that iterate the whole tier.
+pub const FP32_OPERATOR_CASE_GROUPS: &[&[TosaFp32OperatorCase]] = &[
+    FP32_UNARY_CASES,
+    FP32_BINARY_CASES,
+    FP32_LOGICAL_CASES,
+    FP32_REDUCTION_CASES,
+    FP32_MOVEMENT_CASES,
+    &[LINEAR_TANH_FP32],
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use virtio_accel_tosa::{
         DType, ExtensionSet, Level, ProfileSet, Target, Version, low_precision_storage_bytes, parse,
     };
+
+    #[test]
+    fn fp32_operator_cases_are_valid_for_the_fp32_target_and_self_consistent() {
+        let target = Target::new(
+            Version::TOSA_1_0,
+            ProfileSet::FLOATING_POINT,
+            Level::Level8K,
+            ExtensionSet::NONE,
+        );
+        let mut names = std::collections::BTreeSet::new();
+        for case in FP32_OPERATOR_CASE_GROUPS
+            .iter()
+            .flat_map(|group| group.iter())
+        {
+            assert!(names.insert(case.name), "duplicate case {}", case.name);
+            parse(case.artifact)
+                .unwrap_or_else(|error| panic!("{}: parse {error:?}", case.name))
+                .validate_for(target)
+                .unwrap_or_else(|error| panic!("{}: semantics {error:?}", case.name));
+            assert!(
+                case.output_matches(&case.output.bytes()),
+                "{}: oracle must accept itself",
+                case.name
+            );
+            let mut wrong = case.output.bytes();
+            wrong.pop();
+            assert!(!case.output_matches(&wrong), "{}: short output", case.name);
+        }
+        assert_eq!(names.len(), 39);
+    }
+
+    #[test]
+    fn fp32_operator_oracle_applies_float_rules_and_exact_auxiliaries() {
+        let float = FP32_UNARY_CASES[2];
+        let mut close = float.output.bytes();
+        // Perturb the first element by one binary32 ulp: within tolerance.
+        let first = f32::from_le_bytes(close[..4].try_into().unwrap());
+        close[..4].copy_from_slice(&f32::from_bits(first.to_bits() + 1).to_le_bytes());
+        assert!(float.output_matches(&close));
+        let mut far = float.output.bytes();
+        far[..4].copy_from_slice(&(first + 1.0e-3).to_le_bytes());
+        assert!(!float.output_matches(&far));
+
+        let exact = FP32_UNARY_CASES[0];
+        let mut nudged = exact.output.bytes();
+        let first = f32::from_le_bytes(nudged[..4].try_into().unwrap());
+        nudged[..4].copy_from_slice(&f32::from_bits(first.to_bits() + 1).to_le_bytes());
+        assert!(!exact.output_matches(&nudged));
+
+        let logical = FP32_LOGICAL_CASES[0];
+        assert!(logical.output_matches(&[1, 0, 0, 1]));
+        assert!(!logical.output_matches(&[1, 0, 0, 2]));
+        let argmax = FP32_REDUCTION_CASES[0];
+        assert!(argmax.output_matches(&Fp32TierTensor::Int32(&[1, 1]).bytes()));
+        assert!(!argmax.output_matches(&Fp32TierTensor::Int32(&[1, 0]).bytes()));
+    }
 
     #[test]
     fn matmul_oracle_checks_shape_values_and_signed_zero() {

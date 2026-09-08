@@ -381,15 +381,21 @@ process, serialized stream, and XDNA-specific local-memory envelopes are documen
 constraints rather than portable API changes or silent fallback paths.
 
 The Vulkan provider is the first GPU-class consumer of the seam and keeps the data plane
-graph-shaped (ADR 0001): one admitted TOSA graph becomes one compute pipeline created at load from
-a crate-authored SPIR-V module specialized by validated shape constants, so guest bytes never reach
-a driver's shader compiler. Buffers are dedicated `VkDeviceMemory` allocations bound directly as
-storage buffers; host-visible domains stay persistently mapped, and device-local memory is reached
-only through bounded staging inside the explicit transfer calls. Each context owns a bounded ring
-of command buffers, fences, and descriptor sets; `vkQueueSubmit2` success is the admission
-boundary and `vkGetFenceStatus` is the whole completion path, so no worker thread bridges the
-runtime. Device loss poisons the instance. The backend runs the conformance suite and the shared
-FP32 identity and matmul corpus on every enumerated device, a real GPU and a software ICD alike.
+graph-shaped (ADR 0001): one admitted TOSA graph becomes one sequence of compute pipelines created
+at load from crate-authored SPIR-V kernels specialized by validated shape constants, so guest bytes
+never reach a driver's shader compiler (ADR 0003, ADR 0007). Every kernel addresses tensors through
+one descriptor — an array of storage buffers holding the submission's bound slots and a
+per-program arena for constants and intermediates — so one module per kernel serves every binding
+layout, and a whole graph is recorded into one command buffer with compute barriers between
+dependent dispatches. Buffers are dedicated `VkDeviceMemory` allocations bound directly as storage
+buffers; host-visible domains stay persistently mapped, and device-local memory is reached only
+through bounded staging inside the explicit transfer calls. Each context owns a bounded ring of
+command buffers, fences, and descriptor sets; `vkQueueSubmit2` success is the admission boundary
+and `vkGetFenceStatus` is the whole completion path, so no worker thread bridges the runtime.
+Device loss poisons the instance. The backend runs the conformance suite and the shared FP32
+operator corpus on every device it enumerates; the FP32 operator tier is verified on the Mesa
+lavapipe CI lane and on Intel ANV (Arc 140V), while Apple M3 via MoltenVK has so far verified
+only the earlier IDENTITY + MATMUL tier.
 
 The Qualcomm adapter uses the same seam. Its safe planner admits 41 of the 42 floating-point
 operators shared by Core ML and OpenVINO, including owned constants/data movement, FP16 unary and

@@ -943,7 +943,7 @@ fn max_pool2d_float_bytes(dtype: wire::DType) -> Vec<u8> {
     builder.finished_data().to_vec()
 }
 
-fn binary_fp16_bytes(op: wire::Op) -> Vec<u8> {
+fn binary_float_bytes(op: wire::Op, dtype: wire::DType) -> Vec<u8> {
     let mut builder = flatbuffers::FlatBufferBuilder::new();
     let region_name = builder.create_string("main");
     let block_name = builder.create_string("entry");
@@ -960,7 +960,7 @@ fn binary_fp16_bytes(op: wire::Op) -> Vec<u8> {
         &wire::TosaTensorArgs {
             name: Some(left_name),
             shape: Some(left_shape),
-            type_: wire::DType::FP16,
+            type_: dtype,
             ..Default::default()
         },
     );
@@ -969,7 +969,7 @@ fn binary_fp16_bytes(op: wire::Op) -> Vec<u8> {
         &wire::TosaTensorArgs {
             name: Some(right_name),
             shape: Some(right_shape),
-            type_: wire::DType::FP16,
+            type_: dtype,
             ..Default::default()
         },
     );
@@ -978,7 +978,7 @@ fn binary_fp16_bytes(op: wire::Op) -> Vec<u8> {
         &wire::TosaTensorArgs {
             name: Some(output_name),
             shape: Some(output_shape),
-            type_: wire::DType::FP16,
+            type_: dtype,
             ..Default::default()
         },
     );
@@ -1120,6 +1120,10 @@ fn binary_fp16_bytes(op: wire::Op) -> Vec<u8> {
     builder.finished_data().to_vec()
 }
 
+fn binary_fp16_bytes(op: wire::Op) -> Vec<u8> {
+    binary_float_bytes(op, wire::DType::FP16)
+}
+
 macro_rules! finish_fixture {
     ($builder:ident, $tensors:expr, $operators:expr, $inputs:expr, $outputs:expr, $shapes:expr) => {{
         let region_name = $builder.create_string("main");
@@ -1166,7 +1170,7 @@ macro_rules! finish_fixture {
     }};
 }
 
-fn unary_fp16_bytes(op: wire::Op) -> Vec<u8> {
+fn unary_float_bytes(op: wire::Op, dtype: wire::DType) -> Vec<u8> {
     let mut builder = flatbuffers::FlatBufferBuilder::new();
     let input_name = builder.create_string("input");
     let output_name = builder.create_string("output");
@@ -1178,7 +1182,7 @@ fn unary_fp16_bytes(op: wire::Op) -> Vec<u8> {
         &wire::TosaTensorArgs {
             name: Some(input_name),
             shape: Some(shape),
-            type_: wire::DType::FP16,
+            type_: dtype,
             ..Default::default()
         },
     );
@@ -1187,7 +1191,7 @@ fn unary_fp16_bytes(op: wire::Op) -> Vec<u8> {
         &wire::TosaTensorArgs {
             name: Some(output_name),
             shape: Some(shape),
-            type_: wire::DType::FP16,
+            type_: dtype,
             ..Default::default()
         },
     );
@@ -1240,9 +1244,15 @@ fn unary_fp16_bytes(op: wire::Op) -> Vec<u8> {
             let value = wire::TanhAttribute::create(&mut builder, &Default::default());
             (wire::Attribute::TanhAttribute, value.as_union_value())
         }
+        wire::Op::ERF => {
+            let value = wire::ErfAttribute::create(&mut builder, &Default::default());
+            (wire::Attribute::ErfAttribute, value.as_union_value())
+        }
         wire::Op::CLAMP => {
-            let minimum = builder.create_vector(&0xbc00_u16.to_le_bytes());
-            let maximum = builder.create_vector(&0x3c00_u16.to_le_bytes());
+            let minimum_bytes = float_storage_bytes(dtype, &[0xbc00], &[-1.0]);
+            let maximum_bytes = float_storage_bytes(dtype, &[0x3c00], &[1.0]);
+            let minimum = builder.create_vector(&minimum_bytes);
+            let maximum = builder.create_vector(&maximum_bytes);
             let value = wire::ClampAttribute::create(
                 &mut builder,
                 &wire::ClampAttributeArgs {
@@ -1259,14 +1269,15 @@ fn unary_fp16_bytes(op: wire::Op) -> Vec<u8> {
     let mut operators = Vec::new();
     let inputs = if op == wire::Op::NEGATE {
         let zero_shape = builder.create_vector(&[1_i32]);
-        let zero_data = builder.create_vector(&0_u16.to_le_bytes());
+        let zero_bytes = float_storage_bytes(dtype, &[0], &[0.0]);
+        let zero_data = builder.create_vector(&zero_bytes);
         for name in [zero_in_name, zero_out_name] {
             tensors.push(wire::TosaTensor::create(
                 &mut builder,
                 &wire::TosaTensorArgs {
                     name: Some(name),
                     shape: Some(zero_shape),
-                    type_: wire::DType::FP16,
+                    type_: dtype,
                     data: Some(zero_data),
                     ..Default::default()
                 },
@@ -1315,7 +1326,11 @@ fn unary_fp16_bytes(op: wire::Op) -> Vec<u8> {
     )
 }
 
-fn comparison_fp16_bytes(op: wire::Op) -> Vec<u8> {
+fn unary_fp16_bytes(op: wire::Op) -> Vec<u8> {
+    unary_float_bytes(op, wire::DType::FP16)
+}
+
+fn comparison_float_bytes(op: wire::Op, dtype: wire::DType) -> Vec<u8> {
     let mut builder = flatbuffers::FlatBufferBuilder::new();
     let left_name = builder.create_string("left");
     let right_name = builder.create_string("right");
@@ -1326,7 +1341,7 @@ fn comparison_fp16_bytes(op: wire::Op) -> Vec<u8> {
         &wire::TosaTensorArgs {
             name: Some(left_name),
             shape: Some(shape),
-            type_: wire::DType::FP16,
+            type_: dtype,
             ..Default::default()
         },
     );
@@ -1335,7 +1350,7 @@ fn comparison_fp16_bytes(op: wire::Op) -> Vec<u8> {
         &wire::TosaTensorArgs {
             name: Some(right_name),
             shape: Some(shape),
-            type_: wire::DType::FP16,
+            type_: dtype,
             ..Default::default()
         },
     );
@@ -1391,6 +1406,10 @@ fn comparison_fp16_bytes(op: wire::Op) -> Vec<u8> {
         block_outputs,
         None
     )
+}
+
+fn comparison_fp16_bytes(op: wire::Op) -> Vec<u8> {
+    comparison_float_bytes(op, wire::DType::FP16)
 }
 
 fn logical_bool_bytes(op: wire::Op) -> Vec<u8> {
@@ -1486,7 +1505,7 @@ fn logical_bool_bytes(op: wire::Op) -> Vec<u8> {
     )
 }
 
-fn select_fp16_bytes() -> Vec<u8> {
+fn select_float_bytes(dtype: wire::DType) -> Vec<u8> {
     let mut builder = flatbuffers::FlatBufferBuilder::new();
     let condition_name = builder.create_string("condition");
     let then_name = builder.create_string("then");
@@ -1507,7 +1526,7 @@ fn select_fp16_bytes() -> Vec<u8> {
         &wire::TosaTensorArgs {
             name: Some(then_name),
             shape: Some(shape),
-            type_: wire::DType::FP16,
+            type_: dtype,
             ..Default::default()
         },
     );
@@ -1516,7 +1535,7 @@ fn select_fp16_bytes() -> Vec<u8> {
         &wire::TosaTensorArgs {
             name: Some(else_name),
             shape: Some(shape),
-            type_: wire::DType::FP16,
+            type_: dtype,
             ..Default::default()
         },
     );
@@ -1525,7 +1544,7 @@ fn select_fp16_bytes() -> Vec<u8> {
         &wire::TosaTensorArgs {
             name: Some(output_name),
             shape: Some(shape),
-            type_: wire::DType::FP16,
+            type_: dtype,
             ..Default::default()
         },
     );
@@ -1557,7 +1576,11 @@ fn select_fp16_bytes() -> Vec<u8> {
     )
 }
 
-fn reduction_fp16_bytes(op: wire::Op) -> Vec<u8> {
+fn select_fp16_bytes() -> Vec<u8> {
+    select_float_bytes(wire::DType::FP16)
+}
+
+fn reduction_float_bytes(op: wire::Op, dtype: wire::DType) -> Vec<u8> {
     let mut builder = flatbuffers::FlatBufferBuilder::new();
     let input_name = builder.create_string("input");
     let output_name = builder.create_string("output");
@@ -1572,7 +1595,7 @@ fn reduction_fp16_bytes(op: wire::Op) -> Vec<u8> {
         &wire::TosaTensorArgs {
             name: Some(input_name),
             shape: Some(input_shape),
-            type_: wire::DType::FP16,
+            type_: dtype,
             ..Default::default()
         },
     );
@@ -1584,7 +1607,7 @@ fn reduction_fp16_bytes(op: wire::Op) -> Vec<u8> {
             type_: if op == wire::Op::ARGMAX {
                 wire::DType::INT32
             } else {
-                wire::DType::FP16
+                dtype
             },
             ..Default::default()
         },
@@ -1666,7 +1689,11 @@ fn reduction_fp16_bytes(op: wire::Op) -> Vec<u8> {
     )
 }
 
-fn movement_fp16_bytes(op: wire::Op) -> Vec<u8> {
+fn reduction_fp16_bytes(op: wire::Op) -> Vec<u8> {
+    reduction_float_bytes(op, wire::DType::FP16)
+}
+
+fn movement_float_bytes(op: wire::Op, dtype: wire::DType) -> Vec<u8> {
     let mut builder = flatbuffers::FlatBufferBuilder::new();
     let first_name = builder.create_string("first");
     let second_name = builder.create_string("second");
@@ -1675,19 +1702,18 @@ fn movement_fp16_bytes(op: wire::Op) -> Vec<u8> {
     match op {
         wire::Op::CONST => {
             let shape = builder.create_vector(&[4_i32]);
-            let constant_data = builder.create_vector(
-                &[0x3c00_u16, 0x4000, 0x4200, 0x4400]
-                    .iter()
-                    .copied()
-                    .flat_map(u16::to_le_bytes)
-                    .collect::<Vec<_>>(),
+            let constant_bytes = float_storage_bytes(
+                dtype,
+                &[0x3c00, 0x4000, 0x4200, 0x4400],
+                &[1.0, 2.0, 3.0, 4.0],
             );
+            let constant_data = builder.create_vector(&constant_bytes);
             let first = wire::TosaTensor::create(
                 &mut builder,
                 &wire::TosaTensorArgs {
                     name: Some(first_name),
                     shape: Some(shape),
-                    type_: wire::DType::FP16,
+                    type_: dtype,
                     ..Default::default()
                 },
             );
@@ -1696,7 +1722,7 @@ fn movement_fp16_bytes(op: wire::Op) -> Vec<u8> {
                 &wire::TosaTensorArgs {
                     name: Some(parameter_name),
                     shape: Some(shape),
-                    type_: wire::DType::FP16,
+                    type_: dtype,
                     data: Some(constant_data),
                     ..Default::default()
                 },
@@ -1706,7 +1732,7 @@ fn movement_fp16_bytes(op: wire::Op) -> Vec<u8> {
                 &wire::TosaTensorArgs {
                     name: Some(output_name),
                     shape: Some(shape),
-                    type_: wire::DType::FP16,
+                    type_: dtype,
                     ..Default::default()
                 },
             );
@@ -1751,7 +1777,7 @@ fn movement_fp16_bytes(op: wire::Op) -> Vec<u8> {
                 &wire::TosaTensorArgs {
                     name: Some(first_name),
                     shape: Some(input_shape),
-                    type_: wire::DType::FP16,
+                    type_: dtype,
                     ..Default::default()
                 },
             );
@@ -1760,7 +1786,7 @@ fn movement_fp16_bytes(op: wire::Op) -> Vec<u8> {
                 &wire::TosaTensorArgs {
                     name: Some(output_name),
                     shape: Some(output_shape),
-                    type_: wire::DType::FP16,
+                    type_: dtype,
                     ..Default::default()
                 },
             );
@@ -1817,14 +1843,26 @@ fn movement_fp16_bytes(op: wire::Op) -> Vec<u8> {
             builder,
             first_name,
             output_name,
-            &[2, 3],
-            &[3, 2],
-            op,
-            &[1, 0],
+            SingleInputMovement {
+                input_dims: &[2, 3],
+                output_dims: &[3, 2],
+                op,
+                parameters: &[1, 0],
+                dtype,
+            },
         ),
-        wire::Op::REVERSE => {
-            movement_single_input(builder, first_name, output_name, &[2, 3], &[2, 3], op, &[1])
-        }
+        wire::Op::REVERSE => movement_single_input(
+            builder,
+            first_name,
+            output_name,
+            SingleInputMovement {
+                input_dims: &[2, 3],
+                output_dims: &[2, 3],
+                op,
+                parameters: &[1],
+                dtype,
+            },
+        ),
         wire::Op::CONCAT => {
             let input_shape = builder.create_vector(&[2_i32, 1]);
             let output_shape = builder.create_vector(&[2_i32, 2]);
@@ -1833,7 +1871,7 @@ fn movement_fp16_bytes(op: wire::Op) -> Vec<u8> {
                 &wire::TosaTensorArgs {
                     name: Some(first_name),
                     shape: Some(input_shape),
-                    type_: wire::DType::FP16,
+                    type_: dtype,
                     ..Default::default()
                 },
             );
@@ -1842,7 +1880,7 @@ fn movement_fp16_bytes(op: wire::Op) -> Vec<u8> {
                 &wire::TosaTensorArgs {
                     name: Some(second_name),
                     shape: Some(input_shape),
-                    type_: wire::DType::FP16,
+                    type_: dtype,
                     ..Default::default()
                 },
             );
@@ -1851,7 +1889,7 @@ fn movement_fp16_bytes(op: wire::Op) -> Vec<u8> {
                 &wire::TosaTensorArgs {
                     name: Some(output_name),
                     shape: Some(output_shape),
-                    type_: wire::DType::FP16,
+                    type_: dtype,
                     ..Default::default()
                 },
             );
@@ -1878,6 +1916,10 @@ fn movement_fp16_bytes(op: wire::Op) -> Vec<u8> {
         }
         _ => panic!("unsupported movement fixture op"),
     }
+}
+
+fn movement_fp16_bytes(op: wire::Op) -> Vec<u8> {
+    movement_float_bytes(op, wire::DType::FP16)
 }
 
 fn fp8_to_bf16_cast_bytes(input_dtype: wire::DType) -> Vec<u8> {
@@ -1935,15 +1977,28 @@ fn fp8_to_bf16_cast_bytes(input_dtype: wire::DType) -> Vec<u8> {
     )
 }
 
+/// Geometry of a single-input data-movement fixture (`TRANSPOSE` perms or `REVERSE` axis).
+struct SingleInputMovement<'p> {
+    input_dims: &'p [i32],
+    output_dims: &'p [i32],
+    op: wire::Op,
+    parameters: &'p [i32],
+    dtype: wire::DType,
+}
+
 fn movement_single_input<'a>(
     mut builder: flatbuffers::FlatBufferBuilder<'a>,
     input_name: flatbuffers::WIPOffset<&'a str>,
     output_name: flatbuffers::WIPOffset<&'a str>,
-    input_dims: &[i32],
-    output_dims: &[i32],
-    op: wire::Op,
-    parameters: &[i32],
+    movement: SingleInputMovement<'_>,
 ) -> Vec<u8> {
+    let SingleInputMovement {
+        input_dims,
+        output_dims,
+        op,
+        parameters,
+        dtype,
+    } = movement;
     let input_shape = builder.create_vector(input_dims);
     let output_shape = builder.create_vector(output_dims);
     let input = wire::TosaTensor::create(
@@ -1951,7 +2006,7 @@ fn movement_single_input<'a>(
         &wire::TosaTensorArgs {
             name: Some(input_name),
             shape: Some(input_shape),
-            type_: wire::DType::FP16,
+            type_: dtype,
             ..Default::default()
         },
     );
@@ -1960,7 +2015,7 @@ fn movement_single_input<'a>(
         &wire::TosaTensorArgs {
             name: Some(output_name),
             shape: Some(output_shape),
-            type_: wire::DType::FP16,
+            type_: dtype,
             ..Default::default()
         },
     );
@@ -2015,6 +2070,142 @@ fn movement_single_input<'a>(
     )
 }
 
+/// Little-endian storage bytes of `values` for a float `dtype` (binary16 bits given directly).
+fn float_storage_bytes(dtype: wire::DType, fp16_bits: &[u16], fp32_values: &[f32]) -> Vec<u8> {
+    if dtype == wire::DType::FP32 {
+        fp32_values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
+    } else {
+        fp16_bits
+            .iter()
+            .flat_map(|bits| bits.to_le_bytes())
+            .collect()
+    }
+}
+
+/// Three-operator FP32 graph: `MATMUL(x, w)` with constant zero points, `ADD` of a broadcast
+/// constant bias, then `TANH`. Exercises constants, intermediates, and broadcasting together.
+fn fp32_tensor<'a>(
+    builder: &mut flatbuffers::FlatBufferBuilder<'a>,
+    name: flatbuffers::WIPOffset<&'a str>,
+    shape: flatbuffers::WIPOffset<flatbuffers::Vector<'a, i32>>,
+    data: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
+) -> flatbuffers::WIPOffset<wire::TosaTensor<'a>> {
+    wire::TosaTensor::create(
+        builder,
+        &wire::TosaTensorArgs {
+            name: Some(name),
+            shape: Some(shape),
+            type_: wire::DType::FP32,
+            data,
+            ..Default::default()
+        },
+    )
+}
+
+fn linear_tanh_fp32_bytes() -> Vec<u8> {
+    let mut builder = flatbuffers::FlatBufferBuilder::new();
+    let x_name = builder.create_string("x");
+    let w_name = builder.create_string("w");
+    let zp_a_name = builder.create_string("zp_a");
+    let zp_b_name = builder.create_string("zp_b");
+    let bias_name = builder.create_string("bias");
+    let h_name = builder.create_string("h");
+    let s_name = builder.create_string("s");
+    let output_name = builder.create_string("output");
+    let x_shape = builder.create_vector(&[1_i32, 2, 3]);
+    let w_shape = builder.create_vector(&[1_i32, 3, 2]);
+    let zero_shape = builder.create_vector(&[1_i32]);
+    let bias_shape = builder.create_vector(&[1_i32, 1, 2]);
+    let out_shape = builder.create_vector(&[1_i32, 2, 2]);
+    let zero_data = builder.create_vector(&0_f32.to_le_bytes());
+    let bias_bytes = [0.5_f32, -0.25]
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect::<Vec<_>>();
+    let bias_data = builder.create_vector(&bias_bytes);
+    let x = fp32_tensor(&mut builder, x_name, x_shape, None);
+    let w = fp32_tensor(&mut builder, w_name, w_shape, None);
+    let zp_a = fp32_tensor(&mut builder, zp_a_name, zero_shape, Some(zero_data));
+    let zp_b = fp32_tensor(&mut builder, zp_b_name, zero_shape, Some(zero_data));
+    let bias = fp32_tensor(&mut builder, bias_name, bias_shape, Some(bias_data));
+    let h = fp32_tensor(&mut builder, h_name, out_shape, None);
+    let s = fp32_tensor(&mut builder, s_name, out_shape, None);
+    let output = fp32_tensor(&mut builder, output_name, out_shape, None);
+    let const_attribute = wire::ConstAttribute::create(&mut builder, &Default::default());
+    let mut operators = Vec::new();
+    for name in [zp_a_name, zp_b_name, bias_name] {
+        let outputs = builder.create_vector(&[name]);
+        operators.push(wire::TosaOperator::create(
+            &mut builder,
+            &wire::TosaOperatorArgs {
+                op: wire::Op::CONST,
+                attribute_type: wire::Attribute::ConstAttribute,
+                attribute: Some(const_attribute.as_union_value()),
+                inputs: None,
+                outputs: Some(outputs),
+                location: None,
+            },
+        ));
+    }
+    let matmul_attribute = wire::MatMulAttribute::create(&mut builder, &Default::default());
+    let matmul_inputs = builder.create_vector(&[x_name, w_name, zp_a_name, zp_b_name]);
+    let matmul_outputs = builder.create_vector(&[h_name]);
+    operators.push(wire::TosaOperator::create(
+        &mut builder,
+        &wire::TosaOperatorArgs {
+            op: wire::Op::MATMUL,
+            attribute_type: wire::Attribute::MatMulAttribute,
+            attribute: Some(matmul_attribute.as_union_value()),
+            inputs: Some(matmul_inputs),
+            outputs: Some(matmul_outputs),
+            location: None,
+        },
+    ));
+    let add_attribute = wire::AddAttribute::create(&mut builder, &Default::default());
+    let add_inputs = builder.create_vector(&[h_name, bias_name]);
+    let add_outputs = builder.create_vector(&[s_name]);
+    operators.push(wire::TosaOperator::create(
+        &mut builder,
+        &wire::TosaOperatorArgs {
+            op: wire::Op::ADD,
+            attribute_type: wire::Attribute::AddAttribute,
+            attribute: Some(add_attribute.as_union_value()),
+            inputs: Some(add_inputs),
+            outputs: Some(add_outputs),
+            location: None,
+        },
+    ));
+    let tanh_attribute = wire::TanhAttribute::create(&mut builder, &Default::default());
+    let tanh_inputs = builder.create_vector(&[s_name]);
+    let tanh_outputs = builder.create_vector(&[output_name]);
+    operators.push(wire::TosaOperator::create(
+        &mut builder,
+        &wire::TosaOperatorArgs {
+            op: wire::Op::TANH,
+            attribute_type: wire::Attribute::TanhAttribute,
+            attribute: Some(tanh_attribute.as_union_value()),
+            inputs: Some(tanh_inputs),
+            outputs: Some(tanh_outputs),
+            location: None,
+        },
+    ));
+    let tensors = builder.create_vector(&[x, w, zp_a, zp_b, bias, h, s, output]);
+    let operators = builder.create_vector(&operators);
+    let block_inputs = builder.create_vector(&[x_name, w_name]);
+    let block_outputs = builder.create_vector(&[output_name]);
+    finish_fixture!(
+        builder,
+        tensors,
+        operators,
+        block_inputs,
+        block_outputs,
+        None
+    )
+}
+
 fn parity_fixture(name: &str) -> Vec<u8> {
     match name {
         "abs" => unary_fp16_bytes(wire::Op::ABS),
@@ -2048,6 +2239,41 @@ fn parity_fixture(name: &str) -> Vec<u8> {
         "transpose" => movement_fp16_bytes(wire::Op::TRANSPOSE),
         "reverse" => movement_fp16_bytes(wire::Op::REVERSE),
         "concat" => movement_fp16_bytes(wire::Op::CONCAT),
+        "abs-fp32" => unary_float_bytes(wire::Op::ABS, wire::DType::FP32),
+        "ceil-fp32" => unary_float_bytes(wire::Op::CEIL, wire::DType::FP32),
+        "cos-fp32" => unary_float_bytes(wire::Op::COS, wire::DType::FP32),
+        "erf-fp32" => unary_float_bytes(wire::Op::ERF, wire::DType::FP32),
+        "exp-fp32" => unary_float_bytes(wire::Op::EXP, wire::DType::FP32),
+        "floor-fp32" => unary_float_bytes(wire::Op::FLOOR, wire::DType::FP32),
+        "log-fp32" => unary_float_bytes(wire::Op::LOG, wire::DType::FP32),
+        "negate-fp32" => unary_float_bytes(wire::Op::NEGATE, wire::DType::FP32),
+        "reciprocal-fp32" => unary_float_bytes(wire::Op::RECIPROCAL, wire::DType::FP32),
+        "rsqrt-fp32" => unary_float_bytes(wire::Op::RSQRT, wire::DType::FP32),
+        "sin-fp32" => unary_float_bytes(wire::Op::SIN, wire::DType::FP32),
+        "sigmoid-fp32" => unary_float_bytes(wire::Op::SIGMOID, wire::DType::FP32),
+        "tanh-fp32" => unary_float_bytes(wire::Op::TANH, wire::DType::FP32),
+        "clamp-fp32" => unary_float_bytes(wire::Op::CLAMP, wire::DType::FP32),
+        "add-fp32" => binary_float_bytes(wire::Op::ADD, wire::DType::FP32),
+        "sub-fp32" => binary_float_bytes(wire::Op::SUB, wire::DType::FP32),
+        "mul-fp32" => binary_float_bytes(wire::Op::MUL, wire::DType::FP32),
+        "pow-fp32" => binary_float_bytes(wire::Op::POW, wire::DType::FP32),
+        "maximum-fp32" => binary_float_bytes(wire::Op::MAXIMUM, wire::DType::FP32),
+        "minimum-fp32" => binary_float_bytes(wire::Op::MINIMUM, wire::DType::FP32),
+        "equal-fp32" => comparison_float_bytes(wire::Op::EQUAL, wire::DType::FP32),
+        "greater-fp32" => comparison_float_bytes(wire::Op::GREATER, wire::DType::FP32),
+        "greater-equal-fp32" => comparison_float_bytes(wire::Op::GREATER_EQUAL, wire::DType::FP32),
+        "select-fp32" => select_float_bytes(wire::DType::FP32),
+        "argmax-fp32" => reduction_float_bytes(wire::Op::ARGMAX, wire::DType::FP32),
+        "reduce-max-fp32" => reduction_float_bytes(wire::Op::REDUCE_MAX, wire::DType::FP32),
+        "reduce-min-fp32" => reduction_float_bytes(wire::Op::REDUCE_MIN, wire::DType::FP32),
+        "reduce-product-fp32" => reduction_float_bytes(wire::Op::REDUCE_PRODUCT, wire::DType::FP32),
+        "reduce-sum-fp32" => reduction_float_bytes(wire::Op::REDUCE_SUM, wire::DType::FP32),
+        "const-fp32" => movement_float_bytes(wire::Op::CONST, wire::DType::FP32),
+        "reshape-fp32" => movement_float_bytes(wire::Op::RESHAPE, wire::DType::FP32),
+        "transpose-fp32" => movement_float_bytes(wire::Op::TRANSPOSE, wire::DType::FP32),
+        "reverse-fp32" => movement_float_bytes(wire::Op::REVERSE, wire::DType::FP32),
+        "concat-fp32" => movement_float_bytes(wire::Op::CONCAT, wire::DType::FP32),
+        "linear-tanh-fp32" => linear_tanh_fp32_bytes(),
         _ => panic!("unknown parity fixture {name}"),
     }
 }
@@ -2084,6 +2310,41 @@ const PARITY_FIXTURE_NAMES: &[&str] = &[
     "transpose",
     "reverse",
     "concat",
+    "abs-fp32",
+    "ceil-fp32",
+    "cos-fp32",
+    "erf-fp32",
+    "exp-fp32",
+    "floor-fp32",
+    "log-fp32",
+    "negate-fp32",
+    "reciprocal-fp32",
+    "rsqrt-fp32",
+    "sin-fp32",
+    "sigmoid-fp32",
+    "tanh-fp32",
+    "clamp-fp32",
+    "add-fp32",
+    "sub-fp32",
+    "mul-fp32",
+    "pow-fp32",
+    "maximum-fp32",
+    "minimum-fp32",
+    "equal-fp32",
+    "greater-fp32",
+    "greater-equal-fp32",
+    "select-fp32",
+    "argmax-fp32",
+    "reduce-max-fp32",
+    "reduce-min-fp32",
+    "reduce-product-fp32",
+    "reduce-sum-fp32",
+    "const-fp32",
+    "reshape-fp32",
+    "transpose-fp32",
+    "reverse-fp32",
+    "concat-fp32",
+    "linear-tanh-fp32",
 ];
 
 #[test]
