@@ -103,17 +103,15 @@ barriers between dependent dispatches. Buffers are dedicated directly bound stor
   crate-authored range reductions and polynomials (Payne–Hanek beyond |x| = 8192) rather than the
   driver's loosely specified built-ins; NaN modes follow the TOSA pseudocode literally. `MATMUL`
   is a shared-memory tiled kernel that is bit-identical to the sequential ascending-k sum.
-- **FP16 tier (ADR 0008):** the same 42 operators over binary16 tensors, advertised per device —
-  only where `shaderFloat16`/`shaderInt16` and the float-controls properties prove binary16
-  round-to-nearest-even conversions with denormal, signed-zero, infinity, and NaN preservation.
-  The float lanes evaluate in binary32 and round once — the implementation choice TOSA 1.0
-  §1.10.3 names explicitly, and the correctly rounded binary16 result on every device — because
-  every production f16 ALU probed (ANV, RADV, Apple) flushes subnormal results non-compliantly
-  or unreliably. `NEGATE`/`ABS` are integer sign operations and data movement copies lanes as
-  integers, both exact for every bit pattern; MATMUL and reductions accumulate in binary32 (the
-  accumulator width TOSA assigns FP16). Where the gate fails — lavapipe and MoltenVK both
-  report no binary16 denormal preservation — the tier is not advertised and FP16 graphs are
-  rejected, never silently widened.
+- **FP16 tier (ADR 0008):** the same 42 operators over binary16 tensors, advertised on every
+  device the backend opens — the tier needs no device feature. Packed binary16 tensors are
+  unpacked and widened to binary32 by crate-owned integer code, the float lanes evaluate in
+  binary32 — the implementation choice TOSA 1.0 §1.10.3 names explicitly, and the correctly
+  rounded binary16 result for `ADD`/`SUB`/`MUL` — and results narrow back through crate-owned
+  round-to-nearest-even code that produces subnormals on every device. `NEGATE`/`ABS` are
+  integer sign operations and data movement copies lanes as integers, both exact for every bit
+  pattern; MATMUL and reductions accumulate in binary32 (the accumulator width TOSA assigns
+  FP16). Numerics are bit-identical across devices by construction.
 - **Constraints:** `MATMUL` and `NEGATE` admit zero zero-points only, `MUL` a zero shift, and
   `RESHAPE` a constant shape (the TOSA 1.0 `CONST`-producer forms).
 - **Evidence:** the shared FP32 operator corpus, the conformance suite, and the kernel-level
@@ -123,15 +121,12 @@ barriers between dependent dispatches. Buffers are dedicated directly bound stor
   synchronization validation in every advertised memory domain; and on 2026-09-17 on Apple M4 via
   MoltenVK 1.4.2. sin/cos/tanh land within 1 ulp and
   erf within 2 ulp of binary64 on
-  every one. The FP16 corpus has executed end-to-end on Apple M4 (with the gate's denormal clause
-  experimentally relaxed for measurement) and, against the shipped gate, on Intel Arc LNL (Mesa
-  ANV) and AMD Radeon 860M (RADV): every bit-exact case, the ulp-tolerated groups, an exhaustive
-  65536-pattern `NEGATE` round trip, and the higher-precision lanes within 1 ulp of the binary64
-  references over the whole finite binary16 domain. Those runs also measured every production f16
-  ALU flushing subnormal results non-compliantly or unreliably (RADV lost the sign of a negative
-  subnormal sum; ANV flushed a subnormal `OpFNegate`), which is why the tier evaluates in
-  binary32 and rounds once; the subnormal-arithmetic probe's re-runs on ANV and RADV are the
-  owed evidence. INT8
+  every one. The FP16 corpus — every bit-exact case, the ulp-tolerated groups, an exhaustive
+  65536-pattern `NEGATE` round trip, the higher-precision lanes within 1 ulp of the binary64
+  references over the whole finite binary16 domain, and the subnormal-arithmetic probe — passes
+  on Apple M4 via MoltenVK 1.4.2 and, against the final kernels, is owed the confirmation runs
+  on Intel Arc LNL (Mesa ANV) and AMD Radeon 860M (RADV), whose earlier runs passed the corpus
+  identically. INT8
   gating remains under the
   [Vulkan wayfinder map](https://github.com/MicroPerceptron/virtio-accel/issues/154); design
   decisions are recorded in `docs/adr/` (ADR 0007 covers the FP32 tier, ADR 0008 the FP16 tier).

@@ -1861,8 +1861,9 @@ fn measure_warm_latency_on(device: &str) {
 // FP16 tier (ADR 0008)
 // ---------------------------------------------------------------------------------------------
 
-/// Whether this instance advertises the FP16 tier: native binary16 arithmetic with proven
-/// float controls. Every FP16 test skips devices that do not, rather than probing a fallback.
+/// Whether this instance advertises the FP16 tier. With crate-owned conversions the tier needs
+/// no device feature (ADR 0008), so this is every native instance; the check stays so the tests
+/// assert the advertisement rather than assume it.
 fn advertises_fp16(backend: &VulkanAccelerator) -> bool {
     backend
         .tosa_capabilities()
@@ -2055,11 +2056,9 @@ fn fp16_within_ulps(expected: u16, actual: u16, max_ulps: u16) -> bool {
     expected.abs_diff(actual) <= max_ulps
 }
 
-/// Binary16 subnormal arithmetic: the tier advertises denormal-preserving binary16 arithmetic
-/// and the kernels ask for it explicitly (the `DenormPreserve`, `SignedZeroInfNanPreserve`, and
-/// `RoundingModeRTE` execution modes, ADR 0008), so these lanes must produce the exact IEEE
-/// results, subnormal operands included. This is the probe the device gate's reported
-/// properties are held to on every stack.
+/// Binary16 subnormal arithmetic: the tier's crate-owned widen/narrow conversions produce
+/// subnormals on every device, so these lanes must produce the exact IEEE results, subnormal
+/// operands included — the held-to-contract check on every stack (ADR 0008).
 #[test]
 fn fp16_subnormal_arithmetic_is_exact_where_the_tier_is_advertised() {
     struct Probe {
@@ -2075,19 +2074,22 @@ fn fp16_subnormal_arithmetic_is_exact_where_the_tier_is_advertised() {
     const SUB_MIN: u16 = 0x0001; // 2^-24, the smallest subnormal
     let probes = &[
         Probe {
+            // (-2^-24) + (-2^-24) = -2^-23; the other rows exercise exact cancellation to +0
+            // and subnormal sign/zero propagation through the constant operand.
             name: "add-subnormal",
             kind: OperatorKind::Add,
-            constant: Some(SUB_MIN),
-            inputs: &[0x0001, 0x8001, 0x0000, 0x8000],
-            expected: &[0x0002, 0x8002, 0x0001, 0x8001],
+            constant: Some(0x8001),
+            inputs: &[0x8001, 0x0001, 0x8000, 0x0000],
+            expected: &[0x8002, 0x0000, 0x8001, 0x8001],
             output_bool: false,
         },
         Probe {
+            // 2^-23 - 2^-24 = 2^-24; -2^-23 - 2^-24 = -3·2^-24; exact cancellation to +0.
             name: "sub-subnormal",
             kind: OperatorKind::Sub,
             constant: Some(SUB_MIN),
             inputs: &[0x0002, 0x8002, 0x0001],
-            expected: &[0x0001, 0x8001, 0x0000],
+            expected: &[0x0001, 0x8003, 0x0000],
             output_bool: false,
         },
         Probe {

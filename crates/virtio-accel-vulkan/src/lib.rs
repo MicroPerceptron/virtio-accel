@@ -2,13 +2,12 @@
 //!
 //! The native path binds Vulkan 1.3 through the pinned [`ash`] crate, loading the platform's
 //! Vulkan loader at run time (ADR 0002). It executes device-neutral TOSA 1.0 programs admitted by
-//! [`lower`](crate::VULKAN_TOSA_CAPABILITY) — the FP32 operator tier shared with the Core ML and
-//! OpenVINO backends, with `BOOL`/`INT32` auxiliaries — on crate-authored SPIR-V compute kernels
-//! specialized at `load_program` (ADR 0003, ADR 0007). Where the device proves binary16
-//! conversions with the required float controls, the instance advertises the FP16 tier
-//! ([`VULKAN_TOSA_FP16_CAPABILITY`], ADR 0008) instead — packed binary16 storage, binary32
-//! evaluation with one rounding, integer sign and data-movement lanes; everywhere else FP16
-//! graphs are rejected, never silently widened. A whole graph is one submission: constants and intermediates live in a
+//! [`lower`](crate::VULKAN_TOSA_FP16_CAPABILITY) — the 42 FP32-tier operators shared with the
+//! Core ML and OpenVINO backends over FP32 and FP16 tensors, with `BOOL`/`INT32` auxiliaries —
+//! on crate-authored SPIR-V compute kernels specialized at `load_program` (ADR 0003, ADR 0007).
+//! The FP16 tier needs no device feature: its binary16 conversions are crate-owned integer and
+//! binary32 code (ADR 0008), so every device that hosts the FP32 tier hosts the FP16 tier with
+//! identical numerics. A whole graph is one submission: constants and intermediates live in a
 //! per-program arena and dependent dispatches are separated by compute barriers. Buffers are
 //! dedicated `VkDeviceMemory` allocations bound directly as storage buffers; completion is a
 //! nonblocking `vkGetFenceStatus` read over a bounded per-context ring of command buffers,
@@ -33,8 +32,8 @@ pub use lower::{
 use virtio_accel_tosa::{CapabilityDescriptor, TosaCapabilityProvider};
 
 /// TOSA capability list of the placeholder build: nothing. The native backend advertises
-/// [`VULKAN_TOSA_CAPABILITY`], or [`VULKAN_TOSA_FP16_CAPABILITY`] wherever the device gates
-/// binary16 in (ADR 0008); see `native`'s `TosaCapabilityProvider` implementation.
+/// [`VULKAN_TOSA_FP16_CAPABILITY`] on every device (ADR 0008); see `native`'s
+/// `TosaCapabilityProvider` implementation.
 #[cfg(not(va_vulkan))]
 const TOSA_CAPABILITIES: &[CapabilityDescriptor] = &[];
 

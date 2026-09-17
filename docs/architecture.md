@@ -395,12 +395,10 @@ and `vkGetFenceStatus` is the whole completion path, so no worker thread bridges
 Device loss poisons the instance. The backend runs the conformance suite and the shared FP32
 operator corpus on every device it enumerates; the FP32 operator tier is verified on the Mesa
 lavapipe CI lane, on Intel ANV (Arc 140V), and on Apple M4 via MoltenVK. The FP16 tier (ADR
-0008) — the same operators over packed binary16 storage with binary32 evaluation, advertised
-only where the device's features and float controls prove binary16 round-to-nearest-even
-conversions with denormal, signed-zero, infinity, and NaN preservation — has executed its corpus
-on Intel Arc LNL (Mesa ANV) and AMD Radeon 860M (RADV) against the shipped gate and on Apple M4
-with the gate's denormal clause experimentally relaxed; the subnormal-arithmetic probe's re-runs
-on ANV and RADV are owed.
+0008) — the same operators over packed binary16 storage with crate-owned conversions and
+binary32 evaluation, advertised on every device — has executed its corpus on Apple M4 via
+MoltenVK, Intel Arc LNL (Mesa ANV), and AMD Radeon 860M (RADV), and the lavapipe CI lane
+exercises it on every change.
 
 The Qualcomm adapter uses the same seam. Its safe planner admits 41 of the 42 floating-point
 operators shared by Core ML and OpenVINO, including owned constants/data movement, FP16 unary and

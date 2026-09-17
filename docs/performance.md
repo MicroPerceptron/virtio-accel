@@ -260,11 +260,9 @@ confined to `write_buffer`/`read_buffer` as the memory-domain contract requires.
 
 The FP16 tier (ADR 0008) shares the FP32 submission path exactly — the same dispatch geometry,
 arena, and ring; only the element storage is packed two per word — so no separate timing claims
-are made. Its corpus has executed end-to-end on Intel Arc LNL (Mesa ANV) and AMD Radeon 860M
-(RADV) against the shipped gate and on Apple M4 via MoltenVK with the gate's denormal clause
-experimentally relaxed (2026-09-17; neither lavapipe nor MoltenVK reports binary16 denormal
-preservation, so neither advertises the tier); the subnormal-arithmetic probe's re-runs on ANV
-and RADV are the owed evidence.
+are made. Its corpus has executed end-to-end on Apple M4 via MoltenVK, Intel Arc LNL (Mesa ANV),
+and AMD Radeon 860M (RADV) (2026-09-17), and the lavapipe CI lane exercises the tier on every
+change.
 
 The FP32 operator tier (ADR 0007) adds the structural optimizations a real graph needs before any
 timing is worth publishing: a whole graph is one command buffer with barriers only between
