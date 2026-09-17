@@ -87,7 +87,7 @@ See the [`virtio-accel-hexagon` support boundary](crates/virtio-accel-hexagon/RE
 - **Runtime:** Native execution requires the pinned amdxdna-native HRX runtime and compiler
   toolchain. Portable admission and offline artifact compilation remain available without a device.
 
-### Vulkan (_FP32 tier, plus FP16 where the device proves it, on any Vulkan 1.3 compute device_)
+### Vulkan (_FP32 and FP16 tiers on any Vulkan 1.3 compute device_)
 
 `virtio-accel-vulkan` is a vendor-neutral Vulkan 1.3 compute backend bound through the pinned
 `ash` crate with run-time loader discovery. It admits static single-block TOSA 1.0 graphs over the
