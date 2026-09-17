@@ -167,10 +167,10 @@ pub const fn supports_tosa_operator(op: Op) -> bool {
     VULKAN_TOSA_CAPABILITY.supports_operator(op)
 }
 
-/// Whether the FP32 tier exposes `dtype` at a program boundary.
+/// Whether the advertised FP16 tier exposes `dtype` at a program boundary.
 pub const fn supports_tosa_dtype(dtype: DType) -> bool {
-    VULKAN_TOSA_CAPABILITY.supports_dtype(dtype, ValueRoles::INPUT)
-        || VULKAN_TOSA_CAPABILITY.supports_dtype(dtype, ValueRoles::OUTPUT)
+    VULKAN_TOSA_FP16_CAPABILITY.supports_dtype(dtype, ValueRoles::INPUT)
+        || VULKAN_TOSA_FP16_CAPABILITY.supports_dtype(dtype, ValueRoles::OUTPUT)
 }
 
 /// Why an artifact was not admitted.
@@ -1551,9 +1551,9 @@ mod tests {
             assert!(!supports_tosa_operator(op), "{op:?}");
         }
         assert!(supports_tosa_dtype(DType::FP32));
+        assert!(supports_tosa_dtype(DType::FP16));
         assert!(supports_tosa_dtype(DType::BOOL));
         assert!(supports_tosa_dtype(DType::INT32));
-        assert!(!supports_tosa_dtype(DType::FP16));
         // INT8 is a compile-time parameter only (the `MUL` shift), never a boundary dtype.
         assert!(!supports_tosa_dtype(DType::INT8));
         assert!(VULKAN_TOSA_CAPABILITY.supports_dtype(DType::INT8, ValueRoles::CONSTANT));

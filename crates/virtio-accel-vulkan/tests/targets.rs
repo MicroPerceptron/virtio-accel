@@ -112,16 +112,10 @@ fn capability_advertises_the_shared_fp32_operator_set() {
     ] {
         assert!(!supports_tosa_operator(op), "{op:?}");
     }
-    for accepted in [DType::FP32, DType::BOOL, DType::INT32] {
+    for accepted in [DType::FP32, DType::FP16, DType::BOOL, DType::INT32] {
         assert!(supports_tosa_dtype(accepted), "{accepted:?}");
     }
-    for rejected in [
-        DType::FP16,
-        DType::BF16,
-        DType::INT8,
-        DType::INT4,
-        DType::INT16,
-    ] {
+    for rejected in [DType::BF16, DType::INT8, DType::INT4, DType::INT16] {
         assert!(!supports_tosa_dtype(rejected), "{rejected:?}");
     }
     // The `MUL` shift is an INT8 constant parameter consumed at admission, so the descriptor

@@ -24,10 +24,10 @@
 //! FP16 kernels are separate [`KernelKey`] variants (`float: Storage::Half`) built from the same
 //! 32-bit-only instruction set as the FP32 kernels — no 16-bit types, no device features, no
 //! driver float-controls to trust. Packed binary16 tensors are unpacked with integer ops and
-//! widened to binary32 exactly ([`Builder::widen_f16`]); every float lane evaluates in binary32
-//! — which TOSA 1.0 §1.10.3 explicitly permits ("fp16_t operations [may] be implemented using
+//! widened to binary32 exactly (`Builder::widen_f16`); every float lane evaluates in binary32
+//! — which TOSA 1.0 §1.10.3 explicitly permits ("fp16_t operations \[may\] be implemented using
 //! the fp32_t datatype") — and results narrow back through crate-owned round-to-nearest-even
-//! integer code ([`Builder::narrow_f16`]) that produces subnormals on every device. For
+//! integer code (`Builder::narrow_f16`) that produces subnormals on every device. For
 //! `ADD`/`SUB`/`MUL` that is the correctly rounded binary16 result (their exact results fit the
 //! binary32 significand); the comparison and selection lanes are exact; `RECIPROCAL` stays
 //! within TOSA's tolerance; the transcendental lanes keep ADR 0007's crate-owned binary32
@@ -649,8 +649,8 @@ pub fn f16_to_f32(bits: u16) -> f32 {
     f32::from_bits(converted.to_bits() | sign)
 }
 
-/// The binary16 bit pattern nearest to `value`, round-to-nearest-even (host side of the kernels'
-/// `OpFConvert` narrowing: NaN is canonicalized to the quiet `0x7e00` payload with its sign;
+/// The binary16 bit pattern nearest to `value`, round-to-nearest-even. NaN is canonicalized to
+/// the quiet `0x7e00` payload with its sign;
 /// magnitudes at or above 65520 round to infinity, and subnormals are produced, never flushed).
 pub fn f32_to_f16_bits(value: f32) -> u16 {
     let bits = value.to_bits();
@@ -674,7 +674,14 @@ pub fn f32_to_f16_bits(value: f32) -> u16 {
     // Subnormal binary16 or zero: scale into integer range (exact while the value is at or
     // above 2^-25; anything smaller rounds to zero either way) and round to the nearest integer.
     let scaled = f32::from_bits(magnitude) * 16_777_216.0;
-    sign | scaled.round_ties_even() as u16
+    let truncated = scaled as u16;
+    let fraction = scaled - f32::from(truncated);
+    let rounded = if fraction > 0.5 || (fraction == 0.5 && truncated & 1 != 0) {
+        truncated + 1
+    } else {
+        truncated
+    };
+    sign | rounded
 }
 
 // ---------------------------------------------------------------------------------------------
