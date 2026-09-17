@@ -1358,7 +1358,8 @@ impl Builder {
         // above 2^-25; anything smaller rounds to zero either way) and round to the nearest
         // integer. The result is at most 1024 — the smallest normal encoding, correctly reached
         // by the rounding carry.
-        let scaled = self.bitcast_f32(magnitude);
+        let safe_magnitude = self.select_u32(is_normal, normal_floor, magnitude);
+        let scaled = self.bitcast_f32(safe_magnitude);
         let scaled = self.fmul(scaled, scale);
         let scaled = self.ext_f32(GLSL_ROUND_EVEN, &[scaled]);
         let subnormal_out = self.f_to_u(scaled);
