@@ -149,9 +149,10 @@ pub const VULKAN_TOSA_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
 /// The FP16 tier's admitted boundary (ADR 0008): the same 42 operators and graph envelope with
 /// binary16 tensors in every role. Advertised per device — only where `shaderFloat16` and
 /// `shaderInt16` are present and the Vulkan 1.2 float-controls properties prove binary16
-/// round-to-nearest-even arithmetic with denormal, signed-zero, infinity, and NaN preservation;
-/// everywhere else the FP32 descriptor stands alone and FP16 graphs are rejected, never
-/// silently widened.
+/// round-to-nearest-even conversions with denormal, signed-zero, infinity, and NaN
+/// preservation; everywhere else the FP32 descriptor stands alone and FP16 graphs are rejected,
+/// never silently widened. The kernels store packed binary16 and evaluate in binary32, rounding
+/// once — the implementation choice TOSA 1.0 §1.10.3 names explicitly.
 pub const VULKAN_TOSA_FP16_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
     target: VULKAN_TOSA_TARGET,
     dtypes: FLOAT16_DTYPES,
@@ -1305,36 +1306,31 @@ impl<'a, 'b> Lowering<'a, 'b> {
                     return Err(LoweringError::UnsupportedGraph);
                 };
                 // Bounds serialize in the tensor dtype: four bytes for FP32, two for FP16. The
-                // kernel receives the dtype's own bit pattern in a word; the ordering check runs
-                // on the widened binary32 values (exact for both widths).
-                let bound = |bytes: &[u8]| -> Result<(u32, f32), LoweringError> {
-                    let (bits, value) = match bytes.len() {
-                        4 => {
-                            let value = f32::from_le_bytes(
-                                bytes
-                                    .try_into()
-                                    .map_err(|_| LoweringError::UnsupportedGraph)?,
-                            );
-                            (value.to_bits(), value)
-                        }
-                        2 => {
-                            let bits = u16::from_le_bytes(
-                                bytes
-                                    .try_into()
-                                    .map_err(|_| LoweringError::UnsupportedGraph)?,
-                            );
-                            (u32::from(bits), crate::shader::f16_to_f32(bits))
-                        }
+                // kernel applies the clamp at binary32 and narrows once (ADR 0008), so the
+                // specialization words always carry binary32 bit patterns; a binary16 bound is
+                // widened host-side, exactly. The ordering check runs on the same values.
+                let bound = |bytes: &[u8]| -> Result<u32, LoweringError> {
+                    let value = match bytes.len() {
+                        4 => f32::from_le_bytes(
+                            bytes
+                                .try_into()
+                                .map_err(|_| LoweringError::UnsupportedGraph)?,
+                        ),
+                        2 => crate::shader::f16_to_f32(u16::from_le_bytes(
+                            bytes
+                                .try_into()
+                                .map_err(|_| LoweringError::UnsupportedGraph)?,
+                        )),
                         _ => return Err(LoweringError::UnsupportedGraph),
                     };
                     if value.is_nan() {
                         return Err(LoweringError::UnsupportedGraph);
                     }
-                    Ok((bits, value))
+                    Ok(value.to_bits())
                 };
-                let (lo, lo_value) = bound(min_val)?;
-                let (hi, hi_value) = bound(max_val)?;
-                if hi_value < lo_value {
+                let lo = bound(min_val)?;
+                let hi = bound(max_val)?;
+                if f32::from_bits(hi) < f32::from_bits(lo) {
                     return Err(LoweringError::UnsupportedGraph);
                 }
                 clamp = Some([lo, hi]);
@@ -1693,8 +1689,10 @@ mod tests {
     }
 
     #[test]
-    fn fp16_clamp_bounds_arrive_as_binary16_bit_patterns() {
-        // The shared clamp-fp16 fixture clamps [0.5, 1.0, 2.0, 4.0] to [0.5, 1.0].
+    fn fp16_clamp_bounds_arrive_widened_to_binary32() {
+        // The shared clamp-fp16 fixture clamps [0.5, 1.0, 2.0, 4.0] to [-1.0, 1.0]; the kernel
+        // applies the clamp at binary32 and narrows once (ADR 0008), so the specialization
+        // words carry the widened binary32 patterns.
         let clamp = HEXAGON_UNARY_FP16_CASES
             .iter()
             .find(|case| case.name == "clamp-fp16")
@@ -1709,9 +1707,8 @@ mod tests {
                 broadcast: false
             }
         );
-        // -1.0 and 1.0 in binary16, carried one pattern per specialization word.
-        assert_eq!(dispatch.spec[dispatch.spec.len() - 2], 0xbc00);
-        assert_eq!(dispatch.spec[dispatch.spec.len() - 1], 0x3c00);
+        assert_eq!(dispatch.spec[dispatch.spec.len() - 2], (-1.0_f32).to_bits());
+        assert_eq!(dispatch.spec[dispatch.spec.len() - 1], 1.0_f32.to_bits());
     }
 
     #[test]

@@ -21,16 +21,22 @@
 //!
 //! ## Binary16 kernels (ADR 0008)
 //!
-//! FP16 kernels are separate [`KernelKey`] variants (`float: Storage::Half`) that execute
-//! binary16 arithmetic natively — elementwise lanes, comparisons, and pooling selections run on
-//! `Float16` values, never silently widened. Two evaluation choices are numerical contracts,
-//! not fallbacks: MATMUL and reduction folds accumulate in binary32 because TOSA assigns the
-//! accumulator that width, and the transcendental lanes (`SIN`, `COS`, `TANH`, `ERF`, and the
-//! `EXP`/`LOG`/`RSQRT`/`POW`/`SIGMOID` built-ins) evaluate their argument in binary32 and round
-//! once, because no meaningful range reduction exists at binary16 precision; both are the same
-//! higher-precision evaluation TOSA permits and the shared corpus's tolerances encode. The
-//! `Float16`/`Int16` capabilities are emitted only by the binary16 modules, and the tier is
-//! advertised only where the device gates them with the required float controls.
+//! FP16 kernels are separate [`KernelKey`] variants (`float: Storage::Half`). Their evaluation
+//! policy is measured, not assumed: every production f16 ALU probed (ANV, RADV, Apple) flushes
+//! subnormal results non-compliantly or unreliably, reported float-controls properties and
+//! execution modes notwithstanding, so the float lanes evaluate in binary32 — which TOSA 1.0
+//! §1.10.3 explicitly permits ("fp16_t operations [may] be implemented using the fp32_t
+//! datatype") — and round once on store. For `ADD`/`SUB`/`MUL` that is the correctly rounded
+//! binary16 result on every device (their exact results fit the binary32 significand); the
+//! comparison and selection lanes are exact; `RECIPROCAL` stays within TOSA's tolerance; the
+//! transcendental lanes keep ADR 0007's crate-owned binary32 numerics. Two lane families are
+//! exact by construction instead: `NEGATE`/`ABS` are integer sign operations on the packed
+//! lane, and data movement copies the 16-bit lanes as integers, so NaN payloads and subnormals
+//! move bit-exactly. MATMUL and reduction folds accumulate in binary32 — the accumulator width
+//! TOSA assigns FP16 — and narrow once. Binary16 modules that convert to or from `f16` emit the
+//! `SPV_KHR_float_controls` execution modes (`DenormPreserve`, `SignedZeroInfNanPreserve`,
+//! `RoundingModeRTE` at width 16), whose VUIDs name exactly the properties the tier's device
+//! gate probes; the `Float16`/`Int16` capabilities are emitted only by the binary16 modules.
 //!
 //! ## Numerics policy
 //!
@@ -350,7 +356,8 @@ pub enum KernelKey {
     /// Elementwise lanes over `count` output elements; `broadcast` selects the strided
     /// multi-index addressing, otherwise every operand shares the output's linear index. `float`
     /// is the storage of the operator's floating-point tensors (`Word` for FP32, `Half` for
-    /// FP16); `BOOL` lanes are byte storage in either variant.
+    /// FP16); `BOOL` lanes are byte storage in either variant. Binary16 lanes evaluate in
+    /// binary32 and narrow once, except the integer `NEGATE`/`ABS` sign lanes (ADR 0008).
     Elementwise {
         op: ElementwiseOp,
         float: Storage,
@@ -1709,14 +1716,6 @@ impl Builder {
         self.store_half_bits(buffers, operand, element, bits);
     }
 
-    /// A specialization-constant word carrying binary16 bits (a `CLAMP` bound) as an `f16`.
-    fn spec_f16(&mut self, bits: Id) -> Id {
-        let u16_ty = self.u16_ty();
-        let narrow = self.value(OP_U_CONVERT, u16_ty, &[bits]);
-        let f16_ty = self.f16_ty();
-        self.value(OP_BITCAST, f16_ty, &[narrow])
-    }
-
     /// Load one float element at the operand's storage width.
     fn load_float(&mut self, storage: Storage, buffers: Id, operand: (Id, Id), element: Id) -> Id {
         match storage {
@@ -2203,12 +2202,15 @@ impl Builder {
     /// width for float inputs, `bool` ids for byte inputs), yielding an id of the output
     /// storage's type per [`ElementwiseOp::output`].
     ///
-    /// Arithmetic, comparison, and selection lanes run natively at the storage width: a
-    /// binary16 `ADD` is a binary16 `OpFAdd`, never a widened binary32 one. The lanes whose
-    /// accuracy Vulkan leaves loose or unspecified (`SIN`, `COS`, `TANH`, `ERF`, and the
-    /// `EXP`/`LOG`/`RSQRT`/`POW`/`SIGMOID` built-ins) evaluate in binary32 — the precision TOSA
-    /// permits above the tensor dtype, and the only precision at which range reduction is
-    /// meaningful — and round once back to binary16 (ADR 0008).
+    /// Binary16 evaluation policy (ADR 0008): `NEGATE` and `ABS` are integer sign operations on
+    /// the packed lane; every other float lane evaluates in binary32 — the correctly rounded
+    /// binary16 result for `ADD`/`SUB`/`MUL` (their exact results fit the binary32 significand),
+    /// within TOSA's tolerance for `RECIPROCAL`, exact for the comparison and selection lanes,
+    /// and the only evaluation TOSA's range reductions permit for the transcendentals — and
+    /// rounds once on store. TOSA 1.0 §1.10.3 explicitly permits fp16 operations to be
+    /// implemented in fp32, and the measured alternative does not work: every production f16 ALU
+    /// probed (ANV, RADV, Apple) flushes subnormal results non-compliantly or unreliably,
+    /// reported float-controls properties and execution modes notwithstanding.
     fn elementwise_lane(
         &mut self,
         storage: Storage,
@@ -2216,23 +2218,33 @@ impl Builder {
         inputs: &[Id],
         clamp: Option<(Id, Id)>,
     ) -> Id {
-        if storage == Storage::Half
-            && matches!(
-                op,
-                ElementwiseOp::Cos
-                    | ElementwiseOp::Erf
-                    | ElementwiseOp::Exp
-                    | ElementwiseOp::Log
-                    | ElementwiseOp::Pow
-                    | ElementwiseOp::Rsqrt
-                    | ElementwiseOp::Sigmoid
-                    | ElementwiseOp::Sin
-                    | ElementwiseOp::Tanh
-            )
-        {
-            let wide: Vec<Id> = inputs.iter().map(|input| self.widen(*input)).collect();
-            let result = self.elementwise_lane(Storage::Word, op, &wide, None);
-            return self.narrow(result);
+        // Lanes with no float-lane evaluation: integer sign operations and the BOOL-only ops.
+        let direct = matches!(
+            op,
+            ElementwiseOp::Negate
+                | ElementwiseOp::Abs
+                | ElementwiseOp::LogicalAnd
+                | ElementwiseOp::LogicalOr
+                | ElementwiseOp::LogicalXor
+                | ElementwiseOp::LogicalNot
+                | ElementwiseOp::CopyBytes
+        );
+        if storage == Storage::Half && !direct {
+            // Widen the float lanes exactly, evaluate at binary32, narrow once. BOOL lanes
+            // (SELECT's condition) pass through; BOOL results (comparisons) need no narrowing.
+            let wide: Vec<Id> = inputs
+                .iter()
+                .zip(op.inputs())
+                .map(|(input, lane)| match lane {
+                    Storage::Word => self.widen(*input),
+                    _ => *input,
+                })
+                .collect();
+            let result = self.elementwise_lane(Storage::Word, op, &wide, clamp);
+            return match op.output() {
+                Storage::Word => self.narrow(result),
+                _ => result,
+            };
         }
         let x = inputs[0];
         match op {
@@ -2280,11 +2292,11 @@ impl Builder {
             }
             ElementwiseOp::Tanh => self.tanh(x),
             ElementwiseOp::Clamp(nan_mode) => {
+                // Reached at binary32 only: binary16 clamps widen, apply, and narrow; the
+                // bounds arrive as binary32 bit patterns (widened host-side for FP16 graphs).
                 let (lo_bits, hi_bits) = clamp.expect("clamp bounds");
-                let (lo, hi) = match storage {
-                    Storage::Half => (self.spec_f16(lo_bits), self.spec_f16(hi_bits)),
-                    _ => (self.bitcast_f32(lo_bits), self.bitcast_f32(hi_bits)),
-                };
+                let lo = self.bitcast_f32(lo_bits);
+                let hi = self.bitcast_f32(hi_bits);
                 let floored = self.apply_max(storage, x, lo, nan_mode);
                 self.apply_min(storage, floored, hi, nan_mode)
             }
@@ -2324,8 +2336,8 @@ struct LoopScope {
 ///
 /// Specialization order: `count`; per input `(buffer, base)`; output `(buffer, base)`; when
 /// `broadcast`, output `dims[MAX_RANK]` then per input `strides[MAX_RANK]`; then the operator's
-/// trailing constants (`CLAMP`: `lo`, `hi` bit patterns — binary32 for FP32, binary16 for
-/// FP16).
+/// trailing constants (`CLAMP`: `lo`, `hi` as binary32 bit patterns — binary16 bounds are
+/// widened host-side).
 fn assemble_elementwise(
     op: ElementwiseOp,
     float: Storage,

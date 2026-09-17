@@ -4,10 +4,11 @@
 //! Vulkan loader at run time (ADR 0002). It executes device-neutral TOSA 1.0 programs admitted by
 //! [`lower`](crate::VULKAN_TOSA_CAPABILITY) — the FP32 operator tier shared with the Core ML and
 //! OpenVINO backends, with `BOOL`/`INT32` auxiliaries — on crate-authored SPIR-V compute kernels
-//! specialized at `load_program` (ADR 0003, ADR 0007). Where the device proves native binary16
-//! arithmetic and the required float controls, the instance advertises the FP16 tier
-//! ([`VULKAN_TOSA_FP16_CAPABILITY`], ADR 0008) instead; everywhere else FP16 graphs are rejected,
-//! never silently widened. A whole graph is one submission: constants and intermediates live in a
+//! specialized at `load_program` (ADR 0003, ADR 0007). Where the device proves binary16
+//! conversions with the required float controls, the instance advertises the FP16 tier
+//! ([`VULKAN_TOSA_FP16_CAPABILITY`], ADR 0008) instead — packed binary16 storage, binary32
+//! evaluation with one rounding, integer sign and data-movement lanes; everywhere else FP16
+//! graphs are rejected, never silently widened. A whole graph is one submission: constants and intermediates live in a
 //! per-program arena and dependent dispatches are separated by compute barriers. Buffers are
 //! dedicated `VkDeviceMemory` allocations bound directly as storage buffers; completion is a
 //! nonblocking `vkGetFenceStatus` read over a bounded per-context ring of command buffers,

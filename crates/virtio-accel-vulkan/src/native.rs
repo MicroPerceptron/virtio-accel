@@ -288,11 +288,11 @@ struct PhysicalDeviceRecord {
     limits: vk::PhysicalDeviceLimits,
     memory: vk::PhysicalDeviceMemoryProperties,
     buffer_device_address: bool,
-    /// The device may advertise the FP16 tier (ADR 0008): native binary16 arithmetic
-    /// (`shaderFloat16`, with `shaderInt16` for the packed-storage bitcasts) under proven
-    /// float controls — round-to-nearest-even with denormal, signed-zero, infinity, and NaN
-    /// preservation, so the shared corpus's non-finite, subnormal, and signed-zero edges are
-    /// properties of the device, not hopes.
+    /// The device may advertise the FP16 tier (ADR 0008): binary16 conversions and the
+    /// packed-storage bitcasts (`shaderFloat16`, `shaderInt16`) under proven float controls —
+    /// round-to-nearest-even with denormal, signed-zero, infinity, and NaN preservation, so the
+    /// shared corpus's non-finite, subnormal, and signed-zero edges are properties of the
+    /// device, not hopes.
     fp16: bool,
     tuning: Tuning,
 }
