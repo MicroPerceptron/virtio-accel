@@ -226,11 +226,18 @@ host-visible type, and `Device` only for device-local memory. Every submitted bu
 direct storage-buffer binding; staging occurs only during explicit reads and writes of
 device-local memory.
 
-**Current execution boundary.** The advertised tier is static FP32 IDENTITY using checked-in SPIR-V.
-The provisional integer target is declared but not advertised, and FP16 remains undeclared pending
-per-device float-controls evidence. The native path and full backend conformance suite are validated
-on Intel Arc 140V through Mesa ANV and on llvmpipe/lavapipe; CI pins lavapipe so the native path
-cannot silently turn into the portable placeholder.
+**Current execution boundary.** The advertised tier is the static 42-operator FP32 tier with
+`BOOL`/`INT32` auxiliaries, plus — per device — the FP16 tier: same operators over binary16
+tensors, advertised only where `shaderFloat16`/`shaderInt16` and the float-controls properties
+prove binary16 round-to-nearest-even arithmetic with denormal, signed-zero, infinity, and NaN
+preservation (ADR 0008). The provisional integer target is declared but not advertised. The
+native path and full backend conformance suite are validated
+on Intel Arc 140V through Mesa ANV, on llvmpipe/lavapipe, and on Apple M4 via MoltenVK; CI pins
+lavapipe so the native path
+cannot silently turn into the portable placeholder. Neither lavapipe nor MoltenVK reports
+binary16 denormal preservation, so neither advertises the FP16 tier; the FP16 corpus has run
+end-to-end on Apple M4 with the gate's denormal clause experimentally relaxed (a measurement, not
+shipped), and the ANV/RADV runs against the shipped gate are the owed evidence.
 
 ## What each backend reports
 

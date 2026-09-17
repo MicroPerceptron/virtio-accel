@@ -11,9 +11,11 @@
 //!
 //! The FP32 tier (ADR 0004, ADR 0007) admits static single-block graphs over the 42 operators the
 //! Core ML and OpenVINO backends share, with `BOOL` and `INT32` auxiliaries where TOSA defines
-//! them. `CONST` tensors and intermediates live in a per-program arena; `RESHAPE` and `IDENTITY`
-//! of arena tensors are views, not copies. The provisional integer target stays declared but
-//! admits nothing until its per-device gating is ratified.
+//! them; the FP16 tier (ADR 0008) admits the same graphs over binary16 tensors on devices with
+//! native binary16 arithmetic and the required float controls. `CONST` tensors and intermediates
+//! live in a per-program arena; `RESHAPE` and `IDENTITY` of arena tensors are views, not copies.
+//! The provisional integer target stays declared but admits nothing until its per-device gating
+//! is ratified.
 
 // Builds forced to the placeholder (`VIRTIO_ACCEL_VULKAN=0`, or an OS outside the loader host
 // set) still type-check and unit-test this admission path; only the native module calls it.
@@ -60,6 +62,22 @@ const FLOAT_DTYPES: &[DTypeCapability] = &[
     DTypeCapability::new(DType::INT32, ValueRoles::ALL),
     // The TOSA 1.0 `MUL` shift operand is an INT8 constant consumed at admission (it must be
     // zero); INT8 never becomes a graph-visible provider tensor.
+    DTypeCapability::constrained(
+        DType::INT8,
+        ValueRoles::CONSTANT,
+        DTypeConstraints::PARAMETER_ONLY,
+    ),
+];
+
+/// The FP16 tier's dtypes: the FP32 tier plus binary16 tensors in every role. FP16 shares the
+/// floating-point target identity with FP32 (the tier is dtype-narrowed, exactly the Hexagon
+/// pattern); which of the two descriptors a backend instance advertises is a per-device fact
+/// (ADR 0008), never a guest-visible knob.
+const FLOAT16_DTYPES: &[DTypeCapability] = &[
+    DTypeCapability::new(DType::FP32, ValueRoles::ALL),
+    DTypeCapability::new(DType::FP16, ValueRoles::ALL),
+    DTypeCapability::new(DType::BOOL, ValueRoles::ALL),
+    DTypeCapability::new(DType::INT32, ValueRoles::ALL),
     DTypeCapability::constrained(
         DType::INT8,
         ValueRoles::CONSTANT,
@@ -128,6 +146,24 @@ pub const VULKAN_TOSA_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
     },
 };
 
+/// The FP16 tier's admitted boundary (ADR 0008): the same 42 operators and graph envelope with
+/// binary16 tensors in every role. Advertised per device — only where `shaderFloat16` and
+/// `shaderInt16` are present and the Vulkan 1.2 float-controls properties prove binary16
+/// round-to-nearest-even arithmetic with denormal, signed-zero, infinity, and NaN preservation;
+/// everywhere else the FP32 descriptor stands alone and FP16 graphs are rejected, never
+/// silently widened.
+pub const VULKAN_TOSA_FP16_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
+    target: VULKAN_TOSA_TARGET,
+    dtypes: FLOAT16_DTYPES,
+    operators: FLOAT_OPERATORS,
+    graph: GraphCapabilities {
+        max_regions: 1,
+        max_blocks: 1,
+        dynamic_shapes: false,
+        runtime_conditions: RuntimeConditionSupport::None,
+    },
+};
+
 /// Whether the FP32 tier admits `op`.
 pub const fn supports_tosa_operator(op: Op) -> bool {
     VULKAN_TOSA_CAPABILITY.supports_operator(op)
@@ -172,11 +208,26 @@ pub(crate) const ARENA_ALIGNMENT: u64 = 256;
 /// once the device's workgroup tuning and descriptor-array length are known.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum KernelSpec {
-    Elementwise { op: ElementwiseOp, broadcast: bool },
-    Reduce { op: ReduceOp },
-    Matmul,
-    MaxPool { nan_mode: NanMode },
-    Move { storage: Storage, contiguous: bool },
+    Elementwise {
+        op: ElementwiseOp,
+        float: Storage,
+        broadcast: bool,
+    },
+    Reduce {
+        op: ReduceOp,
+        float: Storage,
+    },
+    Matmul {
+        float: Storage,
+    },
+    MaxPool {
+        nan_mode: NanMode,
+        float: Storage,
+    },
+    Move {
+        storage: Storage,
+        contiguous: bool,
+    },
 }
 
 /// Dispatch geometry before device tuning.
@@ -254,14 +305,20 @@ impl ProgramPlan {
     }
 }
 
-/// Admit `bytes` for `target` and produce its plan, or explain the rejection.
-pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<ProgramPlan, LoweringError> {
+/// Admit `bytes` for `target` and produce its plan, or explain the rejection. `fp16` is the
+/// instance's advertised-tier fact (ADR 0008): with it, FP16 tensors are admitted; without it
+/// they are rejected as [`LoweringError::UnsupportedType`], never silently widened.
+pub(crate) fn lower_tosa(
+    bytes: &[u8],
+    target: Target,
+    fp16: bool,
+) -> Result<ProgramPlan, LoweringError> {
     if target != VULKAN_TOSA_TARGET {
         return Err(LoweringError::UnsupportedTarget);
     }
     let model = parse(bytes).map_err(LoweringError::Parse)?;
     let analysis = model.analyze_for(target).map_err(LoweringError::Analysis)?;
-    Lowering::new(&analysis)?.run()
+    Lowering::new(&analysis, fp16)?.run()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -314,15 +371,19 @@ fn pad_leading(values: &[u32], fill: u32) -> [u32; MAX_RANK] {
 }
 
 fn storage_of(dtype: DType) -> Storage {
-    if dtype == DType::BOOL {
-        Storage::Byte
-    } else {
-        Storage::Word
+    match dtype {
+        DType::BOOL => Storage::Byte,
+        DType::FP16 => Storage::Half,
+        _ => Storage::Word,
     }
 }
 
 fn scalar_bytes(dtype: DType) -> u64 {
-    if dtype == DType::BOOL { 1 } else { 4 }
+    match dtype {
+        DType::BOOL => 1,
+        DType::FP16 => 2,
+        _ => 4,
+    }
 }
 
 /// Where a tensor's bytes live during execution.
@@ -369,6 +430,9 @@ struct Region {
 
 struct Lowering<'a, 'b> {
     analysis: &'b TosaAnalysis<'a>,
+    /// Whether this instance advertises the FP16 tier (ADR 0008); without it FP16 tensors are
+    /// rejected at the dtype gate.
+    fp16: bool,
     inputs: &'b [ValueId],
     outputs: &'b [ValueId],
     order: &'b [OperatorId],
@@ -388,7 +452,7 @@ struct Lowering<'a, 'b> {
 }
 
 impl<'a, 'b> Lowering<'a, 'b> {
-    fn new(analysis: &'b TosaAnalysis<'a>) -> Result<Self, LoweringError> {
+    fn new(analysis: &'b TosaAnalysis<'a>, fp16: bool) -> Result<Self, LoweringError> {
         if analysis.regions().len() != 1 || analysis.blocks().len() != 1 {
             return Err(LoweringError::UnsupportedGraph);
         }
@@ -424,6 +488,7 @@ impl<'a, 'b> Lowering<'a, 'b> {
         }
         Ok(Self {
             analysis,
+            fp16,
             inputs,
             outputs,
             order,
@@ -536,7 +601,9 @@ impl<'a, 'b> Lowering<'a, 'b> {
             return Err(LoweringError::UnsupportedGraph);
         };
         let dtype = tensor.dtype();
-        if !matches!(dtype, DType::FP32 | DType::BOOL | DType::INT32) {
+        if !matches!(dtype, DType::FP32 | DType::BOOL | DType::INT32)
+            && !(dtype == DType::FP16 && self.fp16)
+        {
             return Err(LoweringError::UnsupportedType(dtype));
         }
         let rank = tensor.rank().ok_or(LoweringError::UnsupportedGraph)?;
@@ -565,9 +632,10 @@ impl<'a, 'b> Lowering<'a, 'b> {
         Ok(shape)
     }
 
+    /// The shape of a floating-point tensor (`FP32`, or `FP16` where the tier is advertised).
     fn float_shape(&mut self, value: ValueId) -> Result<TensorShape, LoweringError> {
         let shape = self.shape(value)?;
-        if shape.dtype != DType::FP32 {
+        if !matches!(shape.dtype, DType::FP32 | DType::FP16) {
             return Err(LoweringError::UnsupportedType(shape.dtype));
         }
         Ok(shape)
@@ -981,14 +1049,14 @@ impl<'a, 'b> Lowering<'a, 'b> {
         let [lhs, rhs, lhs_zp, rhs_zp] = inputs else {
             return Err(LoweringError::UnsupportedGraph);
         };
-        // TOSA 1.0 FP32 MATMUL admits only zero zero-points: the two trailing inputs must be
-        // `CONST` tensors whose serialized payload is all-zero (signed zero included).
-        for zero_point in [lhs_zp, rhs_zp] {
-            self.require_zero_constant(*zero_point, DType::FP32)?;
-        }
         let lhs_shape = self.float_shape(*lhs)?;
-        let rhs_shape = self.float_shape(*rhs)?;
-        let out_shape = self.float_shape(output)?;
+        let rhs_shape = self.typed_shape(*rhs, lhs_shape.dtype)?;
+        let out_shape = self.typed_shape(output, lhs_shape.dtype)?;
+        // TOSA 1.0 floating-point MATMUL admits only zero zero-points: the two trailing inputs
+        // must be `CONST` tensors whose serialized payload is all-zero (signed zero included).
+        for zero_point in [lhs_zp, rhs_zp] {
+            self.require_zero_constant(*zero_point, lhs_shape.dtype)?;
+        }
         let ([batch_l, m, k], [batch_r, k_r, n], [batch_o, m_o, n_o]) = (
             lhs_shape.dims.as_slice(),
             rhs_shape.dims.as_slice(),
@@ -1013,7 +1081,9 @@ impl<'a, 'b> Lowering<'a, 'b> {
             batch,
         );
         self.dispatch(
-            KernelSpec::Matmul,
+            KernelSpec::Matmul {
+                float: lhs_shape.storage(),
+            },
             spec,
             Work::Matmul { m, n, batch },
             &[from_lhs, from_rhs],
@@ -1043,7 +1113,7 @@ impl<'a, 'b> Lowering<'a, 'b> {
         };
         let nan_mode = nan_mode_of(nan_mode)?;
         let source = self.float_shape(*input)?;
-        let target = self.float_shape(output)?;
+        let target = self.typed_shape(output, source.dtype)?;
         let ([batch, height, width, channels], [batch_o, out_height, out_width, channels_o]) =
             (source.dims.as_slice(), target.dims.as_slice())
         else {
@@ -1118,7 +1188,10 @@ impl<'a, 'b> Lowering<'a, 'b> {
         let to = self.output_location(output)?;
         let spec = max_pool_spec(self.operand(from), self.operand(to), geometry);
         self.dispatch(
-            KernelSpec::MaxPool { nan_mode },
+            KernelSpec::MaxPool {
+                nan_mode,
+                float: source.storage(),
+            },
             spec,
             Work::Linear(target.elements),
             &[from],
@@ -1152,7 +1225,7 @@ impl<'a, 'b> Lowering<'a, 'b> {
             _ => return Err(LoweringError::UnsupportedGraph),
         };
         let source = self.float_shape(*input)?;
-        let target = self.typed_shape(output, if argmax { DType::INT32 } else { DType::FP32 })?;
+        let target = self.typed_shape(output, if argmax { DType::INT32 } else { source.dtype })?;
         let axis = usize::try_from(axis)
             .ok()
             .filter(|axis| *axis < source.rank())
@@ -1178,7 +1251,10 @@ impl<'a, 'b> Lowering<'a, 'b> {
             inner,
         );
         self.dispatch(
-            KernelSpec::Reduce { op },
+            KernelSpec::Reduce {
+                op,
+                float: source.storage(),
+            },
             spec,
             Work::Linear(target.elements),
             &[from],
@@ -1214,8 +1290,9 @@ impl<'a, 'b> Lowering<'a, 'b> {
                 let [value, input_zp, output_zp] = inputs else {
                     return Err(LoweringError::UnsupportedGraph);
                 };
-                self.require_zero_constant(*input_zp, DType::FP32)?;
-                self.require_zero_constant(*output_zp, DType::FP32)?;
+                let dtype = self.shape(*value)?.dtype;
+                self.require_zero_constant(*input_zp, dtype)?;
+                self.require_zero_constant(*output_zp, dtype)?;
                 (ElementwiseOp::Negate, vec![*value])
             }
             Op::CLAMP => {
@@ -1227,19 +1304,37 @@ impl<'a, 'b> Lowering<'a, 'b> {
                 else {
                     return Err(LoweringError::UnsupportedGraph);
                 };
-                let bound = |bytes: &[u8]| -> Result<u32, LoweringError> {
-                    let bytes: [u8; 4] = bytes
-                        .try_into()
-                        .map_err(|_| LoweringError::UnsupportedGraph)?;
-                    let value = f32::from_le_bytes(bytes);
+                // Bounds serialize in the tensor dtype: four bytes for FP32, two for FP16. The
+                // kernel receives the dtype's own bit pattern in a word; the ordering check runs
+                // on the widened binary32 values (exact for both widths).
+                let bound = |bytes: &[u8]| -> Result<(u32, f32), LoweringError> {
+                    let (bits, value) = match bytes.len() {
+                        4 => {
+                            let value = f32::from_le_bytes(
+                                bytes
+                                    .try_into()
+                                    .map_err(|_| LoweringError::UnsupportedGraph)?,
+                            );
+                            (value.to_bits(), value)
+                        }
+                        2 => {
+                            let bits = u16::from_le_bytes(
+                                bytes
+                                    .try_into()
+                                    .map_err(|_| LoweringError::UnsupportedGraph)?,
+                            );
+                            (u32::from(bits), crate::shader::f16_to_f32(bits))
+                        }
+                        _ => return Err(LoweringError::UnsupportedGraph),
+                    };
                     if value.is_nan() {
                         return Err(LoweringError::UnsupportedGraph);
                     }
-                    Ok(value.to_bits())
+                    Ok((bits, value))
                 };
-                let lo = bound(min_val)?;
-                let hi = bound(max_val)?;
-                if f32::from_bits(hi) < f32::from_bits(lo) {
+                let (lo, lo_value) = bound(min_val)?;
+                let (hi, hi_value) = bound(max_val)?;
+                if hi_value < lo_value {
                     return Err(LoweringError::UnsupportedGraph);
                 }
                 clamp = Some([lo, hi]);
@@ -1296,33 +1391,36 @@ impl<'a, 'b> Lowering<'a, 'b> {
         output: ValueId,
         clamp: Option<[u32; 2]>,
     ) -> Result<(), LoweringError> {
-        let input_storage = lane.inputs();
-        if inputs.len() != input_storage.len() {
+        let lanes = lane.inputs();
+        if inputs.len() != lanes.len() {
             return Err(LoweringError::UnsupportedGraph);
         }
         let target = self.shape(output)?;
-        // Output dtype: BOOL for predicates, otherwise the (word) dtype of the value operands.
-        match lane.output() {
-            Storage::Byte if target.dtype != DType::BOOL => {
-                return Err(LoweringError::UnsupportedType(target.dtype));
+        // Every float lane (`Word` in the lane table) must agree on one float dtype, FP32 or
+        // FP16; pure-`BOOL` lanes have no float storage and the kernel's float width is unused.
+        let mut float_dtype: Option<DType> = None;
+        let mut unify = |dtype: DType| -> Result<(), LoweringError> {
+            if !matches!(dtype, DType::FP32 | DType::FP16) {
+                return Err(LoweringError::UnsupportedType(dtype));
             }
-            Storage::Word if target.dtype == DType::BOOL => {
-                return Err(LoweringError::UnsupportedType(target.dtype));
+            match float_dtype {
+                Some(existing) if existing != dtype => Err(LoweringError::UnsupportedGraph),
+                _ => {
+                    float_dtype = Some(dtype);
+                    Ok(())
+                }
             }
-            _ => {}
-        }
-        // SELECT moves words of either word dtype; every other word lane is FP32 arithmetic.
-        let word_dtype = match lane {
-            ElementwiseOp::Select => target.dtype,
-            _ => DType::FP32,
         };
         let mut shapes = Vec::with_capacity(inputs.len());
-        for (input, storage) in inputs.iter().zip(input_storage) {
-            let expected = match storage {
-                Storage::Byte => DType::BOOL,
-                Storage::Word => word_dtype,
-            };
-            let shape = self.typed_shape(*input, expected)?;
+        for (input, storage) in inputs.iter().zip(lanes) {
+            let shape = self.shape(*input)?;
+            match storage {
+                Storage::Word => unify(shape.dtype)?,
+                Storage::Byte if shape.dtype != DType::BOOL => {
+                    return Err(LoweringError::UnsupportedType(shape.dtype));
+                }
+                _ => {}
+            }
             if shape.rank() != target.rank()
                 || shape
                     .dims
@@ -1334,9 +1432,14 @@ impl<'a, 'b> Lowering<'a, 'b> {
             }
             shapes.push(shape);
         }
-        if matches!(lane.output(), Storage::Word) && target.dtype != word_dtype {
-            return Err(LoweringError::UnsupportedType(target.dtype));
+        match lane.output() {
+            Storage::Word => unify(target.dtype)?,
+            Storage::Byte if target.dtype != DType::BOOL => {
+                return Err(LoweringError::UnsupportedType(target.dtype));
+            }
+            _ => {}
         }
+        let float = storage_of(float_dtype.unwrap_or(DType::FP32));
         let broadcast = shapes.iter().any(|shape| shape.dims != target.dims);
         let mut strides = Vec::with_capacity(inputs.len());
         for shape in &shapes {
@@ -1371,6 +1474,7 @@ impl<'a, 'b> Lowering<'a, 'b> {
         self.dispatch(
             KernelSpec::Elementwise {
                 op: lane,
+                float,
                 broadcast,
             },
             spec,
@@ -1401,6 +1505,12 @@ impl<'a, 'b> Lowering<'a, 'b> {
                         u32::from_le_bytes(chunk.try_into().expect("four bytes")) & 0x7fff_ffff == 0
                     })
             }
+            DType::FP16 => {
+                bytes.len() % 2 == 0
+                    && bytes.chunks_exact(2).all(|chunk| {
+                        u16::from_le_bytes(chunk.try_into().expect("two bytes")) & 0x7fff == 0
+                    })
+            }
             _ => bytes.iter().all(|byte| *byte == 0),
         };
         if bytes.is_empty() || !zero {
@@ -1424,7 +1534,8 @@ fn nan_mode_of(mode: NanPropagationMode) -> Result<NanMode, LoweringError> {
 mod tests {
     use super::*;
     use virtio_accel_conformance::numerics::{
-        IDENTITY_EDGES_FP16, IDENTITY_EDGES_FP32, IDENTITY_INT8, MATMUL_FP32, MAX_POOL2D_FP32,
+        HEXAGON_UNARY_FP16_CASES, IDENTITY_EDGES_FP16, IDENTITY_EDGES_FP32, IDENTITY_INT8,
+        MATMUL_FP16, MATMUL_FP32, MAX_POOL2D_FP16, MAX_POOL2D_FP32,
     };
 
     const IDENTITY_FP32_LOCAL: &[u8] = include_bytes!("../tests/data/identity-fp32-v1.0.0.tosa");
@@ -1468,7 +1579,7 @@ mod tests {
 
     #[test]
     fn lowers_the_local_fp32_identity_artifact() {
-        let plan = lower_tosa(IDENTITY_FP32_LOCAL, VULKAN_TOSA_TARGET).unwrap();
+        let plan = lower_tosa(IDENTITY_FP32_LOCAL, VULKAN_TOSA_TARGET, false).unwrap();
         assert_eq!(plan.slots.len(), 2);
         assert_eq!(plan.slot(0).unwrap().role, SlotRole::Input);
         assert_eq!(plan.slot(1).unwrap().role, SlotRole::Output);
@@ -1494,7 +1605,7 @@ mod tests {
 
     #[test]
     fn lowers_the_shared_fp32_edge_identity_artifact() {
-        let plan = lower_tosa(IDENTITY_EDGES_FP32.artifact, VULKAN_TOSA_TARGET).unwrap();
+        let plan = lower_tosa(IDENTITY_EDGES_FP32.artifact, VULKAN_TOSA_TARGET, false).unwrap();
         let expected = IDENTITY_EDGES_FP32.inputs[0].values.len();
         assert_eq!(plan.dispatches[0].work, Work::Linear(expected as u32));
         assert_eq!(plan.slot(1).unwrap().byte_len as usize, expected * 4);
@@ -1503,32 +1614,127 @@ mod tests {
     #[test]
     fn rejects_other_targets_before_parsing() {
         assert_eq!(
-            lower_tosa(IDENTITY_FP32_LOCAL, VULKAN_TOSA_INTEGER_TARGET),
+            lower_tosa(IDENTITY_FP32_LOCAL, VULKAN_TOSA_INTEGER_TARGET, false),
             Err(LoweringError::UnsupportedTarget)
         );
         assert_eq!(
-            lower_tosa(IDENTITY_INT8.artifact, VULKAN_TOSA_INTEGER_TARGET),
+            lower_tosa(IDENTITY_INT8.artifact, VULKAN_TOSA_INTEGER_TARGET, false),
             Err(LoweringError::UnsupportedTarget)
         );
     }
 
     #[test]
     fn rejects_mistyped_identity_graphs_loudly() {
-        // FP16 identity: the FP16 tier is deliberately undeclared (ADR 0004).
+        // FP16 identity on an instance that does not advertise the FP16 tier (ADR 0008):
+        // rejected, never silently widened to FP32.
         assert!(matches!(
-            lower_tosa(IDENTITY_EDGES_FP16.artifact, VULKAN_TOSA_TARGET),
+            lower_tosa(IDENTITY_EDGES_FP16.artifact, VULKAN_TOSA_TARGET, false),
             Err(LoweringError::UnsupportedType(DType::FP16) | LoweringError::Analysis(_))
         ));
         // INT8 identity under the floating-point target: never relabeled.
         assert!(matches!(
-            lower_tosa(IDENTITY_INT8.artifact, VULKAN_TOSA_TARGET),
+            lower_tosa(IDENTITY_INT8.artifact, VULKAN_TOSA_TARGET, false),
             Err(LoweringError::UnsupportedType(DType::INT8) | LoweringError::Analysis(_))
         ));
     }
 
     #[test]
+    fn fp16_capability_extends_the_fp32_boundary() {
+        for dtype in [DType::FP32, DType::FP16, DType::BOOL, DType::INT32] {
+            assert!(
+                VULKAN_TOSA_FP16_CAPABILITY.supports_dtype(dtype, ValueRoles::INPUT),
+                "{dtype:?}"
+            );
+            assert!(
+                VULKAN_TOSA_FP16_CAPABILITY.supports_dtype(dtype, ValueRoles::OUTPUT),
+                "{dtype:?}"
+            );
+        }
+        assert_eq!(VULKAN_TOSA_FP16_CAPABILITY.target, VULKAN_TOSA_TARGET);
+        assert_eq!(VULKAN_TOSA_FP16_CAPABILITY.operators, FLOAT_OPERATORS);
+        assert!(!VULKAN_TOSA_CAPABILITY.supports_dtype(DType::FP16, ValueRoles::INPUT));
+    }
+
+    #[test]
+    fn lowers_the_shared_fp16_artifacts_when_the_tier_is_advertised() {
+        let plan = lower_tosa(IDENTITY_EDGES_FP16.artifact, VULKAN_TOSA_TARGET, true).unwrap();
+        let expected = IDENTITY_EDGES_FP16.inputs[0].bits.len() as u32;
+        assert_eq!(plan.slot(0).unwrap().byte_len, u64::from(expected) * 2);
+        assert_eq!(plan.slot(0).unwrap().storage, Storage::Half);
+        assert_eq!(plan.dispatches.len(), 1);
+        assert_eq!(
+            plan.dispatches[0].kernel,
+            KernelSpec::Move {
+                storage: Storage::Half,
+                contiguous: true
+            }
+        );
+        assert_eq!(plan.dispatches[0].work, Work::Linear(expected));
+
+        let plan = lower_tosa(MATMUL_FP16.artifact, VULKAN_TOSA_TARGET, true).unwrap();
+        assert_eq!(
+            plan.dispatches[0].kernel,
+            KernelSpec::Matmul {
+                float: Storage::Half
+            }
+        );
+        assert_eq!(plan.slot(0).unwrap().byte_len, 6 * 2);
+        assert_eq!(plan.slot(2).unwrap().byte_len, 4 * 2);
+        assert_eq!(plan.arena_bytes, 0);
+
+        let plan = lower_tosa(MAX_POOL2D_FP16.artifact, VULKAN_TOSA_TARGET, true).unwrap();
+        assert_eq!(
+            plan.dispatches[0].kernel,
+            KernelSpec::MaxPool {
+                nan_mode: NanMode::Propagate,
+                float: Storage::Half
+            }
+        );
+    }
+
+    #[test]
+    fn fp16_clamp_bounds_arrive_as_binary16_bit_patterns() {
+        // The shared clamp-fp16 fixture clamps [0.5, 1.0, 2.0, 4.0] to [0.5, 1.0].
+        let clamp = HEXAGON_UNARY_FP16_CASES
+            .iter()
+            .find(|case| case.name == "clamp-fp16")
+            .expect("the shared clamp-fp16 case");
+        let plan = lower_tosa(clamp.artifact, VULKAN_TOSA_TARGET, true).unwrap();
+        let dispatch = &plan.dispatches[0];
+        assert_eq!(
+            dispatch.kernel,
+            KernelSpec::Elementwise {
+                op: ElementwiseOp::Clamp(NanMode::Propagate),
+                float: Storage::Half,
+                broadcast: false
+            }
+        );
+        // -1.0 and 1.0 in binary16, carried one pattern per specialization word.
+        assert_eq!(dispatch.spec[dispatch.spec.len() - 2], 0xbc00);
+        assert_eq!(dispatch.spec[dispatch.spec.len() - 1], 0x3c00);
+    }
+
+    #[test]
+    fn fp16_negate_zero_points_are_consumed_at_admission() {
+        let negate = HEXAGON_UNARY_FP16_CASES
+            .iter()
+            .find(|case| case.name == "negate-fp16")
+            .expect("the shared negate-fp16 case");
+        let plan = lower_tosa(negate.artifact, VULKAN_TOSA_TARGET, true).unwrap();
+        assert_eq!(
+            plan.dispatches[0].kernel,
+            KernelSpec::Elementwise {
+                op: ElementwiseOp::Negate,
+                float: Storage::Half,
+                broadcast: false
+            }
+        );
+        assert_eq!(plan.arena_bytes, 0);
+    }
+
+    #[test]
     fn lowers_the_shared_fp32_matmul_artifact() {
-        let plan = lower_tosa(MATMUL_FP32.artifact, VULKAN_TOSA_TARGET).unwrap();
+        let plan = lower_tosa(MATMUL_FP32.artifact, VULKAN_TOSA_TARGET, false).unwrap();
         assert_eq!(plan.slots.len(), 3);
         assert_eq!(plan.slot(0).unwrap().byte_len, 6 * 4);
         assert_eq!(plan.slot(1).unwrap().byte_len, 6 * 4);
@@ -1536,7 +1742,12 @@ mod tests {
         assert_eq!(plan.slot(2).unwrap().byte_len, 4 * 4);
         assert_eq!(plan.dispatches.len(), 1);
         let dispatch = &plan.dispatches[0];
-        assert_eq!(dispatch.kernel, KernelSpec::Matmul);
+        assert_eq!(
+            dispatch.kernel,
+            KernelSpec::Matmul {
+                float: Storage::Word
+            }
+        );
         assert_eq!(
             dispatch.work,
             Work::Matmul {
@@ -1553,12 +1764,13 @@ mod tests {
 
     #[test]
     fn lowers_the_shared_fp32_max_pool_artifact() {
-        let plan = lower_tosa(MAX_POOL2D_FP32.artifact, VULKAN_TOSA_TARGET).unwrap();
+        let plan = lower_tosa(MAX_POOL2D_FP32.artifact, VULKAN_TOSA_TARGET, false).unwrap();
         let dispatch = &plan.dispatches[0];
         assert_eq!(
             dispatch.kernel,
             KernelSpec::MaxPool {
-                nan_mode: NanMode::Propagate
+                nan_mode: NanMode::Propagate,
+                float: Storage::Word
             }
         );
         assert_eq!(dispatch.work, Work::Linear(8));
@@ -1572,7 +1784,7 @@ mod tests {
     #[test]
     fn rejects_garbage_as_a_parse_error() {
         assert!(matches!(
-            lower_tosa(b"not a flatbuffer", VULKAN_TOSA_TARGET),
+            lower_tosa(b"not a flatbuffer", VULKAN_TOSA_TARGET, false),
             Err(LoweringError::Parse(_))
         ));
     }
@@ -1583,7 +1795,7 @@ mod tests {
         let bytes = IDENTITY_FP32_LOCAL;
         let model = parse(bytes).unwrap();
         let analysis = model.analyze_for(VULKAN_TOSA_TARGET).unwrap();
-        let mut lowering = Lowering::new(&analysis).unwrap();
+        let mut lowering = Lowering::new(&analysis, false).unwrap();
         lowering.position = 0;
         let a = lowering.allocate_region(100, 1).unwrap();
         let b = lowering.allocate_region(100, 5).unwrap();
@@ -1605,7 +1817,7 @@ mod tests {
     fn reused_arena_bytes_force_a_barrier_before_the_new_writer() {
         let model = parse(IDENTITY_FP32_LOCAL).unwrap();
         let analysis = model.analyze_for(VULKAN_TOSA_TARGET).unwrap();
-        let mut lowering = Lowering::new(&analysis).unwrap();
+        let mut lowering = Lowering::new(&analysis, false).unwrap();
         let values: Vec<ValueId> = analysis.values().iter().map(|value| value.id()).collect();
         let (a_value, b_value) = (values[0], values[1]);
         let kernel = KernelSpec::Move {

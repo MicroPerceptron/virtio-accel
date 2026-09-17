@@ -42,7 +42,7 @@ This table is organized by program and dtype. For the physical devices behind it
 | Intel OpenVINO (`virtio-accel-openvino`)    | Implemented; OpenVINO 2026.x              | Static TOSA 1.0 FP + INT8 tier                           | Supported                         | Supported                              | Not implemented             | Identity + MATMUL | Not implemented | Direct host/shared bindings |
 | AMD XDNA (`virtio-accel-xdna`)              | Experimental; HRX on XDNA2                | Static BF16 TOSA + explicit FP8 storage CAST + INT8 tier | Accumulator outputs only          | Not implemented                        | E4M3/E5M2 → BF16 CAST       | Identity + MATMUL + RESCALE | Not implemented | Direct host/shared bindings |
 | Qualcomm Hexagon (`virtio-accel-hexagon`)   | Experimental; QAIRT 2.49 on Windows ARM64 | Static TOSA 1.0 FP16 + BOOL/INT32 auxiliaries; INT8 tier | Blocked by v73 precision evidence | 41/42 shared operators (`ERF` blocked) | Blocked: ambiguous encoding | Identity + MATMUL | Not implemented | Direct host/shared bindings |
-| Vulkan (`virtio-accel-vulkan`)              | Experimental; Vulkan 1.3 loader           | Static TOSA 1.0 FP32 + BOOL/INT32 auxiliaries            | Supported                         | Not implemented                        | Not implemented             | Target declared, not advertised | Not implemented | Direct host/shared/device bindings |
+| Vulkan (`virtio-accel-vulkan`)              | Experimental; Vulkan 1.3 loader           | Static TOSA 1.0 FP32/FP16 + BOOL/INT32 auxiliaries            | Supported                         | Supported (per-device float-controls gate)                        | Not implemented             | Target declared, not advertised | Not implemented | Direct host/shared/device bindings |
 
 ### Core ML (_Apple Neural Engine_)
 
@@ -87,7 +87,7 @@ See the [`virtio-accel-hexagon` support boundary](crates/virtio-accel-hexagon/RE
 - **Runtime:** Native execution requires the pinned amdxdna-native HRX runtime and compiler
   toolchain. Portable admission and offline artifact compilation remain available without a device.
 
-### Vulkan (_FP32 tier on any Vulkan 1.3 compute device_)
+### Vulkan (_FP32 tier, plus FP16 where the device proves it, on any Vulkan 1.3 compute device_)
 
 `virtio-accel-vulkan` is a vendor-neutral Vulkan 1.3 compute backend bound through the pinned
 `ash` crate with run-time loader discovery. It admits static single-block TOSA 1.0 graphs over the
@@ -103,18 +103,32 @@ barriers between dependent dispatches. Buffers are dedicated directly bound stor
   crate-authored range reductions and polynomials (Payne–Hanek beyond |x| = 8192) rather than the
   driver's loosely specified built-ins; NaN modes follow the TOSA pseudocode literally. `MATMUL`
   is a shared-memory tiled kernel that is bit-identical to the sequential ascending-k sum.
+- **FP16 tier (ADR 0008):** the same 42 operators over binary16 tensors, advertised per device —
+  only where `shaderFloat16`/`shaderInt16` and the float-controls properties prove binary16
+  round-to-nearest-even arithmetic with denormal, signed-zero, infinity, and NaN preservation.
+  Arithmetic, comparison, and selection lanes execute natively in binary16; MATMUL and reduction
+  sums accumulate in binary32 because TOSA assigns that accumulator width; the transcendental and
+  `EXP`/`LOG`/`RSQRT`/`POW`/`SIGMOID` lanes evaluate in binary32 and round once (the
+  higher-precision evaluation TOSA permits). Where the gate fails — lavapipe and MoltenVK both
+  report no binary16 denormal preservation — the tier is not advertised and FP16 graphs are
+  rejected, never silently widened.
 - **Constraints:** `MATMUL` and `NEGATE` admit zero zero-points only, `MUL` a zero shift, and
   `RESHAPE` a constant shape (the TOSA 1.0 `CONST`-producer forms).
 - **Evidence:** the shared FP32 operator corpus, the conformance suite, and the kernel-level
   tests pass on Mesa lavapipe in CI; on 2026-09-06 on Intel Arc 140V (Lunar Lake, Mesa 26.0.8 ANV,
-  Vulkan 1.4.335) and the same host's llvmpipe (LLVM 21.1.8); and on 2026-09-08 on AMD Radeon 860M
+  Vulkan 1.4.335) and the same host's llvmpipe (LLVM 21.1.8); on 2026-09-08 on AMD Radeon 860M
   (Krackan Point, RADV Mesa 26.1.8, Vulkan 1.4.354), which also runs clean under Khronos
-  synchronization validation in every advertised memory domain. sin/cos/tanh land within 1 ulp and
+  synchronization validation in every advertised memory domain; and on 2026-09-17 on Apple M4 via
+  MoltenVK 1.4.2. sin/cos/tanh land within 1 ulp and
   erf within 2 ulp of binary64 on
-  every one. Apple M3 via MoltenVK has verified only the earlier IDENTITY + MATMUL tier. FP16/INT8
+  every one. The FP16 corpus has executed end-to-end on Apple M4 (with the gate's denormal clause
+  experimentally relaxed for measurement): every bit-exact case, the ulp-tolerated groups, an
+  exhaustive 65536-pattern `NEGATE` round trip, and the higher-precision lanes within 1 ulp of the
+  binary64 references over the whole finite binary16 domain; the ANV and RADV runs against the
+  shipped gate are the owed evidence. INT8
   gating remains under the
   [Vulkan wayfinder map](https://github.com/MicroPerceptron/virtio-accel/issues/154); design
-  decisions are recorded in `docs/adr/` (ADR 0007 covers this tier).
+  decisions are recorded in `docs/adr/` (ADR 0007 covers the FP32 tier, ADR 0008 the FP16 tier).
 
 ### TOSA 1.0
 
@@ -127,7 +141,7 @@ Independently of backend execution, `virtio-accel-tosa` validates the TOSA 1.0 p
 | `virtio-accel-vaccel`      | `core`                | Adapter seam for mapping native provider contracts (including vAccel-style backends) to `virtio-accel-core`  |
 | `virtio-accel-coreml`      | `std`                 | TOSA-to-Core ML lowering, direct buffers, and asynchronous ANE-capable prediction                            |
 | `virtio-accel-openvino`    | `std`                 | TOSA-to-OpenVINO IR lowering, direct host-pointer tensors, and asynchronous NPU/GPU/CPU inference            |
-| `virtio-accel-vulkan`      | `std`                 | Vendor-neutral Vulkan 1.3 compute backend over `ash`: crate-authored SPIR-V kernels, direct storage-buffer binding, the shared FP32 operator tier |
+| `virtio-accel-vulkan`      | `std`                 | Vendor-neutral Vulkan 1.3 compute backend over `ash`: crate-authored SPIR-V kernels, direct storage-buffer binding, the shared FP32 operator tier plus a gated native FP16 tier |
 | `virtio-accel-xdna`        | `std`                 | AMD XDNA2 NPU backend over HRX with direct buffers, asynchronous dispatch, and strict BF16/FP8/INT8 TOSA tiers |
 | `virtio-accel-hexagon`     | `std` (Windows ARM64) | Strict FP16/INT8 TOSA-to-QNN lowering, direct buffers, and asynchronous Hexagon HTP execution                |
 | `virtio-accel`             | `core + alloc`        | Facade re-exporting the portable layers                                                                      |
@@ -216,7 +230,8 @@ For portable adapter-boundary validation while the native vAccel path is wired, 
 `virtio-accel-hexagon = "0.3"` exposes the separate Qualcomm adapter. A complete QAIRT/QNN SDK on Windows ARM64 enables its HTP backend; SDK-free builds validate its strict FP16 graph planner and constructors return `RuntimeUnavailable`.
 
 `virtio-accel-vulkan = "0.3"` loads the platform Vulkan loader at run time. It admits the shared
-FP32 operator tier (with `BOOL`/`INT32` auxiliaries) and returns `RuntimeUnavailable` or
+FP32 operator tier (with `BOOL`/`INT32` auxiliaries) and, on devices whose features and float
+controls prove binary16 arithmetic, the FP16 tier. It returns `RuntimeUnavailable` or
 `DeviceUnavailable` when no suitable Vulkan 1.3 compute path exists; it does not silently fall
 back to the mock backend.
 

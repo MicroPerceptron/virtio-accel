@@ -14,9 +14,23 @@
 //! `{ uint words[]; }` storage-buffer blocks. An [`Operand`] names an array element and a base
 //! offset in 32-bit words, both specialization constants, so one module per kernel serves every
 //! binding layout, the program-owned arena, and `CONCAT` with any input count. Word-storage
-//! tensors (`FP32`, `INT32`) are addressed one element per word; byte-storage tensors (`BOOL`)
+//! tensors (`FP32`, `INT32`) are addressed one element per word; half-storage tensors (`FP16`)
+//! are packed two elements per word and byte-storage tensors (`BOOL`) four per word, and both
 //! are read with word loads and written with `OpAtomicAnd`/`OpAtomicOr`, so a kernel never
 //! modifies bytes outside the elements it owns even at a tensor's unaligned tail.
+//!
+//! ## Binary16 kernels (ADR 0008)
+//!
+//! FP16 kernels are separate [`KernelKey`] variants (`float: Storage::Half`) that execute
+//! binary16 arithmetic natively — elementwise lanes, comparisons, and pooling selections run on
+//! `Float16` values, never silently widened. Two evaluation choices are numerical contracts,
+//! not fallbacks: MATMUL and reduction folds accumulate in binary32 because TOSA assigns the
+//! accumulator that width, and the transcendental lanes (`SIN`, `COS`, `TANH`, `ERF`, and the
+//! `EXP`/`LOG`/`RSQRT`/`POW`/`SIGMOID` built-ins) evaluate their argument in binary32 and round
+//! once, because no meaningful range reduction exists at binary16 precision; both are the same
+//! higher-precision evaluation TOSA permits and the shared corpus's tolerances encode. The
+//! `Float16`/`Int16` capabilities are emitted only by the binary16 modules, and the tier is
+//! advertised only where the device gates them with the required float controls.
 //!
 //! ## Numerics policy
 //!
@@ -97,6 +111,8 @@ const OP_DECORATE: u16 = 71;
 const OP_MEMBER_DECORATE: u16 = 72;
 const OP_CONVERT_F_TO_U: u16 = 109;
 const OP_CONVERT_U_TO_F: u16 = 112;
+const OP_U_CONVERT: u16 = 113;
+const OP_F_CONVERT: u16 = 115;
 const OP_BITCAST: u16 = 124;
 const OP_F_NEGATE: u16 = 127;
 const OP_I_ADD: u16 = 128;
@@ -139,6 +155,8 @@ const OP_RETURN: u16 = 253;
 
 // Enumerants (section 3).
 const CAPABILITY_SHADER: u32 = 1;
+const CAPABILITY_FLOAT16: u32 = 9;
+const CAPABILITY_INT16: u32 = 22;
 const ADDRESSING_MODEL_LOGICAL: u32 = 0;
 const MEMORY_MODEL_GLSL450: u32 = 1;
 const EXECUTION_MODEL_GL_COMPUTE: u32 = 5;
@@ -189,6 +207,10 @@ pub enum Storage {
     Word,
     /// One byte per element, four to a word (`BOOL`).
     Byte,
+    /// Two bytes per element, two to a word (`FP16`); the 16-bit lanes are unpacked on load and
+    /// repacked with `OpAtomicAnd`/`OpAtomicOr` on store, so a kernel never modifies the
+    /// neighbouring element of its word.
+    Half,
 }
 
 /// TOSA NaN-propagation attribute value a kernel is specialized for.
@@ -238,7 +260,9 @@ pub enum ElementwiseOp {
 }
 
 impl ElementwiseOp {
-    /// Storage of each tensor input, in operand order.
+    /// Storage of each tensor input, in operand order. `Word` marks a floating-point lane: the
+    /// kernel resolves it to its own float storage (`Word` for FP32, `Half` for FP16); `Byte`
+    /// lanes are always `BOOL`.
     pub const fn inputs(self) -> &'static [Storage] {
         match self {
             Self::Abs
@@ -272,7 +296,7 @@ impl ElementwiseOp {
         }
     }
 
-    /// Storage of the output tensor.
+    /// Storage of the output tensor, with the same float-lane convention as [`Self::inputs`].
     pub const fn output(self) -> Storage {
         match self {
             Self::Equal
@@ -312,24 +336,37 @@ pub enum ReduceOp {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KernelKey {
     /// Elementwise lanes over `count` output elements; `broadcast` selects the strided
-    /// multi-index addressing, otherwise every operand shares the output's linear index.
+    /// multi-index addressing, otherwise every operand shares the output's linear index. `float`
+    /// is the storage of the operator's floating-point tensors (`Word` for FP32, `Half` for
+    /// FP16); `BOOL` lanes are byte storage in either variant.
     Elementwise {
         op: ElementwiseOp,
+        float: Storage,
         broadcast: bool,
         workgroup: u32,
         buffers: u32,
     },
-    /// Axis reduction: one invocation per output element, sequential ascending-axis fold.
+    /// Axis reduction: one invocation per output element, sequential ascending-axis fold. The
+    /// input is read at `float` storage; sums and products fold in binary32 (the TOSA
+    /// accumulator width), and the output is stored back at `float` storage.
     Reduce {
         op: ReduceOp,
+        float: Storage,
         workgroup: u32,
         buffers: u32,
     },
-    /// FP32 batched matrix multiplication over `tile × tile` workgroup-shared tiles.
-    Matmul { tile: u32, buffers: u32 },
-    /// NHWC FP32 max pooling with padding excluded from the window.
+    /// Batched matrix multiplication over `tile × tile` workgroup-shared binary32 tiles. The
+    /// operands are read at `float` storage and accumulate in binary32 — the accumulator width
+    /// TOSA assigns FP16 MATMUL — and the output is stored back at `float` storage.
+    Matmul {
+        float: Storage,
+        tile: u32,
+        buffers: u32,
+    },
+    /// NHWC max pooling with padding excluded from the window, at `float` storage.
     MaxPool {
         nan_mode: NanMode,
+        float: Storage,
         workgroup: u32,
         buffers: u32,
     },
@@ -349,21 +386,28 @@ impl KernelKey {
         match self {
             Self::Elementwise {
                 op,
+                float,
                 broadcast,
                 workgroup,
                 buffers,
-            } => assemble_elementwise(op, broadcast, workgroup, buffers),
+            } => assemble_elementwise(op, float, broadcast, workgroup, buffers),
             Self::Reduce {
                 op,
+                float,
                 workgroup,
                 buffers,
-            } => assemble_reduce(op, workgroup, buffers),
-            Self::Matmul { tile, buffers } => assemble_matmul(tile, buffers),
+            } => assemble_reduce(op, float, workgroup, buffers),
+            Self::Matmul {
+                float,
+                tile,
+                buffers,
+            } => assemble_matmul(float, tile, buffers),
             Self::MaxPool {
                 nan_mode,
+                float,
                 workgroup,
                 buffers,
-            } => assemble_max_pool(nan_mode, workgroup, buffers),
+            } => assemble_max_pool(nan_mode, float, workgroup, buffers),
             Self::Move {
                 storage,
                 contiguous,
@@ -579,6 +623,57 @@ pub const fn matmul_workgroups(m: u32, n: u32, batch: u32, tile: u32) -> [u32; 3
 }
 
 // ---------------------------------------------------------------------------------------------
+// Binary16 host conversions
+// ---------------------------------------------------------------------------------------------
+
+/// The exact binary32 value of a binary16 bit pattern (host side of the kernels' unpack: every
+/// binary16 value, subnormals included, is exactly representable in binary32; NaN payloads are
+/// preserved).
+pub fn f16_to_f32(bits: u16) -> f32 {
+    let bits = u32::from(bits);
+    let sign = (bits & 0x8000) << 16;
+    let exponent = (bits >> 10) & 0x1f;
+    let mantissa = bits & 0x3ff;
+    let converted = if exponent == 0 {
+        // Subnormal or zero: `mantissa · 2^-24`, exact for every 10-bit mantissa.
+        (mantissa as f32) * (1.0 / 16_777_216.0)
+    } else if exponent == 31 {
+        f32::from_bits(0x7f80_0000 | (mantissa << 13))
+    } else {
+        f32::from_bits(((exponent + 112) << 23) | (mantissa << 13))
+    };
+    f32::from_bits(converted.to_bits() | sign)
+}
+
+/// The binary16 bit pattern nearest to `value`, round-to-nearest-even (host side of the kernels'
+/// `OpFConvert` narrowing: NaN is canonicalized to the quiet `0x7e00` payload with its sign;
+/// magnitudes at or above 65520 round to infinity, and subnormals are produced, never flushed).
+pub fn f32_to_f16_bits(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let magnitude = bits & 0x7fff_ffff;
+    if magnitude > 0x7f80_0000 {
+        return sign | 0x7e00;
+    }
+    if magnitude >= 0x477f_f000 {
+        // At or above 65520 — the midpoint between 65504 and the overflow binade — round to
+        // infinity (65504 itself is `0x477f_e000`, finite).
+        return sign | 0x7c00;
+    }
+    if magnitude >= 0x3880_0000 {
+        // Normal binary16: rebias the exponent, then round the significand with the
+        // add-half-ulp-plus-guard trick; a mantissa carry increments the exponent on its own.
+        let adjusted = magnitude - 0x3800_0000;
+        let rounded = adjusted + 0x0000_0fff + ((adjusted >> 13) & 1);
+        return sign | (rounded >> 13) as u16;
+    }
+    // Subnormal binary16 or zero: scale into integer range (exact while the value is at or
+    // above 2^-25; anything smaller rounds to zero either way) and round to the nearest integer.
+    let scaled = f32::from_bits(magnitude) * 16_777_216.0;
+    sign | scaled.round_ties_even() as u16
+}
+
+// ---------------------------------------------------------------------------------------------
 // Module builder
 // ---------------------------------------------------------------------------------------------
 
@@ -587,7 +682,9 @@ enum TypeKey {
     Void,
     Bool,
     U32,
+    U16,
     F32,
+    F16,
     Vector(Id, u32),
     Pointer(u32, Id),
     RuntimeArray(Id),
@@ -599,6 +696,7 @@ enum TypeKey {
 enum ConstKey {
     U32(u32),
     F32(u32),
+    F16(u32),
     False,
 }
 
@@ -721,16 +819,31 @@ impl Builder {
 
     // -- types and constants ------------------------------------------------------------------
 
+    /// Emit `OpCapability cap` unless it is already emitted. Capability instructions live in
+    /// their own leading section, so lazy emission from type declaration keeps the module legal.
+    fn capability(&mut self, capability: u32) {
+        instruction(&mut self.capabilities, OP_CAPABILITY, &[capability]);
+    }
+
     fn ty(&mut self, key: TypeKey) -> Id {
         if let Some(id) = self.types.get(&key) {
             return *id;
+        }
+        // 16-bit types gate their capabilities: only binary16 kernels declare them, so only
+        // those modules carry `Float16`/`Int16` (ADR 0008).
+        match &key {
+            TypeKey::F16 => self.capability(CAPABILITY_FLOAT16),
+            TypeKey::U16 => self.capability(CAPABILITY_INT16),
+            _ => {}
         }
         let id = self.id();
         match &key {
             TypeKey::Void => instruction(&mut self.declarations, OP_TYPE_VOID, &[id]),
             TypeKey::Bool => instruction(&mut self.declarations, OP_TYPE_BOOL, &[id]),
             TypeKey::U32 => instruction(&mut self.declarations, OP_TYPE_INT, &[id, 32, 0]),
+            TypeKey::U16 => instruction(&mut self.declarations, OP_TYPE_INT, &[id, 16, 0]),
             TypeKey::F32 => instruction(&mut self.declarations, OP_TYPE_FLOAT, &[id, 32]),
+            TypeKey::F16 => instruction(&mut self.declarations, OP_TYPE_FLOAT, &[id, 16]),
             TypeKey::Vector(element, count) => {
                 instruction(
                     &mut self.declarations,
@@ -779,6 +892,20 @@ impl Builder {
     fn f32_ty(&mut self) -> Id {
         self.ty(TypeKey::F32)
     }
+    fn u16_ty(&mut self) -> Id {
+        self.ty(TypeKey::U16)
+    }
+    fn f16_ty(&mut self) -> Id {
+        self.ty(TypeKey::F16)
+    }
+    /// The float type of a storage width (`Word` → binary32, `Half` → binary16).
+    fn float_ty(&mut self, storage: Storage) -> Id {
+        match storage {
+            Storage::Word => self.f32_ty(),
+            Storage::Half => self.f16_ty(),
+            Storage::Byte => unreachable!("byte storage has no float type"),
+        }
+    }
     fn uvec3(&mut self) -> Id {
         let u32_ty = self.u32_ty();
         self.ty(TypeKey::Vector(u32_ty, 3))
@@ -801,6 +928,10 @@ impl Builder {
                 let ty = self.f32_ty();
                 instruction(&mut self.declarations, OP_CONSTANT, &[ty, id, bits]);
             }
+            ConstKey::F16(bits) => {
+                let ty = self.f16_ty();
+                instruction(&mut self.declarations, OP_CONSTANT, &[ty, id, bits]);
+            }
             ConstKey::False => {
                 let ty = self.bool_ty();
                 instruction(&mut self.declarations, OP_CONSTANT_FALSE, &[ty, id]);
@@ -818,6 +949,18 @@ impl Builder {
     }
     fn c_false(&mut self) -> Id {
         self.constant(ConstKey::False)
+    }
+
+    /// A float constant of a storage width; binary16 constants are rounded host-side.
+    fn c_float(&mut self, storage: Storage, value: f32) -> Id {
+        match storage {
+            Storage::Word => self.c_f32(value),
+            Storage::Half => {
+                let bits = u32::from(f32_to_f16_bits(value));
+                self.constant(ConstKey::F16(bits))
+            }
+            Storage::Byte => unreachable!("byte storage has no float constants"),
+        }
     }
 
     /// Declare the next `u32` specialization constant (ids are assigned in declaration order).
@@ -1007,13 +1150,26 @@ impl Builder {
 
     fn float_value(&mut self, opcode: u16, operands: &[u32]) -> Id {
         let f32_ty = self.f32_ty();
-        let id = self.value(opcode, f32_ty, operands);
+        self.float_typed(f32_ty, opcode, operands)
+    }
+
+    /// A `NoContraction`-decorated float result of `ty`, so no driver may fuse a multiply and an
+    /// add: the same TOSA graph yields the same bits on every conformant device.
+    fn float_typed(&mut self, ty: Id, opcode: u16, operands: &[u32]) -> Id {
+        let id = self.value(opcode, ty, operands);
         instruction(
             &mut self.annotations,
             OP_DECORATE,
             &[id, DECORATION_NO_CONTRACTION],
         );
         id
+    }
+
+    /// A `NoContraction`-decorated float result of the storage width (`Word` → binary32,
+    /// `Half` → binary16).
+    fn float_value_w(&mut self, storage: Storage, opcode: u16, operands: &[u32]) -> Id {
+        let ty = self.float_ty(storage);
+        self.float_typed(ty, opcode, operands)
     }
 
     fn load(&mut self, ty: Id, pointer: Id) -> Id {
@@ -1162,6 +1318,48 @@ impl Builder {
         // `a * b + c` as two separately rounded operations (never contracted).
         let product = self.fmul(a, b);
         self.fadd(product, c)
+    }
+
+    // -- width-generic float lanes (binary16 kernels, ADR 0008) --------------------------------
+
+    fn fadd_w(&mut self, storage: Storage, a: Id, b: Id) -> Id {
+        self.float_value_w(storage, OP_F_ADD, &[a, b])
+    }
+    fn fsub_w(&mut self, storage: Storage, a: Id, b: Id) -> Id {
+        self.float_value_w(storage, OP_F_SUB, &[a, b])
+    }
+    fn fmul_w(&mut self, storage: Storage, a: Id, b: Id) -> Id {
+        self.float_value_w(storage, OP_F_MUL, &[a, b])
+    }
+    fn fdiv_w(&mut self, storage: Storage, a: Id, b: Id) -> Id {
+        self.float_value_w(storage, OP_F_DIV, &[a, b])
+    }
+    fn fneg_w(&mut self, storage: Storage, a: Id) -> Id {
+        let ty = self.float_ty(storage);
+        self.value(OP_F_NEGATE, ty, &[a])
+    }
+    fn ext_float(&mut self, storage: Storage, op: u32, args: &[Id]) -> Id {
+        let ty = self.float_ty(storage);
+        let glsl = self.glsl;
+        let mut operands = vec![glsl, op];
+        operands.extend_from_slice(args);
+        self.value(OP_EXT_INST, ty, &operands)
+    }
+    fn select_float(&mut self, storage: Storage, condition: Id, then: Id, otherwise: Id) -> Id {
+        let ty = self.float_ty(storage);
+        self.select(ty, condition, then, otherwise)
+    }
+
+    /// Widen a binary16 value to binary32 (`OpFConvert`, exact).
+    fn widen(&mut self, value: Id) -> Id {
+        let f32_ty = self.f32_ty();
+        self.value(OP_F_CONVERT, f32_ty, &[value])
+    }
+
+    /// Narrow a binary32 value to binary16 (`OpFConvert`, round-to-nearest-even).
+    fn narrow(&mut self, value: Id) -> Id {
+        let f16_ty = self.f16_ty();
+        self.value(OP_F_CONVERT, f16_ty, &[value])
     }
     fn ext_f32(&mut self, op: u32, args: &[Id]) -> Id {
         let ty = self.f32_ty();
@@ -1391,6 +1589,78 @@ impl Builder {
         self.value(OP_ATOMIC_OR, u32_ty, &[pointer, scope, semantics, set]);
     }
 
+    /// The raw 16 bits of half-storage `element` as a `u32` (`0..=0xffff`): word load, shift
+    /// the lane down, mask. No float conversion — bit patterns (NaN payloads, subnormals) pass
+    /// through untouched.
+    fn load_half_bits(&mut self, buffers: Id, operand: (Id, Id), element: Id) -> Id {
+        let one = self.c_u32(1);
+        let sixteen = self.c_u32(16);
+        let mask = self.c_u32(0xffff);
+        let word_index = self.shr(element, one);
+        let word = self.load_word(buffers, operand, word_index);
+        let lane = self.band(element, one);
+        let shift = self.imul(lane, sixteen);
+        let shifted = self.shr(word, shift);
+        self.band(shifted, mask)
+    }
+
+    /// Write the low 16 bits of `bits` to half-storage `element` without touching the other
+    /// element of its word: clear with `OpAtomicAnd`, then set with `OpAtomicOr` (the same
+    /// neighbour-safe pattern as [`Self::store_bool`]).
+    fn store_half_bits(&mut self, buffers: Id, operand: (Id, Id), element: Id, bits: Id) {
+        let one = self.c_u32(1);
+        let sixteen = self.c_u32(16);
+        let mask = self.c_u32(0xffff);
+        let word_index = self.shr(element, one);
+        let pointer = self.word_pointer(buffers, operand, word_index);
+        let lane = self.band(element, one);
+        let shift = self.imul(lane, sixteen);
+        let clear = self.shl(mask, shift);
+        let clear = self.bnot(clear);
+        let bits = self.band(bits, mask);
+        let set = self.shl(bits, shift);
+        let scope = self.c_u32(SCOPE_DEVICE);
+        let semantics = self.c_u32(MEMORY_SEMANTICS_RELAXED);
+        let u32_ty = self.u32_ty();
+        self.value(OP_ATOMIC_AND, u32_ty, &[pointer, scope, semantics, clear]);
+        self.value(OP_ATOMIC_OR, u32_ty, &[pointer, scope, semantics, set]);
+    }
+
+    /// Element `element` of a half-storage operand as a native binary16 value.
+    fn load_f16(&mut self, buffers: Id, operand: (Id, Id), element: Id) -> Id {
+        let bits = self.load_half_bits(buffers, operand, element);
+        let u16_ty = self.u16_ty();
+        let narrow = self.value(OP_U_CONVERT, u16_ty, &[bits]);
+        let f16_ty = self.f16_ty();
+        self.value(OP_BITCAST, f16_ty, &[narrow])
+    }
+
+    /// Store the native binary16 `value` to half-storage `element`.
+    fn store_f16(&mut self, buffers: Id, operand: (Id, Id), element: Id, value: Id) {
+        let u16_ty = self.u16_ty();
+        let bits16 = self.value(OP_BITCAST, u16_ty, &[value]);
+        let u32_ty = self.u32_ty();
+        let bits = self.value(OP_U_CONVERT, u32_ty, &[bits16]);
+        self.store_half_bits(buffers, operand, element, bits);
+    }
+
+    /// A specialization-constant word carrying binary16 bits (a `CLAMP` bound) as an `f16`.
+    fn spec_f16(&mut self, bits: Id) -> Id {
+        let u16_ty = self.u16_ty();
+        let narrow = self.value(OP_U_CONVERT, u16_ty, &[bits]);
+        let f16_ty = self.f16_ty();
+        self.value(OP_BITCAST, f16_ty, &[narrow])
+    }
+
+    /// Load one float element at the operand's storage width.
+    fn load_float(&mut self, storage: Storage, buffers: Id, operand: (Id, Id), element: Id) -> Id {
+        match storage {
+            Storage::Word => self.load_f32(buffers, operand, element),
+            Storage::Half => self.load_f16(buffers, operand, element),
+            Storage::Byte => unreachable!("byte storage is not a float lane"),
+        }
+    }
+
     /// Decompose linear index `i` over `dims` (last dimension fastest) and accumulate per-operand
     /// element indices from `strides`.
     fn strided_indices(
@@ -1431,32 +1701,41 @@ impl Builder {
 
     // -- scalar lanes ---------------------------------------------------------------------------
 
-    /// TOSA `apply_max_s(a, b)`: `a >= b ? a : b` with the NaN mode applied first.
-    fn apply_max(&mut self, a: Id, b: Id, nan_mode: NanMode) -> Id {
+    /// TOSA `apply_max_s(a, b)`: `a >= b ? a : b` with the NaN mode applied first, at the
+    /// operands' storage width.
+    fn apply_max(&mut self, storage: Storage, a: Id, b: Id, nan_mode: NanMode) -> Id {
         let ordered = self.foge(a, b);
-        let picked = self.select_f32(ordered, a, b);
-        self.apply_nan_mode(a, b, picked, nan_mode)
+        let picked = self.select_float(storage, ordered, a, b);
+        self.apply_nan_mode(storage, a, b, picked, nan_mode)
     }
 
-    /// TOSA `apply_min_s(a, b)`: `a < b ? a : b` with the NaN mode applied first.
-    fn apply_min(&mut self, a: Id, b: Id, nan_mode: NanMode) -> Id {
+    /// TOSA `apply_min_s(a, b)`: `a < b ? a : b` with the NaN mode applied first, at the
+    /// operands' storage width.
+    fn apply_min(&mut self, storage: Storage, a: Id, b: Id, nan_mode: NanMode) -> Id {
         let ordered = self.folt(a, b);
-        let picked = self.select_f32(ordered, a, b);
-        self.apply_nan_mode(a, b, picked, nan_mode)
+        let picked = self.select_float(storage, ordered, a, b);
+        self.apply_nan_mode(storage, a, b, picked, nan_mode)
     }
 
-    fn apply_nan_mode(&mut self, a: Id, b: Id, picked: Id, nan_mode: NanMode) -> Id {
+    fn apply_nan_mode(
+        &mut self,
+        storage: Storage,
+        a: Id,
+        b: Id,
+        picked: Id,
+        nan_mode: NanMode,
+    ) -> Id {
         let a_nan = self.is_nan(a);
         let b_nan = self.is_nan(b);
         match nan_mode {
             NanMode::Propagate => {
-                let nan = self.c_f32(f32::NAN);
+                let nan = self.c_float(storage, f32::NAN);
                 let any_nan = self.lor(a_nan, b_nan);
-                self.select_f32(any_nan, nan, picked)
+                self.select_float(storage, any_nan, nan, picked)
             }
             NanMode::Ignore => {
-                let without_b = self.select_f32(b_nan, a, picked);
-                self.select_f32(a_nan, b, without_b)
+                let without_b = self.select_float(storage, b_nan, a, picked);
+                self.select_float(storage, a_nan, b, without_b)
             }
         }
     }
@@ -1855,28 +2134,55 @@ impl Builder {
         self.select_f32(negative, minus_one, plus_one)
     }
 
-    /// The scalar lane of `op` over already-loaded inputs (`f32` ids for word inputs, `bool` ids
-    /// for byte inputs), yielding an `f32` or `bool` id per [`ElementwiseOp::output`].
+    /// The scalar lane of `op` over already-loaded inputs (float ids of the kernel's storage
+    /// width for float inputs, `bool` ids for byte inputs), yielding an id of the output
+    /// storage's type per [`ElementwiseOp::output`].
+    ///
+    /// Arithmetic, comparison, and selection lanes run natively at the storage width: a
+    /// binary16 `ADD` is a binary16 `OpFAdd`, never a widened binary32 one. The lanes whose
+    /// accuracy Vulkan leaves loose or unspecified (`SIN`, `COS`, `TANH`, `ERF`, and the
+    /// `EXP`/`LOG`/`RSQRT`/`POW`/`SIGMOID` built-ins) evaluate in binary32 — the precision TOSA
+    /// permits above the tensor dtype, and the only precision at which range reduction is
+    /// meaningful — and round once back to binary16 (ADR 0008).
     fn elementwise_lane(
         &mut self,
+        storage: Storage,
         op: ElementwiseOp,
         inputs: &[Id],
         clamp: Option<(Id, Id)>,
     ) -> Id {
+        if storage == Storage::Half
+            && matches!(
+                op,
+                ElementwiseOp::Cos
+                    | ElementwiseOp::Erf
+                    | ElementwiseOp::Exp
+                    | ElementwiseOp::Log
+                    | ElementwiseOp::Pow
+                    | ElementwiseOp::Rsqrt
+                    | ElementwiseOp::Sigmoid
+                    | ElementwiseOp::Sin
+                    | ElementwiseOp::Tanh
+            )
+        {
+            let wide: Vec<Id> = inputs.iter().map(|input| self.widen(*input)).collect();
+            let result = self.elementwise_lane(Storage::Word, op, &wide, None);
+            return self.narrow(result);
+        }
         let x = inputs[0];
         match op {
-            ElementwiseOp::Abs => self.fabs(x),
-            ElementwiseOp::Ceil => self.ext_f32(GLSL_CEIL, &[x]),
-            ElementwiseOp::Floor => self.ext_f32(GLSL_FLOOR, &[x]),
+            ElementwiseOp::Abs => self.ext_float(storage, GLSL_FABS, &[x]),
+            ElementwiseOp::Ceil => self.ext_float(storage, GLSL_CEIL, &[x]),
+            ElementwiseOp::Floor => self.ext_float(storage, GLSL_FLOOR, &[x]),
             ElementwiseOp::Cos => self.sincos(x, true),
             ElementwiseOp::Sin => self.sincos(x, false),
             ElementwiseOp::Erf => self.erf(x),
             ElementwiseOp::Exp => self.ext_f32(GLSL_EXP, &[x]),
             ElementwiseOp::Log => self.ext_f32(GLSL_LOG, &[x]),
-            ElementwiseOp::Negate => self.fneg(x),
+            ElementwiseOp::Negate => self.fneg_w(storage, x),
             ElementwiseOp::Reciprocal => {
-                let one = self.c_f32(1.0);
-                self.fdiv(one, x)
+                let one = self.c_float(storage, 1.0);
+                self.fdiv_w(storage, one, x)
             }
             ElementwiseOp::Rsqrt => self.ext_f32(GLSL_INVERSE_SQRT, &[x]),
             ElementwiseOp::Sigmoid => {
@@ -1889,17 +2195,19 @@ impl Builder {
             ElementwiseOp::Tanh => self.tanh(x),
             ElementwiseOp::Clamp(nan_mode) => {
                 let (lo_bits, hi_bits) = clamp.expect("clamp bounds");
-                let lo = self.bitcast_f32(lo_bits);
-                let hi = self.bitcast_f32(hi_bits);
-                let floored = self.apply_max(x, lo, nan_mode);
-                self.apply_min(floored, hi, nan_mode)
+                let (lo, hi) = match storage {
+                    Storage::Half => (self.spec_f16(lo_bits), self.spec_f16(hi_bits)),
+                    _ => (self.bitcast_f32(lo_bits), self.bitcast_f32(hi_bits)),
+                };
+                let floored = self.apply_max(storage, x, lo, nan_mode);
+                self.apply_min(storage, floored, hi, nan_mode)
             }
-            ElementwiseOp::Add => self.fadd(x, inputs[1]),
-            ElementwiseOp::Sub => self.fsub(x, inputs[1]),
-            ElementwiseOp::Mul => self.fmul(x, inputs[1]),
+            ElementwiseOp::Add => self.fadd_w(storage, x, inputs[1]),
+            ElementwiseOp::Sub => self.fsub_w(storage, x, inputs[1]),
+            ElementwiseOp::Mul => self.fmul_w(storage, x, inputs[1]),
             ElementwiseOp::Pow => self.pow(x, inputs[1]),
-            ElementwiseOp::Maximum(nan_mode) => self.apply_max(x, inputs[1], nan_mode),
-            ElementwiseOp::Minimum(nan_mode) => self.apply_min(x, inputs[1], nan_mode),
+            ElementwiseOp::Maximum(nan_mode) => self.apply_max(storage, x, inputs[1], nan_mode),
+            ElementwiseOp::Minimum(nan_mode) => self.apply_min(storage, x, inputs[1], nan_mode),
             ElementwiseOp::Equal => self.foeq(x, inputs[1]),
             ElementwiseOp::Greater => self.fogt(x, inputs[1]),
             ElementwiseOp::GreaterEqual => self.foge(x, inputs[1]),
@@ -1907,7 +2215,7 @@ impl Builder {
             ElementwiseOp::LogicalOr => self.lor(x, inputs[1]),
             ElementwiseOp::LogicalXor => self.lxor(x, inputs[1]),
             ElementwiseOp::LogicalNot => self.lnot(x),
-            ElementwiseOp::Select => self.select_f32(x, inputs[1], inputs[2]),
+            ElementwiseOp::Select => self.select_float(storage, x, inputs[1], inputs[2]),
             ElementwiseOp::CopyBytes => x,
         }
     }
@@ -1925,13 +2233,16 @@ struct LoopScope {
 // Kernels
 // ---------------------------------------------------------------------------------------------
 
-/// Elementwise kernel: grid-stride over `count` output elements.
+/// Elementwise kernel: grid-stride over `count` output elements, with `float` the storage of
+/// the operator's floating-point tensors (`Word` for FP32, `Half` for FP16).
 ///
 /// Specialization order: `count`; per input `(buffer, base)`; output `(buffer, base)`; when
 /// `broadcast`, output `dims[MAX_RANK]` then per input `strides[MAX_RANK]`; then the operator's
-/// trailing constants (`CLAMP`: `lo`, `hi` bit patterns).
+/// trailing constants (`CLAMP`: `lo`, `hi` bit patterns — binary32 for FP32, binary16 for
+/// FP16).
 fn assemble_elementwise(
     op: ElementwiseOp,
+    float: Storage,
     broadcast: bool,
     workgroup: u32,
     buffers: u32,
@@ -1940,6 +2251,12 @@ fn assemble_elementwise(
     let array = b.buffer_array(buffers);
     let count = b.spec_u32(1);
     let input_storage = op.inputs();
+    // Lane tables mark floating-point operands `Word`; resolve those to this kernel's float
+    // storage, keeping `BOOL` lanes on byte storage.
+    let lane = |storage: Storage| match storage {
+        Storage::Word => float,
+        other => other,
+    };
     let inputs: Vec<(Id, Id)> = input_storage.iter().map(|_| b.spec_operand()).collect();
     let output = b.spec_operand();
     let shape = broadcast.then(|| {
@@ -1961,15 +2278,17 @@ fn assemble_elementwise(
     };
     let mut values = Vec::with_capacity(inputs.len());
     for (k, operand) in inputs.iter().enumerate() {
-        let value = match input_storage[k] {
+        let value = match lane(input_storage[k]) {
             Storage::Word => b.load_f32(array, *operand, indices[k]),
+            Storage::Half => b.load_f16(array, *operand, indices[k]),
             Storage::Byte => b.load_bool(array, *operand, indices[k]),
         };
         values.push(value);
     }
-    let result = b.elementwise_lane(op, &values, clamp);
-    match op.output() {
+    let result = b.elementwise_lane(float, op, &values, clamp);
+    match lane(op.output()) {
         Storage::Word => b.store_f32(array, output, i, result),
+        Storage::Half => b.store_f16(array, output, i, result),
         Storage::Byte => b.store_bool(array, output, i, result),
     }
     b.end_loop(scope, counter, stride);
@@ -1978,11 +2297,13 @@ fn assemble_elementwise(
 }
 
 /// Reduction kernel: one invocation per `(outer, inner)` output element folds the axis in
-/// ascending order.
+/// ascending order. Inputs are read at `float` storage and widened to binary32 for the fold —
+/// the accumulator width TOSA assigns FP16 sums and products, and exact for the max/min/argmax
+/// selections — then narrowed back to `float` storage on store.
 ///
 /// Specialization order: input `(buffer, base)`, output `(buffer, base)`, `outer`, `axis`,
 /// `inner`.
-fn assemble_reduce(op: ReduceOp, workgroup: u32, buffers: u32) -> Vec<u32> {
+fn assemble_reduce(op: ReduceOp, float: Storage, workgroup: u32, buffers: u32) -> Vec<u32> {
     let mut b = Builder::new();
     let array = b.buffer_array(buffers);
     let input = b.spec_operand();
@@ -2024,7 +2345,11 @@ fn assemble_reduce(op: ReduceOp, workgroup: u32, buffers: u32) -> Vec<u32> {
     let (inner_scope, a) = b.begin_loop(a_var, axis);
     let offset = b.imul(a, inner);
     let element = b.iadd(base, offset);
-    let value = b.load_f32(array, input, element);
+    let loaded = b.load_float(float, array, input, element);
+    let value = match float {
+        Storage::Half => b.widen(loaded),
+        _ => loaded,
+    };
     let acc = b.load(f32_ty, acc_var);
     match op {
         ReduceOp::Sum => {
@@ -2036,11 +2361,11 @@ fn assemble_reduce(op: ReduceOp, workgroup: u32, buffers: u32) -> Vec<u32> {
             b.store(acc_var, next);
         }
         ReduceOp::Max(nan_mode) => {
-            let next = b.apply_max(acc, value, nan_mode);
+            let next = b.apply_max(Storage::Word, acc, value, nan_mode);
             b.store(acc_var, next);
         }
         ReduceOp::Min(nan_mode) => {
-            let next = b.apply_min(acc, value, nan_mode);
+            let next = b.apply_min(Storage::Word, acc, value, nan_mode);
             b.store(acc_var, next);
         }
         ReduceOp::ArgMax(nan_mode) => {
@@ -2078,7 +2403,13 @@ fn assemble_reduce(op: ReduceOp, workgroup: u32, buffers: u32) -> Vec<u32> {
         }
         _ => {
             let acc = b.load(f32_ty, acc_var);
-            b.store_f32(array, output, o, acc);
+            match float {
+                Storage::Half => {
+                    let narrowed = b.narrow(acc);
+                    b.store_f16(array, output, o, narrowed);
+                }
+                _ => b.store_f32(array, output, o, acc),
+            }
         }
     }
     b.end_loop(scope, counter, stride);
@@ -2086,7 +2417,9 @@ fn assemble_reduce(op: ReduceOp, workgroup: u32, buffers: u32) -> Vec<u32> {
     b.finish([workgroup, 1, 1])
 }
 
-/// FP32 batched MATMUL over `tile × tile` workgroup tiles of both operands.
+/// Batched MATMUL over `tile × tile` workgroup tiles of both operands, reading `float` storage
+/// (FP32 words or packed FP16) and accumulating in binary32 — the accumulator width TOSA
+/// assigns FP16 MATMUL, and the FP32 tier's own width.
 ///
 /// `out[b, m, n] = Σ_k lhs[b, m, k] · rhs[b, k, n]`, accumulated in ascending `k` with separately
 /// rounded multiply and add, so the result is bit-identical to the untiled loop. Out-of-range
@@ -2094,7 +2427,7 @@ fn assemble_reduce(op: ReduceOp, workgroup: u32, buffers: u32) -> Vec<u32> {
 /// k - k0)`, never a padded zero product, so signed zeros survive.
 ///
 /// Specialization order: `lhs`, `rhs`, output `(buffer, base)`; `m`, `n`, `k`, `batch`.
-fn assemble_matmul(tile: u32, buffers: u32) -> Vec<u32> {
+fn assemble_matmul(float: Storage, tile: u32, buffers: u32) -> Vec<u32> {
     let mut b = Builder::new();
     let array = b.buffer_array(buffers);
     let lhs = b.spec_operand();
@@ -2159,16 +2492,24 @@ fn assemble_matmul(tile: u32, buffers: u32) -> Vec<u32> {
     let lhs_ok = b.land(row_ok, ka_ok);
     let lhs_index = b.iadd(lhs_row, ka);
     let lhs_index = b.select_u32(lhs_ok, lhs_index, zero);
-    let lhs_value = b.load_f32(array, lhs, lhs_index);
-    let lhs_value = b.select_f32(lhs_ok, lhs_value, zero_f);
+    let lhs_loaded = b.load_float(float, array, lhs, lhs_index);
+    let lhs_loaded = match float {
+        Storage::Half => b.widen(lhs_loaded),
+        _ => lhs_loaded,
+    };
+    let lhs_value = b.select_f32(lhs_ok, lhs_loaded, zero_f);
     let kb = b.iadd(k0, ty);
     let kb_ok = b.ult(kb, k);
     let rhs_ok = b.land(kb_ok, col_ok);
     let rhs_index = b.imul(kb, n);
     let rhs_index = b.iadd(rhs_index, rhs_col);
     let rhs_index = b.select_u32(rhs_ok, rhs_index, zero);
-    let rhs_value = b.load_f32(array, rhs, rhs_index);
-    let rhs_value = b.select_f32(rhs_ok, rhs_value, zero_f);
+    let rhs_loaded = b.load_float(float, array, rhs, rhs_index);
+    let rhs_loaded = match float {
+        Storage::Half => b.widen(rhs_loaded),
+        _ => rhs_loaded,
+    };
+    let rhs_value = b.select_f32(rhs_ok, rhs_loaded, zero_f);
     let lhs_slot = b.access_chain(workgroup_ptr, lhs_tile, &[local_index]);
     b.store(lhs_slot, lhs_value);
     let rhs_slot = b.access_chain(workgroup_ptr, rhs_tile, &[local_index]);
@@ -2200,19 +2541,26 @@ fn assemble_matmul(tile: u32, buffers: u32) -> Vec<u32> {
         let out_index = b.iadd(out_batch, out_row);
         let out_index = b.iadd(out_index, col);
         let acc = b.load(f32_ty, acc_var);
-        b.store_f32(array, output, out_index, acc);
+        match float {
+            Storage::Half => {
+                let narrowed = b.narrow(acc);
+                b.store_f16(array, output, out_index, narrowed);
+            }
+            _ => b.store_f32(array, output, out_index, acc),
+        }
     });
     b.end_main();
     b.finish([tile, tile, 1])
 }
 
-/// NHWC FP32 MAX_POOL2D: one invocation per output element folds its window with
-/// `apply_max_s` from `-inf`; padded positions are skipped, never substituted.
+/// NHWC MAX_POOL2D at `float` storage: one invocation per output element folds its window with
+/// `apply_max_s` from `-inf`; padded positions are skipped, never substituted. FP16 inputs are
+/// widened for the fold — an exact selection, so the narrowed store is exact.
 ///
 /// Specialization order: input, output `(buffer, base)`; `batch`, `height`, `width`, `channels`,
 /// `out_height`, `out_width`, `kernel_h`, `kernel_w`, `stride_h`, `stride_w`, `pad_top`,
 /// `pad_left`.
-fn assemble_max_pool(nan_mode: NanMode, workgroup: u32, buffers: u32) -> Vec<u32> {
+fn assemble_max_pool(nan_mode: NanMode, float: Storage, workgroup: u32, buffers: u32) -> Vec<u32> {
     let mut b = Builder::new();
     let array = b.buffer_array(buffers);
     let input = b.spec_operand();
@@ -2275,15 +2623,25 @@ fn assemble_max_pool(nan_mode: NanMode, workgroup: u32, buffers: u32) -> Vec<u32
     let index = b.imul(index, channels);
     let index = b.iadd(index, c);
     let index = b.select_u32(ok, index, zero);
-    let value = b.load_f32(array, input, index);
+    let loaded = b.load_float(float, array, input, index);
+    let value = match float {
+        Storage::Half => b.widen(loaded),
+        _ => loaded,
+    };
     let acc = b.load(f32_ty, acc_var);
-    let folded = b.apply_max(acc, value, nan_mode);
+    let folded = b.apply_max(Storage::Word, acc, value, nan_mode);
     let next = b.select_f32(ok, folded, acc);
     b.store(acc_var, next);
     b.end_loop(cols, kw_var, one);
     b.end_loop(rows, kh_var, one);
     let acc = b.load(f32_ty, acc_var);
-    b.store_f32(array, output, o, acc);
+    match float {
+        Storage::Half => {
+            let narrowed = b.narrow(acc);
+            b.store_f16(array, output, o, narrowed);
+        }
+        _ => b.store_f32(array, output, o, acc),
+    }
     b.end_loop(scope, counter, stride);
     b.end_main();
     b.finish([workgroup, 1, 1])
@@ -2328,6 +2686,12 @@ fn assemble_move(storage: Storage, contiguous: bool, workgroup: u32, buffers: u3
         Storage::Byte => {
             let value = b.load_bool(array, input, source);
             b.store_bool(array, output, destination, value);
+        }
+        // A raw 16-bit lane copy: no float conversion, so every binary16 bit pattern — NaN
+        // payloads and subnormals included — moves exactly.
+        Storage::Half => {
+            let bits = b.load_half_bits(array, input, source);
+            b.store_half_bits(array, output, destination, bits);
         }
     }
     b.end_loop(scope, counter, stride);
@@ -2375,13 +2739,16 @@ mod tests {
             ElementwiseOp::CopyBytes,
         ];
         for op in ops {
-            for broadcast in [false, true] {
-                keys.push(KernelKey::Elementwise {
-                    op,
-                    broadcast,
-                    workgroup: 64,
-                    buffers: 17,
-                });
+            for float in [Storage::Word, Storage::Half] {
+                for broadcast in [false, true] {
+                    keys.push(KernelKey::Elementwise {
+                        op,
+                        float,
+                        broadcast,
+                        workgroup: 64,
+                        buffers: 17,
+                    });
+                }
             }
         }
         for op in [
@@ -2392,28 +2759,38 @@ mod tests {
             ReduceOp::ArgMax(NanMode::Propagate),
             ReduceOp::ArgMax(NanMode::Ignore),
         ] {
-            keys.push(KernelKey::Reduce {
-                op,
-                workgroup: 64,
+            for float in [Storage::Word, Storage::Half] {
+                keys.push(KernelKey::Reduce {
+                    op,
+                    float,
+                    workgroup: 64,
+                    buffers: 17,
+                });
+            }
+        }
+        for float in [Storage::Word, Storage::Half] {
+            keys.push(KernelKey::Matmul {
+                float,
+                tile: 16,
                 buffers: 17,
             });
+            keys.push(KernelKey::Matmul {
+                float,
+                tile: 8,
+                buffers: 5,
+            });
         }
-        keys.push(KernelKey::Matmul {
-            tile: 16,
-            buffers: 17,
-        });
-        keys.push(KernelKey::Matmul {
-            tile: 8,
-            buffers: 5,
-        });
         for nan_mode in [NanMode::Propagate, NanMode::Ignore] {
-            keys.push(KernelKey::MaxPool {
-                nan_mode,
-                workgroup: 64,
-                buffers: 17,
-            });
+            for float in [Storage::Word, Storage::Half] {
+                keys.push(KernelKey::MaxPool {
+                    nan_mode,
+                    float,
+                    workgroup: 64,
+                    buffers: 17,
+                });
+            }
         }
-        for storage in [Storage::Word, Storage::Byte] {
+        for storage in [Storage::Word, Storage::Byte, Storage::Half] {
             for contiguous in [false, true] {
                 keys.push(KernelKey::Move {
                     storage,
@@ -2478,11 +2855,19 @@ mod tests {
             cursor += word_count;
         }
         assert_eq!(cursor, words.len(), "{key:?}");
-        assert_eq!(opcodes[0], OP_CAPABILITY, "{key:?}");
-        assert_eq!(opcodes[1], OP_EXT_INST_IMPORT, "{key:?}");
-        assert_eq!(opcodes[2], OP_MEMORY_MODEL, "{key:?}");
-        assert_eq!(opcodes[3], OP_ENTRY_POINT, "{key:?}");
-        assert_eq!(opcodes[4], OP_EXECUTION_MODE, "{key:?}");
+        // One to three leading capabilities: `Shader`, plus `Float16`/`Int16` for the binary16
+        // kernels (ADR 0008).
+        let imports_at = opcodes
+            .iter()
+            .position(|op| *op == OP_EXT_INST_IMPORT)
+            .expect("{key:?}: an ExtInstImport");
+        assert!(
+            opcodes[..imports_at].iter().all(|op| *op == OP_CAPABILITY),
+            "{key:?}"
+        );
+        assert_eq!(opcodes[imports_at + 1], OP_MEMORY_MODEL, "{key:?}");
+        assert_eq!(opcodes[imports_at + 2], OP_ENTRY_POINT, "{key:?}");
+        assert_eq!(opcodes[imports_at + 3], OP_EXECUTION_MODE, "{key:?}");
         assert_eq!(*opcodes.last().unwrap(), OP_FUNCTION_END, "{key:?}");
         assert_eq!(
             opcodes.iter().filter(|op| **op == OP_FUNCTION).count(),
@@ -2614,6 +2999,122 @@ mod tests {
                 assert!(!op.inputs().is_empty());
                 assert!(op.inputs().len() <= MAX_ELEMENTWISE_INPUTS);
             }
+        }
+    }
+
+    /// Independent binary32 → binary16 reference: decompose the (exact) binary64 value into its
+    /// integer significand and round to the binary16 significand with round-to-nearest-even —
+    /// deliberately a different formulation than [`f32_to_f16_bits`].
+    fn reference_f32_to_f16(value: f32) -> u16 {
+        let value = f64::from(value);
+        if value.is_nan() {
+            return if value.is_sign_negative() {
+                0xfe00
+            } else {
+                0x7e00
+            };
+        }
+        let sign: u16 = if value.is_sign_negative() { 0x8000 } else { 0 };
+        let magnitude = value.abs();
+        if magnitude >= 65520.0 {
+            return sign | 0x7c00;
+        }
+        if magnitude == 0.0 {
+            return sign;
+        }
+        let bits = magnitude.to_bits();
+        let biased = ((bits >> 52) & 0x7ff) as i32;
+        // `f32` inputs are never binary64-subnormal, so the implicit leading bit is present.
+        let mantissa = (bits & ((1_u64 << 52) - 1)) | (1_u64 << 52);
+        let exponent = biased - 1023;
+        // value = mantissa · 2^(exponent - 52)
+        if exponent >= -14 {
+            // Binary16 normal: keep the top 11 significand bits, round the rest.
+            let kept = mantissa >> 42;
+            let dropped = mantissa & ((1_u64 << 42) - 1);
+            let half = 1_u64 << 41;
+            let rounded = if dropped > half || (dropped == half && kept & 1 == 1) {
+                kept + 1
+            } else {
+                kept
+            };
+            let (exponent, mantissa) = if rounded == 2048 {
+                (exponent + 1, 1024)
+            } else {
+                (exponent, rounded)
+            };
+            let biased = exponent + 15;
+            if biased >= 31 {
+                return sign | 0x7c00;
+            }
+            return sign | ((biased as u16) << 10) | (mantissa - 1024) as u16;
+        }
+        // Binary16 subnormal (step 2^-24): scale into the integer domain and round.
+        let drop = (28 - exponent) as u32;
+        if drop >= 64 {
+            return sign;
+        }
+        let kept = mantissa >> drop;
+        let dropped = mantissa & ((1_u64 << drop) - 1);
+        let half = 1_u64 << (drop - 1);
+        let rounded = if dropped > half || (dropped == half && kept & 1 == 1) {
+            kept + 1
+        } else {
+            kept
+        };
+        // At most 1024: the smallest normal encoding, correctly reached by the rounding carry.
+        sign | rounded as u16
+    }
+
+    #[test]
+    fn binary16_widening_is_exact_for_every_pattern() {
+        for pattern in 0_u32..=0xffff {
+            let bits = pattern as u16;
+            let value = f16_to_f32(bits);
+            let exponent = (bits >> 10) & 0x1f;
+            let mantissa = bits & 0x3ff;
+            match (exponent, mantissa) {
+                (0, 0) => assert_eq!(value.to_bits(), (u32::from(bits) & 0x8000) << 16),
+                (31, 0) => assert!(value.is_infinite(), "{bits:#06x}"),
+                (31, _) => assert!(value.is_nan(), "{bits:#06x}"),
+                _ => {
+                    // Round trip: every binary16 value is exactly binary32-representable.
+                    assert_eq!(f32_to_f16_bits(value), bits, "{bits:#06x}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn binary16_narrowing_matches_the_reference_everywhere() {
+        // Every binary16 pattern (round trip), the rounding boundaries between them, and a
+        // pseudo-random sweep across the whole binary32 range.
+        let mut cases: Vec<f32> = (0_u32..=0xffff)
+            .map(|pattern| f16_to_f32(pattern as u16))
+            .collect();
+        for pattern in 0_u32..=0xfffe {
+            let lo = f16_to_f32(pattern as u16);
+            let hi = f16_to_f32((pattern + 1) as u16);
+            if lo.is_finite() && hi.is_finite() {
+                cases.push(f32::from_bits(
+                    lo.to_bits() + hi.to_bits().abs_diff(lo.to_bits()) / 2,
+                ));
+            }
+        }
+        let mut state = 0x243f_6a88_85a3_08d3_u64;
+        for _ in 0..1_000_000 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            cases.push(f32::from_bits((state >> 32) as u32));
+        }
+        for case in cases {
+            assert_eq!(
+                f32_to_f16_bits(case),
+                reference_f32_to_f16(case),
+                "{case:e} ({:#010x})",
+                case.to_bits()
+            );
         }
     }
 }

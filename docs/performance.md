@@ -249,14 +249,21 @@ VIRTIO_ACCEL_VULKAN_REQUIRE_DEVICE=1 \
 ```
 
 Verified driver stacks for the FP32 operator tier (ADR 0007): Intel Arc 140V (Lunar Lake, Mesa 26.0.8 ANV, Vulkan 1.4.335)
-(full suite, 2026-09-06, alongside the same host's llvmpipe LLVM 21.1.8) and Mesa lavapipe in the
-`vulkan-lavapipe-test` CI lane. Apple M3 via MoltenVK (local validation only, not a CI lane)
-verified the earlier IDENTITY + MATMUL tier. On ANV and llvmpipe alike the crate-authored
+(full suite, 2026-09-06, alongside the same host's llvmpipe LLVM 21.1.8), Mesa lavapipe in the
+`vulkan-lavapipe-test` CI lane, and Apple M4 via MoltenVK 1.4.2 (full suite, 2026-09-17; local
+validation only, not a CI lane). On ANV and llvmpipe alike the crate-authored
 transcendentals measured 1 ulp (sin, cos, tanh) and 2 ulp (erf) worst case against binary64 over
 4096 samples spanning ±8000, ±1e6, `f32::MAX`, and the non-finite edges — the same numbers, which
 is what the `NoContraction` and software-reduction policy exists to guarantee. Copy-path diagnostics across all three: every submission is a direct binding;
 `explicit_transfer_bytes` stays zero for `Host` and `Shared` domains, and `Device` staging is
 confined to `write_buffer`/`read_buffer` as the memory-domain contract requires.
+
+The FP16 tier (ADR 0008) shares the FP32 submission path exactly — the same dispatch geometry,
+arena, and ring; only the element storage is packed two per word — so no separate timing claims
+are made. Its corpus has executed end-to-end on Apple M4 via MoltenVK with the gate's denormal
+clause experimentally relaxed (2026-09-17; neither lavapipe nor MoltenVK reports binary16
+denormal preservation, so neither advertises the tier under the shipped gate); ANV and RADV runs
+against the shipped gate are the owed evidence.
 
 The FP32 operator tier (ADR 0007) adds the structural optimizations a real graph needs before any
 timing is worth publishing: a whole graph is one command buffer with barriers only between

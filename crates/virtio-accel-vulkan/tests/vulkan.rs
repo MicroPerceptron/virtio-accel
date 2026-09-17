@@ -10,8 +10,11 @@
 use std::time::{Duration, Instant};
 
 use virtio_accel_conformance::numerics::{
-    FP32_OPERATOR_CASE_GROUPS, Fp32TierTensor, IDENTITY_EDGES_FP32, IDENTITY_INT8,
-    LINEAR_TANH_FP32, MATMUL_FP32, TosaFp32OperatorCase,
+    ADD_FP16, FP32_OPERATOR_CASE_GROUPS, Fp32TierTensor, HEXAGON_LOGICAL_CASES,
+    HEXAGON_MOVEMENT_CASES, HEXAGON_REDUCTION_CASES, HEXAGON_UNARY_FP16_CASES, IDENTITY_EDGES_FP16,
+    IDENTITY_EDGES_FP32, IDENTITY_INT8, LINEAR_TANH_FP32, MATMUL_FP16, MATMUL_FP32,
+    MAX_POOL2D_FP16, MAXIMUM_FP16, MINIMUM_FP16, MOCK_LINEAR_CLASSIFIER_FP16, MUL_FP16, POW_FP16,
+    SUB_FP16, TosaFloat16Case, TosaFp32OperatorCase, TosaRawCase,
 };
 use virtio_accel_conformance::{
     BindingFixture, ConformanceHooks, ProgramFixture, ResourceCounts, SubmissionPathDiagnostics,
@@ -22,7 +25,7 @@ use virtio_accel_core::{
     BufferUsage, ByteSink, ByteSource, Capabilities, ContextDesc, EventState, MemoryDomain,
     QueueDesc, ReleaseFailure, SubmitFailure, Timeout,
 };
-use virtio_accel_tosa::{DType, Target, parse};
+use virtio_accel_tosa::{DType, Target, TosaCapabilityProvider, ValueRoles, parse};
 use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
 use virtio_accel_vulkan::{
     InitError, REQUIRED_RESIDENT_BYTES, VULKAN_TOSA_INTEGER_TARGET, VULKAN_TOSA_TARGET,
@@ -1850,4 +1853,332 @@ fn measure_warm_latency_on(device: &str) {
     release(backend.free_buffer(input));
     release(backend.free_buffer(output));
     release(backend.destroy_context(context));
+}
+
+// ---------------------------------------------------------------------------------------------
+// FP16 tier (ADR 0008)
+// ---------------------------------------------------------------------------------------------
+
+/// Whether this instance advertises the FP16 tier: native binary16 arithmetic with proven
+/// float controls. Every FP16 test skips devices that do not, rather than probing a fallback.
+fn advertises_fp16(backend: &VulkanAccelerator) -> bool {
+    backend
+        .tosa_capabilities()
+        .iter()
+        .any(|capability| capability.supports_dtype(DType::FP16, ValueRoles::INPUT))
+}
+
+fn fp16_bytes(values: &[u16]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
+}
+
+fn fp16s_le(bytes: &[u8]) -> Vec<u16> {
+    bytes
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes(chunk.try_into().unwrap()))
+        .collect()
+}
+
+/// The bit-exact binary16 corpus: every non-NaN value must match bit-for-bit, signed zeros and
+/// subnormals included; NaN payloads may canonicalize.
+const FP16_BIT_EXACT_CASES: &[&TosaFloat16Case] = &[
+    &MATMUL_FP16,
+    &MOCK_LINEAR_CLASSIFIER_FP16,
+    &ADD_FP16,
+    &SUB_FP16,
+    &MUL_FP16,
+    &POW_FP16,
+    &MAXIMUM_FP16,
+    &MINIMUM_FP16,
+    &MAX_POOL2D_FP16,
+    &IDENTITY_EDGES_FP16,
+];
+
+#[test]
+fn executes_every_fp16_bit_exact_case_in_every_advertised_domain() {
+    for device in devices() {
+        let backend = open(&device);
+        if !advertises_fp16(&backend) {
+            eprintln!("{device}: the FP16 tier is not advertised here (ADR 0008); skipped");
+            continue;
+        }
+        for domain in advertised_domains(&backend) {
+            for case in FP16_BIT_EXACT_CASES {
+                let inputs: Vec<Vec<u8>> = case
+                    .inputs
+                    .iter()
+                    .map(|input| fp16_bytes(input.bits))
+                    .collect();
+                let actual = run_graph(
+                    &backend,
+                    case.artifact,
+                    &inputs,
+                    case.outputs[0].bits.len() * 2,
+                    domain,
+                );
+                let actual = fp16s_le(&actual);
+                assert!(
+                    case.output_matches(0, &actual),
+                    "{device}: {} in {domain:?}: {actual:x?}",
+                    case.name
+                );
+            }
+        }
+    }
+}
+
+/// The ulp-tolerated binary16 corpus: unary and activation, comparison/logical/selection,
+/// reduction, and data-movement cases.
+const FP16_RAW_CASE_GROUPS: &[&[TosaRawCase]] = &[
+    HEXAGON_UNARY_FP16_CASES,
+    HEXAGON_LOGICAL_CASES,
+    HEXAGON_REDUCTION_CASES,
+    HEXAGON_MOVEMENT_CASES,
+];
+
+#[test]
+fn executes_every_fp16_raw_oracle_case_in_every_advertised_domain() {
+    for device in devices() {
+        let backend = open(&device);
+        if !advertises_fp16(&backend) {
+            eprintln!("{device}: the FP16 tier is not advertised here (ADR 0008); skipped");
+            continue;
+        }
+        for domain in advertised_domains(&backend) {
+            for case in FP16_RAW_CASE_GROUPS
+                .iter()
+                .flat_map(|group| group.iter().copied())
+            {
+                let inputs: Vec<Vec<u8>> = case.inputs.iter().map(|input| input.bytes()).collect();
+                let actual = run_graph(
+                    &backend,
+                    case.artifact,
+                    &inputs,
+                    case.output.byte_len(),
+                    domain,
+                );
+                assert!(
+                    case.output_matches(&actual),
+                    "{device}: {} in {domain:?}: {actual:x?}",
+                    case.name
+                );
+            }
+        }
+    }
+}
+
+/// Every one of the 65536 binary16 bit patterns through NEGATE: the sign bit flips, and the
+/// rest of the pattern — subnormals and signed zeros included — passes through the native
+/// unpack and atomic repack untouched. NaN outcomes follow the shared corpus rule: any NaN
+/// payload (including a canonical one) satisfies a NaN expectation.
+#[test]
+fn fp16_negate_round_trips_every_binary16_bit_pattern() {
+    const ELEMENTS: i32 = 65536;
+    let mut graph = OwnedGraph::new("main");
+    graph
+        .push_tensor(OwnedTensor::new("x", vec![ELEMENTS], DType::FP16))
+        .push_tensor(OwnedTensor::constant(
+            "input_zp",
+            vec![1],
+            DType::FP16,
+            vec![0, 0],
+        ))
+        .push_tensor(OwnedTensor::constant(
+            "output_zp",
+            vec![1],
+            DType::FP16,
+            vec![0, 0],
+        ))
+        .push_tensor(OwnedTensor::new("y", vec![ELEMENTS], DType::FP16))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Const,
+            vec![],
+            vec!["input_zp".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Const,
+            vec![],
+            vec!["output_zp".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Negate,
+            vec!["x".into(), "input_zp".into(), "output_zp".into()],
+            vec!["y".into()],
+        ))
+        .push_input("x")
+        .push_output("y");
+    let artifact = graph.build(VULKAN_TOSA_TARGET).unwrap();
+    let patterns: Vec<u16> = (0..=u16::MAX).collect();
+    let input = fp16_bytes(&patterns);
+    for device in devices() {
+        let backend = open(&device);
+        if !advertises_fp16(&backend) {
+            eprintln!("{device}: the FP16 tier is not advertised here (ADR 0008); skipped");
+            continue;
+        }
+        for domain in advertised_domains(&backend) {
+            let actual = fp16s_le(&run_graph(
+                &backend,
+                &artifact,
+                std::slice::from_ref(&input),
+                input.len(),
+                domain,
+            ));
+            for (index, (expected, actual)) in patterns
+                .iter()
+                .map(|pattern| pattern ^ 0x8000)
+                .zip(&actual)
+                .enumerate()
+            {
+                assert!(
+                    fp16_within_ulps(expected, *actual, 0),
+                    "{device}: {domain:?}: pattern {index:#06x}: expected {expected:#06x}, got {actual:#06x}"
+                );
+            }
+        }
+    }
+}
+
+/// `expected` and `actual` binary16 patterns within `max_ulps` of each other, NaN-tolerant,
+/// sign- and zero-exact (the shared raw-case comparison rule).
+fn fp16_within_ulps(expected: u16, actual: u16, max_ulps: u16) -> bool {
+    if expected & 0x7c00 == 0x7c00 && expected & 0x03ff != 0 {
+        return actual & 0x7c00 == 0x7c00 && actual & 0x03ff != 0;
+    }
+    if max_ulps == 0 || (expected ^ actual) & 0x8000 != 0 || expected & 0x7fff == 0 {
+        return expected == actual;
+    }
+    expected.abs_diff(actual) <= max_ulps
+}
+
+/// The higher-precision lanes against binary64 references: `SIN`, `COS`, `TANH`, `ERF`, and the
+/// `EXP`/`LOG`/`RSQRT`/`SIGMOID` built-ins are evaluated in binary32 and rounded once, so the
+/// binary16 result must land within one ulp of the correctly rounded exact value over the whole
+/// finite binary16 domain. (`LOG`/`RSQRT` skip negative inputs, whose behaviour Vulkan leaves
+/// undefined, and their fixtures elsewhere cover the positive domain.)
+#[test]
+fn fp16_higher_precision_lanes_track_binary64_references() {
+    /// One transcendental case: corpus name, the unary operator, the binary64 oracle, and
+    /// whether the domain is restricted to positive inputs.
+    struct TranscendentalCase {
+        name: &'static str,
+        kind: OperatorKind,
+        oracle: fn(f64) -> f64,
+        positive_only: bool,
+    }
+    let cases = [
+        TranscendentalCase {
+            name: "sin",
+            kind: OperatorKind::Sin,
+            oracle: f64::sin,
+            positive_only: false,
+        },
+        TranscendentalCase {
+            name: "cos",
+            kind: OperatorKind::Cos,
+            oracle: f64::cos,
+            positive_only: false,
+        },
+        TranscendentalCase {
+            name: "tanh",
+            kind: OperatorKind::Tanh,
+            oracle: f64::tanh,
+            positive_only: false,
+        },
+        TranscendentalCase {
+            name: "erf",
+            kind: OperatorKind::Erf,
+            oracle: libm_erf,
+            positive_only: false,
+        },
+        TranscendentalCase {
+            name: "exp",
+            kind: OperatorKind::Exp,
+            oracle: f64::exp,
+            positive_only: false,
+        },
+        TranscendentalCase {
+            name: "log",
+            kind: OperatorKind::Log,
+            oracle: f64::ln,
+            positive_only: true,
+        },
+        TranscendentalCase {
+            name: "rsqrt",
+            kind: OperatorKind::Rsqrt,
+            oracle: |x| 1.0 / x.sqrt(),
+            positive_only: true,
+        },
+        TranscendentalCase {
+            name: "sigmoid",
+            kind: OperatorKind::Sigmoid,
+            oracle: |x| 1.0 / (1.0 + (-x).exp()),
+            positive_only: false,
+        },
+    ];
+    // Every finite binary16 pattern as f64-exact input.
+    let finite: Vec<u16> = (0..=u16::MAX)
+        .filter(|pattern| pattern & 0x7c00 != 0x7c00)
+        .collect();
+    for TranscendentalCase {
+        name,
+        kind,
+        oracle,
+        positive_only,
+    } in cases
+    {
+        let inputs: Vec<u16> = finite
+            .iter()
+            .copied()
+            .filter(|pattern| !positive_only || pattern & 0x8000 == 0)
+            .collect();
+        let mut graph = OwnedGraph::new("main");
+        graph
+            .push_tensor(OwnedTensor::new(
+                "x",
+                vec![inputs.len() as i32],
+                DType::FP16,
+            ))
+            .push_tensor(OwnedTensor::new(
+                "y",
+                vec![inputs.len() as i32],
+                DType::FP16,
+            ))
+            .push_operator(OwnedOperator::new(kind, vec!["x".into()], vec!["y".into()]))
+            .push_input("x")
+            .push_output("y");
+        let artifact = graph.build(VULKAN_TOSA_TARGET).unwrap();
+        let input = fp16_bytes(&inputs);
+        let expected: Vec<u16> = inputs
+            .iter()
+            .map(|pattern| {
+                let exact = oracle(f64::from(virtio_accel_vulkan::shader::f16_to_f32(*pattern)));
+                virtio_accel_vulkan::shader::f32_to_f16_bits(exact as f32)
+            })
+            .collect();
+        for device in devices() {
+            let backend = open(&device);
+            if !advertises_fp16(&backend) {
+                eprintln!("{device}: the FP16 tier is not advertised here (ADR 0008); skipped");
+                continue;
+            }
+            let actual = fp16s_le(&run_graph(
+                &backend,
+                &artifact,
+                std::slice::from_ref(&input),
+                input.len(),
+                MemoryDomain::Host,
+            ));
+            for (index, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
+                assert!(
+                    fp16_within_ulps(*expected, *actual, 1),
+                    "{device}: {name}({:#06x}): expected within 1 ulp of {expected:#06x}, got {actual:#06x}",
+                    inputs[index]
+                );
+            }
+        }
+    }
 }

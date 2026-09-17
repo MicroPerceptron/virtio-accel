@@ -1,7 +1,9 @@
 # 4. First advertised numerical tier: FP32 base, INT8 candidate, FP16 deferred
 
 - Status: provisional (declares the scaffold's `Target` constants; wayfinder map #154 ticket 5
-  closes on per-ICD float-controls evidence before operator work in ticket 9)
+  closes on per-ICD float-controls evidence before operator work in ticket 9). The FP16 deferral
+  is resolved by ADR 0008 — native binary16 kernels behind exactly the float-controls gate this
+  ADR required; the INT8 candidate remains open under ticket 5.
 - Resolves: nothing final; records the candidate set the scaffold compiles
 
 ## Decision

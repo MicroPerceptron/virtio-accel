@@ -3,8 +3,8 @@
 
 use virtio_accel_tosa::{DType, ExtensionSet, Op, ProfileSet, Target, ValueRoles};
 use virtio_accel_vulkan::{
-    REQUIRED_RESIDENT_BYTES, VULKAN_TOSA_CAPABILITY, VULKAN_TOSA_INTEGER_TARGET,
-    VULKAN_TOSA_TARGET, supports_tosa_dtype, supports_tosa_operator,
+    REQUIRED_RESIDENT_BYTES, VULKAN_TOSA_CAPABILITY, VULKAN_TOSA_FP16_CAPABILITY,
+    VULKAN_TOSA_INTEGER_TARGET, VULKAN_TOSA_TARGET, supports_tosa_dtype, supports_tosa_operator,
 };
 
 #[test]
@@ -133,16 +133,53 @@ fn capability_advertises_the_shared_fp32_operator_set() {
     assert_eq!(VULKAN_TOSA_CAPABILITY.graph.max_blocks, 1);
 }
 
+/// The FP16 tier (ADR 0008): the same target identity, operators, and graph envelope as the
+/// FP32 tier, with binary16 in every role; the base tier stays FP32-only so a device without
+/// proven binary16 float controls never relabels.
+#[test]
+fn fp16_capability_extends_the_fp32_boundary() {
+    assert_eq!(VULKAN_TOSA_FP16_CAPABILITY.target, VULKAN_TOSA_TARGET);
+    assert_eq!(
+        VULKAN_TOSA_FP16_CAPABILITY.operators,
+        VULKAN_TOSA_CAPABILITY.operators
+    );
+    assert_eq!(
+        VULKAN_TOSA_FP16_CAPABILITY.graph,
+        VULKAN_TOSA_CAPABILITY.graph
+    );
+    for accepted in [DType::FP32, DType::FP16, DType::BOOL, DType::INT32] {
+        assert!(
+            VULKAN_TOSA_FP16_CAPABILITY.supports_dtype(accepted, ValueRoles::ALL),
+            "{accepted:?}"
+        );
+    }
+    for rejected in [DType::BF16, DType::INT4, DType::INT16] {
+        assert!(
+            !VULKAN_TOSA_FP16_CAPABILITY.supports_dtype(rejected, ValueRoles::ALL),
+            "{rejected:?}"
+        );
+    }
+    assert!(VULKAN_TOSA_FP16_CAPABILITY.supports_dtype(DType::INT8, ValueRoles::CONSTANT));
+    assert!(!VULKAN_TOSA_FP16_CAPABILITY.supports_dtype(DType::INT8, ValueRoles::INPUT));
+}
+
 #[test]
 fn every_kernel_variant_assembles_to_valid_spirv_headers() {
     use virtio_accel_vulkan::shader::{KernelKey, NanMode, ReduceOp, Storage};
     let keys = [
         KernelKey::Matmul {
+            float: Storage::Word,
+            tile: 16,
+            buffers: 17,
+        },
+        KernelKey::Matmul {
+            float: Storage::Half,
             tile: 16,
             buffers: 17,
         },
         KernelKey::Reduce {
             op: ReduceOp::ArgMax(NanMode::Propagate),
+            float: Storage::Half,
             workgroup: 256,
             buffers: 17,
         },
