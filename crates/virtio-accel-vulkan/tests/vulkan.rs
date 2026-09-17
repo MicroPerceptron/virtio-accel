@@ -1066,9 +1066,13 @@ fn vulkan_backend_passes_the_standard_semantic_suite_on_every_device() {
         let backend = open(&device);
         for domain in advertised_domains(&backend) {
             let target = conformance_target(domain);
-            // `event.pending-release-terminal-stability` needs to observe a pending event before
-            // the completion hook; a fast device may finish a one-element copy first. Retry that
-            // specific precondition race a bounded number of times and fail on anything else.
+            // `event.pending-release-terminal-stability` needs to observe a pending event at
+            // both edges: the poll before the release, and the release itself. A fast device
+            // may finish the one-element copy before the first poll ("did not expose a
+            // controllable pending event") or between the poll and the release ("pending event
+            // release reported success" — releasing the then-Complete event is correct, so the
+            // case simply observed nothing). Retry that precondition race a bounded number of
+            // times and fail on anything else.
             let mut passed = false;
             for attempt in 1..=8 {
                 let report = run(|| open(&device), &target, &Hooks);
@@ -1076,7 +1080,8 @@ fn vulkan_backend_passes_the_standard_semantic_suite_on_every_device() {
                     case.id == "event.pending-release-terminal-stability"
                         && matches!(&case.status,
                             virtio_accel_conformance::CaseStatus::Failed(message)
-                                if message.contains("did not expose a controllable pending event"))
+                                if message.contains("did not expose a controllable pending event")
+                                    || message.contains("pending event release reported success"))
                 };
                 let racy_precondition = report.cases().iter().any(racy);
                 let other_failure = report.failures().any(|case| !racy(case));
