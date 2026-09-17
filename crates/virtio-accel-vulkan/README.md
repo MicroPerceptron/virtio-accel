@@ -25,17 +25,18 @@ build time (ADR 0002 in `docs/adr/`).
 - **The FP16 operator tier** (`VULKAN_TOSA_FP16_CAPABILITY`, ADR 0008): the same 42 operators
   and graph envelope over binary16 tensors, advertised per device — only where `shaderFloat16`
   and `shaderInt16` are present and the Vulkan 1.2 float-controls properties prove binary16
-  round-to-nearest-even arithmetic with denormal, signed-zero, infinity, and NaN preservation
+  round-to-nearest-even conversions with denormal, signed-zero, infinity, and NaN preservation
   (`shaderDenormPreserveFloat16`, `shaderSignedZeroInfNanPreserveFloat16`,
   `shaderRoundingModeRTEFloat16`). Everywhere else the FP32 descriptor stands alone and FP16
-  graphs are rejected, never silently widened. Elementwise arithmetic, comparisons,
-  `MAXIMUM`/`MINIMUM`/`CLAMP`, and `SELECT` execute on native binary16 values; MATMUL and
-  reductions accumulate in binary32 because TOSA assigns that accumulator width; the
-  transcendental and `EXP`/`LOG`/`RSQRT`/`POW`/`SIGMOID` lanes evaluate in binary32 and round
-  once, the higher-precision evaluation TOSA permits. Tensors stay packed two per word: loads
-  unpack and bitcast, stores repack with the same neighbour-safe atomics `BOOL` uses, and
-  data-movement kernels copy the lanes as integers, so `IDENTITY_EDGES_FP16` — NaN payloads,
-  subnormals, signed zeros — moves bit-exactly.
+  graphs are rejected, never silently widened. The float lanes evaluate in binary32 and round
+  once — the implementation choice TOSA 1.0 §1.10.3 names explicitly, and the correctly rounded
+  binary16 result on every device for `ADD`/`SUB`/`MUL` (their exact results fit the binary32
+  significand) — because every production f16 ALU probed flushes subnormal results
+  non-compliantly or unreliably. `NEGATE`/`ABS` are integer sign operations on the packed lane;
+  data movement copies the 16-bit lanes as integers, so `IDENTITY_EDGES_FP16` — NaN payloads,
+  subnormals, signed zeros — moves bit-exactly; MATMUL and reductions accumulate in binary32
+  (the accumulator width TOSA assigns FP16); stores repack with the same neighbour-safe atomics
+  `BOOL` uses.
 - **Whole-graph execution** (ADR 0007): the graph's execution order becomes one command buffer of
   compute dispatches with `COMPUTE → COMPUTE` memory barriers between dependent dispatches.
   `CONST` tensors and intermediates live in one per-program arena allocation (lifetime-packed;
@@ -110,21 +111,20 @@ on Apple M4 via MoltenVK 1.4.2 (local validation only, not a CI lane). One crate
 code paths.
 
 **FP16 tier.** Neither lavapipe nor MoltenVK reports `shaderDenormPreserveFloat16`, so neither
-advertises the tier and the FP16 corpus tests skip there explicitly. On 2026-09-17, with only the
+advertises the tier and the FP16 corpus tests skip there explicitly. On 2026-09-17, Intel Arc
+LNL (Mesa ANV) and AMD Radeon 860M (RADV) advertised the tier under the shipped gate and passed
+the bit-exact corpus, the ulp-tolerated groups, the binary64 sweep, and the fully strict
+65536-pattern `NEGATE` round trip (the lane is an integer sign operation). Those runs also
+measured every production f16 ALU flushing subnormal results non-compliantly or unreliably —
+RADV lost the sign of a negative subnormal sum, ANV flushed a subnormal `OpFNegate`, and
+MoltenVK's compiler demotes widen–narrow chains back to f16 — which is why the tier evaluates in
+binary32 and rounds once (TOSA 1.0 §1.10.3 permits fp16 operations in fp32), with the
+`SPV_KHR_float_controls` execution modes on the conversions. On the same day, with only the
 denormal clause experimentally relaxed (a measurement, not shipped), Apple M4 via MoltenVK
-executed the entire FP16 corpus in every advertised domain: the ten bit-exact cases, the
-ulp-tolerated unary/comparison/logical/reduction/movement groups, an exhaustive 65536-pattern
-`NEGATE` round trip (fully bit-exact, NaN payloads included — the lane is an integer sign
-operation), and the eight higher-precision lanes within 1 ulp of the correctly rounded binary64
-references over the whole finite binary16 domain. On the same day, Intel Arc LNL (Mesa ANV)
-advertised the tier under the shipped gate and passed the bit-exact corpus, the ulp-tolerated
-groups, and the sweep; its f16 ALU was caught flushing a subnormal `OpFNegate` result despite
-reporting denormal preservation, so `NEGATE`/`ABS` are integer sign operations and the binary16
-kernels carry the `SPV_KHR_float_controls` execution modes (`DenormPreserve`,
-`SignedZeroInfNanPreserve`, `RoundingModeRTE`). The subnormal-arithmetic probe's ANV re-run and
-any RADV run are the owed evidence. Host-side, the binary16 conversions are verified exhaustively
-against an independent reference and every kernel variant passes
-`spirv-val --target-env vulkan1.3`.
+executed the entire FP16 corpus in every advertised domain. The subnormal-arithmetic probe's
+re-runs on ANV and RADV against the final kernels are the owed evidence. Host-side, the binary16
+conversions are verified exhaustively against an independent reference and every kernel variant
+passes `spirv-val --target-env vulkan1.3`.
 
 Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an
 experimental native-Rust protocol and implementation stack for a transport-neutral virtual

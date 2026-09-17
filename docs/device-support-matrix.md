@@ -229,18 +229,18 @@ device-local memory.
 **Current execution boundary.** The advertised tier is the static 42-operator FP32 tier with
 `BOOL`/`INT32` auxiliaries, plus — per device — the FP16 tier: same operators over binary16
 tensors, advertised only where `shaderFloat16`/`shaderInt16` and the float-controls properties
-prove binary16 round-to-nearest-even arithmetic with denormal, signed-zero, infinity, and NaN
+prove binary16 round-to-nearest-even conversions with denormal, signed-zero, infinity, and NaN
 preservation (ADR 0008). The provisional integer target is declared but not advertised. The
 native path and full backend conformance suite are validated
 on Intel Arc 140V through Mesa ANV, on llvmpipe/lavapipe, and on Apple M4 via MoltenVK; CI pins
 lavapipe so the native path
 cannot silently turn into the portable placeholder. Neither lavapipe nor MoltenVK reports
 binary16 denormal preservation, so neither advertises the FP16 tier. Intel Arc LNL (Mesa ANV)
-does advertise it and passes the FP16 corpus; its f16 ALU was measured flushing a subnormal
-`OpFNegate` result despite the reported property, so `NEGATE`/`ABS` are integer sign operations
-and the kernels carry the float-controls execution modes — the subnormal-arithmetic probe's ANV
-re-run and any RADV run are the owed evidence. Apple M4 executed the full FP16 corpus with the
-gate's denormal clause experimentally relaxed (a measurement, not shipped).
+and AMD Radeon 860M (RADV) advertise it and pass the FP16 corpus; those runs measured every
+production f16 ALU flushing subnormal results non-compliantly or unreliably, so the tier
+evaluates in binary32 and rounds once — the subnormal-arithmetic probe's re-runs on ANV and
+RADV against the final kernels are the owed evidence. Apple M4 executed the full FP16 corpus
+with the gate's denormal clause experimentally relaxed (a measurement, not shipped).
 
 ## What each backend reports
 

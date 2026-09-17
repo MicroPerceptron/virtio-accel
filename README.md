@@ -105,11 +105,13 @@ barriers between dependent dispatches. Buffers are dedicated directly bound stor
   is a shared-memory tiled kernel that is bit-identical to the sequential ascending-k sum.
 - **FP16 tier (ADR 0008):** the same 42 operators over binary16 tensors, advertised per device —
   only where `shaderFloat16`/`shaderInt16` and the float-controls properties prove binary16
-  round-to-nearest-even arithmetic with denormal, signed-zero, infinity, and NaN preservation.
-  Arithmetic, comparison, and selection lanes execute natively in binary16; MATMUL and reduction
-  sums accumulate in binary32 because TOSA assigns that accumulator width; the transcendental and
-  `EXP`/`LOG`/`RSQRT`/`POW`/`SIGMOID` lanes evaluate in binary32 and round once (the
-  higher-precision evaluation TOSA permits). Where the gate fails — lavapipe and MoltenVK both
+  round-to-nearest-even conversions with denormal, signed-zero, infinity, and NaN preservation.
+  The float lanes evaluate in binary32 and round once — the implementation choice TOSA 1.0
+  §1.10.3 names explicitly, and the correctly rounded binary16 result on every device — because
+  every production f16 ALU probed (ANV, RADV, Apple) flushes subnormal results non-compliantly
+  or unreliably. `NEGATE`/`ABS` are integer sign operations and data movement copies lanes as
+  integers, both exact for every bit pattern; MATMUL and reductions accumulate in binary32 (the
+  accumulator width TOSA assigns FP16). Where the gate fails — lavapipe and MoltenVK both
   report no binary16 denormal preservation — the tier is not advertised and FP16 graphs are
   rejected, never silently widened.
 - **Constraints:** `MATMUL` and `NEGATE` admit zero zero-points only, `MUL` a zero shift, and
@@ -122,13 +124,14 @@ barriers between dependent dispatches. Buffers are dedicated directly bound stor
   MoltenVK 1.4.2. sin/cos/tanh land within 1 ulp and
   erf within 2 ulp of binary64 on
   every one. The FP16 corpus has executed end-to-end on Apple M4 (with the gate's denormal clause
-  experimentally relaxed for measurement) and on Intel Arc LNL (Mesa ANV) against the shipped
-  gate: every bit-exact case, the ulp-tolerated groups, an exhaustive 65536-pattern `NEGATE`
-  round trip, and the higher-precision lanes within 1 ulp of the binary64 references over the
-  whole finite binary16 domain. The ANV run caught its f16 ALU flushing a subnormal `OpFNegate`
-  result despite reporting denormal preservation, so `NEGATE`/`ABS` are integer sign operations
-  and the kernels carry the `SPV_KHR_float_controls` execution modes; the subnormal-arithmetic
-  probe's ANV re-run and any RADV run are the owed evidence. INT8
+  experimentally relaxed for measurement) and, against the shipped gate, on Intel Arc LNL (Mesa
+  ANV) and AMD Radeon 860M (RADV): every bit-exact case, the ulp-tolerated groups, an exhaustive
+  65536-pattern `NEGATE` round trip, and the higher-precision lanes within 1 ulp of the binary64
+  references over the whole finite binary16 domain. Those runs also measured every production f16
+  ALU flushing subnormal results non-compliantly or unreliably (RADV lost the sign of a negative
+  subnormal sum; ANV flushed a subnormal `OpFNegate`), which is why the tier evaluates in
+  binary32 and rounds once; the subnormal-arithmetic probe's re-runs on ANV and RADV are the
+  owed evidence. INT8
   gating remains under the
   [Vulkan wayfinder map](https://github.com/MicroPerceptron/virtio-accel/issues/154); design
   decisions are recorded in `docs/adr/` (ADR 0007 covers the FP32 tier, ADR 0008 the FP16 tier).
