@@ -635,15 +635,15 @@ footer { padding-block: 44px 52px; }
           program loads, one submission per graph. Host, shared and device-local storage buffers
           bind directly for submission; explicit staging is confined to reads and writes of
           device-local memory. Fence status provides nonblocking completion without a worker
-          thread.</p>
+          thread. The same 42 operators run over binary16 tensors wherever the device proves
+          native FP16 arithmetic with the required float controls.</p>
         <p class="bk-device"><b>Vulkan 1.3 compute devices</b>FP32 operator tier validated on
-          Intel Arc 140V (Mesa ANV), AMD Radeon 860M (RADV), and continuously verified on Mesa
-          lavapipe; Apple M3 via MoltenVK has local-only validation for the earlier IDENTITY + MATMUL
-          tier</p>
+          Intel Arc 140V (Mesa ANV), AMD Radeon 860M (RADV), Apple M4 (MoltenVK), and continuously
+          verified on Mesa lavapipe; the gated FP16 tier has executed its corpus on Apple M4</p>
         <p class="bk-label">Program dtypes</p>
         <ul class="bk-dtypes">
           <li class="dt on">FP32<span class="sr-only"> supported</span></li>
-          <li class="dt">FP16<span class="sr-only"> not supported</span></li>
+          <li class="dt on">FP16<span class="sr-only"> supported, per-device float-controls gate</span></li>
           <li class="dt">FP8<span class="sr-only"> not supported</span></li>
           <li class="dt">INT8<span class="sr-only"> target declared but not advertised</span></li>
           <li class="dt">INT4<span class="sr-only"> not supported</span></li>
@@ -652,7 +652,8 @@ footer { padding-block: 44px 52px; }
     </div>
     <p style="margin-top: 18px; font-size: 14px; color: var(--fg-dim);">None of these silently
       dequantize an unsupported graph: unsupported FP8 or INT8 and packed INT4 graphs are rejected
-      at load, where you can see it. Vulkan advertises the FP32 tier only. The
+      at load, where you can see it. Vulkan advertises the FP32 tier, plus the FP16 tier on
+      devices whose features and float controls prove binary16 arithmetic. The
       <a href="docs/device-support-matrix.html">device support matrix</a> records which parts are
       validated on hardware, which are merely reachable, and which are one named change away; the
       <a href="docs/hexagon-operator-matrix.html">Hexagon operator matrix</a> has the per-operator
@@ -679,7 +680,7 @@ footer { padding-block: 44px 52px; }
       <div class="crate-row"><div>virtio-accel-openvino</div><div class="tier">Linux std</div><div class="role">TOSA-to-OpenVINO IR lowering and NPU/GPU/CPU inference</div></div>
       <div class="crate-row"><div>virtio-accel-hexagon</div><div class="tier">Windows ARM64 std</div><div class="role">Strict FP16/INT8 TOSA-to-QNN lowering</div></div>
       <div class="crate-row"><div>virtio-accel-xdna</div><div class="tier">std</div><div class="role">AMD XDNA2 NPU backend over HRX with BF16/FP8/INT8 TOSA tiers</div></div>
-      <div class="crate-row"><div>virtio-accel-vulkan</div><div class="tier">std</div><div class="role">Vendor-neutral Vulkan 1.3 compute with direct buffers and the shared FP32 operator tier</div></div>
+      <div class="crate-row"><div>virtio-accel-vulkan</div><div class="tier">std</div><div class="role">Vendor-neutral Vulkan 1.3 compute with direct buffers, the shared FP32 tier, and a gated FP16 tier</div></div>
       <div class="crate-row"><div>virtio-accel-split-queue</div><div class="tier">core + alloc</div><div class="role">Bounded in-memory split-ring reference model</div></div>
       <div class="crate-row"><div>virtio-accel-guest</div><div class="tier">core + alloc</div><div class="role">Typed reference client with bounded request tracking</div></div>
       <div class="crate-row"><div>virtio-accel-device</div><div class="tier">core + alloc</div><div class="role">Device-owned state with generational IDs</div></div>

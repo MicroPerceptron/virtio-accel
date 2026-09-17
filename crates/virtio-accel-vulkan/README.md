@@ -21,7 +21,21 @@ build time (ADR 0002 in `docs/adr/`).
   selection) and `INT32` (`ARGMAX` results, data movement) auxiliaries, rank up to 6 with TOSA
   broadcasting. `MATMUL` and `NEGATE` admit zero zero-points only, `MUL` a zero shift, and
   `RESHAPE` a constant shape. Every shape, axis, permutation, and pooling window is re-derived at
-  admission and checked against the declared tensors before any kernel is dispatched.
+   admission and checked against the declared tensors before any kernel is dispatched.
+- **The FP16 operator tier** (`VULKAN_TOSA_FP16_CAPABILITY`, ADR 0008): the same 42 operators
+  and graph envelope over binary16 tensors, advertised per device — only where `shaderFloat16`
+  and `shaderInt16` are present and the Vulkan 1.2 float-controls properties prove binary16
+  round-to-nearest-even arithmetic with denormal, signed-zero, infinity, and NaN preservation
+  (`shaderDenormPreserveFloat16`, `shaderSignedZeroInfNanPreserveFloat16`,
+  `shaderRoundingModeRTEFloat16`). Everywhere else the FP32 descriptor stands alone and FP16
+  graphs are rejected, never silently widened. Elementwise arithmetic, comparisons,
+  `MAXIMUM`/`MINIMUM`/`CLAMP`, and `SELECT` execute on native binary16 values; MATMUL and
+  reductions accumulate in binary32 because TOSA assigns that accumulator width; the
+  transcendental and `EXP`/`LOG`/`RSQRT`/`POW`/`SIGMOID` lanes evaluate in binary32 and round
+  once, the higher-precision evaluation TOSA permits. Tensors stay packed two per word: loads
+  unpack and bitcast, stores repack with the same neighbour-safe atomics `BOOL` uses, and
+  data-movement kernels copy the lanes as integers, so `IDENTITY_EDGES_FP16` — NaN payloads,
+  subnormals, signed zeros — moves bit-exactly.
 - **Whole-graph execution** (ADR 0007): the graph's execution order becomes one command buffer of
   compute dispatches with `COMPUTE → COMPUTE` memory barriers between dependent dispatches.
   `CONST` tensors and intermediates live in one per-program arena allocation (lifetime-packed;
@@ -52,8 +66,8 @@ build time (ADR 0002 in `docs/adr/`).
   feed the conformance suite's copy-path and accounting hooks; `VulkanProgram::dispatch_count`
   and `arena_bytes` expose a loaded program's shape.
 
-The provisional integer target (`VULKAN_TOSA_INTEGER_TARGET`) is declared but not advertised; FP16
-is undeclared until per-device float-controls evidence closes wayfinder ticket 5 (ADR 0004).
+The provisional integer target (`VULKAN_TOSA_INTEGER_TARGET`) is declared but not advertised;
+its per-device gating closes with wayfinder ticket 5 (ADR 0004).
 
 ## Build-time gate
 
@@ -75,6 +89,14 @@ reports that no device is available. The native tests run against every enumerat
 skip without one; `VIRTIO_ACCEL_VULKAN_REQUIRE_DEVICE=1` turns absence into a failure, and
 `VK_DRIVER_FILES` pins the ICD (the CI lane pins lavapipe).
 
+On macOS the Vulkan loader comes from MoltenVK (Homebrew `molten-vk` plus `vulkan-loader`, or the
+LunarG SDK). A Homebrew loader lives in `/opt/homebrew/lib`, which is not on the default `dlopen`
+search path, so test and example runs need it exported:
+
+```sh
+DYLD_LIBRARY_PATH=/opt/homebrew/lib cargo test -p virtio-accel-vulkan
+```
+
 ## Verified driver stacks
 
 The full backend suite — admission, lifecycle, the conformance suite, every case of the shared
@@ -83,9 +105,22 @@ ulp sweeps, tiled-MATMUL bit identity, rank-4 broadcasting, byte-tensor neighbou
 on Mesa lavapipe in the `vulkan-lavapipe-test` CI lane and, on 2026-09-06, on
 Intel Arc 140V (Lunar Lake, Mesa 26.0.8 ANV, Vulkan 1.4.335) together with the same host's llvmpipe (LLVM 21.1.8), in
 `Host`, `Shared`, and `Device` domains; the transcendental kernels measured 1 ulp (sin, cos, tanh)
-and 2 ulp (erf) worst case against binary64 on both devices. Apple M3 via MoltenVK (local
-validation only, not a CI lane) has verified the earlier IDENTITY + MATMUL tier and awaits a re-run
-of the broadened one. One crate, no per-driver code paths.
+and 2 ulp (erf) worst case against binary64 on both devices. On 2026-09-17 the same suite passed
+on Apple M4 via MoltenVK 1.4.2 (local validation only, not a CI lane). One crate, no per-driver
+code paths.
+
+**FP16 tier.** Neither lavapipe nor MoltenVK reports `shaderDenormPreserveFloat16`, so neither
+advertises the tier and the FP16 corpus tests skip there explicitly; the shipped gate has not yet
+had a passing device. On 2026-09-17, with only the denormal clause experimentally relaxed (a
+measurement, not shipped), Apple M4 via MoltenVK executed the entire FP16 corpus in every
+advertised domain: the ten bit-exact cases, the ulp-tolerated unary/comparison/logical/reduction/
+movement groups, an exhaustive 65536-pattern `NEGATE` round trip, and the eight higher-precision
+lanes within 1 ulp of the correctly rounded binary64 references over the whole finite binary16
+domain — binary16 subnormals produced and preserved in practice, with NaN payloads canonicalized
+(the TOSA-permitted behaviour the corpus allows). ANV and RADV runs against the strict gate are
+the owed evidence before any support-matrix claim. Host-side, the binary16 conversions are
+verified exhaustively against an independent reference and every kernel variant passes
+`spirv-val --target-env vulkan1.3`.
 
 Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an
 experimental native-Rust protocol and implementation stack for a transport-neutral virtual
