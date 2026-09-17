@@ -653,8 +653,8 @@ footer { padding-block: 44px 52px; }
     </div>
     <p style="margin-top: 18px; font-size: 14px; color: var(--fg-dim);">None of these silently
       dequantize an unsupported graph: unsupported FP8 or INT8 and packed INT4 graphs are rejected
-      at load, where you can see it. Vulkan advertises the FP32 tier, plus the FP16 tier on
-      devices whose features and float controls prove binary16 arithmetic. The
+      at load, where you can see it. Vulkan advertises the FP32 and FP16 tiers on every device it
+      opens; the
       <a href="docs/device-support-matrix.html">device support matrix</a> records which parts are
       validated on hardware, which are merely reachable, and which are one named change away; the
       <a href="docs/hexagon-operator-matrix.html">Hexagon operator matrix</a> has the per-operator
