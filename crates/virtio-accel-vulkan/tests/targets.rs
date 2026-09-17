@@ -134,8 +134,8 @@ fn capability_advertises_the_shared_fp32_operator_set() {
 }
 
 /// The FP16 tier (ADR 0008): the same target identity, operators, and graph envelope as the
-/// FP32 tier, with binary16 in every role; the base tier stays FP32-only so a device without
-/// proven binary16 float controls never relabels.
+/// FP32 tier, with binary16 in every role; the advertised descriptor is valid on every device
+/// because the kernels use crate-owned conversions rather than float16 device features.
 #[test]
 fn fp16_capability_extends_the_fp32_boundary() {
     assert_eq!(VULKAN_TOSA_FP16_CAPABILITY.target, VULKAN_TOSA_TARGET);
