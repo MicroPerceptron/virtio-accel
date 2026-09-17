@@ -288,12 +288,6 @@ struct PhysicalDeviceRecord {
     limits: vk::PhysicalDeviceLimits,
     memory: vk::PhysicalDeviceMemoryProperties,
     buffer_device_address: bool,
-    /// The device may advertise the FP16 tier (ADR 0008): binary16 conversions and the
-    /// packed-storage bitcasts (`shaderFloat16`, `shaderInt16`) under proven float controls —
-    /// round-to-nearest-even with denormal, signed-zero, infinity, and NaN preservation, so the
-    /// shared corpus's non-finite, subnormal, and signed-zero edges are properties of the
-    /// device, not hopes.
-    fp16: bool,
     tuning: Tuning,
 }
 
@@ -302,10 +296,7 @@ impl PhysicalDeviceRecord {
     /// mandatory `synchronization2`).
     fn probe(instance: &ash::Instance, handle: vk::PhysicalDevice) -> Option<Self> {
         let mut vulkan11 = vk::PhysicalDeviceVulkan11Properties::default();
-        let mut vulkan12_properties = vk::PhysicalDeviceVulkan12Properties::default();
-        let mut properties = vk::PhysicalDeviceProperties2::default()
-            .push_next(&mut vulkan11)
-            .push_next(&mut vulkan12_properties);
+        let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut vulkan11);
         // SAFETY: `handle` was enumerated from `instance`; the chained structures are live locals.
         unsafe { instance.get_physical_device_properties2(handle, &mut properties) };
         let properties = properties.properties;
@@ -321,16 +312,9 @@ impl PhysicalDeviceRecord {
             .push_next(&mut vulkan13);
         // SAFETY: as above; the feature chain is fully initialized before the call.
         unsafe { instance.get_physical_device_features2(handle, &mut features) };
-        // Read through `features` first so its chain borrow ends before the linked structs.
-        let shader_int16 = features.features.shader_int16 == vk::TRUE;
         if vulkan13.synchronization2 == vk::FALSE {
             return None;
         }
-        let fp16 = vulkan12.shader_float16 == vk::TRUE
-            && shader_int16
-            && vulkan12_properties.shader_denorm_preserve_float16 == vk::TRUE
-            && vulkan12_properties.shader_signed_zero_inf_nan_preserve_float16 == vk::TRUE
-            && vulkan12_properties.shader_rounding_mode_rte_float16 == vk::TRUE;
 
         // SAFETY: `handle` is a live physical device of `instance`.
         let families = unsafe { instance.get_physical_device_queue_family_properties(handle) };
@@ -361,7 +345,6 @@ impl PhysicalDeviceRecord {
             limits: properties.limits,
             memory,
             buffer_device_address: vulkan12.buffer_device_address == vk::TRUE,
-            fp16,
             tuning,
         })
     }
@@ -539,16 +522,11 @@ impl Shared {
         let queue_infos = [queue_info];
         // `synchronization2` is core in 1.3 but still an opt-in feature (ADR 0005);
         // `bufferDeviceAddress` is enabled only to measure allocation alignment honestly.
-        // `shaderFloat16` and `shaderInt16` are enabled only where the FP16 gate passed (ADR
-        // 0008): the binary16 kernels are the only modules that use 16-bit types.
         let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default()
-            .buffer_device_address(physical.buffer_device_address)
-            .shader_float16(physical.fp16);
+            .buffer_device_address(physical.buffer_device_address);
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default().synchronization2(true);
-        let core_features = vk::PhysicalDeviceFeatures::default().shader_int16(physical.fp16);
         let info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
-            .enabled_features(&core_features)
             .push_next(&mut vulkan12)
             .push_next(&mut vulkan13);
         // SAFETY: `physical.handle` belongs to `instance.instance`; every pointed-to structure
@@ -1801,13 +1779,10 @@ impl Drop for PartialProgram<'_> {
 
 impl TosaCapabilityProvider for VulkanAccelerator {
     fn tosa_capabilities(&self) -> &'static [CapabilityDescriptor] {
-        // The advertised tier is a per-device fact (ADR 0008): the FP16 descriptor only where
-        // the probe proved native binary16 arithmetic with the required float controls.
-        if self.shared.physical.fp16 {
-            &[crate::VULKAN_TOSA_FP16_CAPABILITY]
-        } else {
-            &[crate::VULKAN_TOSA_CAPABILITY]
-        }
+        // The FP16 tier needs no device feature at all (ADR 0008): the kernels' binary16
+        // conversions are crate-owned integer and binary32 code, so every device that hosts the
+        // FP32 tier hosts the FP16 tier with identical numerics.
+        &[crate::VULKAN_TOSA_FP16_CAPABILITY]
     }
 }
 
@@ -2008,8 +1983,7 @@ impl Accelerator for VulkanAccelerator {
                 &owned
             }
         };
-        let plan =
-            lower_tosa(bytes, target, self.shared.physical.fp16).map_err(Self::lowering_error)?;
+        let plan = lower_tosa(bytes, target).map_err(Self::lowering_error)?;
         let tuning = shared.physical.tuning;
         let limits = &shared.physical.limits;
         // The plan's slots and arena must fit the descriptor array, and the arena one storage

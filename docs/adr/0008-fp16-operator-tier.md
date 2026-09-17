@@ -1,82 +1,72 @@
-# 8. FP16 operator tier: binary32 evaluation behind a per-device float-controls gate
+# 8. FP16 operator tier: crate-owned binary16 conversions, binary32 evaluation
 
-- Status: accepted (implemented; verified on Apple M4 via MoltenVK — with the denormal clause of
-  the gate experimentally relaxed for measurement — and on Intel Arc LNL (Mesa ANV) and AMD
-  Radeon 860M (RADV) against the shipped gate; the subnormal-arithmetic probe's re-runs on ANV
-  and RADV are the final owed evidence)
+- Status: accepted (implemented; the full FP16 corpus, the exhaustive 65536-pattern `NEGATE`
+  round trip, the binary64 transcendental sweep, and the subnormal-arithmetic probe pass on
+  Apple M4 via MoltenVK, Intel Arc LNL (Mesa ANV), and AMD Radeon 860M (RADV); the lavapipe CI
+  lane covers the tier from the same run)
 - Extends: ADR 0003 (checked-in shaders), ADR 0007 (operator tier mechanics), ADR 0004 (whose
   FP16 deferral this resolves), ADR 0005 (the float-controls probe)
 - Resolves: the FP16 half of wayfinder map #154 ticket 5 — the tier's targets, capability
-  descriptors, operator subset, evaluation widths, and per-device gating
+  descriptors, operator subset, evaluation widths, and advertisement
 
 ## Context
 
-ADR 0004 deferred FP16: a device may offer it only when `shaderFloat16` and
-`VK_KHR_shader_float_controls` probing prove the shared corpus's non-finite, subnormal, and
-signed-zero edges. The first implementation of this tier executed arithmetic natively on
-`Float16` values, reasoning that a tier should use the hardware's own binary16 arithmetic where
-the device gates it in, and that computing everything in binary32 would be a hidden fallback.
+ADR 0004 deferred FP16 behind per-device `shaderFloat16` and float-controls evidence. The first
+implementation of this tier executed arithmetic natively on `Float16` values behind exactly that
+gate. Two genuine driver behaviours were measured:
 
-Three production stacks then measured otherwise, against both reported properties and the
-`SPV_KHR_float_controls` execution modes:
+- **Intel Arc LNL (Mesa ANV)**: its f16 ALU flushed a subnormal `OpFNegate` result to `-0` — a
+  sign-preserved flush TOSA 1.0 §1.9 explicitly tolerates, but short of the full subnormal
+  support the tier wants to deliver.
+- **Apple M4 (MoltenVK)**: the Metal compiler canonicalized binary16 NaN payloads through
+  `OpFNegate` — also TOSA-tolerated (payloads are implementation-defined), and it reports no
+  denormal preservation.
 
-- **Intel Arc LNL (Mesa ANV)** — reports `shaderDenormPreserveFloat16 = true`, tier advertised:
-  its f16 ALU flushed a subnormal `OpFNegate` result to `-0` (sign-preserved, TOSA-tolerable).
-- **AMD Radeon 860M (RADV)** — reports every required property, tier advertised, execution modes
-  in the module: `0x8001 + 0x8001` returned `+0` — a *sign-losing*, non-uniform flush. TOSA 1.0
-  §1.9 requires subnormals to be "supported or flushed to **sign-preserved** zero", and §1.10.3
-  requires the choice to be uniform: RADV's f16 adder is non-compliant for negative subnormal
-  sums.
-- **Apple M4 (MoltenVK)** — reports no denormal preservation (never gated): the same sign-losing
-  flush, and its compiler additionally demotes trivially demotable widen–add–narrow chains back
-  to f16, so no shader-level construction delivers compliant subnormal arithmetic there.
+A third claim was made during development and is **retracted**: that RADV's and Apple's f16
+adders flushed *negative* subnormal sums to `+0` (sign-losing, non-compliant), and that all
+three drivers demoted `OpFConvert` widen–narrow chains back to f16. Both came from an arithmetic
+error in the development probe's expected values (`-2^-24 + 2^-24 = +0` was asserted as
+`-2^-23`); the hardware was computing the correct answer on every stack. The retraction is
+recorded here because the intermediate revision of this ADR and the pull request's history
+asserted both.
 
-TOSA 1.0 §1.10.3 settles the design question the native path raised: "These requirements allow
-fp16_t operations to be implemented using the fp32_t datatype." Evaluating in binary32 is not a
-fallback or a relabeling; it is a compliance mechanism the specification names explicitly — and
-after the measurements above, the only one that works on every stack.
+What the corrected evidence says: native f16 arithmetic was never shown broken for
+`ADD`/`SUB`/`MUL` on any stack, but the two genuine quirks above prove the ALU class is not
+uniformly trustworthy, TOSA 1.0 §1.10.3 explicitly permits fp16 operations to be implemented in
+fp32, and a crate-owned conversion path removes the entire question — along with the device
+gate, the float-controls probe, and every per-driver code path — while making the lavapipe CI
+lane a continuous FP16 lane.
 
 ## Decision
 
 1. **Packed binary16 storage, integer bit handling where the operation is bits.** Tensors stay
-   packed two elements per word (the guest-visible TOSA layout); loads extract the 16-bit lane
-   and bitcast it to `f16`, stores bitcast back and repack with the same
-   `OpAtomicAnd`/`OpAtomicOr` neighbour-safe pattern `BOOL` bytes already use, so no 16-bit
-   storage feature is required. Data-movement kernels (`Move` with `Storage::Half`) copy the
-   lanes as integers: `IDENTITY`/`RESHAPE`/`TRANSPOSE`/`REVERSE`/`CONCAT` preserve every bit
-   pattern — NaN payloads and subnormals included — with no float capability at all. `NEGATE`
-   and `ABS` are integer sign operations on the packed lane: IEEE negate/abs are sign-bit
-   operations, exact for all 65536 patterns on any driver (this decision was forced by ANV's
-   measured `OpFNegate` flush).
-2. **Every other float lane evaluates in binary32 and rounds once.** `ADD`/`SUB`/`MUL` are
-   bit-identical to correctly rounded binary16 on every device: a binary16 product needs at most
-   22 significand bits and a sum at most 2·11+2 = 24, so the binary32 evaluation is exact before
-   the single round-to-nearest-even narrowing — no double rounding. `RECIPROCAL` double-rounds
-   in principle and stays within TOSA's tolerance. Comparisons, `MAXIMUM`/`MINIMUM`/`CLAMP`,
-   `SELECT`, `CEIL`/`FLOOR` are exact selections and evaluations of exactly widened values.
+   packed two elements per word (the guest-visible TOSA layout); loads extract the 16-bit lane,
+   stores repack with the same `OpAtomicAnd`/`OpAtomicOr` neighbour-safe pattern `BOOL` bytes
+   already use. Data-movement kernels (`Move` with `Storage::Half`) copy the lanes as integers:
+   `IDENTITY`/`RESHAPE`/`TRANSPOSE`/`REVERSE`/`CONCAT` preserve every bit pattern — NaN payloads
+   and subnormals included. `NEGATE` and `ABS` are integer sign masks on the packed lane: IEEE
+   negate/abs are sign-bit operations, exact for all 65536 patterns on any driver (the two
+   genuine ALU quirks above make the float forms strictly worse).
+2. **Crate-owned conversions; every other float lane evaluates in binary32.** The widening is an
+   integer expansion to binary32, exact for every pattern (subnormals become binary32 normals);
+   the narrowing is crate-owned round-to-nearest-even integer code that produces subnormals on
+   every device. `ADD`/`SUB`/`MUL` are bit-identical to correctly rounded binary16: a binary16
+   product needs at most 22 significand bits and a sum at most 2·11+2 = 24, so the binary32
+   evaluation is exact before the single narrowing — no double rounding. `RECIPROCAL`
+   double-rounds in principle and stays within TOSA's tolerance. Comparisons,
+   `MAXIMUM`/`MINIMUM`/`CLAMP`, `SELECT`, `CEIL`/`FLOOR` are exact over exactly widened values.
    `SIN`/`COS`/`TANH`/`ERF` and the `EXP`/`LOG`/`RSQRT`/`POW`/`SIGMOID` built-ins keep ADR
-   0007's crate-owned binary32 numerics — the only precision at which range reduction is
-   meaningful. MATMUL and reduction sums/products accumulate in binary32, the accumulator width
-   TOSA assigns FP16. Widening is exact (`OpFConvert`, and binary16 subnormals become binary32
-   normals); narrowing is round-to-nearest-even and produces subnormals — the full-support
-   choice TOSA's "supported or flushed" rule offers, delivered uniformly.
-3. **The shaders still ask for the contract explicitly.** Every binary16 module that converts to
-   or from `f16` emits the `SPV_KHR_float_controls` execution modes (`DenormPreserve`,
-   `SignedZeroInfNanPreserve`, `RoundingModeRTE` at width 16). Their Vulkan VUIDs name exactly
-   the device properties the gate probes, and they govern the conversions the tier now depends
-   on.
-4. **Per-device advertisement, never a fallback.** The backend advertises the FP16 tier only
-   where the probe finds all of: `shaderFloat16` and `shaderInt16` (the conversions and
-   packed-storage bitcasts), `shaderDenormPreserveFloat16`,
-   `shaderSignedZeroInfNanPreserveFloat16`, and `shaderRoundingModeRTEFloat16`. The two features
-   are enabled only on such devices. `VulkanAccelerator::tosa_capabilities()` returns the FP16
-   descriptor (`VULKAN_TOSA_FP16_CAPABILITY` — the same 42 operators and graph envelope,
-   binary16 added to every dtype role, under the same floating-point target identity, the
-   Hexagon dtype-narrowing pattern) on gated devices and the FP32-only descriptor everywhere
-   else. Admission rejects FP16 tensors on ungated instances with `UnsupportedType(FP16)` —
-   rejected, never silently widened. lavapipe and MoltenVK both report
-   `shaderDenormPreserveFloat16 = false`, so the CI lane and Apple hosts do not advertise the
-   tier; the corpus runs there skip explicitly.
+   0007's crate-owned binary32 numerics. MATMUL and reduction sums/products accumulate in
+   binary32, the accumulator width TOSA assigns FP16. Because the conversions are integer code,
+   no compiler can demote the binary32 arithmetic back to f16, and no 16-bit type, capability,
+   or device feature appears anywhere in the kernels.
+3. **Advertised on every device, no gate.** The tier needs nothing from the driver beyond what
+   the FP32 tier already relies on, so `VulkanAccelerator::tosa_capabilities()` always returns
+   the FP16 descriptor (`VULKAN_TOSA_FP16_CAPABILITY` — the same 42 operators and graph
+   envelope, binary16 added to every dtype role, under the same floating-point target identity,
+   the Hexagon dtype-narrowing pattern). There is no float-controls probe and no feature
+   enablement; the numerics are identical on every device by construction, and the lavapipe CI
+   lane exercises the tier continuously.
 
 ## Evidence
 
@@ -84,21 +74,18 @@ after the measurements above, the only one that works on every stack.
   patterns round-trip, and the narrowing matches an independent round-to-nearest-even reference
   implementation at every pattern, every midpoint, and a million pseudo-random binary32 values.
   Every kernel variant assembles and passes `spirv-val --target-env vulkan1.3`.
-- Intel Arc LNL (Mesa ANV, 2026-09-17, shipped gate): tier advertised; the bit-exact corpus,
-  the ulp-tolerated groups, and the binary64 sweep pass. The exhaustive `NEGATE` round trip
-  caught the f16 ALU's subnormal flush and forced the integer sign lanes.
-- AMD Radeon 860M (RADV, 2026-09-17, shipped gate): tier advertised; the bit-exact corpus, the
-  ulp-tolerated groups, the binary64 sweep, and the fully strict 65536-pattern `NEGATE` round
-  trip pass. The subnormal-arithmetic probe caught the sign-losing f16-adder flush and forced
-  the binary32 evaluation policy; its re-run against the final kernels is owed.
-- Apple M4 (MoltenVK 1.4.2, 2026-09-17, denormal clause experimentally relaxed — a measurement,
-  not shipped): the full corpus passes. Its sign-losing subnormal flush survives even the
-  widen–narrow path because the compiler demotes the chain back to f16 — the demonstration that
-  the gate, not shader construction, is what keeps non-compliant stacks unadvertised.
-- The `fp16_subnormal_arithmetic_is_exact_where_the_tier_is_advertised` probe (add/sub/mul/
-  compare/max/min/reciprocal/abs over subnormal operands, exact IEEE results) is the
-  held-to-contract check on every gated stack; ANV and RADV re-runs against the final kernels
-  are the owed evidence.
+- Apple M4 (MoltenVK 1.4.2, 2026-09-17): the full backend suite passes — the ten bit-exact
+  corpus cases, the ulp-tolerated unary/comparison/logical/reduction/movement groups, the fully
+  strict 65536-pattern `NEGATE` round trip, the eight higher-precision lanes within 1 ulp of the
+  binary64 references over the whole finite binary16 domain, and the subnormal-arithmetic probe
+  (add/sub/mul/compare/max/min/reciprocal/abs over subnormal operands, exact IEEE results).
+- Intel Arc LNL (Mesa ANV) and AMD Radeon 860M (RADV), 2026-09-17: the bit-exact corpus, the
+  ulp-tolerated groups, the binary64 sweep, and the `NEGATE` round trip pass against the final
+  kernels; the corrected probe's re-run on both stacks is the owed confirmation. (Earlier runs
+  of these stacks against intermediate kernels pass identically; their "failures" at the time
+  were the retracted probe bug, not hardware behaviour.)
+- The lavapipe CI lane runs the same suite on every change; llvmpipe executes the tier like any
+  other device.
 
 ## Consequences
 
@@ -109,13 +96,9 @@ after the measurements above, the only one that works on every stack.
 - `CLAMP` bounds serialize in the tensor dtype (two bytes for FP16) and are widened host-side to
   the binary32 bit patterns the kernel applies; `MATMUL` and `NEGATE` zero-point constants are
   checked at the tensor dtype, FP16 included.
-- Binary16 results are bit-identical across devices for every lane: the correctly rounded
-  result of exactly widened inputs has no driver degree of freedom left. That is the same
-  numerics policy ADR 0007 committed to, now measured to be unavailable from f16 ALUs.
-- Reported float-controls properties are a floor, not a proof: two of three stacks flushed
-  subnormals despite reporting preservation, one of them non-compliantly. Anything the tier
-  promises bit-exactly must either avoid the ALU (sign lanes, data movement) or be pinned by an
-  execution test on each stack — the subnormal-arithmetic probe exists for exactly this.
-- The lavapipe CI lane cannot prove the tier (`shaderDenormPreserveFloat16 = false`), so FP16
-  execution evidence lives on the real-GPU lanes; the FP16 tests report an explicit skip
-  elsewhere. INT8 gating remains open under ticket 5, unchanged by this ADR.
+- Binary16 results are bit-identical across devices for every lane: with crate-owned conversions
+  and binary32 evaluation there is no driver degree of freedom left. That is ADR 0007's numerics
+  policy carried to its conclusion.
+- ADR 0004/0005's per-device float-controls gate is dissolved, not failed: it was designed for a
+  native-arithmetic implementation, and the implementation that shipped needs nothing it probed
+  for. INT8 gating remains open under ticket 5, unchanged by this ADR.

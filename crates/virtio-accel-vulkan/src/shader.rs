@@ -21,22 +21,21 @@
 //!
 //! ## Binary16 kernels (ADR 0008)
 //!
-//! FP16 kernels are separate [`KernelKey`] variants (`float: Storage::Half`). Their evaluation
-//! policy is measured, not assumed: every production f16 ALU probed (ANV, RADV, Apple) flushes
-//! subnormal results non-compliantly or unreliably, reported float-controls properties and
-//! execution modes notwithstanding, so the float lanes evaluate in binary32 — which TOSA 1.0
-//! §1.10.3 explicitly permits ("fp16_t operations [may] be implemented using the fp32_t
-//! datatype") — and round once on store. For `ADD`/`SUB`/`MUL` that is the correctly rounded
-//! binary16 result on every device (their exact results fit the binary32 significand); the
-//! comparison and selection lanes are exact; `RECIPROCAL` stays within TOSA's tolerance; the
-//! transcendental lanes keep ADR 0007's crate-owned binary32 numerics. Two lane families are
-//! exact by construction instead: `NEGATE`/`ABS` are integer sign operations on the packed
-//! lane, and data movement copies the 16-bit lanes as integers, so NaN payloads and subnormals
-//! move bit-exactly. MATMUL and reduction folds accumulate in binary32 — the accumulator width
-//! TOSA assigns FP16 — and narrow once. Binary16 modules that convert to or from `f16` emit the
-//! `SPV_KHR_float_controls` execution modes (`DenormPreserve`, `SignedZeroInfNanPreserve`,
-//! `RoundingModeRTE` at width 16), whose VUIDs name exactly the properties the tier's device
-//! gate probes; the `Float16`/`Int16` capabilities are emitted only by the binary16 modules.
+//! FP16 kernels are separate [`KernelKey`] variants (`float: Storage::Half`) built from the same
+//! 32-bit-only instruction set as the FP32 kernels — no 16-bit types, no device features, no
+//! driver float-controls to trust. Packed binary16 tensors are unpacked with integer ops and
+//! widened to binary32 exactly ([`Builder::widen_f16`]); every float lane evaluates in binary32
+//! — which TOSA 1.0 §1.10.3 explicitly permits ("fp16_t operations [may] be implemented using
+//! the fp32_t datatype") — and results narrow back through crate-owned round-to-nearest-even
+//! integer code ([`Builder::narrow_f16`]) that produces subnormals on every device. For
+//! `ADD`/`SUB`/`MUL` that is the correctly rounded binary16 result (their exact results fit the
+//! binary32 significand); the comparison and selection lanes are exact; `RECIPROCAL` stays
+//! within TOSA's tolerance; the transcendental lanes keep ADR 0007's crate-owned binary32
+//! numerics; MATMUL and reduction folds accumulate in binary32, the accumulator width TOSA
+//! assigns FP16. `NEGATE`/`ABS` are integer sign masks on the packed lane, and data movement
+//! copies the 16-bit lanes as integers, so NaN payloads and subnormals move bit-exactly. Because
+//! the conversions are integer code, no compiler can demote the binary32 arithmetic back to
+//! f16, and binary16 results are bit-identical on every device.
 //!
 //! ## Numerics policy
 //!
@@ -87,7 +86,6 @@ pub const MAX_RANK: usize = 6;
 pub const MAX_ELEMENTWISE_INPUTS: usize = 3;
 
 // SPIR-V opcodes (Unified specification, section 3.52).
-const OP_EXTENSION: u16 = 10;
 const OP_EXT_INST_IMPORT: u16 = 11;
 const OP_EXT_INST: u16 = 12;
 const OP_MEMORY_MODEL: u16 = 14;
@@ -118,8 +116,6 @@ const OP_DECORATE: u16 = 71;
 const OP_MEMBER_DECORATE: u16 = 72;
 const OP_CONVERT_F_TO_U: u16 = 109;
 const OP_CONVERT_U_TO_F: u16 = 112;
-const OP_U_CONVERT: u16 = 113;
-const OP_F_CONVERT: u16 = 115;
 const OP_BITCAST: u16 = 124;
 const OP_F_NEGATE: u16 = 127;
 const OP_I_ADD: u16 = 128;
@@ -163,22 +159,10 @@ const OP_RETURN: u16 = 253;
 
 // Enumerants (section 3).
 const CAPABILITY_SHADER: u32 = 1;
-const CAPABILITY_FLOAT16: u32 = 9;
-const CAPABILITY_INT16: u32 = 22;
-// SPV_KHR_float_controls capabilities, one per execution mode used below.
-const CAPABILITY_DENORM_PRESERVE: u32 = 4464;
-const CAPABILITY_SIGNED_ZERO_INF_NAN_PRESERVE: u32 = 4466;
-const CAPABILITY_ROUNDING_MODE_RTE: u32 = 4467;
 const ADDRESSING_MODEL_LOGICAL: u32 = 0;
 const MEMORY_MODEL_GLSL450: u32 = 1;
 const EXECUTION_MODEL_GL_COMPUTE: u32 = 5;
 const EXECUTION_MODE_LOCAL_SIZE: u32 = 17;
-// SPV_KHR_float_controls execution modes (extension-range enumerants, gated by the
-// `FloatControls` capability); their Vulkan VUIDs name exactly the device properties the
-// tier's gate probes (ADR 0008).
-const EXECUTION_MODE_DENORM_PRESERVE: u32 = 4459;
-const EXECUTION_MODE_SIGNED_ZERO_INF_NAN_PRESERVE: u32 = 4461;
-const EXECUTION_MODE_ROUNDING_MODE_RTE: u32 = 4462;
 const STORAGE_CLASS_INPUT: u32 = 1;
 const STORAGE_CLASS_WORKGROUP: u32 = 4;
 const STORAGE_CLASS_PRIVATE: u32 = 6;
@@ -205,6 +189,7 @@ const MEMORY_SEMANTICS_RELAXED: u32 = 0;
 const MEMORY_SEMANTICS_ACQUIRE_RELEASE_WORKGROUP: u32 = 0x8 | 0x100;
 
 // GLSL.std.450 extended instructions.
+const GLSL_ROUND_EVEN: u32 = 2;
 const GLSL_FABS: u32 = 4;
 const GLSL_FLOOR: u32 = 8;
 const GLSL_CEIL: u32 = 9;
@@ -701,9 +686,7 @@ enum TypeKey {
     Void,
     Bool,
     U32,
-    U16,
     F32,
-    F16,
     Vector(Id, u32),
     Pointer(u32, Id),
     RuntimeArray(Id),
@@ -714,9 +697,7 @@ enum TypeKey {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum ConstKey {
     U32(u32),
-    U16(u32),
     F32(u32),
-    F16(u32),
     False,
 }
 
@@ -725,7 +706,6 @@ enum ConstKey {
 struct Builder {
     next_id: Id,
     capabilities: Vec<u32>,
-    extensions: Vec<u32>,
     imports: Vec<u32>,
     memory_model: Vec<u32>,
     entry_point: Vec<u32>,
@@ -737,11 +717,6 @@ struct Builder {
     constants: HashMap<ConstKey, Id>,
     glsl: Id,
     spec_next: u32,
-    /// Emit the binary16 float-controls execution modes: an f16 arithmetic or narrowing
-    /// instruction was emitted, so the module asks the driver for the denormal, signed-zero/
-    /// inf/NaN, and round-to-nearest-even preservation the tier's device gate requires (ADR
-    /// 0008). The modes' VUIDs name exactly the properties the gate probes.
-    float_controls_f16: bool,
     /// Where the entry block's `OpVariable Function` declarations are spliced in.
     local_variable_cursor: usize,
     interface: Vec<Id>,
@@ -772,7 +747,6 @@ impl Builder {
         let mut builder = Self {
             next_id: 1,
             capabilities: Vec::new(),
-            extensions: Vec::new(),
             imports: Vec::new(),
             memory_model: Vec::new(),
             entry_point: Vec::new(),
@@ -784,7 +758,6 @@ impl Builder {
             constants: HashMap::new(),
             glsl: 0,
             spec_next: 0,
-            float_controls_f16: false,
             local_variable_cursor: 0,
             interface: Vec::new(),
             main: 0,
@@ -829,31 +802,9 @@ impl Builder {
                 local_size[2],
             ],
         );
-        if self.float_controls_f16 {
-            instruction(
-                &mut self.extensions,
-                OP_EXTENSION,
-                &literal_string("SPV_KHR_float_controls"),
-            );
-            self.capability(CAPABILITY_DENORM_PRESERVE);
-            self.capability(CAPABILITY_SIGNED_ZERO_INF_NAN_PRESERVE);
-            self.capability(CAPABILITY_ROUNDING_MODE_RTE);
-            for mode in [
-                EXECUTION_MODE_DENORM_PRESERVE,
-                EXECUTION_MODE_SIGNED_ZERO_INF_NAN_PRESERVE,
-                EXECUTION_MODE_ROUNDING_MODE_RTE,
-            ] {
-                instruction(
-                    &mut self.execution_modes,
-                    OP_EXECUTION_MODE,
-                    &[self.main, mode, 16],
-                );
-            }
-        }
         let mut words = vec![SPIRV_MAGIC, SPIRV_VERSION_1_3, 0, self.next_id, 0];
         for section in [
             &self.capabilities,
-            &self.extensions,
             &self.imports,
             &self.memory_model,
             &self.entry_point,
@@ -869,31 +820,16 @@ impl Builder {
 
     // -- types and constants ------------------------------------------------------------------
 
-    /// Emit `OpCapability cap` unless it is already emitted. Capability instructions live in
-    /// their own leading section, so lazy emission from type declaration keeps the module legal.
-    fn capability(&mut self, capability: u32) {
-        instruction(&mut self.capabilities, OP_CAPABILITY, &[capability]);
-    }
-
     fn ty(&mut self, key: TypeKey) -> Id {
         if let Some(id) = self.types.get(&key) {
             return *id;
-        }
-        // 16-bit types gate their capabilities: only binary16 kernels declare them, so only
-        // those modules carry `Float16`/`Int16` (ADR 0008).
-        match &key {
-            TypeKey::F16 => self.capability(CAPABILITY_FLOAT16),
-            TypeKey::U16 => self.capability(CAPABILITY_INT16),
-            _ => {}
         }
         let id = self.id();
         match &key {
             TypeKey::Void => instruction(&mut self.declarations, OP_TYPE_VOID, &[id]),
             TypeKey::Bool => instruction(&mut self.declarations, OP_TYPE_BOOL, &[id]),
             TypeKey::U32 => instruction(&mut self.declarations, OP_TYPE_INT, &[id, 32, 0]),
-            TypeKey::U16 => instruction(&mut self.declarations, OP_TYPE_INT, &[id, 16, 0]),
             TypeKey::F32 => instruction(&mut self.declarations, OP_TYPE_FLOAT, &[id, 32]),
-            TypeKey::F16 => instruction(&mut self.declarations, OP_TYPE_FLOAT, &[id, 16]),
             TypeKey::Vector(element, count) => {
                 instruction(
                     &mut self.declarations,
@@ -942,20 +878,6 @@ impl Builder {
     fn f32_ty(&mut self) -> Id {
         self.ty(TypeKey::F32)
     }
-    fn u16_ty(&mut self) -> Id {
-        self.ty(TypeKey::U16)
-    }
-    fn f16_ty(&mut self) -> Id {
-        self.ty(TypeKey::F16)
-    }
-    /// The float type of a storage width (`Word` → binary32, `Half` → binary16).
-    fn float_ty(&mut self, storage: Storage) -> Id {
-        match storage {
-            Storage::Word => self.f32_ty(),
-            Storage::Half => self.f16_ty(),
-            Storage::Byte => unreachable!("byte storage has no float type"),
-        }
-    }
     fn uvec3(&mut self) -> Id {
         let u32_ty = self.u32_ty();
         self.ty(TypeKey::Vector(u32_ty, 3))
@@ -974,16 +896,8 @@ impl Builder {
                 let ty = self.u32_ty();
                 instruction(&mut self.declarations, OP_CONSTANT, &[ty, id, value]);
             }
-            ConstKey::U16(value) => {
-                let ty = self.u16_ty();
-                instruction(&mut self.declarations, OP_CONSTANT, &[ty, id, value]);
-            }
             ConstKey::F32(bits) => {
                 let ty = self.f32_ty();
-                instruction(&mut self.declarations, OP_CONSTANT, &[ty, id, bits]);
-            }
-            ConstKey::F16(bits) => {
-                let ty = self.f16_ty();
                 instruction(&mut self.declarations, OP_CONSTANT, &[ty, id, bits]);
             }
             ConstKey::False => {
@@ -998,26 +912,11 @@ impl Builder {
     fn c_u32(&mut self, value: u32) -> Id {
         self.constant(ConstKey::U32(value))
     }
-    fn c_u16(&mut self, value: u16) -> Id {
-        self.constant(ConstKey::U16(u32::from(value)))
-    }
     fn c_f32(&mut self, value: f32) -> Id {
         self.constant(ConstKey::F32(value.to_bits()))
     }
     fn c_false(&mut self) -> Id {
         self.constant(ConstKey::False)
-    }
-
-    /// A float constant of a storage width; binary16 constants are rounded host-side.
-    fn c_float(&mut self, storage: Storage, value: f32) -> Id {
-        match storage {
-            Storage::Word => self.c_f32(value),
-            Storage::Half => {
-                let bits = u32::from(f32_to_f16_bits(value));
-                self.constant(ConstKey::F16(bits))
-            }
-            Storage::Byte => unreachable!("byte storage has no float constants"),
-        }
     }
 
     /// Declare the next `u32` specialization constant (ids are assigned in declaration order).
@@ -1222,16 +1121,6 @@ impl Builder {
         id
     }
 
-    /// A `NoContraction`-decorated float result of the storage width (`Word` → binary32,
-    /// `Half` → binary16).
-    fn float_value_w(&mut self, storage: Storage, opcode: u16, operands: &[u32]) -> Id {
-        if storage == Storage::Half {
-            self.float_controls_f16 = true;
-        }
-        let ty = self.float_ty(storage);
-        self.float_typed(ty, opcode, operands)
-    }
-
     fn load(&mut self, ty: Id, pointer: Id) -> Id {
         self.value(OP_LOAD, ty, &[pointer])
     }
@@ -1290,16 +1179,12 @@ impl Builder {
         let ty = self.u32_ty();
         self.value(OP_BITWISE_OR, ty, &[a, b])
     }
-    fn band(&mut self, a: Id, b: Id) -> Id {
+    fn bxor(&mut self, a: Id, b: Id) -> Id {
         let ty = self.u32_ty();
-        self.value(OP_BITWISE_AND, ty, &[a, b])
-    }
-    /// Bitwise XOR at the operands' own integer width (u16 masks for the binary16 sign lanes).
-    fn bxor_w(&mut self, ty: Id, a: Id, b: Id) -> Id {
         self.value(OP_BITWISE_XOR, ty, &[a, b])
     }
-    /// Bitwise AND at the operands' own integer width.
-    fn band_w(&mut self, ty: Id, a: Id, b: Id) -> Id {
+    fn band(&mut self, a: Id, b: Id) -> Id {
+        let ty = self.u32_ty();
         self.value(OP_BITWISE_AND, ty, &[a, b])
     }
     fn bnot(&mut self, a: Id) -> Id {
@@ -1388,50 +1273,99 @@ impl Builder {
         self.fadd(product, c)
     }
 
-    // -- width-generic float lanes (binary16 kernels, ADR 0008) --------------------------------
+    // -- crate-owned binary16 conversions (ADR 0008) --------------------------------------------
 
-    fn fadd_w(&mut self, storage: Storage, a: Id, b: Id) -> Id {
-        self.float_value_w(storage, OP_F_ADD, &[a, b])
-    }
-    fn fsub_w(&mut self, storage: Storage, a: Id, b: Id) -> Id {
-        self.float_value_w(storage, OP_F_SUB, &[a, b])
-    }
-    fn fmul_w(&mut self, storage: Storage, a: Id, b: Id) -> Id {
-        self.float_value_w(storage, OP_F_MUL, &[a, b])
-    }
-    fn fdiv_w(&mut self, storage: Storage, a: Id, b: Id) -> Id {
-        self.float_value_w(storage, OP_F_DIV, &[a, b])
-    }
-    fn fneg_w(&mut self, storage: Storage, a: Id) -> Id {
-        let ty = self.float_ty(storage);
-        self.value(OP_F_NEGATE, ty, &[a])
-    }
-    fn ext_float(&mut self, storage: Storage, op: u32, args: &[Id]) -> Id {
-        if storage == Storage::Half {
-            self.float_controls_f16 = true;
-        }
-        let ty = self.float_ty(storage);
-        let glsl = self.glsl;
-        let mut operands = vec![glsl, op];
-        operands.extend_from_slice(args);
-        self.value(OP_EXT_INST, ty, &operands)
-    }
-    fn select_float(&mut self, storage: Storage, condition: Id, then: Id, otherwise: Id) -> Id {
-        let ty = self.float_ty(storage);
-        self.select(ty, condition, then, otherwise)
+    /// Widen packed binary16 bits (a `u32` in `0..=0xffff`) to binary32, exactly. This is the
+    /// kernel twin of the host [`f16_to_f32`]: integer expansion only, so every value —
+    /// subnormals included — is exact on every device, and there is no `OpFConvert` pattern a
+    /// driver can demote back to f16 (ADR 0008: ANV, RADV, and Apple all demote them).
+    fn widen_f16(&mut self, bits: Id) -> Id {
+        let sixteen = self.c_u32(16);
+        let ten = self.c_u32(10);
+        let thirteen = self.c_u32(13);
+        let twenty_three = self.c_u32(23);
+        let zero = self.c_u32(0);
+        let sign_mask = self.c_u32(0x8000);
+        let exponent_mask = self.c_u32(0x1f);
+        let mantissa_mask = self.c_u32(0x3ff);
+        let rebias = self.c_u32(112);
+        let inf_bits = self.c_u32(0x7f80_0000);
+        let thirty_one = self.c_u32(31);
+        let scale = self.c_f32(1.0 / 16_777_216.0);
+        let sign = self.band(bits, sign_mask);
+        let sign = self.shl(sign, sixteen);
+        let exponent = self.shr(bits, ten);
+        let exponent = self.band(exponent, exponent_mask);
+        let mantissa = self.band(bits, mantissa_mask);
+        // Normal: rebias the exponent (+112) and shift the mantissa up.
+        let biased = self.iadd(exponent, rebias);
+        let normal = self.shl(biased, twenty_three);
+        let shifted = self.shl(mantissa, thirteen);
+        let normal = self.bor(normal, shifted);
+        let normal = self.bor(normal, sign);
+        // Subnormal or zero: `mantissa · 2^-24`, exact for every 10-bit mantissa.
+        let scaled = self.u_to_f(mantissa);
+        let subnormal = self.fmul(scaled, scale);
+        let subnormal = self.bitcast_u32(subnormal);
+        let subnormal = self.bor(subnormal, sign);
+        // Infinity or NaN: exponent all ones, payload preserved.
+        let infnan = self.bor(sign, inf_bits);
+        let shifted = self.shl(mantissa, thirteen);
+        let infnan = self.bor(infnan, shifted);
+        let is_subnormal = self.ieq(exponent, zero);
+        let is_infnan = self.ieq(exponent, thirty_one);
+        let value = self.select_u32(is_subnormal, subnormal, normal);
+        let value = self.select_u32(is_infnan, infnan, value);
+        self.bitcast_f32(value)
     }
 
-    /// Widen a binary16 value to binary32 (`OpFConvert`, exact).
-    fn widen(&mut self, value: Id) -> Id {
-        let f32_ty = self.f32_ty();
-        self.value(OP_F_CONVERT, f32_ty, &[value])
-    }
-
-    /// Narrow a binary32 value to binary16 (`OpFConvert`, round-to-nearest-even).
-    fn narrow(&mut self, value: Id) -> Id {
-        self.float_controls_f16 = true;
-        let f16_ty = self.f16_ty();
-        self.value(OP_F_CONVERT, f16_ty, &[value])
+    /// Narrow a binary32 value to packed binary16 bits (a `u32` in `0..=0xffff`),
+    /// round-to-nearest-even, NaN canonicalized to the quiet `0x7e00` payload with its sign.
+    /// This is the kernel twin of the host [`f32_to_f16_bits`]: integer and binary32 operations
+    /// only, so subnormals are produced — never flushed — on every device (ADR 0008).
+    fn narrow_f16(&mut self, value: Id) -> Id {
+        let sixteen = self.c_u32(16);
+        let thirteen = self.c_u32(13);
+        let one = self.c_u32(1);
+        let sign_mask = self.c_u32(0x8000);
+        let magnitude_mask = self.c_u32(0x7fff_ffff);
+        let inf_bits = self.c_u32(0x7f80_0000);
+        let overflow_bits = self.c_u32(0x477f_f000);
+        let normal_floor = self.c_u32(0x3880_0000);
+        let rebias = self.c_u32(0x3800_0000);
+        let half_ulp = self.c_u32(0x0000_0fff);
+        let inf_out = self.c_u32(0x7c00);
+        let nan_out = self.c_u32(0x7e00);
+        let scale = self.c_f32(16_777_216.0);
+        let bits = self.bitcast_u32(value);
+        let sign = self.shr(bits, sixteen);
+        let sign = self.band(sign, sign_mask);
+        let magnitude = self.band(bits, magnitude_mask);
+        let is_nan = self.ult(inf_bits, magnitude);
+        // At or above 65520 — the midpoint between 65504 and the overflow binade — round to
+        // infinity (65504 itself is `0x477f_e000`, finite).
+        let overflow = self.uge(magnitude, overflow_bits);
+        // Normal binary16: rebias the exponent, then round the significand with the
+        // add-half-ulp-plus-guard trick; a mantissa carry increments the exponent on its own.
+        let is_normal = self.uge(magnitude, normal_floor);
+        let adjusted = self.isub(magnitude, rebias);
+        let guard = self.shr(adjusted, thirteen);
+        let guard = self.band(guard, one);
+        let rounding = self.iadd(half_ulp, guard);
+        let rounded = self.iadd(adjusted, rounding);
+        let normal_out = self.shr(rounded, thirteen);
+        // Subnormal binary16 or zero: scale into integer range (exact while the value is at or
+        // above 2^-25; anything smaller rounds to zero either way) and round to the nearest
+        // integer. The result is at most 1024 — the smallest normal encoding, correctly reached
+        // by the rounding carry.
+        let scaled = self.bitcast_f32(magnitude);
+        let scaled = self.fmul(scaled, scale);
+        let scaled = self.ext_f32(GLSL_ROUND_EVEN, &[scaled]);
+        let subnormal_out = self.f_to_u(scaled);
+        let body = self.select_u32(is_normal, normal_out, subnormal_out);
+        let body = self.select_u32(overflow, inf_out, body);
+        let body = self.select_u32(is_nan, nan_out, body);
+        self.bor(sign, body)
     }
     fn ext_f32(&mut self, op: u32, args: &[Id]) -> Id {
         let ty = self.f32_ty();
@@ -1698,29 +1632,15 @@ impl Builder {
         self.value(OP_ATOMIC_OR, u32_ty, &[pointer, scope, semantics, set]);
     }
 
-    /// Element `element` of a half-storage operand as a native binary16 value.
-    fn load_f16(&mut self, buffers: Id, operand: (Id, Id), element: Id) -> Id {
-        let bits = self.load_half_bits(buffers, operand, element);
-        let u16_ty = self.u16_ty();
-        let narrow = self.value(OP_U_CONVERT, u16_ty, &[bits]);
-        let f16_ty = self.f16_ty();
-        self.value(OP_BITCAST, f16_ty, &[narrow])
-    }
-
-    /// Store the native binary16 `value` to half-storage `element`.
-    fn store_f16(&mut self, buffers: Id, operand: (Id, Id), element: Id, value: Id) {
-        let u16_ty = self.u16_ty();
-        let bits16 = self.value(OP_BITCAST, u16_ty, &[value]);
-        let u32_ty = self.u32_ty();
-        let bits = self.value(OP_U_CONVERT, u32_ty, &[bits16]);
-        self.store_half_bits(buffers, operand, element, bits);
-    }
-
-    /// Load one float element at the operand's storage width.
+    /// Load one float element as binary32: word storage bitcasts, half storage is unpacked and
+    /// widened exactly by [`Self::widen_f16`].
     fn load_float(&mut self, storage: Storage, buffers: Id, operand: (Id, Id), element: Id) -> Id {
         match storage {
             Storage::Word => self.load_f32(buffers, operand, element),
-            Storage::Half => self.load_f16(buffers, operand, element),
+            Storage::Half => {
+                let bits = self.load_half_bits(buffers, operand, element);
+                self.widen_f16(bits)
+            }
             Storage::Byte => unreachable!("byte storage is not a float lane"),
         }
     }
@@ -1765,41 +1685,32 @@ impl Builder {
 
     // -- scalar lanes ---------------------------------------------------------------------------
 
-    /// TOSA `apply_max_s(a, b)`: `a >= b ? a : b` with the NaN mode applied first, at the
-    /// operands' storage width.
-    fn apply_max(&mut self, storage: Storage, a: Id, b: Id, nan_mode: NanMode) -> Id {
+    /// TOSA `apply_max_s(a, b)`: `a >= b ? a : b` with the NaN mode applied first.
+    fn apply_max(&mut self, a: Id, b: Id, nan_mode: NanMode) -> Id {
         let ordered = self.foge(a, b);
-        let picked = self.select_float(storage, ordered, a, b);
-        self.apply_nan_mode(storage, a, b, picked, nan_mode)
+        let picked = self.select_f32(ordered, a, b);
+        self.apply_nan_mode(a, b, picked, nan_mode)
     }
 
-    /// TOSA `apply_min_s(a, b)`: `a < b ? a : b` with the NaN mode applied first, at the
-    /// operands' storage width.
-    fn apply_min(&mut self, storage: Storage, a: Id, b: Id, nan_mode: NanMode) -> Id {
+    /// TOSA `apply_min_s(a, b)`: `a < b ? a : b` with the NaN mode applied first.
+    fn apply_min(&mut self, a: Id, b: Id, nan_mode: NanMode) -> Id {
         let ordered = self.folt(a, b);
-        let picked = self.select_float(storage, ordered, a, b);
-        self.apply_nan_mode(storage, a, b, picked, nan_mode)
+        let picked = self.select_f32(ordered, a, b);
+        self.apply_nan_mode(a, b, picked, nan_mode)
     }
 
-    fn apply_nan_mode(
-        &mut self,
-        storage: Storage,
-        a: Id,
-        b: Id,
-        picked: Id,
-        nan_mode: NanMode,
-    ) -> Id {
+    fn apply_nan_mode(&mut self, a: Id, b: Id, picked: Id, nan_mode: NanMode) -> Id {
         let a_nan = self.is_nan(a);
         let b_nan = self.is_nan(b);
         match nan_mode {
             NanMode::Propagate => {
-                let nan = self.c_float(storage, f32::NAN);
+                let nan = self.c_f32(f32::NAN);
                 let any_nan = self.lor(a_nan, b_nan);
-                self.select_float(storage, any_nan, nan, picked)
+                self.select_f32(any_nan, nan, picked)
             }
             NanMode::Ignore => {
-                let without_b = self.select_float(storage, b_nan, a, picked);
-                self.select_float(storage, a_nan, b, without_b)
+                let without_b = self.select_f32(b_nan, a, picked);
+                self.select_f32(a_nan, b, without_b)
             }
         }
     }
@@ -2198,89 +2109,30 @@ impl Builder {
         self.select_f32(negative, minus_one, plus_one)
     }
 
-    /// The scalar lane of `op` over already-loaded inputs (float ids of the kernel's storage
-    /// width for float inputs, `bool` ids for byte inputs), yielding an id of the output
-    /// storage's type per [`ElementwiseOp::output`].
-    ///
-    /// Binary16 evaluation policy (ADR 0008): `NEGATE` and `ABS` are integer sign operations on
-    /// the packed lane; every other float lane evaluates in binary32 — the correctly rounded
-    /// binary16 result for `ADD`/`SUB`/`MUL` (their exact results fit the binary32 significand),
-    /// within TOSA's tolerance for `RECIPROCAL`, exact for the comparison and selection lanes,
-    /// and the only evaluation TOSA's range reductions permit for the transcendentals — and
-    /// rounds once on store. TOSA 1.0 §1.10.3 explicitly permits fp16 operations to be
-    /// implemented in fp32, and the measured alternative does not work: every production f16 ALU
-    /// probed (ANV, RADV, Apple) flushes subnormal results non-compliantly or unreliably,
-    /// reported float-controls properties and execution modes notwithstanding.
+    /// The scalar lane of `op` over already-loaded inputs (`f32` ids for float inputs — binary16
+    /// tensors are widened on load by [`Self::widen_f16`] and narrowed on store by
+    /// [`Self::narrow_f16`], so every float lane is binary32 — and `bool` ids for byte inputs),
+    /// yielding an `f32` or `bool` id per [`ElementwiseOp::output`].
     fn elementwise_lane(
         &mut self,
-        storage: Storage,
         op: ElementwiseOp,
         inputs: &[Id],
         clamp: Option<(Id, Id)>,
     ) -> Id {
-        // Lanes with no float-lane evaluation: integer sign operations and the BOOL-only ops.
-        let direct = matches!(
-            op,
-            ElementwiseOp::Negate
-                | ElementwiseOp::Abs
-                | ElementwiseOp::LogicalAnd
-                | ElementwiseOp::LogicalOr
-                | ElementwiseOp::LogicalXor
-                | ElementwiseOp::LogicalNot
-                | ElementwiseOp::CopyBytes
-        );
-        if storage == Storage::Half && !direct {
-            // Widen the float lanes exactly, evaluate at binary32, narrow once. BOOL lanes
-            // (SELECT's condition) pass through; BOOL results (comparisons) need no narrowing.
-            let wide: Vec<Id> = inputs
-                .iter()
-                .zip(op.inputs())
-                .map(|(input, lane)| match lane {
-                    Storage::Word => self.widen(*input),
-                    _ => *input,
-                })
-                .collect();
-            let result = self.elementwise_lane(Storage::Word, op, &wide, clamp);
-            return match op.output() {
-                Storage::Word => self.narrow(result),
-                _ => result,
-            };
-        }
         let x = inputs[0];
         match op {
-            // IEEE negate and abs are sign-bit operations, not arithmetic: on binary16 they are
-            // integer masks, exact for every pattern — subnormals and NaN payloads included — on
-            // any driver, with no float-controls surface at all (ADR 0008: ANV's f16 ALU was
-            // measured flushing a subnormal `OpFNegate` result despite reporting denormal
-            // preservation).
-            ElementwiseOp::Negate if storage == Storage::Half => {
-                let u16_ty = self.u16_ty();
-                let bits = self.value(OP_BITCAST, u16_ty, &[x]);
-                let sign = self.c_u16(0x8000);
-                let flipped = self.bxor_w(u16_ty, bits, sign);
-                let f16_ty = self.f16_ty();
-                self.value(OP_BITCAST, f16_ty, &[flipped])
-            }
-            ElementwiseOp::Abs if storage == Storage::Half => {
-                let u16_ty = self.u16_ty();
-                let bits = self.value(OP_BITCAST, u16_ty, &[x]);
-                let magnitude = self.c_u16(0x7fff);
-                let masked = self.band_w(u16_ty, bits, magnitude);
-                let f16_ty = self.f16_ty();
-                self.value(OP_BITCAST, f16_ty, &[masked])
-            }
-            ElementwiseOp::Abs => self.ext_float(storage, GLSL_FABS, &[x]),
-            ElementwiseOp::Ceil => self.ext_float(storage, GLSL_CEIL, &[x]),
-            ElementwiseOp::Floor => self.ext_float(storage, GLSL_FLOOR, &[x]),
+            ElementwiseOp::Abs => self.fabs(x),
+            ElementwiseOp::Ceil => self.ext_f32(GLSL_CEIL, &[x]),
+            ElementwiseOp::Floor => self.ext_f32(GLSL_FLOOR, &[x]),
             ElementwiseOp::Cos => self.sincos(x, true),
             ElementwiseOp::Sin => self.sincos(x, false),
             ElementwiseOp::Erf => self.erf(x),
             ElementwiseOp::Exp => self.ext_f32(GLSL_EXP, &[x]),
             ElementwiseOp::Log => self.ext_f32(GLSL_LOG, &[x]),
-            ElementwiseOp::Negate => self.fneg_w(storage, x),
+            ElementwiseOp::Negate => self.fneg(x),
             ElementwiseOp::Reciprocal => {
-                let one = self.c_float(storage, 1.0);
-                self.fdiv_w(storage, one, x)
+                let one = self.c_f32(1.0);
+                self.fdiv(one, x)
             }
             ElementwiseOp::Rsqrt => self.ext_f32(GLSL_INVERSE_SQRT, &[x]),
             ElementwiseOp::Sigmoid => {
@@ -2292,20 +2144,20 @@ impl Builder {
             }
             ElementwiseOp::Tanh => self.tanh(x),
             ElementwiseOp::Clamp(nan_mode) => {
-                // Reached at binary32 only: binary16 clamps widen, apply, and narrow; the
-                // bounds arrive as binary32 bit patterns (widened host-side for FP16 graphs).
+                // The bounds arrive as binary32 bit patterns (binary16 bounds are widened
+                // host-side, exactly).
                 let (lo_bits, hi_bits) = clamp.expect("clamp bounds");
                 let lo = self.bitcast_f32(lo_bits);
                 let hi = self.bitcast_f32(hi_bits);
-                let floored = self.apply_max(storage, x, lo, nan_mode);
-                self.apply_min(storage, floored, hi, nan_mode)
+                let floored = self.apply_max(x, lo, nan_mode);
+                self.apply_min(floored, hi, nan_mode)
             }
-            ElementwiseOp::Add => self.fadd_w(storage, x, inputs[1]),
-            ElementwiseOp::Sub => self.fsub_w(storage, x, inputs[1]),
-            ElementwiseOp::Mul => self.fmul_w(storage, x, inputs[1]),
+            ElementwiseOp::Add => self.fadd(x, inputs[1]),
+            ElementwiseOp::Sub => self.fsub(x, inputs[1]),
+            ElementwiseOp::Mul => self.fmul(x, inputs[1]),
             ElementwiseOp::Pow => self.pow(x, inputs[1]),
-            ElementwiseOp::Maximum(nan_mode) => self.apply_max(storage, x, inputs[1], nan_mode),
-            ElementwiseOp::Minimum(nan_mode) => self.apply_min(storage, x, inputs[1], nan_mode),
+            ElementwiseOp::Maximum(nan_mode) => self.apply_max(x, inputs[1], nan_mode),
+            ElementwiseOp::Minimum(nan_mode) => self.apply_min(x, inputs[1], nan_mode),
             ElementwiseOp::Equal => self.foeq(x, inputs[1]),
             ElementwiseOp::Greater => self.fogt(x, inputs[1]),
             ElementwiseOp::GreaterEqual => self.foge(x, inputs[1]),
@@ -2313,7 +2165,7 @@ impl Builder {
             ElementwiseOp::LogicalOr => self.lor(x, inputs[1]),
             ElementwiseOp::LogicalXor => self.lxor(x, inputs[1]),
             ElementwiseOp::LogicalNot => self.lnot(x),
-            ElementwiseOp::Select => self.select_float(storage, x, inputs[1], inputs[2]),
+            ElementwiseOp::Select => self.select_f32(x, inputs[1], inputs[2]),
             ElementwiseOp::CopyBytes => x,
         }
     }
@@ -2374,19 +2226,48 @@ fn assemble_elementwise(
         Some((dims, strides)) => b.strided_indices(i, dims, strides),
         None => vec![i; inputs.len()],
     };
+    // IEEE negate and abs are sign-bit operations, not arithmetic: on binary16 they are integer
+    // masks on the packed lane, exact for every pattern — subnormals and NaN payloads included
+    // (ADR 0008). Every other binary16 lane widens exactly, evaluates at binary32, and narrows
+    // once, all in crate-owned integer/binary32 code no driver can demote.
+    let bits_lane =
+        float == Storage::Half && matches!(op, ElementwiseOp::Negate | ElementwiseOp::Abs);
     let mut values = Vec::with_capacity(inputs.len());
     for (k, operand) in inputs.iter().enumerate() {
         let value = match lane(input_storage[k]) {
             Storage::Word => b.load_f32(array, *operand, indices[k]),
-            Storage::Half => b.load_f16(array, *operand, indices[k]),
+            Storage::Half if bits_lane => b.load_half_bits(array, *operand, indices[k]),
+            Storage::Half => {
+                let bits = b.load_half_bits(array, *operand, indices[k]);
+                b.widen_f16(bits)
+            }
             Storage::Byte => b.load_bool(array, *operand, indices[k]),
         };
         values.push(value);
     }
-    let result = b.elementwise_lane(float, op, &values, clamp);
+    let result = if bits_lane {
+        let bits = values[0];
+        match op {
+            ElementwiseOp::Negate => {
+                let sign = b.c_u32(0x8000);
+                b.bxor(bits, sign)
+            }
+            ElementwiseOp::Abs => {
+                let magnitude = b.c_u32(0x7fff);
+                b.band(bits, magnitude)
+            }
+            _ => unreachable!("bits lane is negate/abs only"),
+        }
+    } else {
+        b.elementwise_lane(op, &values, clamp)
+    };
     match lane(op.output()) {
         Storage::Word => b.store_f32(array, output, i, result),
-        Storage::Half => b.store_f16(array, output, i, result),
+        Storage::Half if bits_lane => b.store_half_bits(array, output, i, result),
+        Storage::Half => {
+            let bits = b.narrow_f16(result);
+            b.store_half_bits(array, output, i, bits);
+        }
         Storage::Byte => b.store_bool(array, output, i, result),
     }
     b.end_loop(scope, counter, stride);
@@ -2443,11 +2324,7 @@ fn assemble_reduce(op: ReduceOp, float: Storage, workgroup: u32, buffers: u32) -
     let (inner_scope, a) = b.begin_loop(a_var, axis);
     let offset = b.imul(a, inner);
     let element = b.iadd(base, offset);
-    let loaded = b.load_float(float, array, input, element);
-    let value = match float {
-        Storage::Half => b.widen(loaded),
-        _ => loaded,
-    };
+    let value = b.load_float(float, array, input, element);
     let acc = b.load(f32_ty, acc_var);
     match op {
         ReduceOp::Sum => {
@@ -2459,11 +2336,11 @@ fn assemble_reduce(op: ReduceOp, float: Storage, workgroup: u32, buffers: u32) -
             b.store(acc_var, next);
         }
         ReduceOp::Max(nan_mode) => {
-            let next = b.apply_max(Storage::Word, acc, value, nan_mode);
+            let next = b.apply_max(acc, value, nan_mode);
             b.store(acc_var, next);
         }
         ReduceOp::Min(nan_mode) => {
-            let next = b.apply_min(Storage::Word, acc, value, nan_mode);
+            let next = b.apply_min(acc, value, nan_mode);
             b.store(acc_var, next);
         }
         ReduceOp::ArgMax(nan_mode) => {
@@ -2503,8 +2380,8 @@ fn assemble_reduce(op: ReduceOp, float: Storage, workgroup: u32, buffers: u32) -
             let acc = b.load(f32_ty, acc_var);
             match float {
                 Storage::Half => {
-                    let narrowed = b.narrow(acc);
-                    b.store_f16(array, output, o, narrowed);
+                    let bits = b.narrow_f16(acc);
+                    b.store_half_bits(array, output, o, bits);
                 }
                 _ => b.store_f32(array, output, o, acc),
             }
@@ -2591,10 +2468,6 @@ fn assemble_matmul(float: Storage, tile: u32, buffers: u32) -> Vec<u32> {
     let lhs_index = b.iadd(lhs_row, ka);
     let lhs_index = b.select_u32(lhs_ok, lhs_index, zero);
     let lhs_loaded = b.load_float(float, array, lhs, lhs_index);
-    let lhs_loaded = match float {
-        Storage::Half => b.widen(lhs_loaded),
-        _ => lhs_loaded,
-    };
     let lhs_value = b.select_f32(lhs_ok, lhs_loaded, zero_f);
     let kb = b.iadd(k0, ty);
     let kb_ok = b.ult(kb, k);
@@ -2603,10 +2476,6 @@ fn assemble_matmul(float: Storage, tile: u32, buffers: u32) -> Vec<u32> {
     let rhs_index = b.iadd(rhs_index, rhs_col);
     let rhs_index = b.select_u32(rhs_ok, rhs_index, zero);
     let rhs_loaded = b.load_float(float, array, rhs, rhs_index);
-    let rhs_loaded = match float {
-        Storage::Half => b.widen(rhs_loaded),
-        _ => rhs_loaded,
-    };
     let rhs_value = b.select_f32(rhs_ok, rhs_loaded, zero_f);
     let lhs_slot = b.access_chain(workgroup_ptr, lhs_tile, &[local_index]);
     b.store(lhs_slot, lhs_value);
@@ -2641,8 +2510,8 @@ fn assemble_matmul(float: Storage, tile: u32, buffers: u32) -> Vec<u32> {
         let acc = b.load(f32_ty, acc_var);
         match float {
             Storage::Half => {
-                let narrowed = b.narrow(acc);
-                b.store_f16(array, output, out_index, narrowed);
+                let bits = b.narrow_f16(acc);
+                b.store_half_bits(array, output, out_index, bits);
             }
             _ => b.store_f32(array, output, out_index, acc),
         }
@@ -2721,13 +2590,9 @@ fn assemble_max_pool(nan_mode: NanMode, float: Storage, workgroup: u32, buffers:
     let index = b.imul(index, channels);
     let index = b.iadd(index, c);
     let index = b.select_u32(ok, index, zero);
-    let loaded = b.load_float(float, array, input, index);
-    let value = match float {
-        Storage::Half => b.widen(loaded),
-        _ => loaded,
-    };
+    let value = b.load_float(float, array, input, index);
     let acc = b.load(f32_ty, acc_var);
-    let folded = b.apply_max(Storage::Word, acc, value, nan_mode);
+    let folded = b.apply_max(acc, value, nan_mode);
     let next = b.select_f32(ok, folded, acc);
     b.store(acc_var, next);
     b.end_loop(cols, kw_var, one);
@@ -2735,8 +2600,8 @@ fn assemble_max_pool(nan_mode: NanMode, float: Storage, workgroup: u32, buffers:
     let acc = b.load(f32_ty, acc_var);
     match float {
         Storage::Half => {
-            let narrowed = b.narrow(acc);
-            b.store_f16(array, output, o, narrowed);
+            let bits = b.narrow_f16(acc);
+            b.store_half_bits(array, output, o, bits);
         }
         _ => b.store_f32(array, output, o, acc),
     }
@@ -2953,22 +2818,11 @@ mod tests {
             cursor += word_count;
         }
         assert_eq!(cursor, words.len(), "{key:?}");
-        // One to three leading capabilities (`Shader`, plus `Float16`/`Int16` and the
-        // SPV_KHR_float_controls capabilities for binary16 kernels, ADR 0008), then the
-        // optional extension declaration, then the import.
-        let imports_at = opcodes
-            .iter()
-            .position(|op| *op == OP_EXT_INST_IMPORT)
-            .expect("{key:?}: an ExtInstImport");
-        assert!(
-            opcodes[..imports_at]
-                .iter()
-                .all(|op| *op == OP_CAPABILITY || *op == OP_EXTENSION),
-            "{key:?}"
-        );
-        assert_eq!(opcodes[imports_at + 1], OP_MEMORY_MODEL, "{key:?}");
-        assert_eq!(opcodes[imports_at + 2], OP_ENTRY_POINT, "{key:?}");
-        assert_eq!(opcodes[imports_at + 3], OP_EXECUTION_MODE, "{key:?}");
+        assert_eq!(opcodes[0], OP_CAPABILITY, "{key:?}");
+        assert_eq!(opcodes[1], OP_EXT_INST_IMPORT, "{key:?}");
+        assert_eq!(opcodes[2], OP_MEMORY_MODEL, "{key:?}");
+        assert_eq!(opcodes[3], OP_ENTRY_POINT, "{key:?}");
+        assert_eq!(opcodes[4], OP_EXECUTION_MODE, "{key:?}");
         assert_eq!(*opcodes.last().unwrap(), OP_FUNCTION_END, "{key:?}");
         assert_eq!(
             opcodes.iter().filter(|op| **op == OP_FUNCTION).count(),

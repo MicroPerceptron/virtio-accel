@@ -635,16 +635,16 @@ footer { padding-block: 44px 52px; }
           program loads, one submission per graph. Host, shared and device-local storage buffers
           bind directly for submission; explicit staging is confined to reads and writes of
           device-local memory. Fence status provides nonblocking completion without a worker
-          thread. The same 42 operators run over binary16 tensors wherever the device proves
-          binary16 conversions with the required float controls.</p>
+          thread. The same 42 operators run over binary16 tensors on every device — the
+          conversions are crate-owned, so the tier needs no device feature.</p>
         <p class="bk-device"><b>Vulkan 1.3 compute devices</b>FP32 operator tier validated on
           Intel Arc 140V (Mesa ANV), AMD Radeon 860M (RADV), Apple M4 (MoltenVK), and continuously
-          verified on Mesa lavapipe; the gated FP16 tier has executed its corpus on Intel Arc LNL
-          (Mesa ANV), AMD Radeon 860M (RADV), and Apple M4</p>
+          verified on Mesa lavapipe; the FP16 tier's corpus passes on Intel Arc LNL (Mesa ANV),
+          AMD Radeon 860M (RADV), Apple M4, and the lavapipe CI lane</p>
         <p class="bk-label">Program dtypes</p>
         <ul class="bk-dtypes">
           <li class="dt on">FP32<span class="sr-only"> supported</span></li>
-          <li class="dt on">FP16<span class="sr-only"> supported, per-device float-controls gate</span></li>
+          <li class="dt on">FP16<span class="sr-only"> supported</span></li>
           <li class="dt">FP8<span class="sr-only"> not supported</span></li>
           <li class="dt">INT8<span class="sr-only"> target declared but not advertised</span></li>
           <li class="dt">INT4<span class="sr-only"> not supported</span></li>

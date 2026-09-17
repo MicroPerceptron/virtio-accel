@@ -227,20 +227,16 @@ direct storage-buffer binding; staging occurs only during explicit reads and wri
 device-local memory.
 
 **Current execution boundary.** The advertised tier is the static 42-operator FP32 tier with
-`BOOL`/`INT32` auxiliaries, plus — per device — the FP16 tier: same operators over binary16
-tensors, advertised only where `shaderFloat16`/`shaderInt16` and the float-controls properties
-prove binary16 round-to-nearest-even conversions with denormal, signed-zero, infinity, and NaN
-preservation (ADR 0008). The provisional integer target is declared but not advertised. The
-native path and full backend conformance suite are validated
+`BOOL`/`INT32` auxiliaries, plus the FP16 tier: the same operators over binary16 tensors,
+advertised on every device the backend opens — the kernels' binary16 conversions are crate-owned
+integer and binary32 code, so the tier needs no device feature (ADR 0008). The provisional
+integer target is declared but not advertised. The native path and full backend conformance
+suite are validated
 on Intel Arc 140V through Mesa ANV, on llvmpipe/lavapipe, and on Apple M4 via MoltenVK; CI pins
 lavapipe so the native path
-cannot silently turn into the portable placeholder. Neither lavapipe nor MoltenVK reports
-binary16 denormal preservation, so neither advertises the FP16 tier. Intel Arc LNL (Mesa ANV)
-and AMD Radeon 860M (RADV) advertise it and pass the FP16 corpus; those runs measured every
-production f16 ALU flushing subnormal results non-compliantly or unreliably, so the tier
-evaluates in binary32 and rounds once — the subnormal-arithmetic probe's re-runs on ANV and
-RADV against the final kernels are the owed evidence. Apple M4 executed the full FP16 corpus
-with the gate's denormal clause experimentally relaxed (a measurement, not shipped).
+cannot silently turn into the portable placeholder. The FP16 corpus passes on Apple M4 via
+MoltenVK and on Intel Arc LNL (Mesa ANV) and AMD Radeon 860M (RADV); the lavapipe CI lane
+exercises the tier on every change.
 
 ## What each backend reports
 

@@ -11,11 +11,11 @@
 //!
 //! The FP32 tier (ADR 0004, ADR 0007) admits static single-block graphs over the 42 operators the
 //! Core ML and OpenVINO backends share, with `BOOL` and `INT32` auxiliaries where TOSA defines
-//! them; the FP16 tier (ADR 0008) admits the same graphs over binary16 tensors on devices with
-//! native binary16 arithmetic and the required float controls. `CONST` tensors and intermediates
-//! live in a per-program arena; `RESHAPE` and `IDENTITY` of arena tensors are views, not copies.
-//! The provisional integer target stays declared but admits nothing until its per-device gating
-//! is ratified.
+//! them; the FP16 tier (ADR 0008) admits the same graphs over binary16 tensors on every device —
+//! its conversions are crate-owned integer and binary32 code, so it needs no device feature.
+//! `CONST` tensors and intermediates live in a per-program arena; `RESHAPE` and `IDENTITY` of
+//! arena tensors are views, not copies. The provisional integer target stays declared but admits
+//! nothing until its per-device gating is ratified.
 
 // Builds forced to the placeholder (`VIRTIO_ACCEL_VULKAN=0`, or an OS outside the loader host
 // set) still type-check and unit-test this admission path; only the native module calls it.
@@ -71,8 +71,7 @@ const FLOAT_DTYPES: &[DTypeCapability] = &[
 
 /// The FP16 tier's dtypes: the FP32 tier plus binary16 tensors in every role. FP16 shares the
 /// floating-point target identity with FP32 (the tier is dtype-narrowed, exactly the Hexagon
-/// pattern); which of the two descriptors a backend instance advertises is a per-device fact
-/// (ADR 0008), never a guest-visible knob.
+/// pattern), and it is the descriptor every native instance advertises (ADR 0008).
 const FLOAT16_DTYPES: &[DTypeCapability] = &[
     DTypeCapability::new(DType::FP32, ValueRoles::ALL),
     DTypeCapability::new(DType::FP16, ValueRoles::ALL),
@@ -147,12 +146,10 @@ pub const VULKAN_TOSA_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
 };
 
 /// The FP16 tier's admitted boundary (ADR 0008): the same 42 operators and graph envelope with
-/// binary16 tensors in every role. Advertised per device — only where `shaderFloat16` and
-/// `shaderInt16` are present and the Vulkan 1.2 float-controls properties prove binary16
-/// round-to-nearest-even conversions with denormal, signed-zero, infinity, and NaN
-/// preservation; everywhere else the FP32 descriptor stands alone and FP16 graphs are rejected,
-/// never silently widened. The kernels store packed binary16 and evaluate in binary32, rounding
-/// once — the implementation choice TOSA 1.0 §1.10.3 names explicitly.
+/// binary16 tensors in every role. The tier needs no device feature — the kernels' binary16
+/// conversions are crate-owned integer and binary32 code, the implementation choice TOSA 1.0
+/// §1.10.3 names explicitly — so it is advertised on every device the backend opens, with
+/// numerics identical to the FP32 tier's everywhere.
 pub const VULKAN_TOSA_FP16_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
     target: VULKAN_TOSA_TARGET,
     dtypes: FLOAT16_DTYPES,
@@ -306,20 +303,14 @@ impl ProgramPlan {
     }
 }
 
-/// Admit `bytes` for `target` and produce its plan, or explain the rejection. `fp16` is the
-/// instance's advertised-tier fact (ADR 0008): with it, FP16 tensors are admitted; without it
-/// they are rejected as [`LoweringError::UnsupportedType`], never silently widened.
-pub(crate) fn lower_tosa(
-    bytes: &[u8],
-    target: Target,
-    fp16: bool,
-) -> Result<ProgramPlan, LoweringError> {
+/// Admit `bytes` for `target` and produce its plan, or explain the rejection.
+pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<ProgramPlan, LoweringError> {
     if target != VULKAN_TOSA_TARGET {
         return Err(LoweringError::UnsupportedTarget);
     }
     let model = parse(bytes).map_err(LoweringError::Parse)?;
     let analysis = model.analyze_for(target).map_err(LoweringError::Analysis)?;
-    Lowering::new(&analysis, fp16)?.run()
+    Lowering::new(&analysis)?.run()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -431,9 +422,6 @@ struct Region {
 
 struct Lowering<'a, 'b> {
     analysis: &'b TosaAnalysis<'a>,
-    /// Whether this instance advertises the FP16 tier (ADR 0008); without it FP16 tensors are
-    /// rejected at the dtype gate.
-    fp16: bool,
     inputs: &'b [ValueId],
     outputs: &'b [ValueId],
     order: &'b [OperatorId],
@@ -453,7 +441,7 @@ struct Lowering<'a, 'b> {
 }
 
 impl<'a, 'b> Lowering<'a, 'b> {
-    fn new(analysis: &'b TosaAnalysis<'a>, fp16: bool) -> Result<Self, LoweringError> {
+    fn new(analysis: &'b TosaAnalysis<'a>) -> Result<Self, LoweringError> {
         if analysis.regions().len() != 1 || analysis.blocks().len() != 1 {
             return Err(LoweringError::UnsupportedGraph);
         }
@@ -489,7 +477,6 @@ impl<'a, 'b> Lowering<'a, 'b> {
         }
         Ok(Self {
             analysis,
-            fp16,
             inputs,
             outputs,
             order,
@@ -602,9 +589,10 @@ impl<'a, 'b> Lowering<'a, 'b> {
             return Err(LoweringError::UnsupportedGraph);
         };
         let dtype = tensor.dtype();
-        if !matches!(dtype, DType::FP32 | DType::BOOL | DType::INT32)
-            && !(dtype == DType::FP16 && self.fp16)
-        {
+        if !matches!(
+            dtype,
+            DType::FP32 | DType::FP16 | DType::BOOL | DType::INT32
+        ) {
             return Err(LoweringError::UnsupportedType(dtype));
         }
         let rank = tensor.rank().ok_or(LoweringError::UnsupportedGraph)?;
@@ -1575,7 +1563,7 @@ mod tests {
 
     #[test]
     fn lowers_the_local_fp32_identity_artifact() {
-        let plan = lower_tosa(IDENTITY_FP32_LOCAL, VULKAN_TOSA_TARGET, false).unwrap();
+        let plan = lower_tosa(IDENTITY_FP32_LOCAL, VULKAN_TOSA_TARGET).unwrap();
         assert_eq!(plan.slots.len(), 2);
         assert_eq!(plan.slot(0).unwrap().role, SlotRole::Input);
         assert_eq!(plan.slot(1).unwrap().role, SlotRole::Output);
@@ -1601,7 +1589,7 @@ mod tests {
 
     #[test]
     fn lowers_the_shared_fp32_edge_identity_artifact() {
-        let plan = lower_tosa(IDENTITY_EDGES_FP32.artifact, VULKAN_TOSA_TARGET, false).unwrap();
+        let plan = lower_tosa(IDENTITY_EDGES_FP32.artifact, VULKAN_TOSA_TARGET).unwrap();
         let expected = IDENTITY_EDGES_FP32.inputs[0].values.len();
         assert_eq!(plan.dispatches[0].work, Work::Linear(expected as u32));
         assert_eq!(plan.slot(1).unwrap().byte_len as usize, expected * 4);
@@ -1610,26 +1598,20 @@ mod tests {
     #[test]
     fn rejects_other_targets_before_parsing() {
         assert_eq!(
-            lower_tosa(IDENTITY_FP32_LOCAL, VULKAN_TOSA_INTEGER_TARGET, false),
+            lower_tosa(IDENTITY_FP32_LOCAL, VULKAN_TOSA_INTEGER_TARGET),
             Err(LoweringError::UnsupportedTarget)
         );
         assert_eq!(
-            lower_tosa(IDENTITY_INT8.artifact, VULKAN_TOSA_INTEGER_TARGET, false),
+            lower_tosa(IDENTITY_INT8.artifact, VULKAN_TOSA_INTEGER_TARGET),
             Err(LoweringError::UnsupportedTarget)
         );
     }
 
     #[test]
     fn rejects_mistyped_identity_graphs_loudly() {
-        // FP16 identity on an instance that does not advertise the FP16 tier (ADR 0008):
-        // rejected, never silently widened to FP32.
-        assert!(matches!(
-            lower_tosa(IDENTITY_EDGES_FP16.artifact, VULKAN_TOSA_TARGET, false),
-            Err(LoweringError::UnsupportedType(DType::FP16) | LoweringError::Analysis(_))
-        ));
         // INT8 identity under the floating-point target: never relabeled.
         assert!(matches!(
-            lower_tosa(IDENTITY_INT8.artifact, VULKAN_TOSA_TARGET, false),
+            lower_tosa(IDENTITY_INT8.artifact, VULKAN_TOSA_TARGET),
             Err(LoweringError::UnsupportedType(DType::INT8) | LoweringError::Analysis(_))
         ));
     }
@@ -1652,8 +1634,8 @@ mod tests {
     }
 
     #[test]
-    fn lowers_the_shared_fp16_artifacts_when_the_tier_is_advertised() {
-        let plan = lower_tosa(IDENTITY_EDGES_FP16.artifact, VULKAN_TOSA_TARGET, true).unwrap();
+    fn lowers_the_shared_fp16_artifacts() {
+        let plan = lower_tosa(IDENTITY_EDGES_FP16.artifact, VULKAN_TOSA_TARGET).unwrap();
         let expected = IDENTITY_EDGES_FP16.inputs[0].bits.len() as u32;
         assert_eq!(plan.slot(0).unwrap().byte_len, u64::from(expected) * 2);
         assert_eq!(plan.slot(0).unwrap().storage, Storage::Half);
@@ -1667,7 +1649,7 @@ mod tests {
         );
         assert_eq!(plan.dispatches[0].work, Work::Linear(expected));
 
-        let plan = lower_tosa(MATMUL_FP16.artifact, VULKAN_TOSA_TARGET, true).unwrap();
+        let plan = lower_tosa(MATMUL_FP16.artifact, VULKAN_TOSA_TARGET).unwrap();
         assert_eq!(
             plan.dispatches[0].kernel,
             KernelSpec::Matmul {
@@ -1678,7 +1660,7 @@ mod tests {
         assert_eq!(plan.slot(2).unwrap().byte_len, 4 * 2);
         assert_eq!(plan.arena_bytes, 0);
 
-        let plan = lower_tosa(MAX_POOL2D_FP16.artifact, VULKAN_TOSA_TARGET, true).unwrap();
+        let plan = lower_tosa(MAX_POOL2D_FP16.artifact, VULKAN_TOSA_TARGET).unwrap();
         assert_eq!(
             plan.dispatches[0].kernel,
             KernelSpec::MaxPool {
@@ -1697,7 +1679,7 @@ mod tests {
             .iter()
             .find(|case| case.name == "clamp-fp16")
             .expect("the shared clamp-fp16 case");
-        let plan = lower_tosa(clamp.artifact, VULKAN_TOSA_TARGET, true).unwrap();
+        let plan = lower_tosa(clamp.artifact, VULKAN_TOSA_TARGET).unwrap();
         let dispatch = &plan.dispatches[0];
         assert_eq!(
             dispatch.kernel,
@@ -1717,7 +1699,7 @@ mod tests {
             .iter()
             .find(|case| case.name == "negate-fp16")
             .expect("the shared negate-fp16 case");
-        let plan = lower_tosa(negate.artifact, VULKAN_TOSA_TARGET, true).unwrap();
+        let plan = lower_tosa(negate.artifact, VULKAN_TOSA_TARGET).unwrap();
         assert_eq!(
             plan.dispatches[0].kernel,
             KernelSpec::Elementwise {
@@ -1731,7 +1713,7 @@ mod tests {
 
     #[test]
     fn lowers_the_shared_fp32_matmul_artifact() {
-        let plan = lower_tosa(MATMUL_FP32.artifact, VULKAN_TOSA_TARGET, false).unwrap();
+        let plan = lower_tosa(MATMUL_FP32.artifact, VULKAN_TOSA_TARGET).unwrap();
         assert_eq!(plan.slots.len(), 3);
         assert_eq!(plan.slot(0).unwrap().byte_len, 6 * 4);
         assert_eq!(plan.slot(1).unwrap().byte_len, 6 * 4);
@@ -1761,7 +1743,7 @@ mod tests {
 
     #[test]
     fn lowers_the_shared_fp32_max_pool_artifact() {
-        let plan = lower_tosa(MAX_POOL2D_FP32.artifact, VULKAN_TOSA_TARGET, false).unwrap();
+        let plan = lower_tosa(MAX_POOL2D_FP32.artifact, VULKAN_TOSA_TARGET).unwrap();
         let dispatch = &plan.dispatches[0];
         assert_eq!(
             dispatch.kernel,
@@ -1781,7 +1763,7 @@ mod tests {
     #[test]
     fn rejects_garbage_as_a_parse_error() {
         assert!(matches!(
-            lower_tosa(b"not a flatbuffer", VULKAN_TOSA_TARGET, false),
+            lower_tosa(b"not a flatbuffer", VULKAN_TOSA_TARGET),
             Err(LoweringError::Parse(_))
         ));
     }
@@ -1792,7 +1774,7 @@ mod tests {
         let bytes = IDENTITY_FP32_LOCAL;
         let model = parse(bytes).unwrap();
         let analysis = model.analyze_for(VULKAN_TOSA_TARGET).unwrap();
-        let mut lowering = Lowering::new(&analysis, false).unwrap();
+        let mut lowering = Lowering::new(&analysis).unwrap();
         lowering.position = 0;
         let a = lowering.allocate_region(100, 1).unwrap();
         let b = lowering.allocate_region(100, 5).unwrap();
@@ -1814,7 +1796,7 @@ mod tests {
     fn reused_arena_bytes_force_a_barrier_before_the_new_writer() {
         let model = parse(IDENTITY_FP32_LOCAL).unwrap();
         let analysis = model.analyze_for(VULKAN_TOSA_TARGET).unwrap();
-        let mut lowering = Lowering::new(&analysis, false).unwrap();
+        let mut lowering = Lowering::new(&analysis).unwrap();
         let values: Vec<ValueId> = analysis.values().iter().map(|value| value.id()).collect();
         let (a_value, b_value) = (values[0], values[1]);
         let kernel = KernelSpec::Move {
