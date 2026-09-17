@@ -25,7 +25,9 @@ use virtio_accel_core::{
     BufferUsage, ByteSink, ByteSource, Capabilities, ContextDesc, EventState, MemoryDomain,
     QueueDesc, ReleaseFailure, SubmitFailure, Timeout,
 };
-use virtio_accel_tosa::{DType, Target, TosaCapabilityProvider, ValueRoles, parse};
+use virtio_accel_tosa::{
+    DType, NanPropagationMode, Target, TosaCapabilityProvider, ValueRoles, parse,
+};
 use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
 use virtio_accel_vulkan::{
     InitError, REQUIRED_RESIDENT_BYTES, VULKAN_TOSA_INTEGER_TARGET, VULKAN_TOSA_TARGET,
@@ -1970,10 +1972,9 @@ fn executes_every_fp16_raw_oracle_case_in_every_advertised_domain() {
     }
 }
 
-/// Every one of the 65536 binary16 bit patterns through NEGATE: the sign bit flips, and the
-/// rest of the pattern — subnormals and signed zeros included — passes through the native
-/// unpack and atomic repack untouched. NaN outcomes follow the shared corpus rule: any NaN
-/// payload (including a canonical one) satisfies a NaN expectation.
+/// Every one of the 65536 binary16 bit patterns through NEGATE: the sign bit flips, the rest of
+/// the pattern — NaN payloads, subnormals, signed zeros — passes through untouched. The lane is
+/// an integer sign operation (ADR 0008), so this is exact on every driver.
 #[test]
 fn fp16_negate_round_trips_every_binary16_bit_pattern() {
     const ELEMENTS: i32 = 65536;
@@ -2033,9 +2034,9 @@ fn fp16_negate_round_trips_every_binary16_bit_pattern() {
                 .zip(&actual)
                 .enumerate()
             {
-                assert!(
-                    fp16_within_ulps(expected, *actual, 0),
-                    "{device}: {domain:?}: pattern {index:#06x}: expected {expected:#06x}, got {actual:#06x}"
+                assert_eq!(
+                    expected, *actual,
+                    "{device}: {domain:?}: pattern {index:#06x}"
                 );
             }
         }
@@ -2052,6 +2053,188 @@ fn fp16_within_ulps(expected: u16, actual: u16, max_ulps: u16) -> bool {
         return expected == actual;
     }
     expected.abs_diff(actual) <= max_ulps
+}
+
+/// Binary16 subnormal arithmetic: the tier advertises denormal-preserving binary16 arithmetic
+/// and the kernels ask for it explicitly (the `DenormPreserve`, `SignedZeroInfNanPreserve`, and
+/// `RoundingModeRTE` execution modes, ADR 0008), so these lanes must produce the exact IEEE
+/// results, subnormal operands included. This is the probe the device gate's reported
+/// properties are held to on every stack.
+#[test]
+fn fp16_subnormal_arithmetic_is_exact_where_the_tier_is_advertised() {
+    struct Probe {
+        name: &'static str,
+        kind: OperatorKind,
+        /// Optional second operand as an in-graph `CONST` (binary16 bits).
+        constant: Option<u16>,
+        inputs: &'static [u16],
+        /// Expected binary16 patterns, or 0/1 bytes for a BOOL output.
+        expected: &'static [u16],
+        output_bool: bool,
+    }
+    const SUB_MIN: u16 = 0x0001; // 2^-24, the smallest subnormal
+    let probes = &[
+        Probe {
+            name: "add-subnormal",
+            kind: OperatorKind::Add,
+            constant: Some(SUB_MIN),
+            inputs: &[0x0001, 0x8001, 0x0000, 0x8000],
+            expected: &[0x0002, 0x8002, 0x0001, 0x8001],
+            output_bool: false,
+        },
+        Probe {
+            name: "sub-subnormal",
+            kind: OperatorKind::Sub,
+            constant: Some(SUB_MIN),
+            inputs: &[0x0002, 0x8002, 0x0001],
+            expected: &[0x0001, 0x8001, 0x0000],
+            output_bool: false,
+        },
+        Probe {
+            name: "mul-by-one",
+            kind: OperatorKind::Mul,
+            constant: Some(0x3c00),
+            inputs: &[0x0001, 0x8001, 0x03ff],
+            expected: &[0x0001, 0x8001, 0x03ff],
+            output_bool: false,
+        },
+        Probe {
+            name: "mul-producing-subnormal",
+            kind: OperatorKind::Mul,
+            constant: Some(0x3800),
+            inputs: &[0x0002, 0x8002],
+            expected: &[0x0001, 0x8001],
+            output_bool: false,
+        },
+        Probe {
+            name: "greater-than-zero",
+            kind: OperatorKind::Greater,
+            constant: Some(0x0000),
+            inputs: &[0x0001, 0x8001, 0x0000],
+            expected: &[1, 0, 0],
+            output_bool: true,
+        },
+        Probe {
+            name: "maximum-with-zero",
+            kind: OperatorKind::Maximum {
+                nan_mode: NanPropagationMode::PROPAGATE,
+            },
+            constant: Some(0x0000),
+            inputs: &[0x0001, 0x8001],
+            expected: &[0x0001, 0x0000],
+            output_bool: false,
+        },
+        Probe {
+            name: "minimum-with-zero",
+            kind: OperatorKind::Minimum {
+                nan_mode: NanPropagationMode::PROPAGATE,
+            },
+            constant: Some(0x0000),
+            inputs: &[0x0001, 0x8001],
+            expected: &[0x0000, 0x8001],
+            output_bool: false,
+        },
+        // CEIL/FLOOR have no `OperatorKind` in the shared builder; their native binary16 GLSL
+        // lanes are covered by the corpus fixtures and the narrowing sweep instead.
+        Probe {
+            name: "reciprocal-of-subnormal",
+            kind: OperatorKind::Reciprocal,
+            constant: None,
+            inputs: &[0x0400],
+            expected: &[0x7400],
+            output_bool: false,
+        },
+        Probe {
+            name: "abs-subnormal",
+            kind: OperatorKind::Abs,
+            constant: None,
+            inputs: &[0x8001, 0x0001],
+            expected: &[0x0001, 0x0001],
+            output_bool: false,
+        },
+    ];
+    for probe in probes {
+        let elements = probe.inputs.len() as i32;
+        let mut graph = OwnedGraph::new("main");
+        graph.push_tensor(OwnedTensor::new("x", vec![elements], DType::FP16));
+        let mut operands = vec!["x".into()];
+        if let Some(constant) = probe.constant {
+            graph
+                .push_tensor(OwnedTensor::constant(
+                    "c",
+                    vec![1],
+                    DType::FP16,
+                    fp16_bytes(&[constant]),
+                ))
+                .push_operator(OwnedOperator::new(
+                    OperatorKind::Const,
+                    vec![],
+                    vec!["c".into()],
+                ));
+            operands.push("c".into());
+        }
+        if probe.kind == OperatorKind::Mul {
+            // TOSA MUL's third operand is the INT8 shift; the tier admits zero shift only.
+            graph
+                .push_tensor(OwnedTensor::constant(
+                    "shift",
+                    vec![1],
+                    DType::INT8,
+                    vec![0],
+                ))
+                .push_operator(OwnedOperator::new(
+                    OperatorKind::Const,
+                    vec![],
+                    vec!["shift".into()],
+                ));
+            operands.push("shift".into());
+        }
+        graph
+            .push_tensor(OwnedTensor::new(
+                "y",
+                vec![elements],
+                if probe.output_bool {
+                    DType::BOOL
+                } else {
+                    DType::FP16
+                },
+            ))
+            .push_operator(OwnedOperator::new(probe.kind, operands, vec!["y".into()]))
+            .push_input("x")
+            .push_output("y");
+        let artifact = graph.build(VULKAN_TOSA_TARGET).unwrap();
+        let input = fp16_bytes(probe.inputs);
+        let output_len = if probe.output_bool {
+            probe.inputs.len()
+        } else {
+            probe.inputs.len() * 2
+        };
+        for device in devices() {
+            let backend = open(&device);
+            if !advertises_fp16(&backend) {
+                eprintln!("{device}: the FP16 tier is not advertised here (ADR 0008); skipped");
+                continue;
+            }
+            let actual = run_graph(
+                &backend,
+                &artifact,
+                std::slice::from_ref(&input),
+                output_len,
+                MemoryDomain::Host,
+            );
+            if probe.output_bool {
+                let expected: Vec<u8> = probe.expected.iter().map(|bit| *bit as u8).collect();
+                assert_eq!(actual, expected, "{device}: {}", probe.name);
+            } else {
+                assert_eq!(
+                    fp16s_le(&actual),
+                    probe.expected,
+                    "{device}: {}",
+                    probe.name
+                );
+            }
+        }
+    }
 }
 
 /// The higher-precision lanes against binary64 references: `SIN`, `COS`, `TANH`, `ERF`, and the

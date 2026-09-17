@@ -397,8 +397,9 @@ operator corpus on every device it enumerates; the FP32 operator tier is verifie
 lavapipe CI lane, on Intel ANV (Arc 140V), and on Apple M4 via MoltenVK. The FP16 tier (ADR
 0008) — the same operators over native binary16 kernels, advertised only where the device's
 features and float controls prove binary16 round-to-nearest-even arithmetic with denormal,
-signed-zero, infinity, and NaN preservation — has executed its full corpus on Apple M4 with the
-gate's denormal clause experimentally relaxed; ANV/RADV runs against the shipped gate are owed.
+signed-zero, infinity, and NaN preservation — has executed its corpus on Intel Arc LNL (Mesa ANV)
+against the shipped gate and on Apple M4 with the gate's denormal clause experimentally relaxed;
+the subnormal-arithmetic probe's ANV re-run and any RADV run are owed.
 
 The Qualcomm adapter uses the same seam. Its safe planner admits 41 of the 42 floating-point
 operators shared by Core ML and OpenVINO, including owned constants/data movement, FP16 unary and

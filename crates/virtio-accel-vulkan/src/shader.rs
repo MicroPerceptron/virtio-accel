@@ -81,6 +81,7 @@ pub const MAX_RANK: usize = 6;
 pub const MAX_ELEMENTWISE_INPUTS: usize = 3;
 
 // SPIR-V opcodes (Unified specification, section 3.52).
+const OP_EXTENSION: u16 = 10;
 const OP_EXT_INST_IMPORT: u16 = 11;
 const OP_EXT_INST: u16 = 12;
 const OP_MEMORY_MODEL: u16 = 14;
@@ -141,6 +142,7 @@ const OP_F_ORD_GREATER_THAN_EQUAL: u16 = 190;
 const OP_SHIFT_RIGHT_LOGICAL: u16 = 194;
 const OP_SHIFT_LEFT_LOGICAL: u16 = 196;
 const OP_BITWISE_OR: u16 = 197;
+const OP_BITWISE_XOR: u16 = 198;
 const OP_BITWISE_AND: u16 = 199;
 const OP_NOT: u16 = 200;
 const OP_CONTROL_BARRIER: u16 = 224;
@@ -157,10 +159,20 @@ const OP_RETURN: u16 = 253;
 const CAPABILITY_SHADER: u32 = 1;
 const CAPABILITY_FLOAT16: u32 = 9;
 const CAPABILITY_INT16: u32 = 22;
+// SPV_KHR_float_controls capabilities, one per execution mode used below.
+const CAPABILITY_DENORM_PRESERVE: u32 = 4464;
+const CAPABILITY_SIGNED_ZERO_INF_NAN_PRESERVE: u32 = 4466;
+const CAPABILITY_ROUNDING_MODE_RTE: u32 = 4467;
 const ADDRESSING_MODEL_LOGICAL: u32 = 0;
 const MEMORY_MODEL_GLSL450: u32 = 1;
 const EXECUTION_MODEL_GL_COMPUTE: u32 = 5;
 const EXECUTION_MODE_LOCAL_SIZE: u32 = 17;
+// SPV_KHR_float_controls execution modes (extension-range enumerants, gated by the
+// `FloatControls` capability); their Vulkan VUIDs name exactly the device properties the
+// tier's gate probes (ADR 0008).
+const EXECUTION_MODE_DENORM_PRESERVE: u32 = 4459;
+const EXECUTION_MODE_SIGNED_ZERO_INF_NAN_PRESERVE: u32 = 4461;
+const EXECUTION_MODE_ROUNDING_MODE_RTE: u32 = 4462;
 const STORAGE_CLASS_INPUT: u32 = 1;
 const STORAGE_CLASS_WORKGROUP: u32 = 4;
 const STORAGE_CLASS_PRIVATE: u32 = 6;
@@ -695,6 +707,7 @@ enum TypeKey {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum ConstKey {
     U32(u32),
+    U16(u32),
     F32(u32),
     F16(u32),
     False,
@@ -705,6 +718,7 @@ enum ConstKey {
 struct Builder {
     next_id: Id,
     capabilities: Vec<u32>,
+    extensions: Vec<u32>,
     imports: Vec<u32>,
     memory_model: Vec<u32>,
     entry_point: Vec<u32>,
@@ -716,6 +730,11 @@ struct Builder {
     constants: HashMap<ConstKey, Id>,
     glsl: Id,
     spec_next: u32,
+    /// Emit the binary16 float-controls execution modes: an f16 arithmetic or narrowing
+    /// instruction was emitted, so the module asks the driver for the denormal, signed-zero/
+    /// inf/NaN, and round-to-nearest-even preservation the tier's device gate requires (ADR
+    /// 0008). The modes' VUIDs name exactly the properties the gate probes.
+    float_controls_f16: bool,
     /// Where the entry block's `OpVariable Function` declarations are spliced in.
     local_variable_cursor: usize,
     interface: Vec<Id>,
@@ -746,6 +765,7 @@ impl Builder {
         let mut builder = Self {
             next_id: 1,
             capabilities: Vec::new(),
+            extensions: Vec::new(),
             imports: Vec::new(),
             memory_model: Vec::new(),
             entry_point: Vec::new(),
@@ -757,6 +777,7 @@ impl Builder {
             constants: HashMap::new(),
             glsl: 0,
             spec_next: 0,
+            float_controls_f16: false,
             local_variable_cursor: 0,
             interface: Vec::new(),
             main: 0,
@@ -801,9 +822,31 @@ impl Builder {
                 local_size[2],
             ],
         );
+        if self.float_controls_f16 {
+            instruction(
+                &mut self.extensions,
+                OP_EXTENSION,
+                &literal_string("SPV_KHR_float_controls"),
+            );
+            self.capability(CAPABILITY_DENORM_PRESERVE);
+            self.capability(CAPABILITY_SIGNED_ZERO_INF_NAN_PRESERVE);
+            self.capability(CAPABILITY_ROUNDING_MODE_RTE);
+            for mode in [
+                EXECUTION_MODE_DENORM_PRESERVE,
+                EXECUTION_MODE_SIGNED_ZERO_INF_NAN_PRESERVE,
+                EXECUTION_MODE_ROUNDING_MODE_RTE,
+            ] {
+                instruction(
+                    &mut self.execution_modes,
+                    OP_EXECUTION_MODE,
+                    &[self.main, mode, 16],
+                );
+            }
+        }
         let mut words = vec![SPIRV_MAGIC, SPIRV_VERSION_1_3, 0, self.next_id, 0];
         for section in [
             &self.capabilities,
+            &self.extensions,
             &self.imports,
             &self.memory_model,
             &self.entry_point,
@@ -924,6 +967,10 @@ impl Builder {
                 let ty = self.u32_ty();
                 instruction(&mut self.declarations, OP_CONSTANT, &[ty, id, value]);
             }
+            ConstKey::U16(value) => {
+                let ty = self.u16_ty();
+                instruction(&mut self.declarations, OP_CONSTANT, &[ty, id, value]);
+            }
             ConstKey::F32(bits) => {
                 let ty = self.f32_ty();
                 instruction(&mut self.declarations, OP_CONSTANT, &[ty, id, bits]);
@@ -943,6 +990,9 @@ impl Builder {
 
     fn c_u32(&mut self, value: u32) -> Id {
         self.constant(ConstKey::U32(value))
+    }
+    fn c_u16(&mut self, value: u16) -> Id {
+        self.constant(ConstKey::U16(u32::from(value)))
     }
     fn c_f32(&mut self, value: f32) -> Id {
         self.constant(ConstKey::F32(value.to_bits()))
@@ -1168,6 +1218,9 @@ impl Builder {
     /// A `NoContraction`-decorated float result of the storage width (`Word` → binary32,
     /// `Half` → binary16).
     fn float_value_w(&mut self, storage: Storage, opcode: u16, operands: &[u32]) -> Id {
+        if storage == Storage::Half {
+            self.float_controls_f16 = true;
+        }
         let ty = self.float_ty(storage);
         self.float_typed(ty, opcode, operands)
     }
@@ -1232,6 +1285,14 @@ impl Builder {
     }
     fn band(&mut self, a: Id, b: Id) -> Id {
         let ty = self.u32_ty();
+        self.value(OP_BITWISE_AND, ty, &[a, b])
+    }
+    /// Bitwise XOR at the operands' own integer width (u16 masks for the binary16 sign lanes).
+    fn bxor_w(&mut self, ty: Id, a: Id, b: Id) -> Id {
+        self.value(OP_BITWISE_XOR, ty, &[a, b])
+    }
+    /// Bitwise AND at the operands' own integer width.
+    fn band_w(&mut self, ty: Id, a: Id, b: Id) -> Id {
         self.value(OP_BITWISE_AND, ty, &[a, b])
     }
     fn bnot(&mut self, a: Id) -> Id {
@@ -1339,6 +1400,9 @@ impl Builder {
         self.value(OP_F_NEGATE, ty, &[a])
     }
     fn ext_float(&mut self, storage: Storage, op: u32, args: &[Id]) -> Id {
+        if storage == Storage::Half {
+            self.float_controls_f16 = true;
+        }
         let ty = self.float_ty(storage);
         let glsl = self.glsl;
         let mut operands = vec![glsl, op];
@@ -1358,6 +1422,7 @@ impl Builder {
 
     /// Narrow a binary32 value to binary16 (`OpFConvert`, round-to-nearest-even).
     fn narrow(&mut self, value: Id) -> Id {
+        self.float_controls_f16 = true;
         let f16_ty = self.f16_ty();
         self.value(OP_F_CONVERT, f16_ty, &[value])
     }
@@ -2171,6 +2236,27 @@ impl Builder {
         }
         let x = inputs[0];
         match op {
+            // IEEE negate and abs are sign-bit operations, not arithmetic: on binary16 they are
+            // integer masks, exact for every pattern — subnormals and NaN payloads included — on
+            // any driver, with no float-controls surface at all (ADR 0008: ANV's f16 ALU was
+            // measured flushing a subnormal `OpFNegate` result despite reporting denormal
+            // preservation).
+            ElementwiseOp::Negate if storage == Storage::Half => {
+                let u16_ty = self.u16_ty();
+                let bits = self.value(OP_BITCAST, u16_ty, &[x]);
+                let sign = self.c_u16(0x8000);
+                let flipped = self.bxor_w(u16_ty, bits, sign);
+                let f16_ty = self.f16_ty();
+                self.value(OP_BITCAST, f16_ty, &[flipped])
+            }
+            ElementwiseOp::Abs if storage == Storage::Half => {
+                let u16_ty = self.u16_ty();
+                let bits = self.value(OP_BITCAST, u16_ty, &[x]);
+                let magnitude = self.c_u16(0x7fff);
+                let masked = self.band_w(u16_ty, bits, magnitude);
+                let f16_ty = self.f16_ty();
+                self.value(OP_BITCAST, f16_ty, &[masked])
+            }
             ElementwiseOp::Abs => self.ext_float(storage, GLSL_FABS, &[x]),
             ElementwiseOp::Ceil => self.ext_float(storage, GLSL_CEIL, &[x]),
             ElementwiseOp::Floor => self.ext_float(storage, GLSL_FLOOR, &[x]),
@@ -2855,14 +2941,17 @@ mod tests {
             cursor += word_count;
         }
         assert_eq!(cursor, words.len(), "{key:?}");
-        // One to three leading capabilities: `Shader`, plus `Float16`/`Int16` for the binary16
-        // kernels (ADR 0008).
+        // One to three leading capabilities (`Shader`, plus `Float16`/`Int16` and the
+        // SPV_KHR_float_controls capabilities for binary16 kernels, ADR 0008), then the
+        // optional extension declaration, then the import.
         let imports_at = opcodes
             .iter()
             .position(|op| *op == OP_EXT_INST_IMPORT)
             .expect("{key:?}: an ExtInstImport");
         assert!(
-            opcodes[..imports_at].iter().all(|op| *op == OP_CAPABILITY),
+            opcodes[..imports_at]
+                .iter()
+                .all(|op| *op == OP_CAPABILITY || *op == OP_EXTENSION),
             "{key:?}"
         );
         assert_eq!(opcodes[imports_at + 1], OP_MEMORY_MODEL, "{key:?}");

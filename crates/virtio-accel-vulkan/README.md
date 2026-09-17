@@ -110,16 +110,20 @@ on Apple M4 via MoltenVK 1.4.2 (local validation only, not a CI lane). One crate
 code paths.
 
 **FP16 tier.** Neither lavapipe nor MoltenVK reports `shaderDenormPreserveFloat16`, so neither
-advertises the tier and the FP16 corpus tests skip there explicitly; the shipped gate has not yet
-had a passing device. On 2026-09-17, with only the denormal clause experimentally relaxed (a
-measurement, not shipped), Apple M4 via MoltenVK executed the entire FP16 corpus in every
-advertised domain: the ten bit-exact cases, the ulp-tolerated unary/comparison/logical/reduction/
-movement groups, an exhaustive 65536-pattern `NEGATE` round trip, and the eight higher-precision
-lanes within 1 ulp of the correctly rounded binary64 references over the whole finite binary16
-domain — binary16 subnormals produced and preserved in practice, with NaN payloads canonicalized
-(the TOSA-permitted behaviour the corpus allows). ANV and RADV runs against the strict gate are
-the owed evidence before any support-matrix claim. Host-side, the binary16 conversions are
-verified exhaustively against an independent reference and every kernel variant passes
+advertises the tier and the FP16 corpus tests skip there explicitly. On 2026-09-17, with only the
+denormal clause experimentally relaxed (a measurement, not shipped), Apple M4 via MoltenVK
+executed the entire FP16 corpus in every advertised domain: the ten bit-exact cases, the
+ulp-tolerated unary/comparison/logical/reduction/movement groups, an exhaustive 65536-pattern
+`NEGATE` round trip (fully bit-exact, NaN payloads included — the lane is an integer sign
+operation), and the eight higher-precision lanes within 1 ulp of the correctly rounded binary64
+references over the whole finite binary16 domain. On the same day, Intel Arc LNL (Mesa ANV)
+advertised the tier under the shipped gate and passed the bit-exact corpus, the ulp-tolerated
+groups, and the sweep; its f16 ALU was caught flushing a subnormal `OpFNegate` result despite
+reporting denormal preservation, so `NEGATE`/`ABS` are integer sign operations and the binary16
+kernels carry the `SPV_KHR_float_controls` execution modes (`DenormPreserve`,
+`SignedZeroInfNanPreserve`, `RoundingModeRTE`). The subnormal-arithmetic probe's ANV re-run and
+any RADV run are the owed evidence. Host-side, the binary16 conversions are verified exhaustively
+against an independent reference and every kernel variant passes
 `spirv-val --target-env vulkan1.3`.
 
 Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an
