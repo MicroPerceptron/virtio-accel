@@ -65,7 +65,7 @@ build time (ADR 0002 in `docs/adr/`).
   and `arena_bytes` expose a loaded program's shape.
 
 The provisional integer target (`VULKAN_TOSA_INTEGER_TARGET`) is declared but not advertised;
-its per-device gating closes with wayfinder ticket 5 (ADR 0004).
+its per-device gating remains open under wayfinder ticket 5 (ADR 0004).
 
 ## Build-time gate
 

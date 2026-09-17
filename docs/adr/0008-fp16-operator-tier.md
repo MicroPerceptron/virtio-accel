@@ -2,8 +2,8 @@
 
 - Status: accepted (implemented; the full FP16 corpus, the exhaustive 65536-pattern `NEGATE`
   round trip, the binary64 transcendental sweep, and the subnormal-arithmetic probe pass on
-  Apple M4 via MoltenVK, Intel Arc LNL (Mesa ANV), and AMD Radeon 860M (RADV); the lavapipe CI
-  lane covers the tier from the same run)
+  Apple M4 via MoltenVK; final-probe confirmation on Intel Arc LNL (Mesa ANV) and AMD Radeon
+  860M (RADV) remains pending; the lavapipe CI lane covers the tier continuously)
 - Extends: ADR 0003 (checked-in shaders), ADR 0007 (operator tier mechanics), ADR 0004 (whose
   FP16 deferral this resolves), ADR 0005 (the float-controls probe)
 - Resolves: the FP16 half of wayfinder map #154 ticket 5 — the tier's targets, capability

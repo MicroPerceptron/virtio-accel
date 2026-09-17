@@ -909,6 +909,155 @@ enum CopyVisibility {
     Device,
 }
 
+/// Copy arbitrary source bytes through a staging buffer. Vulkan copies operate on whole words, so
+/// partial first and last words are read-modify-written to preserve neighbouring logical bytes.
+fn write_through_staging<S: ByteSource + ?Sized>(
+    context: &ContextInner,
+    destination: vk::Buffer,
+    start: u64,
+    data: &S,
+    len: u64,
+    staging: &mut Staging<'_>,
+) -> Result<(), BackendError> {
+    let mut done = 0_u64;
+    let misalignment = start % WORD_BYTES;
+    if misalignment != 0 {
+        let prefix = (WORD_BYTES - misalignment).min(len);
+        context.blocking_copy(
+            destination,
+            staging.raw.buffer,
+            vk::BufferCopy {
+                src_offset: start - misalignment,
+                dst_offset: 0,
+                size: WORD_BYTES,
+            },
+            CopyVisibility::HostRead,
+        )?;
+        let slice_start = usize::try_from(misalignment).map_err(|_| BackendError::OutOfBounds)?;
+        let end = slice_start
+            .checked_add(usize::try_from(prefix).map_err(|_| BackendError::OutOfBounds)?)
+            .ok_or(BackendError::OutOfBounds)?;
+        data.read_at(done, &mut staging.as_mut_slice()[slice_start..end])?;
+        context.blocking_copy(
+            staging.raw.buffer,
+            destination,
+            vk::BufferCopy {
+                src_offset: 0,
+                dst_offset: start - misalignment,
+                size: WORD_BYTES,
+            },
+            CopyVisibility::Device,
+        )?;
+        done += prefix;
+    }
+    while len - done >= WORD_BYTES {
+        let chunk = ((len - done).min(staging.bytes) / WORD_BYTES) * WORD_BYTES;
+        let chunk_len = usize::try_from(chunk).map_err(|_| BackendError::OutOfBounds)?;
+        data.read_at(done, &mut staging.as_mut_slice()[..chunk_len])?;
+        context.blocking_copy(
+            staging.raw.buffer,
+            destination,
+            vk::BufferCopy {
+                src_offset: 0,
+                dst_offset: start + done,
+                size: chunk,
+            },
+            CopyVisibility::Device,
+        )?;
+        done += chunk;
+    }
+    if done < len {
+        let tail = len - done;
+        context.blocking_copy(
+            destination,
+            staging.raw.buffer,
+            vk::BufferCopy {
+                src_offset: start + done,
+                dst_offset: 0,
+                size: WORD_BYTES,
+            },
+            CopyVisibility::HostRead,
+        )?;
+        let tail_len = usize::try_from(tail).map_err(|_| BackendError::OutOfBounds)?;
+        data.read_at(done, &mut staging.as_mut_slice()[..tail_len])?;
+        context.blocking_copy(
+            staging.raw.buffer,
+            destination,
+            vk::BufferCopy {
+                src_offset: 0,
+                dst_offset: start + done,
+                size: WORD_BYTES,
+            },
+            CopyVisibility::Device,
+        )?;
+    }
+    Ok(())
+}
+
+/// Copy arbitrary bytes from a buffer through staging. Partial first and last words are copied in
+/// full, but only their requested logical bytes are sent to the caller.
+fn read_through_staging(
+    context: &ContextInner,
+    source: vk::Buffer,
+    start: u64,
+    data: &mut dyn ByteSink,
+    len: u64,
+    staging: &mut Staging<'_>,
+) -> Result<(), BackendError> {
+    let mut done = 0_u64;
+    let misalignment = start % WORD_BYTES;
+    if misalignment != 0 {
+        let prefix = (WORD_BYTES - misalignment).min(len);
+        context.blocking_copy(
+            source,
+            staging.raw.buffer,
+            vk::BufferCopy {
+                src_offset: start - misalignment,
+                dst_offset: 0,
+                size: WORD_BYTES,
+            },
+            CopyVisibility::HostRead,
+        )?;
+        let slice_start = usize::try_from(misalignment).map_err(|_| BackendError::OutOfBounds)?;
+        let end = slice_start
+            .checked_add(usize::try_from(prefix).map_err(|_| BackendError::OutOfBounds)?)
+            .ok_or(BackendError::OutOfBounds)?;
+        data.write_at(done, &staging.as_mut_slice()[slice_start..end])?;
+        done += prefix;
+    }
+    while len - done >= WORD_BYTES {
+        let chunk = ((len - done).min(staging.bytes) / WORD_BYTES) * WORD_BYTES;
+        let chunk_len = usize::try_from(chunk).map_err(|_| BackendError::OutOfBounds)?;
+        context.blocking_copy(
+            source,
+            staging.raw.buffer,
+            vk::BufferCopy {
+                src_offset: start + done,
+                dst_offset: 0,
+                size: chunk,
+            },
+            CopyVisibility::HostRead,
+        )?;
+        data.write_at(done, &staging.as_mut_slice()[..chunk_len])?;
+        done += chunk;
+    }
+    if done < len {
+        let tail = usize::try_from(len - done).map_err(|_| BackendError::OutOfBounds)?;
+        context.blocking_copy(
+            source,
+            staging.raw.buffer,
+            vk::BufferCopy {
+                src_offset: start + done,
+                dst_offset: 0,
+                size: WORD_BYTES,
+            },
+            CopyVisibility::HostRead,
+        )?;
+        data.write_at(done, &staging.as_mut_slice()[..tail])?;
+    }
+    Ok(())
+}
+
 /// Destroys partially created context objects if creation fails midway.
 struct PartialContext<'a> {
     shared: &'a Shared,
@@ -1200,6 +1349,12 @@ struct Staging<'a> {
 
 impl<'a> Staging<'a> {
     fn new(shared: &'a Shared, bytes: u64) -> Result<Self, BackendError> {
+        let bytes = bytes
+            .max(WORD_BYTES)
+            .checked_add(WORD_BYTES - 1)
+            .ok_or(BackendError::ResourceLimit)?
+            / WORD_BYTES
+            * WORD_BYTES;
         let raw = RawAllocation::create(shared, bytes, shared.memory_plan.host, true)?;
         Ok(Self { raw, bytes })
     }
@@ -1570,24 +1725,15 @@ impl VulkanAccelerator {
     ) -> Result<(), BackendError> {
         let shared = &self.shared;
         let mut staging = Staging::new(shared, len.min(STAGING_BYTES))?;
-        let mut done = 0_u64;
-        while done < len {
-            let chunk = (len - done).min(staging.bytes);
-            let chunk_len = usize::try_from(chunk).map_err(|_| BackendError::OutOfBounds)?;
-            data.read_at(done, &mut staging.as_mut_slice()[..chunk_len])?;
-            buffer.context.blocking_copy(
-                staging.raw.buffer,
-                buffer.buffer,
-                vk::BufferCopy {
-                    src_offset: 0,
-                    dst_offset: start + done,
-                    size: chunk,
-                },
-                CopyVisibility::Device,
-            )?;
-            increment(&shared.counters.explicit_transfer_bytes, chunk);
-            done += chunk;
-        }
+        write_through_staging(
+            &buffer.context,
+            buffer.buffer,
+            start,
+            data,
+            len,
+            &mut staging,
+        )?;
+        increment(&shared.counters.explicit_transfer_bytes, len);
         Ok(())
     }
 
@@ -1601,24 +1747,15 @@ impl VulkanAccelerator {
     ) -> Result<(), BackendError> {
         let shared = &self.shared;
         let mut staging = Staging::new(shared, len.min(STAGING_BYTES))?;
-        let mut done = 0_u64;
-        while done < len {
-            let chunk = (len - done).min(staging.bytes);
-            let chunk_len = usize::try_from(chunk).map_err(|_| BackendError::OutOfBounds)?;
-            buffer.context.blocking_copy(
-                buffer.buffer,
-                staging.raw.buffer,
-                vk::BufferCopy {
-                    src_offset: start + done,
-                    dst_offset: 0,
-                    size: chunk,
-                },
-                CopyVisibility::HostRead,
-            )?;
-            data.write_at(done, &staging.as_mut_slice()[..chunk_len])?;
-            increment(&shared.counters.explicit_transfer_bytes, chunk);
-            done += chunk;
-        }
+        read_through_staging(
+            &buffer.context,
+            buffer.buffer,
+            start,
+            data,
+            len,
+            &mut staging,
+        )?;
+        increment(&shared.counters.explicit_transfer_bytes, len);
         Ok(())
     }
 
@@ -1730,23 +1867,14 @@ impl VulkanAccelerator {
         }
         let mut staging = Staging::new(shared, largest.min(STAGING_BYTES))?;
         for constant in &plan.constants {
-            let mut done = 0_usize;
-            while done < constant.bytes.len() {
-                let chunk = (constant.bytes.len() - done).min(staging.bytes as usize);
-                staging.as_mut_slice()[..chunk]
-                    .copy_from_slice(&constant.bytes[done..done + chunk]);
-                context.blocking_copy(
-                    staging.raw.buffer,
-                    arena.buffer,
-                    vk::BufferCopy {
-                        src_offset: 0,
-                        dst_offset: constant.offset + done as u64,
-                        size: chunk as u64,
-                    },
-                    CopyVisibility::Device,
-                )?;
-                done += chunk;
-            }
+            write_through_staging(
+                context,
+                arena.buffer,
+                constant.offset,
+                constant.bytes.as_slice(),
+                constant.bytes.len() as u64,
+                &mut staging,
+            )?;
         }
         Ok(())
     }

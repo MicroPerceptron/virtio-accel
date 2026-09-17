@@ -1909,10 +1909,10 @@ const FP16_BIT_EXACT_CASES: &[&TosaFloat16Case] = &[
 fn executes_every_fp16_bit_exact_case_in_every_advertised_domain() {
     for device in devices() {
         let backend = open(&device);
-        if !advertises_fp16(&backend) {
-            eprintln!("{device}: the FP16 tier is not advertised here (ADR 0008); skipped");
-            continue;
-        }
+        assert!(
+            advertises_fp16(&backend),
+            "{device}: FP16 tier not advertised"
+        );
         for domain in advertised_domains(&backend) {
             for case in FP16_BIT_EXACT_CASES {
                 let inputs: Vec<Vec<u8>> = case
@@ -1951,10 +1951,10 @@ const FP16_RAW_CASE_GROUPS: &[&[TosaRawCase]] = &[
 fn executes_every_fp16_raw_oracle_case_in_every_advertised_domain() {
     for device in devices() {
         let backend = open(&device);
-        if !advertises_fp16(&backend) {
-            eprintln!("{device}: the FP16 tier is not advertised here (ADR 0008); skipped");
-            continue;
-        }
+        assert!(
+            advertises_fp16(&backend),
+            "{device}: FP16 tier not advertised"
+        );
         for domain in advertised_domains(&backend) {
             for case in FP16_RAW_CASE_GROUPS
                 .iter()
@@ -2022,10 +2022,10 @@ fn fp16_negate_round_trips_every_binary16_bit_pattern() {
     let input = fp16_bytes(&patterns);
     for device in devices() {
         let backend = open(&device);
-        if !advertises_fp16(&backend) {
-            eprintln!("{device}: the FP16 tier is not advertised here (ADR 0008); skipped");
-            continue;
-        }
+        assert!(
+            advertises_fp16(&backend),
+            "{device}: FP16 tier not advertised"
+        );
         for domain in advertised_domains(&backend) {
             let actual = fp16s_le(&run_graph(
                 &backend,
@@ -2218,10 +2218,10 @@ fn fp16_subnormal_arithmetic_is_exact_where_the_tier_is_advertised() {
         };
         for device in devices() {
             let backend = open(&device);
-            if !advertises_fp16(&backend) {
-                eprintln!("{device}: the FP16 tier is not advertised here (ADR 0008); skipped");
-                continue;
-            }
+            assert!(
+                advertises_fp16(&backend),
+                "{device}: FP16 tier not advertised"
+            );
             let actual = run_graph(
                 &backend,
                 &artifact,
@@ -2351,10 +2351,10 @@ fn fp16_higher_precision_lanes_track_binary64_references() {
             .collect();
         for device in devices() {
             let backend = open(&device);
-            if !advertises_fp16(&backend) {
-                eprintln!("{device}: the FP16 tier is not advertised here (ADR 0008); skipped");
-                continue;
-            }
+            assert!(
+                advertises_fp16(&backend),
+                "{device}: FP16 tier not advertised"
+            );
             let actual = fp16s_le(&run_graph(
                 &backend,
                 &artifact,
