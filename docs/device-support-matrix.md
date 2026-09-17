@@ -235,9 +235,12 @@ native path and full backend conformance suite are validated
 on Intel Arc 140V through Mesa ANV, on llvmpipe/lavapipe, and on Apple M4 via MoltenVK; CI pins
 lavapipe so the native path
 cannot silently turn into the portable placeholder. Neither lavapipe nor MoltenVK reports
-binary16 denormal preservation, so neither advertises the FP16 tier; the FP16 corpus has run
-end-to-end on Apple M4 with the gate's denormal clause experimentally relaxed (a measurement, not
-shipped), and the ANV/RADV runs against the shipped gate are the owed evidence.
+binary16 denormal preservation, so neither advertises the FP16 tier. Intel Arc LNL (Mesa ANV)
+does advertise it and passes the FP16 corpus; its f16 ALU was measured flushing a subnormal
+`OpFNegate` result despite the reported property, so `NEGATE`/`ABS` are integer sign operations
+and the kernels carry the float-controls execution modes — the subnormal-arithmetic probe's ANV
+re-run and any RADV run are the owed evidence. Apple M4 executed the full FP16 corpus with the
+gate's denormal clause experimentally relaxed (a measurement, not shipped).
 
 ## What each backend reports
 

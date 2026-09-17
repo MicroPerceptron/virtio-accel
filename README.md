@@ -122,10 +122,13 @@ barriers between dependent dispatches. Buffers are dedicated directly bound stor
   MoltenVK 1.4.2. sin/cos/tanh land within 1 ulp and
   erf within 2 ulp of binary64 on
   every one. The FP16 corpus has executed end-to-end on Apple M4 (with the gate's denormal clause
-  experimentally relaxed for measurement): every bit-exact case, the ulp-tolerated groups, an
-  exhaustive 65536-pattern `NEGATE` round trip, and the higher-precision lanes within 1 ulp of the
-  binary64 references over the whole finite binary16 domain; the ANV and RADV runs against the
-  shipped gate are the owed evidence. INT8
+  experimentally relaxed for measurement) and on Intel Arc LNL (Mesa ANV) against the shipped
+  gate: every bit-exact case, the ulp-tolerated groups, an exhaustive 65536-pattern `NEGATE`
+  round trip, and the higher-precision lanes within 1 ulp of the binary64 references over the
+  whole finite binary16 domain. The ANV run caught its f16 ALU flushing a subnormal `OpFNegate`
+  result despite reporting denormal preservation, so `NEGATE`/`ABS` are integer sign operations
+  and the kernels carry the `SPV_KHR_float_controls` execution modes; the subnormal-arithmetic
+  probe's ANV re-run and any RADV run are the owed evidence. INT8
   gating remains under the
   [Vulkan wayfinder map](https://github.com/MicroPerceptron/virtio-accel/issues/154); design
   decisions are recorded in `docs/adr/` (ADR 0007 covers the FP32 tier, ADR 0008 the FP16 tier).
