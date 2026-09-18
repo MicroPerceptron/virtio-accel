@@ -174,6 +174,11 @@ round-trips all 256 patterns of each encoding bit-exactly. Both device tests rep
 they ran on, because FP8 movement succeeds on every plugin and a bare pass would not say which
 one executed it.
 
+The negative case is pinned too, on the same date, on an Intel NPU at arch 40XX: the suite passes
+with the FP8 tier withheld, and `fp8_advertisement_matches_what_the_device_accepts` confirms the
+device refuses an FP8 graph at load. A withheld tier is a claim about the backend as much as an
+advertised one, and it is the half that quietly rots, since nothing fails when it is wrong.
+
 ## Consequences
 
 - A consumer that places FP8 work now has a provider that accepts it on every Vulkan device,
