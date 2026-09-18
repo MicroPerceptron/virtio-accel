@@ -183,12 +183,17 @@ dependencies = [
  "virtio-accel-cleanroom",
  "virtio-accel-conformance",
  "virtio-accel-core",
+ "virtio-accel-coreml",
  "virtio-accel-device",
  "virtio-accel-guest",
+ "virtio-accel-hexagon",
  "virtio-accel-mock",
+ "virtio-accel-openvino",
  "virtio-accel-proto",
  "virtio-accel-split-queue",
+ "virtio-accel-tosa",
  "virtio-accel-transport",
+ "virtio-accel-xdna",
  "zerocopy",
 ]
 
