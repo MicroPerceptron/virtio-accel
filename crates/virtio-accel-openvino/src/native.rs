@@ -1486,7 +1486,8 @@ impl Accelerator for OpenVinoAccelerator {
 mod tests {
     use super::*;
     use virtio_accel_conformance::numerics::{
-        IDENTITY_EDGES_FP32, MATMUL_FP16, MATMUL_FP32, MAX_POOL2D_FP32,
+        IDENTITY_EDGES_FP32, IDENTITY_FP8E4M3, IDENTITY_FP8E5M2, MATMUL_FP16, MATMUL_FP32,
+        MAX_POOL2D_FP32,
     };
 
     const IDENTITY_FP32_LOCAL: &[u8] = include_bytes!("../tests/data/identity-fp32-v1.0.0.tosa");
@@ -1534,9 +1535,16 @@ mod tests {
     }
 
     fn tosa_artifact<'a>(payload: &'a SliceSource<'a>) -> ArtifactRef<'a> {
+        tosa_artifact_for(payload, crate::OPENVINO_TOSA_TARGET)
+    }
+
+    fn tosa_artifact_for<'a>(
+        payload: &'a SliceSource<'a>,
+        target: virtio_accel_tosa::Target,
+    ) -> ArtifactRef<'a> {
         ArtifactRef {
             format: virtio_accel_tosa::ARTIFACT_FORMAT,
-            target: crate::OPENVINO_TOSA_TARGET.to_identity(),
+            target: target.to_identity(),
             payload,
             resident_bytes: REQUIRED_RESIDENT_BYTES,
         }
@@ -1675,6 +1683,120 @@ mod tests {
 
     /// The milestone gate: a device-neutral TOSA identity executes end-to-end on the selected
     /// device with direct bindings only.
+    #[test]
+    fn fp8_tier_graphs_compile_on_the_device() {
+        let Some(backend) = backend() else { return };
+        eprintln!("FP8 tier device: {}", backend.device_name());
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        for dtype in [
+            virtio_accel_tosa::DType::FP8E4M3,
+            virtio_accel_tosa::DType::FP8E5M2,
+        ] {
+            for (name, artifact) in [
+                ("matmul", crate::lower::fp8_matmul_graph(dtype)),
+                ("max_pool2d", crate::lower::fp8_pool_graph(dtype)),
+                ("transpose", crate::lower::fp8_transpose_graph(dtype)),
+            ] {
+                let program = backend
+                    .load_program(
+                        &context,
+                        tosa_artifact_for(
+                            &SliceSource(&artifact),
+                            crate::OPENVINO_TOSA_FP8_TARGET,
+                        ),
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!("{dtype:?} {name}: device compilation failed: {error:?}")
+                    });
+                backend.unload_program(program).unwrap();
+            }
+        }
+        backend.destroy_context(context).unwrap();
+    }
+
+    /// The lowering tests assert the emitted document's shape; this asserts the real compiler
+    /// builds a blob from it. The distinction is the whole point of the widening: a raw FP8
+    /// MatMul reaches MLIR's verifier and is rejected, because the NPU compiler's IE dialect
+    /// declares MatMul operands without the FP8 types.
+    #[test]
+    fn fp8_identity_moves_every_byte_pattern_on_the_device() {
+        let Some(backend) = backend() else { return };
+        // Name the device: FP8 movement works on every plugin, so a pass says nothing about
+        // which one ran it. The evidence pin needs the device, not just the result.
+        eprintln!("FP8 device: {}", backend.device_name());
+        for case in [IDENTITY_FP8E4M3, IDENTITY_FP8E5M2] {
+            let context = backend.create_context(ContextDesc::default()).unwrap();
+            let program = backend
+                .load_program(
+                    &context,
+                    tosa_artifact_for(
+                        &SliceSource(case.artifact),
+                        crate::OPENVINO_TOSA_FP8_TARGET,
+                    ),
+                )
+                .unwrap_or_else(|error| panic!("{}: load rejected: {error:?}", case.name));
+            let bytes = program.slots[0].byte_len;
+            let desc = BufferDesc::new(
+                bytes,
+                4096,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_SOURCE
+                    | BufferUsage::TRANSFER_DESTINATION
+                    | BufferUsage::PROGRAM_INPUT
+                    | BufferUsage::PROGRAM_OUTPUT,
+            )
+            .unwrap();
+            let (mut input, _) = backend
+                .allocate_buffer(&context, desc)
+                .unwrap()
+                .into_parts();
+            let (output, _) = backend
+                .allocate_buffer(&context, desc)
+                .unwrap()
+                .into_parts();
+            // Walk the encoding space: one byte per element, so NaNs, both zeros, the
+            // subnormals and the maxima are all covered rather than sampled.
+            let payload = (0..bytes as usize)
+                .map(|index| (index % 256) as u8)
+                .collect::<Vec<_>>();
+            backend
+                .write_buffer(&mut input, 0, &SliceSource(&payload))
+                .unwrap();
+            let queue = backend
+                .create_queue(&context, QueueDesc::default())
+                .unwrap();
+            let bindings = [
+                BindingRef {
+                    slot: 0,
+                    buffer: &input,
+                    range: virtio_accel_core::BufferRange::new(0, bytes).unwrap(),
+                    access: AccessMode::Read,
+                },
+                BindingRef {
+                    slot: 1,
+                    buffer: &output,
+                    range: virtio_accel_core::BufferRange::new(0, bytes).unwrap(),
+                    access: AccessMode::Write,
+                },
+            ];
+            let event = backend
+                .submit(&queue, &program, &bindings, Timeout::Infinite)
+                .unwrap_or_else(|_| panic!("{}: submission failed", case.name));
+            assert_eq!(
+                wait_for_terminal(&backend, &event),
+                EventState::Complete,
+                "{}",
+                case.name
+            );
+            let mut result = vec![0u8; bytes as usize];
+            backend
+                .read_buffer(&output, 0, &mut SliceSink(&mut result))
+                .unwrap();
+            assert_eq!(result, payload, "{}: FP8 movement is not bit-exact", case.name);
+            backend.destroy_event(event).unwrap();
+        }
+    }
+
     #[test]
     fn executes_device_neutral_tosa_identity_end_to_end() {
         let Some(backend) = backend() else { return };
