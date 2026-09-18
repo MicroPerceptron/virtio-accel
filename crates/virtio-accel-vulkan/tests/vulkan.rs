@@ -1739,7 +1739,7 @@ fn constants_first_used_late_survive_earlier_dispatches() {
         let output = run_graph(
             &backend,
             &artifact,
-            &[input.clone()],
+            std::slice::from_ref(&input),
             (m * n) as usize * 4,
             MemoryDomain::Host,
         );
