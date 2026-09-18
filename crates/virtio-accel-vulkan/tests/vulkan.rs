@@ -1668,6 +1668,103 @@ fn matmul_artifact(batch: i32, m: i32, k: i32, n: i32) -> Vec<u8> {
     graph.build(VULKAN_TOSA_TARGET).unwrap()
 }
 
+/// `tanh(x · w1) · w2` with both weight matrices as `CONST` tensors, every column of each
+/// filled with one value, so every output column of a row must be equal. The second weight
+/// matrix is first read by the third dispatch, after the first MATMUL's output has died: a
+/// packer that hands that dead region to the constant places load-time bytes where a run-time
+/// dispatch writes, and the columns diverge.
+fn chained_matmul_constants_artifact(m: i32, k: i32, hidden: i32, n: i32) -> Vec<u8> {
+    let zero = 0_f32.to_le_bytes().to_vec();
+    let fill = |count: i32, value: f32| -> Vec<u8> {
+        (0..count).flat_map(|_| value.to_le_bytes()).collect()
+    };
+    let mut graph = OwnedGraph::new("main");
+    graph
+        .push_tensor(OwnedTensor::new("x", vec![1, m, k], DType::FP32))
+        .push_tensor(OwnedTensor::constant(
+            "w1",
+            vec![1, k, hidden],
+            DType::FP32,
+            fill(k * hidden, 0.03125),
+        ))
+        .push_tensor(OwnedTensor::constant(
+            "w2",
+            vec![1, hidden, n],
+            DType::FP32,
+            fill(hidden * n, 0.0625),
+        ))
+        .push_tensor(OwnedTensor::constant("zp", vec![1], DType::FP32, zero))
+        .push_tensor(OwnedTensor::new("h", vec![1, m, hidden], DType::FP32))
+        .push_tensor(OwnedTensor::new("a", vec![1, m, hidden], DType::FP32))
+        .push_tensor(OwnedTensor::new("y", vec![1, m, n], DType::FP32));
+    for name in ["w1", "w2", "zp"] {
+        graph.push_operator(OwnedOperator::new(
+            OperatorKind::Const,
+            vec![],
+            vec![name.into()],
+        ));
+    }
+    graph
+        .push_operator(OwnedOperator::new(
+            OperatorKind::MatMul,
+            vec!["x".into(), "w1".into(), "zp".into(), "zp".into()],
+            vec!["h".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Tanh,
+            vec!["h".into()],
+            vec!["a".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::MatMul,
+            vec!["a".into(), "w2".into(), "zp".into(), "zp".into()],
+            vec!["y".into()],
+        ))
+        .push_input("x")
+        .push_output("y");
+    graph.build(VULKAN_TOSA_TARGET).unwrap()
+}
+
+/// Regression: a `CONST` first used after an intermediate's arena region was freed must not be
+/// packed into that region, because constants are uploaded at load and the intermediate is
+/// written by a dispatch that runs afterwards.
+#[test]
+fn constants_first_used_late_survive_earlier_dispatches() {
+    let (m, k, hidden, n) = (64, 8, 16, 3);
+    let artifact = chained_matmul_constants_artifact(m, k, hidden, n);
+    let x: Vec<f32> = (0..m * k).map(|i| i as f32 / 512.0 - 0.5).collect();
+    let input: Vec<u8> = x.iter().flat_map(|v| v.to_le_bytes()).collect();
+    for device in devices() {
+        let backend = open(&device);
+        let output = run_graph(
+            &backend,
+            &artifact,
+            &[input.clone()],
+            (m * n) as usize * 4,
+            MemoryDomain::Host,
+        );
+        let y: Vec<f32> = output
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        for row in 0..m as usize {
+            let hidden_value = (x[row * k as usize..(row + 1) * k as usize]
+                .iter()
+                .sum::<f32>()
+                * 0.03125)
+                .tanh();
+            let expected = hidden_value * 0.0625 * hidden as f32;
+            for column in 0..n as usize {
+                let got = y[row * n as usize + column];
+                assert!(
+                    (got - expected).abs() <= 1e-5,
+                    "{device}: row {row} column {column}: {got} != {expected}"
+                );
+            }
+        }
+    }
+}
+
 /// Deterministic pseudo-random values in `[-2, 2)`.
 fn pseudo_random(count: usize, seed: u32) -> Vec<f32> {
     let mut state = seed;
