@@ -138,11 +138,15 @@ code paths.
 **FP8 tier.** Advertised on every device the backend opens, for the same reason the FP16 tier is:
 no conversion in it touches a device feature. On 2026-09-18 the full device suite passed on Intel
 Arc B390 (Panther Lake, Mesa 26.0.8 ANV, Vulkan 1.4.335) with that host's llvmpipe (LLVM 21.1.8),
-and independently on a Lunar Lake host (Xe2, Mesa ANV) — two Intel generations and a software ICD,
-in every advertised memory domain, with identical results. That matters more here than for the
-other tiers: the tier's claim is that FP8 numerics *cannot* vary by device, since every widening
-and narrowing is crate-owned integer and binary32 code, and until a second silicon generation ran
-it that was an argument rather than a measurement. Covered on each: all 256 patterns of both
+independently on a Lunar Lake host (Xe2, Mesa ANV), and on an Apple M3 via MoltenVK — two Intel
+GPU generations, Apple Silicon, and a software ICD, across three unrelated driver stacks, in every
+advertised memory domain, with identical results. That matters more here than for the other tiers:
+the tier's claim is that FP8 numerics *cannot* vary by device, since every widening and narrowing
+is crate-owned integer and binary32 code, and until a second silicon generation ran it that was an
+argument rather than a measurement. The Apple run is the sharpest of the three, because MoltenVK
+translates the SPIR-V to Metal and Apple Silicon flushes denormals: the tier is unaffected because
+widening never produces a binary32 denormal (the smallest FP8 value, 2⁻¹⁶, is a normal binary32)
+and narrowing rounds every denormal input to zero whether or not the device flushed it first. Covered on each: all 256 patterns of both
 encodings through `IDENTITY` bit-for-bit, `MATMUL` against a widened host reference with input and
 with constant operands, `CAST` round-tripping every encoding in both directions and honouring the
 overflow policy, two FP8 matmuls chained through a `CAST`, and `MAX_POOL2D`/`ARGMAX`. All 170

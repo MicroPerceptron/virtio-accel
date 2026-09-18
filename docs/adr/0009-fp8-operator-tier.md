@@ -1,8 +1,8 @@
 # 9. FP8 operator tier: a separate target, exact widening, no FP8 arithmetic
 
 - Status: accepted (implemented; the full device suite passes on Intel Arc B390 (Panther Lake,
-  Mesa ANV), on a Lunar Lake host (Xe2, Mesa ANV), and on Mesa lavapipe, in every advertised
-  memory domain, with identical results across all three)
+  Mesa ANV), on a Lunar Lake host (Xe2, Mesa ANV), on an Apple M3 via MoltenVK, and on Mesa
+  lavapipe, in every advertised memory domain, with identical results across all four)
 - Extends: ADR 0003 (checked-in shaders), ADR 0007 (operator tier mechanics), ADR 0008 (whose
   crate-owned-conversion argument this reuses)
 - Resolves: the FP8 half of the low-precision boundary — the tier's target, capability
@@ -93,10 +93,17 @@ this is a storage-and-matmul tier, not a narrower FP16 tier, and copying ADR 000
   neither the instruction nor the reason, which cost a bisect during this tier's development.
   The device suite also runs clean under `VK_LAYER_KHRONOS_validation`.
 
-- Two Intel silicon generations agree exactly. The tier's claim is that FP8 numerics cannot vary
-  by device, because every widening and narrowing is crate-owned integer and binary32 code with
-  no device feature involved; Panther Lake (Xe3 class) and Lunar Lake (Xe2) producing identical
-  results, alongside a software ICD, is that claim measured rather than argued.
+- Three architectures and three unrelated driver stacks agree exactly. The tier's claim is that
+  FP8 numerics cannot vary by device, because every widening and narrowing is crate-owned integer
+  and binary32 code with no device feature involved; Panther Lake (Xe3 class), Lunar Lake (Xe2),
+  Apple M3 through MoltenVK's SPIR-V-to-Metal translation, and a software ICD producing identical
+  results is that claim measured rather than argued.
+- Apple Silicon settles the denormal question the tier's arithmetic raises. It flushes denormals
+  and reports no denormal preservation (ADR 0008), yet the FP8 CAST corpus round-trips every
+  encoding there: widening never produces a binary32 denormal, since the smallest FP8 magnitude
+  is 2⁻¹⁶ and that is a normal binary32, and narrowing takes every denormal input to zero whether
+  or not the device flushed it first — the threshold for rounding to a nonzero FP8 is roughly
+  9.8e-4, six orders of magnitude above the denormal range.
 - Exhaustive: all 256 patterns of each encoding survive `IDENTITY` bit-for-bit on every device,
   in every advertised memory domain. This is the analogue of the FP16
   tier's 65536-pattern `NEGATE` round trip and the reason movement is a raw byte copy.
