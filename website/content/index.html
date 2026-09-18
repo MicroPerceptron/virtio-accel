@@ -575,13 +575,16 @@ footer { padding-block: 44px 52px; }
           NPU first, then GPU, then CPU &mdash; under accuracy-preserving execution mode. It reports
           completion only if the runtime actually wrote into the caller's output allocation, which
           is a stronger claim than &ldquo;the call returned&rdquo;. Its INT8 tier legalizes zero
-          points explicitly in INT32.</p>
-        <p class="bk-device"><b>Intel NPU, GPU or CPU</b>CPU plugin proven in CI</p>
+          points explicitly in INT32, and an FP8 tier carries both encodings at the model boundary
+          on the same target the Vulkan backend uses &mdash; movement bit-exact, MATMUL widened to
+          binary16, which is the accumulator type TOSA already assigns FP8 MATMUL.</p>
+        <p class="bk-device"><b>Intel NPU, GPU or CPU</b>CPU plugin proven in CI; the FP8 tier
+          compiles and round-trips on an Intel NPU (arch 5010, Panther Lake)</p>
         <p class="bk-label">Program dtypes</p>
         <ul class="bk-dtypes">
           <li class="dt on">FP32<span class="sr-only"> supported</span></li>
           <li class="dt on">FP16<span class="sr-only"> supported</span></li>
-          <li class="dt">FP8<span class="sr-only"> not supported</span></li>
+          <li class="dt on">FP8<span class="sr-only"> supported as a widened tier</span></li>
           <li class="dt on">INT8<span class="sr-only"> supported</span></li>
           <li class="dt">INT4<span class="sr-only"> not supported</span></li>
         </ul>
@@ -658,7 +661,7 @@ footer { padding-block: 44px 52px; }
       </div>
     </div>
     <p style="margin-top: 18px; font-size: 14px; color: var(--fg-dim);">None of these silently
-      dequantize an unsupported graph: unsupported FP8 or INT8 and packed INT4 graphs are rejected
+      dequantize an unsupported graph: unsupported INT8 and packed INT4 graphs are rejected
       at load, where you can see it. Vulkan advertises the FP32, FP16 and FP8 tiers on every
       device it opens; the
       <a href="docs/device-support-matrix.html">device support matrix</a> records which parts are

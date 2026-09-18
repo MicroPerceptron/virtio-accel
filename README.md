@@ -39,7 +39,7 @@ This table is organized by program and dtype. For the physical devices behind it
 | Backend                                     | Status                                    | Program admission                                            | FP32                              | FP16                                   | FP8 E4M3/E5M2               | INT8                            | Packed INT4     | Program-visible buffers            |
 | ------------------------------------------- | ----------------------------------------- | ------------------------------------------------------------ | --------------------------------- | -------------------------------------- | --------------------------- | ------------------------------- | --------------- | ---------------------------------- |
 | Apple Core ML / ANE (`virtio-accel-coreml`) | Implemented; macOS 14+                    | Static TOSA 1.0 FP; INT8 tier on macOS 26+                   | Supported                         | Supported                              | Not implemented             | Identity + MATMUL               | Not implemented | Direct host/shared bindings        |
-| Intel OpenVINO (`virtio-accel-openvino`)    | Implemented; OpenVINO 2026.x              | Static TOSA 1.0 FP + INT8 tier                               | Supported                         | Supported                              | Not implemented             | Identity + MATMUL               | Not implemented | Direct host/shared bindings        |
+| Intel OpenVINO (`virtio-accel-openvino`)    | Implemented; OpenVINO 2026.x              | Static TOSA 1.0 FP + INT8 tier; FP8 tier                     | Supported                         | Supported                              | Widened tier (ADR 0009)     | Identity + MATMUL               | Not implemented | Direct host/shared bindings        |
 | AMD XDNA (`virtio-accel-xdna`)              | Experimental; HRX on XDNA2                | Static BF16 TOSA + explicit FP8 storage CAST + INT8 tier     | Accumulator outputs only          | Not implemented                        | E4M3/E5M2 → BF16 CAST       | Identity + MATMUL + RESCALE     | Not implemented | Direct host/shared bindings        |
 | Qualcomm Hexagon (`virtio-accel-hexagon`)   | Experimental; QAIRT 2.49 on Windows ARM64 | Static TOSA 1.0 FP16 + BOOL/INT32 auxiliaries; INT8 tier     | Blocked by v73 precision evidence | 41/42 shared operators (`ERF` blocked) | Blocked: ambiguous encoding | Identity + MATMUL               | Not implemented | Direct host/shared bindings        |
 | Vulkan (`virtio-accel-vulkan`)              | Experimental; Vulkan 1.3 loader           | Static TOSA 1.0 FP32/FP16 + BOOL/INT32 auxiliaries; FP8 tier | Supported                         | Supported                              | 11-operator tier (ADR 0009) | Target declared, not advertised | Not implemented | Direct host/shared/device bindings |
@@ -56,8 +56,15 @@ See the [`virtio-accel-coreml` support boundary](crates/virtio-accel-coreml/READ
 
 - **Execution:** The backend compiles separately for each available device—NPU, then GPU, then CPU by default—using OpenVINO's accuracy-preserving mode. A submission completes only after the runtime writes into the caller's output allocation.
 - **INT8:** Direct INT8 model boundaries are supported; MATMUL uses explicit INT32 zero-point legalization. Restricted INT32 outputs are also available.
+- **FP8 tier (ADR 0009):** both encodings at the model boundary, on the same target the Vulkan tier
+  uses, so a graph admitted by one backend is admitted by the other. FP8 data movement is bit-exact;
+  `MATMUL` widens its operands to binary16, which is TOSA's own accumulator type for FP8 `MATMUL`,
+  so nothing narrows back; `MAX_POOL2D` widens around the window only. The widening is not a
+  preference — the NPU compiler's IE dialect declares `MatMul` operands without the FP8 types, so
+  MLIR's verifier rejects a raw FP8 `MatMul` before the hardware is consulted. What is native is the
+  FP8 *boundary*: parameters stay FP8 through compilation, so nothing converts on the host.
 - **Runtime:** NPU and GPU require their Intel Level Zero driver or compute runtime. The CPU plugin is exercised in CI.
-- **Explicit limits:** FP8, unsupported INT8 operators, and packed INT4 graphs are rejected rather than dequantized.
+- **Explicit limits:** unsupported INT8 operators and packed INT4 graphs are rejected rather than dequantized. FP8 arithmetic beyond `MATMUL` is not reachable: TOSA admits no FP8 elementwise operator at all.
 
 See the [`virtio-accel-openvino` support boundary](crates/virtio-accel-openvino/README.md#low-precision-boundary).
 
