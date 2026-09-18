@@ -877,6 +877,29 @@ impl OpenVinoAccelerator {
     }
 
     /// The enumerated name of the device this instance executes on.
+    /// The runtime's build number (`ov_get_openvino_version`), the version a captured compiled
+    /// blob must be bound to.
+    pub fn runtime_version() -> Result<String, InitError> {
+        let mut version = ffi::ov_version_t {
+            build_number: ptr::null(),
+            description: ptr::null(),
+        };
+        // SAFETY: `version` is a valid out-structure; on success the runtime owns both strings
+        // until `ov_version_free`, and they are copied before that release.
+        unsafe {
+            if ffi::ov_get_openvino_version(&mut version) != ffi::OV_STATUS_OK
+                || version.build_number.is_null()
+            {
+                return Err(InitError::RuntimeUnavailable);
+            }
+            let build = CStr::from_ptr(version.build_number)
+                .to_string_lossy()
+                .into_owned();
+            ffi::ov_version_free(&mut version);
+            Ok(build)
+        }
+    }
+
     /// Export the plugin-compiled form of `program` to `path` through
     /// `ov_compiled_model_export_model`: the NPU plugin writes its VPUX ELF, the GPU plugin its
     /// serialized graph with the OpenCL program binaries (Intel GT zebin ELFs) embedded. The

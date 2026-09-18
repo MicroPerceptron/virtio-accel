@@ -78,8 +78,17 @@ pub(crate) struct ov_available_devices_t {
     pub size: usize,
 }
 
+/// `ov_version_t`: two runtime-owned C strings released by `ov_version_free`.
+#[repr(C)]
+pub(crate) struct ov_version_t {
+    pub build_number: *const c_char,
+    pub description: *const c_char,
+}
+
 unsafe extern "C" {
     // Core lifecycle and discovery.
+    pub(crate) fn ov_get_openvino_version(version: *mut ov_version_t) -> ov_status_e;
+    pub(crate) fn ov_version_free(version: *mut ov_version_t);
     pub(crate) fn ov_core_create(core: *mut *mut ov_core_t) -> ov_status_e;
     pub(crate) fn ov_core_free(core: *mut ov_core_t);
     pub(crate) fn ov_core_get_available_devices(
