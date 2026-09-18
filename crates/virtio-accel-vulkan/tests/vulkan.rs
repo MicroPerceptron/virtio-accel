@@ -2978,3 +2978,116 @@ fn chained_fp8_matmuls_need_no_host_round_trip() {
         }
     }
 }
+
+/// `MAX_POOL2D` over FP8: a 1x1x4x4 NHWC plane pooled 2x2, and `ARGMAX` over the last axis of
+/// an FP8 tensor. Pooling selects an existing encoding and ARGMAX emits an INT32 index, so
+/// neither introduces a rounding decision — the results are exact by construction.
+#[test]
+fn fp8_pooling_and_argmax_execute_on_every_device() {
+    for device in devices() {
+        let backend = open(&device);
+        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+            let decode = |bits: u8| match dtype {
+                DType::FP8E4M3 => virtio_accel_tosa::fp8e4m3_to_f32(bits),
+                _ => virtio_accel_tosa::fp8e5m2_to_f32(bits),
+            };
+            // Finite, distinct, both signs.
+            let values: Vec<u8> = (0..16).map(|i| ((i * 5 + 48) % 112) as u8).collect();
+
+            let mut pool = OwnedGraph::new("main");
+            pool.push_tensor(OwnedTensor::new("x", vec![1, 4, 4, 1], dtype))
+                .push_tensor(OwnedTensor::new("y", vec![1, 2, 2, 1], dtype))
+                .push_operator(OwnedOperator::new(
+                    OperatorKind::MaxPool2d {
+                        kernel: [2, 2],
+                        stride: [2, 2],
+                        pad: [0; 4],
+                        nan_mode: NanPropagationMode::PROPAGATE,
+                    },
+                    vec!["x".into()],
+                    vec!["y".into()],
+                ))
+                .push_input("x")
+                .push_output("y");
+            let pool = pool.build(VULKAN_TOSA_FP8_TARGET).unwrap();
+
+            let mut expected_pool = Vec::new();
+            for row in 0..2usize {
+                for column in 0..2usize {
+                    let window = [
+                        values[row * 8 + column * 2],
+                        values[row * 8 + column * 2 + 1],
+                        values[row * 8 + 4 + column * 2],
+                        values[row * 8 + 4 + column * 2 + 1],
+                    ];
+                    let best = window
+                        .iter()
+                        .copied()
+                        .max_by(|a, b| decode(*a).total_cmp(&decode(*b)))
+                        .unwrap();
+                    expected_pool.push(best);
+                }
+            }
+
+            let mut argmax = OwnedGraph::new("main");
+            argmax
+                .push_tensor(OwnedTensor::new("x", vec![1, 4, 4], dtype))
+                .push_tensor(OwnedTensor::new("y", vec![1, 4], DType::INT32))
+                .push_operator(OwnedOperator::new(
+                    OperatorKind::ArgMax {
+                        axis: 2,
+                        nan_mode: NanPropagationMode::PROPAGATE,
+                    },
+                    vec!["x".into()],
+                    vec!["y".into()],
+                ))
+                .push_input("x")
+                .push_output("y");
+            let argmax = argmax.build(VULKAN_TOSA_FP8_TARGET).unwrap();
+
+            let expected_argmax: Vec<i32> = (0..4usize)
+                .map(|row| {
+                    let lane = &values[row * 4..row * 4 + 4];
+                    let mut best = 0usize;
+                    for index in 1..4 {
+                        if decode(lane[index]) > decode(lane[best]) {
+                            best = index;
+                        }
+                    }
+                    best as i32
+                })
+                .collect();
+
+            for domain in advertised_domains(&backend) {
+                let actual = run_graph_for(
+                    &backend,
+                    &pool,
+                    VULKAN_TOSA_FP8_TARGET,
+                    std::slice::from_ref(&values),
+                    4,
+                    domain,
+                );
+                assert_eq!(
+                    actual, expected_pool,
+                    "{device}: {dtype:?} MAX_POOL2D in {domain:?}"
+                );
+                let actual = run_graph_for(
+                    &backend,
+                    &argmax,
+                    VULKAN_TOSA_FP8_TARGET,
+                    std::slice::from_ref(&values),
+                    4 * 4,
+                    domain,
+                );
+                let actual: Vec<i32> = actual
+                    .chunks_exact(4)
+                    .map(|chunk| i32::from_le_bytes(chunk.try_into().unwrap()))
+                    .collect();
+                assert_eq!(
+                    actual, expected_argmax,
+                    "{device}: {dtype:?} ARGMAX in {domain:?}"
+                );
+            }
+        }
+    }
+}

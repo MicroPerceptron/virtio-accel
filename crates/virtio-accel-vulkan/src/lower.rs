@@ -205,6 +205,8 @@ const FLOAT8_OPERATORS: &[OperatorCapability] = &[
     OperatorCapability::new(Op::CONST_SHAPE),
     OperatorCapability::new(Op::IDENTITY),
     OperatorCapability::new(Op::CAST),
+    OperatorCapability::new(Op::MAX_POOL2D),
+    OperatorCapability::new(Op::ARGMAX),
 ];
 
 /// The FP8 tier's admitted boundary (ADR 0009): `(FP8, FP8) -> FP16` MATMUL and exact FP8 data
@@ -718,9 +720,10 @@ impl<'a, 'b> Lowering<'a, 'b> {
         Ok(shape)
     }
 
-    /// The shape of a MATMUL operand: a float the tier multiplies, which is `FP32`/`FP16` or,
-    /// under the FP8 target, either FP8 encoding.
-    fn matmul_operand_shape(&mut self, value: ValueId) -> Result<TensorShape, LoweringError> {
+    /// The shape of a float operand the tier can load and store: `FP32`/`FP16`, or either FP8
+    /// encoding under the FP8 target. Distinct from [`float_shape`](Self::float_shape), which is
+    /// the narrower set TOSA admits for float *arithmetic*.
+    fn convertible_float_shape(&mut self, value: ValueId) -> Result<TensorShape, LoweringError> {
         let shape = self.shape(value)?;
         if !matches!(
             shape.dtype,
@@ -1202,7 +1205,7 @@ impl<'a, 'b> Lowering<'a, 'b> {
         let [lhs, rhs, lhs_zp, rhs_zp] = inputs else {
             return Err(LoweringError::UnsupportedGraph);
         };
-        let lhs_shape = self.matmul_operand_shape(*lhs)?;
+        let lhs_shape = self.convertible_float_shape(*lhs)?;
         let rhs_shape = self.typed_shape(*rhs, lhs_shape.dtype)?;
         // TOSA defines FP8 MATMUL as `(FP8, FP8) -> FP16`; every other admitted operand type
         // keeps its own dtype.
@@ -1272,7 +1275,9 @@ impl<'a, 'b> Lowering<'a, 'b> {
             return Err(LoweringError::UnsupportedGraph);
         };
         let nan_mode = nan_mode_of(nan_mode)?;
-        let source = self.float_shape(*input)?;
+        // TOSA admits FP8 MAX_POOL2D: pooling selects an existing encoding rather than
+        // computing a new one, so the widen/narrow round trip through the kernel is exact.
+        let source = self.convertible_float_shape(*input)?;
         let target = self.typed_shape(output, source.dtype)?;
         let ([batch, height, width, channels], [batch_o, out_height, out_width, channels_o]) =
             (source.dims.as_slice(), target.dims.as_slice())
@@ -1384,7 +1389,13 @@ impl<'a, 'b> Lowering<'a, 'b> {
             OpAttributes::ReduceSum { axis } => (axis, ReduceOp::Sum, false),
             _ => return Err(LoweringError::UnsupportedGraph),
         };
-        let source = self.float_shape(*input)?;
+        // TOSA admits FP8 for ARGMAX (comparing widened values, emitting an INT32 index) but
+        // for none of the REDUCE lanes, which stay on the float-arithmetic dtypes.
+        let source = if argmax {
+            self.convertible_float_shape(*input)?
+        } else {
+            self.float_shape(*input)?
+        };
         let target = self.typed_shape(output, if argmax { DType::INT32 } else { source.dtype })?;
         let axis = usize::try_from(axis)
             .ok()

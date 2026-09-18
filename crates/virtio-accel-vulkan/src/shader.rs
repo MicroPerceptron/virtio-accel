@@ -2636,13 +2636,7 @@ fn assemble_reduce(op: ReduceOp, float: Storage, workgroup: u32, buffers: u32) -
         }
         _ => {
             let acc = b.load(f32_ty, acc_var);
-            match float {
-                Storage::Half => {
-                    let bits = b.narrow_f16(acc);
-                    b.store_half_bits(array, output, o, bits);
-                }
-                _ => b.store_f32(array, output, o, acc),
-            }
+            b.store_float(float, array, output, o, acc);
         }
     }
     b.end_loop(scope, counter, stride);
@@ -2858,13 +2852,7 @@ fn assemble_max_pool(nan_mode: NanMode, float: Storage, workgroup: u32, buffers:
     b.end_loop(cols, kw_var, one);
     b.end_loop(rows, kh_var, one);
     let acc = b.load(f32_ty, acc_var);
-    match float {
-        Storage::Half => {
-            let bits = b.narrow_f16(acc);
-            b.store_half_bits(array, output, o, bits);
-        }
-        _ => b.store_f32(array, output, o, acc),
-    }
+    b.store_float(float, array, output, o, acc);
     b.end_loop(scope, counter, stride);
     b.end_main();
     b.finish([workgroup, 1, 1])
@@ -3054,6 +3042,24 @@ mod tests {
                 keys.push(KernelKey::MaxPool {
                     nan_mode,
                     float,
+                    workgroup: 64,
+                    buffers: 17,
+                });
+            }
+        }
+        // The FP8 tier's pooling and ARGMAX: pooling selects an existing encoding, ARGMAX
+        // compares widened values and emits an INT32 index.
+        for format in [Fp8Format::E4M3, Fp8Format::E5M2] {
+            for nan_mode in [NanMode::Propagate, NanMode::Ignore] {
+                keys.push(KernelKey::MaxPool {
+                    nan_mode,
+                    float: Storage::Quarter(format),
+                    workgroup: 64,
+                    buffers: 17,
+                });
+                keys.push(KernelKey::Reduce {
+                    op: ReduceOp::ArgMax(nan_mode),
+                    float: Storage::Quarter(format),
                     workgroup: 64,
                     buffers: 17,
                 });

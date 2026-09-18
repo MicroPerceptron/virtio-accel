@@ -116,6 +116,8 @@ this is a storage-and-matmul tier, not a narrower FP16 tier, and copying ADR 000
   movement over either, and now as the result of a `CAST` from a wider float. The dominant
   shape — a weight matrix narrowed once on the host, as `axnn` has done since its first FP8
   support — was covered before `CAST`; what `CAST` adds is the chain.
-- `MAX_POOL2D` and `ARGMAX` remain the unimplemented FP8 operators. Neither needs new numerics:
-  pooling selects an existing encoding rather than computing one, and `ARGMAX` compares widened
-  values and emits `INT32`.
+- Authoring `ARGMAX` needed a variant `virtio-accel-tosa-build` did not carry, so this tier adds
+  one. Its attribute union tag is its opcode, as the schema arranges for every operator, and the
+  crate's existing opcode/tag test covers it.
+- What TOSA admits for FP8 and this tier still does not execute is the convolution family and
+  the gather family, neither of which this backend implements for any dtype.
