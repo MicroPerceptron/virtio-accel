@@ -165,6 +165,12 @@ impl Tuning {
                 workgroup: self.workgroup,
                 buffers: self.buffers,
             },
+            KernelSpec::Cast { input, output } => KernelKey::Cast {
+                input,
+                output,
+                workgroup: self.workgroup,
+                buffers: self.buffers,
+            },
             KernelSpec::Move {
                 storage,
                 contiguous,

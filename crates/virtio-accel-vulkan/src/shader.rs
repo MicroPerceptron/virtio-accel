@@ -390,6 +390,14 @@ pub enum KernelKey {
         workgroup: u32,
         buffers: u32,
     },
+    /// Elementwise float conversion: read at `input` storage, write at `output`. One dispatch
+    /// per `CAST` between float dtypes, including both FP8 directions (ADR 0009).
+    Cast {
+        input: Storage,
+        output: Storage,
+        workgroup: u32,
+        buffers: u32,
+    },
     /// Strided copy over a rank-`MAX_RANK` iteration space (`TRANSPOSE`, `REVERSE`, `CONCAT`
     /// segments); `contiguous` collapses to a linear copy.
     Move {
@@ -435,6 +443,12 @@ impl KernelKey {
                 workgroup,
                 buffers,
             } => assemble_move(storage, contiguous, workgroup, buffers),
+            Self::Cast {
+                input,
+                output,
+                workgroup,
+                buffers,
+            } => assemble_cast(input, output, workgroup, buffers),
         }
     }
 
@@ -461,6 +475,7 @@ impl KernelKey {
                     2 + 2 + 1 + MAX_RANK as u32 * 3 + 2
                 }
             }
+            Self::Cast { .. } => 2 + 2 + 1,
         }
     }
 
@@ -470,7 +485,8 @@ impl KernelKey {
             Self::Elementwise { workgroup, .. }
             | Self::Reduce { workgroup, .. }
             | Self::MaxPool { workgroup, .. }
-            | Self::Move { workgroup, .. } => [workgroup, 1, 1],
+            | Self::Move { workgroup, .. }
+            | Self::Cast { workgroup, .. } => [workgroup, 1, 1],
             Self::Matmul { tile, .. } => [tile, tile, 1],
         }
     }
@@ -1469,6 +1485,58 @@ impl Builder {
     /// round-to-nearest-even, NaN canonicalized to the quiet `0x7e00` payload with its sign.
     /// This is the kernel twin of the host [`f32_to_f16_bits`]: integer and binary32 operations
     /// only, so subnormals are produced — never flushed — on every device (ADR 0008).
+    /// Narrow binary32 to FP8, the kernel twin of [`f32_to_fp8_bits`] and bound by its tests.
+    /// Integer rounding throughout, with one `RoundEven` for the subnormal range, so the result
+    /// is identical on every device. The overflow policy is that function's: NaN for E4M3,
+    /// infinity for E5M2 (ADR 0009).
+    fn narrow_fp8(&mut self, format: Fp8Format, value: Id) -> Id {
+        let (mantissa_bits, bias, nan_out, max_finite, overflow_out) = match format {
+            Fp8Format::E4M3 => (3_u32, 7_u32, 0x7f_u32, 0x7e_u32, 0x7f_u32),
+            Fp8Format::E5M2 => (2, 15, 0x7e, 0x7b, 0x7c),
+        };
+        let shift = 23 - mantissa_bits;
+        let twenty_four = self.c_u32(24);
+        let one = self.c_u32(1);
+        let sign_mask = self.c_u32(0x80);
+        let magnitude_mask = self.c_u32(0x7fff_ffff);
+        let inf_bits = self.c_u32(0x7f80_0000);
+        let normal_floor = self.c_u32((128 - bias) << 23);
+        let rebias = self.c_u32((127 - bias) << 23);
+        let shift_c = self.c_u32(shift);
+        let half_ulp = self.c_u32((1 << (shift - 1)) - 1);
+        let scale = self.c_f32(f32::from_bits((127 + bias - 1 + mantissa_bits) << 23));
+        let max_finite_c = self.c_u32(max_finite);
+        let nan_c = self.c_u32(nan_out);
+        let overflow_c = self.c_u32(overflow_out);
+        let bits = self.bitcast_u32(value);
+        let sign = self.shr(bits, twenty_four);
+        let sign = self.band(sign, sign_mask);
+        let magnitude = self.band(bits, magnitude_mask);
+        let is_nan = self.ult(inf_bits, magnitude);
+        let is_normal = self.uge(magnitude, normal_floor);
+        // Normal: rebias, then round the significand with the add-half-ulp-plus-guard trick; a
+        // carry increments the exponent on its own. The subnormal branch discards the wrap.
+        let adjusted = self.isub(magnitude, rebias);
+        let guard = self.shr(adjusted, shift_c);
+        let guard = self.band(guard, one);
+        let rounding = self.iadd(half_ulp, guard);
+        let rounded = self.iadd(adjusted, rounding);
+        let normal_out = self.shr(rounded, shift_c);
+        // Subnormal or zero: scale into integer range, exact for every representable
+        // subnormal, and round to the nearest integer. A carry reaches the smallest normal.
+        let safe_magnitude = self.select_u32(is_normal, normal_floor, magnitude);
+        let scaled = self.bitcast_f32(safe_magnitude);
+        let scaled = self.fmul(scaled, scale);
+        let scaled = self.ext_f32(GLSL_ROUND_EVEN, &[scaled]);
+        let subnormal_out = self.f_to_u(scaled);
+        let body = self.select_u32(is_normal, normal_out, subnormal_out);
+        // Rounding has happened, so landing past the last finite encoding is the overflow test.
+        let overflowed = self.ult(max_finite_c, body);
+        let body = self.select_u32(overflowed, overflow_c, body);
+        let body = self.select_u32(is_nan, nan_c, body);
+        self.bor(sign, body)
+    }
+
     fn narrow_f16(&mut self, value: Id) -> Id {
         let sixteen = self.c_u32(16);
         let thirteen = self.c_u32(13);
@@ -1790,6 +1858,29 @@ impl Builder {
         let u32_ty = self.u32_ty();
         self.value(OP_ATOMIC_AND, u32_ty, &[pointer, scope, semantics, clear]);
         self.value(OP_ATOMIC_OR, u32_ty, &[pointer, scope, semantics, set]);
+    }
+
+    /// Store one binary32 float at `storage`, narrowing where the storage is narrower.
+    fn store_float(
+        &mut self,
+        storage: Storage,
+        buffers: Id,
+        operand: (Id, Id),
+        element: Id,
+        value: Id,
+    ) {
+        match storage {
+            Storage::Word => self.store_f32(buffers, operand, element, value),
+            Storage::Half => {
+                let bits = self.narrow_f16(value);
+                self.store_half_bits(buffers, operand, element, bits);
+            }
+            Storage::Quarter(format) => {
+                let bits = self.narrow_fp8(format, value);
+                self.store_byte_bits(buffers, operand, element, bits);
+            }
+            Storage::Byte => unreachable!("BOOL is not a float storage"),
+        }
     }
 
     /// Load one float element as binary32: word storage bitcasts, half storage is unpacked and
@@ -2784,6 +2875,29 @@ fn assemble_max_pool(nan_mode: NanMode, float: Storage, workgroup: u32, buffers:
 ///
 /// Specialization order: input, output `(buffer, base)`; `count`; then (strided only)
 /// `dims[MAX_RANK]`, `in_strides[MAX_RANK]`, `in_offset`, `out_strides[MAX_RANK]`, `out_offset`.
+/// Elementwise float conversion over `count` elements: load at `input` storage as binary32,
+/// store at `output` storage. Every narrowing is crate-owned integer code, so a `CAST` produces
+/// the same bits on every device.
+fn assemble_cast(
+    input: Storage,
+    output_storage: Storage,
+    workgroup: u32,
+    buffers: u32,
+) -> Vec<u32> {
+    let mut b = Builder::new();
+    let array = b.buffer_array(buffers);
+    let source = b.spec_operand();
+    let destination = b.spec_operand();
+    let count = b.spec_u32(1);
+    let (counter, stride) = b.grid_stride(workgroup);
+    let (scope, i) = b.begin_loop(counter, count);
+    let value = b.load_float(input, array, source, i);
+    b.store_float(output_storage, array, destination, i, value);
+    b.end_loop(scope, counter, stride);
+    b.end_main();
+    b.finish([workgroup, 1, 1])
+}
+
 fn assemble_move(storage: Storage, contiguous: bool, workgroup: u32, buffers: u32) -> Vec<u32> {
     let mut b = Builder::new();
     let array = b.buffer_array(buffers);
@@ -2945,6 +3059,23 @@ mod tests {
                 });
             }
         }
+        // Every CAST pair the FP8 tier lowers, both directions.
+        for format in [Fp8Format::E4M3, Fp8Format::E5M2] {
+            for wide in [Storage::Word, Storage::Half] {
+                keys.push(KernelKey::Cast {
+                    input: Storage::Quarter(format),
+                    output: wide,
+                    workgroup: 64,
+                    buffers: 17,
+                });
+                keys.push(KernelKey::Cast {
+                    input: wide,
+                    output: Storage::Quarter(format),
+                    workgroup: 64,
+                    buffers: 17,
+                });
+            }
+        }
         for storage in [
             Storage::Word,
             Storage::Byte,
@@ -3098,6 +3229,21 @@ mod tests {
                         pad_top: 0,
                         pad_left: 0,
                     },
+                ),
+                // A CAST's specialization payload is a contiguous move's: two operands and a
+                // count.
+                KernelKey::Cast { .. } => move_spec(
+                    operand,
+                    operand,
+                    MoveGeometry {
+                        count: 8,
+                        dims: [1; MAX_RANK],
+                        in_strides: [1; MAX_RANK],
+                        in_offset: 0,
+                        out_strides: [1; MAX_RANK],
+                        out_offset: 0,
+                    },
+                    true,
                 ),
                 KernelKey::Move { contiguous, .. } => move_spec(
                     operand,

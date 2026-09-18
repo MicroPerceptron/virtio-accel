@@ -186,6 +186,18 @@ fn every_kernel_variant_assembles_to_valid_spirv_headers() {
             tile: 16,
             buffers: 17,
         },
+        KernelKey::Cast {
+            input: Storage::Quarter(Fp8Format::E4M3),
+            output: Storage::Half,
+            workgroup: 64,
+            buffers: 17,
+        },
+        KernelKey::Cast {
+            input: Storage::Word,
+            output: Storage::Quarter(Fp8Format::E5M2),
+            workgroup: 64,
+            buffers: 17,
+        },
         KernelKey::Move {
             storage: Storage::Quarter(Fp8Format::E4M3),
             contiguous: true,
