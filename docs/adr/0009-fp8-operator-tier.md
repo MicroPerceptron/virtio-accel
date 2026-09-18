@@ -153,6 +153,21 @@ with no FP8 string near matmul or convolution, and the DPU register contract car
 PPE convert, ODU output and scale paths. That is consistent with FP8 storage plus wider
 arithmetic, and it does not rule out a native multiplier — the compiler never asks the device.
 
+FP8 support is a property of the device, not of the backend, and this was found the hard way: the
+tier compiled and ran on an Intel NPU at arch 5010 (Panther Lake) and then failed at `load_program`
+on arch 40XX (Lunar Lake), where even an FP8 `IDENTITY` is refused — consistent with the FP8
+handling in the driver-side compiler's own tree living under an `NPU50XX/` path. An unconditional
+descriptor would therefore have a placement layer admit an FP8 graph on 40XX and fail it at load,
+which is the silent-then-explode behaviour this project refuses everywhere else.
+
+So the tier is advertised per instance, decided by compiling a one-element FP8 `IDENTITY` at open
+and withholding the descriptor if the device's compiler rejects it. It is probed rather than
+branded, for the reason the device matrix already gives for device identity: an arch allowlist
+would be wrong in both directions, stale the moment a driver adds 40XX support, and there is no
+property to read instead — `OPTIMIZATION_CAPABILITIES` omits FP8 on 5010, where FP8 works. The
+probe document is built by the same `IrBuilder` the real lowering uses, so it cannot drift from a
+format known to work, and it costs one small compile per backend open.
+
 Evidence: on 2026-09-18 on an Intel NPU at arch 5010 (Panther Lake, OpenVINO 2026.4), the tier's
 `MATMUL`, `MAX_POOL2D` and `TRANSPOSE` graphs all compile for both encodings, and FP8 `IDENTITY`
 round-trips all 256 patterns of each encoding bit-exactly. Both device tests report the device
