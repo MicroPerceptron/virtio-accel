@@ -52,14 +52,22 @@ this is a storage-and-matmul tier, not a narrower FP16 tier, and copying ADR 000
    included. It is a separate variant from `Byte` precisely so the canonicalizing path cannot be
    reused by accident.
 
-3. **Crate-owned exact widening; no narrowing exists.** `Builder::widen_fp8` is the kernel twin
+3. **Crate-owned exact widening, and a narrowing whose overflow policy is this crate's.** `Builder::widen_fp8` is the kernel twin
    of `virtio_accel_tosa::fp8e4m3_to_f32` / `fp8e5m2_to_f32`: integer expansion for normals and
    specials, one exact multiply for subnormals. Every FP8 value is representable in binary32, so
    the widening is exact on every device by construction and no `OpFConvert` appears that a
    driver could demote. The two encodings are separate variants because they differ in exponent
    width, bias and specials: E4M3 has no infinity and exactly one NaN per sign, while E5M2 is
    IEEE-shaped. Because MATMUL produces FP16 and data movement copies raw bytes, **no f32-to-FP8
-   narrowing is needed anywhere in the tier**, so none was written.
+   narrowing is needed for MATMUL or data movement**. `CAST` does need it, and TOSA 1.0 through
+   1.2 leave float-to-FP8 overflow undefined, so the policy is this crate's: a magnitude too
+   large for E4M3 — which has no infinity — becomes NaN rather than saturating to 448. The
+   alternatives are not symmetric. A consumer who wants saturation can `CLAMP` in a wider dtype
+   before the `CAST` and get it exactly; a consumer handed a saturated 448 cannot distinguish it
+   from a value that was always 448. NaN preserves the choice, saturation destroys it, and it
+   keeps the crate consistent with `narrow_f16`, which signals unrepresentability as infinity
+   rather than clamping to 65504. E5M2 needs no policy: it is IEEE-shaped and overflows to
+   infinity.
 
 4. **Mixed input and output storage in the MATMUL key.** `KernelKey::Matmul` carried one
    `float: Storage` for both operands and the result, which cannot express `(FP8, FP8) -> FP16`.
@@ -67,7 +75,12 @@ this is a storage-and-matmul tier, not a narrower FP16 tier, and copying ADR 000
    accumulator stays binary32, the width TOSA assigns both FP16 and FP8 MATMUL, and the result
    narrows once through ADR 0008's round-to-nearest-even code.
 
-5. **Advertised on every device, no gate.** As in ADR 0008 §3, nothing here needs a device
+5. **Admission follows the target's own descriptor.** The operator check consulted the FP32
+   tier's capability whatever the target was, so a tier could admit operators it does not
+   advertise. It now consults the descriptor for the target being lowered, which makes what the
+   FP8 target admits exactly what it promises.
+
+6. **Advertised on every device, no gate.** As in ADR 0008 §3, nothing here needs a device
    feature: the conversions are crate-owned integer and binary32 code. `tosa_capabilities()`
    returns the FP16 and FP8 descriptors on every device the backend opens.
 
@@ -79,6 +92,15 @@ this is a storage-and-matmul tier, not a narrower FP16 tier, and copying ADR 000
 - `(FP8, FP8) -> FP16` MATMUL is bit-exact against a host reference that widens with the TOSA
   crate's own decoders, accumulates in binary32 and narrows once, on both devices and in every
   domain.
+- `CAST` between any two float dtypes the tier stores, both FP8 directions included: every
+  encoding widens to the value the TOSA crate's own decoder gives and every finite value returns
+  to its own encoding, on both devices in every domain. The host narrowing is verified separately
+  and exhaustively — all 256 encodings round-trip, 200k values agree with an independent
+  nearest-encoding search sharing no bit arithmetic with it, and the boundaries are pinned (464
+  ties to even and stays finite at 448; beyond it is NaN; a value rounding to zero keeps its
+  sign).
+- Two FP8 matmuls chained through a `CAST` match a host reference layer for layer, which is the
+  shape `CAST` exists for: without it every layer after the first would round-trip to the host.
 - The extension bits are load-bearing: an FP8 artifact is refused under the FP32/FP16 target.
   The converse is not asserted, because the FP8 target's envelope is a superset and an FP32
   graph remains legal under it.
@@ -90,12 +112,10 @@ this is a storage-and-matmul tier, not a narrower FP16 tier, and copying ADR 000
   not FP8 arithmetic — which is what TOSA defines FP8 MATMUL to be.
 - Graphs mixing FP8 matmuls with FP32 elementwise work partition across the two targets. That is
   the honest shape: TOSA has no FP8 elementwise operator to fuse them with.
-- FP8 reaches a graph three ways the tier already admits: as a program input, as a `CONST`, and
-  as the result of data movement over either. The dominant shape — a weight matrix narrowed once
-  on the host, as `axnn` has done since its first FP8 support, then carried as packed bytes — is
-  covered today and tested.
-- `CAST` is therefore a refinement rather than the unlock: it is the only operator that *narrows*
-  a wider float to FP8 *inside* a graph, which matters for a graph that computes in FP16 or FP32
-  and re-narrows mid-graph without a host round trip. It needs the same mixed-storage kernel key
-  this ADR introduces. `MAX_POOL2D`, `ARGMAX` and the gather family also output FP8, but only
-  from FP8 that already exists.
+- FP8 reaches a graph four ways: as a program input, as a `CONST`, as the result of data
+  movement over either, and now as the result of a `CAST` from a wider float. The dominant
+  shape — a weight matrix narrowed once on the host, as `axnn` has done since its first FP8
+  support — was covered before `CAST`; what `CAST` adds is the chain.
+- `MAX_POOL2D` and `ARGMAX` remain the unimplemented FP8 operators. Neither needs new numerics:
+  pooling selects an existing encoding rather than computing one, and `ARGMAX` compares widened
+  values and emits `INT32`.

@@ -204,6 +204,7 @@ const FLOAT8_OPERATORS: &[OperatorCapability] = &[
     OperatorCapability::new(Op::CONST),
     OperatorCapability::new(Op::CONST_SHAPE),
     OperatorCapability::new(Op::IDENTITY),
+    OperatorCapability::new(Op::CAST),
 ];
 
 /// The FP8 tier's admitted boundary (ADR 0009): `(FP8, FP8) -> FP16` MATMUL and exact FP8 data
@@ -278,6 +279,10 @@ pub(crate) enum KernelSpec {
         float: Storage,
     },
     Matmul {
+        input: Storage,
+        output: Storage,
+    },
+    Cast {
         input: Storage,
         output: Storage,
     },
@@ -373,7 +378,12 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<ProgramPlan, Lo
     }
     let model = parse(bytes).map_err(LoweringError::Parse)?;
     let analysis = model.analyze_for(target).map_err(LoweringError::Analysis)?;
-    Lowering::new(&analysis)?.run()
+    let capability = if target == VULKAN_TOSA_FP8_TARGET {
+        VULKAN_TOSA_FP8_CAPABILITY
+    } else {
+        VULKAN_TOSA_CAPABILITY
+    };
+    Lowering::new(&analysis, capability)?.run()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -487,6 +497,9 @@ struct Region {
 
 struct Lowering<'a, 'b> {
     analysis: &'b TosaAnalysis<'a>,
+    /// The tier being lowered. Admission consults this tier's operator list, so what a target
+    /// admits is exactly what its descriptor advertises.
+    capability: CapabilityDescriptor,
     inputs: &'b [ValueId],
     outputs: &'b [ValueId],
     order: &'b [OperatorId],
@@ -506,7 +519,10 @@ struct Lowering<'a, 'b> {
 }
 
 impl<'a, 'b> Lowering<'a, 'b> {
-    fn new(analysis: &'b TosaAnalysis<'a>) -> Result<Self, LoweringError> {
+    fn new(
+        analysis: &'b TosaAnalysis<'a>,
+        capability: CapabilityDescriptor,
+    ) -> Result<Self, LoweringError> {
         if analysis.regions().len() != 1 || analysis.blocks().len() != 1 {
             return Err(LoweringError::UnsupportedGraph);
         }
@@ -542,6 +558,7 @@ impl<'a, 'b> Lowering<'a, 'b> {
         }
         Ok(Self {
             analysis,
+            capability,
             inputs,
             outputs,
             order,
@@ -595,7 +612,7 @@ impl<'a, 'b> Lowering<'a, 'b> {
                 continue;
             }
             let op = operator.op();
-            if !supports_tosa_operator(op) {
+            if !self.capability.supports_operator(op) {
                 return Err(LoweringError::UnsupportedOperator(op));
             }
             let operator_inputs = self.analysis.operator_inputs(*operator_id);
@@ -613,6 +630,7 @@ impl<'a, 'b> Lowering<'a, 'b> {
                 Op::TRANSPOSE => self.lower_transpose(operator, operator_inputs, output)?,
                 Op::REVERSE => self.lower_reverse(operator, operator_inputs, output)?,
                 Op::CONCAT => self.lower_concat(operator, operator_inputs, output)?,
+                Op::CAST => self.lower_cast(operator_inputs, output)?,
                 Op::MATMUL => self.lower_matmul(operator_inputs, output)?,
                 Op::MAX_POOL2D => self.lower_max_pool(operator, operator_inputs, output)?,
                 Op::ARGMAX
@@ -1127,6 +1145,52 @@ impl<'a, 'b> Lowering<'a, 'b> {
             },
             spec,
             Work::Linear(geometry.count),
+            &[from],
+            to,
+            output,
+        );
+        Ok(())
+    }
+
+    /// `CAST` between float dtypes: one conversion dispatch, elementwise and shape-preserving.
+    /// This is the tier's only narrowing path, and the reason a chain of FP8 matmuls needs no
+    /// host round trip between layers.
+    fn lower_cast(&mut self, inputs: &[ValueId], output: ValueId) -> Result<(), LoweringError> {
+        let [input] = inputs else {
+            return Err(LoweringError::UnsupportedGraph);
+        };
+        let source = self.shape(*input)?;
+        let destination = self.shape(output)?;
+        if source.dims != destination.dims {
+            return Err(LoweringError::UnsupportedGraph);
+        }
+        for dtype in [source.dtype, destination.dtype] {
+            if !matches!(
+                dtype,
+                DType::FP32 | DType::FP16 | DType::FP8E4M3 | DType::FP8E5M2
+            ) {
+                return Err(LoweringError::UnsupportedType(dtype));
+            }
+        }
+        let from = self.input_location(*input)?;
+        let to = self.output_location(output)?;
+        let strides = pad_leading(&source.strides(), 0);
+        let geometry = MoveGeometry {
+            count: source.elements,
+            dims: source.padded_dims(),
+            in_strides: strides,
+            in_offset: 0,
+            out_strides: strides,
+            out_offset: 0,
+        };
+        let spec = move_spec(self.operand(from), self.operand(to), geometry, true);
+        self.dispatch(
+            KernelSpec::Cast {
+                input: source.storage(),
+                output: destination.storage(),
+            },
+            spec,
+            Work::Linear(source.elements),
             &[from],
             to,
             output,
@@ -1886,7 +1950,7 @@ mod tests {
         let bytes = IDENTITY_FP32_LOCAL;
         let model = parse(bytes).unwrap();
         let analysis = model.analyze_for(VULKAN_TOSA_TARGET).unwrap();
-        let mut lowering = Lowering::new(&analysis).unwrap();
+        let mut lowering = Lowering::new(&analysis, VULKAN_TOSA_CAPABILITY).unwrap();
         lowering.position = 0;
         let a = lowering.allocate_region(100, 1).unwrap();
         let b = lowering.allocate_region(100, 5).unwrap();
@@ -1908,7 +1972,7 @@ mod tests {
     fn constants_never_share_bytes_with_earlier_intermediates() {
         let model = parse(IDENTITY_FP32_LOCAL).unwrap();
         let analysis = model.analyze_for(VULKAN_TOSA_TARGET).unwrap();
-        let mut lowering = Lowering::new(&analysis).unwrap();
+        let mut lowering = Lowering::new(&analysis, VULKAN_TOSA_CAPABILITY).unwrap();
         lowering.position = 0;
         let a = lowering.allocate_region(64, 1).unwrap();
         assert_eq!(lowering.regions[a].offset, 0);
@@ -1928,7 +1992,7 @@ mod tests {
     fn reused_arena_bytes_force_a_barrier_before_the_new_writer() {
         let model = parse(IDENTITY_FP32_LOCAL).unwrap();
         let analysis = model.analyze_for(VULKAN_TOSA_TARGET).unwrap();
-        let mut lowering = Lowering::new(&analysis).unwrap();
+        let mut lowering = Lowering::new(&analysis, VULKAN_TOSA_CAPABILITY).unwrap();
         let values: Vec<ValueId> = analysis.values().iter().map(|value| value.id()).collect();
         let (a_value, b_value) = (values[0], values[1]);
         let kernel = KernelSpec::Move {

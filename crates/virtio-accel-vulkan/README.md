@@ -45,8 +45,12 @@ build time (ADR 0002 in `docs/adr/`).
   accumulate in binary32 and narrow once to binary16, and data movement copies the 8-bit lanes as
   integers, so all 256 patterns of each encoding — NaNs, infinities, subnormals, signed zeros —
   move bit-exactly. Nothing in the tier writes FP8 except that raw copy, so no binary32-to-FP8
-  narrowing exists. `CAST`, `MAX_POOL2D` and `ARGMAX` are admitted by TOSA for FP8 and are not
-  yet implemented.
+  narrowing is needed for either. `CAST` carries both FP8 directions, so a chain of FP8 matmuls
+  re-narrows on the device instead of round-tripping to the host; its overflow policy is this
+  crate's, since TOSA leaves float-to-FP8 overflow undefined — too large for E4M3, which has no
+  infinity, becomes NaN rather than saturating, because saturation stays expressible as a
+  `CLAMP` before the cast while a saturated value cannot be told from a genuine one.
+  `MAX_POOL2D` and `ARGMAX` are admitted by TOSA for FP8 and are not yet implemented.
 - **Whole-graph execution** (ADR 0007): the graph's execution order becomes one command buffer of
   compute dispatches with `COMPUTE → COMPUTE` memory barriers between dependent dispatches.
   `CONST` tensors and intermediates live in one per-program arena allocation (lifetime-packed;

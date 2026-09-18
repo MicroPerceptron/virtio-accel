@@ -2743,3 +2743,238 @@ fn fp8_matmul_admits_a_constant_weight_matrix() {
         }
     }
 }
+
+/// A `CAST` between two float dtypes, shape `[1, 1, elements]`.
+fn fp8_cast_artifact(from: DType, to: DType, elements: i32) -> Vec<u8> {
+    let shape = vec![1, 1, elements];
+    let mut graph = OwnedGraph::new("main");
+    graph
+        .push_tensor(OwnedTensor::new("x", shape.clone(), from))
+        .push_tensor(OwnedTensor::new("y", shape, to))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Cast,
+            vec!["x".into()],
+            vec!["y".into()],
+        ))
+        .push_input("x")
+        .push_output("y");
+    graph.build(VULKAN_TOSA_FP8_TARGET).unwrap()
+}
+
+/// Exhaustive both ways: every FP8 encoding widens to the value the TOSA crate's own decoder
+/// gives, and every finite value returns to its own encoding. The narrowing direction is the
+/// device twin of `f32_to_fp8_bits`, whose policy and rounding the unit tests pin.
+#[test]
+fn fp8_cast_round_trips_every_encoding_on_every_device() {
+    let patterns: Vec<u8> = (0..=u8::MAX).collect();
+    for device in devices() {
+        let backend = open(&device);
+        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+            let decode = |bits: u8| match dtype {
+                DType::FP8E4M3 => virtio_accel_tosa::fp8e4m3_to_f32(bits),
+                _ => virtio_accel_tosa::fp8e5m2_to_f32(bits),
+            };
+            let widen = fp8_cast_artifact(dtype, DType::FP32, patterns.len() as i32);
+            let narrow = fp8_cast_artifact(DType::FP32, dtype, patterns.len() as i32);
+            for domain in advertised_domains(&backend) {
+                let widened = run_graph_for(
+                    &backend,
+                    &widen,
+                    VULKAN_TOSA_FP8_TARGET,
+                    std::slice::from_ref(&patterns),
+                    patterns.len() * 4,
+                    domain,
+                );
+                let widened: Vec<f32> = widened
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+                    .collect();
+                for (bits, actual) in patterns.iter().zip(&widened) {
+                    let expected = decode(*bits);
+                    assert!(
+                        (expected.is_nan() && actual.is_nan())
+                            || expected.to_bits() == actual.to_bits(),
+                        "{device}: {dtype:?} widen {bits:#04x} in {domain:?}: {actual}"
+                    );
+                }
+                // Narrow the finite values back; NaN and infinity are policy, covered by the
+                // unit tests and the case below.
+                let bytes: Vec<u8> = widened
+                    .iter()
+                    .flat_map(|value| if value.is_finite() { *value } else { 0.0 }.to_le_bytes())
+                    .collect();
+                let narrowed = run_graph_for(
+                    &backend,
+                    &narrow,
+                    VULKAN_TOSA_FP8_TARGET,
+                    std::slice::from_ref(&bytes),
+                    patterns.len(),
+                    domain,
+                );
+                for (index, bits) in patterns.iter().enumerate() {
+                    let expected = if decode(*bits).is_finite() { *bits } else { 0 };
+                    assert_eq!(
+                        narrowed[index], expected,
+                        "{device}: {dtype:?} narrow {bits:#04x} in {domain:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The device honours the overflow policy: E4M3 takes an out-of-range magnitude to NaN rather
+/// than saturating to 448, and E5M2 takes it to infinity.
+#[test]
+fn fp8_cast_overflow_policy_holds_on_every_device() {
+    let values: [f32; 6] = [464.0, 464.001, -464.001, 1.0e9, -1.0e9, 100_000.0];
+    let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+    for device in devices() {
+        let backend = open(&device);
+        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+            let format = match dtype {
+                DType::FP8E4M3 => virtio_accel_vulkan::shader::Fp8Format::E4M3,
+                _ => virtio_accel_vulkan::shader::Fp8Format::E5M2,
+            };
+            let expected: Vec<u8> = values
+                .iter()
+                .map(|value| virtio_accel_vulkan::shader::f32_to_fp8_bits(format, *value))
+                .collect();
+            let artifact = fp8_cast_artifact(DType::FP32, dtype, values.len() as i32);
+            for domain in advertised_domains(&backend) {
+                let actual = run_graph_for(
+                    &backend,
+                    &artifact,
+                    VULKAN_TOSA_FP8_TARGET,
+                    std::slice::from_ref(&bytes),
+                    values.len(),
+                    domain,
+                );
+                assert_eq!(
+                    actual, expected,
+                    "{device}: {dtype:?} overflow in {domain:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Two FP8 matmuls chained through a `CAST`, which is the shape `CAST` exists for: layer one
+/// produces FP16, the cast re-narrows it to FP8, and layer two consumes that — with no host
+/// round trip between the layers.
+#[test]
+fn chained_fp8_matmuls_need_no_host_round_trip() {
+    let (m, k, h, n) = (3_i32, 4_i32, 5_i32, 2_i32);
+    for device in devices() {
+        let backend = open(&device);
+        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+            let format = match dtype {
+                DType::FP8E4M3 => virtio_accel_vulkan::shader::Fp8Format::E4M3,
+                _ => virtio_accel_vulkan::shader::Fp8Format::E5M2,
+            };
+            let decode = |bits: u8| match dtype {
+                DType::FP8E4M3 => virtio_accel_tosa::fp8e4m3_to_f32(bits),
+                _ => virtio_accel_tosa::fp8e5m2_to_f32(bits),
+            };
+            let pick = |seed: usize, count: usize| -> Vec<u8> {
+                (0..count)
+                    .map(|index| ((index * 7 + seed * 5) % 40 + 48) as u8)
+                    .collect()
+            };
+            let a = pick(1, (m * k) as usize);
+            let w1 = pick(2, (k * h) as usize);
+            let w2 = pick(3, (h * n) as usize);
+
+            let mut graph = OwnedGraph::new("main");
+            graph
+                .push_tensor(OwnedTensor::new("a", vec![1, m, k], dtype))
+                .push_tensor(OwnedTensor::constant(
+                    "w1",
+                    vec![1, k, h],
+                    dtype,
+                    w1.clone(),
+                ))
+                .push_tensor(OwnedTensor::constant(
+                    "w2",
+                    vec![1, h, n],
+                    dtype,
+                    w2.clone(),
+                ))
+                .push_tensor(OwnedTensor::constant("zp", vec![1], dtype, vec![0]))
+                .push_tensor(OwnedTensor::new("h16", vec![1, m, h], DType::FP16))
+                .push_tensor(OwnedTensor::new("h8", vec![1, m, h], dtype))
+                .push_tensor(OwnedTensor::new("y", vec![1, m, n], DType::FP16));
+            for name in ["w1", "w2", "zp"] {
+                graph.push_operator(OwnedOperator::new(
+                    OperatorKind::Const,
+                    vec![],
+                    vec![name.into()],
+                ));
+            }
+            graph
+                .push_operator(OwnedOperator::new(
+                    OperatorKind::MatMul,
+                    vec!["a".into(), "w1".into(), "zp".into(), "zp".into()],
+                    vec!["h16".into()],
+                ))
+                .push_operator(OwnedOperator::new(
+                    OperatorKind::Cast,
+                    vec!["h16".into()],
+                    vec!["h8".into()],
+                ))
+                .push_operator(OwnedOperator::new(
+                    OperatorKind::MatMul,
+                    vec!["h8".into(), "w2".into(), "zp".into(), "zp".into()],
+                    vec!["y".into()],
+                ))
+                .push_input("a")
+                .push_output("y");
+            let artifact = graph.build(VULKAN_TOSA_FP8_TARGET).unwrap();
+
+            // Host reference: widen, accumulate in binary32, narrow to FP16, re-narrow to FP8,
+            // widen again, second matmul, narrow to FP16.
+            let mut hidden = Vec::new();
+            for row in 0..m as usize {
+                for column in 0..h as usize {
+                    let mut accumulator = 0.0_f32;
+                    for inner in 0..k as usize {
+                        accumulator += decode(a[row * k as usize + inner])
+                            * decode(w1[inner * h as usize + column]);
+                    }
+                    let as_f16 = virtio_accel_vulkan::shader::f16_to_f32(
+                        virtio_accel_vulkan::shader::f32_to_f16_bits(accumulator),
+                    );
+                    hidden.push(decode(virtio_accel_vulkan::shader::f32_to_fp8_bits(
+                        format, as_f16,
+                    )));
+                }
+            }
+            let mut expected = Vec::new();
+            for row in 0..m as usize {
+                for column in 0..n as usize {
+                    let mut accumulator = 0.0_f32;
+                    for inner in 0..h as usize {
+                        accumulator += hidden[row * h as usize + inner]
+                            * decode(w2[inner * n as usize + column]);
+                    }
+                    expected.push(virtio_accel_vulkan::shader::f32_to_f16_bits(accumulator));
+                }
+            }
+            for domain in advertised_domains(&backend) {
+                let actual = run_graph_for(
+                    &backend,
+                    &artifact,
+                    VULKAN_TOSA_FP8_TARGET,
+                    std::slice::from_ref(&a),
+                    (m * n) as usize * 2,
+                    domain,
+                );
+                assert_eq!(
+                    fp16s_le(&actual),
+                    expected,
+                    "{device}: chained {dtype:?} matmuls in {domain:?}"
+                );
+            }
+        }
+    }
+}
