@@ -641,14 +641,28 @@ impl<'a, 'b> Lowering<'a, 'b> {
     // -- arena --------------------------------------------------------------------------------
 
     /// Allocate a region of `bytes` live through `live_end` at the lowest offset free of every
-    /// overlapping-lifetime region.
+    /// overlapping-lifetime region. The region is first written by the dispatch at the current
+    /// position, so regions whose lifetime ended earlier are free.
     fn allocate_region(&mut self, bytes: u64, live_end: u32) -> Result<usize, LoweringError> {
+        self.allocate_region_written_at(bytes, live_end, self.position)
+    }
+
+    /// [`allocate_region`](Self::allocate_region) for bytes first written at `written_at`
+    /// rather than at the current position. A region whose lifetime ended before `written_at`
+    /// is free; one that ends at or after it is still overlapped, because the dispatch that
+    /// writes it runs after the new bytes exist.
+    fn allocate_region_written_at(
+        &mut self,
+        bytes: u64,
+        live_end: u32,
+        written_at: u32,
+    ) -> Result<usize, LoweringError> {
         let bytes = bytes.max(1).div_ceil(ARENA_ALIGNMENT) * ARENA_ALIGNMENT;
         let mut candidates = vec![0_u64];
         let overlapping: Vec<Region> = self
             .regions
             .iter()
-            .filter(|region| region.live_end >= self.position)
+            .filter(|region| region.live_end >= written_at)
             .copied()
             .collect();
         for region in &overlapping {
@@ -698,8 +712,11 @@ impl<'a, 'b> Lowering<'a, 'b> {
         if bytes.len() as u64 != shape.byte_len() {
             return Err(LoweringError::UnsupportedGraph);
         }
-        // Constants stay live for the whole program.
-        let region = self.allocate_region(shape.byte_len(), u32::MAX)?;
+        // Constants are uploaded at `load_program`, before the first dispatch, and stay live
+        // for the whole program: their bytes are written at position 0, so a region an
+        // earlier intermediate has already died in is *not* free — the dispatch that wrote
+        // that intermediate runs after the upload and would overwrite the constant.
+        let region = self.allocate_region_written_at(shape.byte_len(), u32::MAX, 0)?;
         self.constants.push(ConstantPlan {
             offset: self.regions[region].offset,
             bytes: bytes.to_vec(),
@@ -1787,6 +1804,26 @@ mod tests {
         let d = lowering.allocate_region(1, 9).unwrap();
         assert_eq!(lowering.regions[d].offset, 2 * ARENA_ALIGNMENT);
         assert_eq!(lowering.arena_bytes, 3 * ARENA_ALIGNMENT);
+    }
+
+    /// A constant first used at position 2 is uploaded before position 0's dispatch runs, so the
+    /// bytes of `a` (dead since position 1) are not free for it: that dispatch would overwrite
+    /// the constant. An intermediate first written at position 2 may still take them.
+    #[test]
+    fn constants_never_share_bytes_with_earlier_intermediates() {
+        let model = parse(IDENTITY_FP32_LOCAL).unwrap();
+        let analysis = model.analyze_for(VULKAN_TOSA_TARGET).unwrap();
+        let mut lowering = Lowering::new(&analysis).unwrap();
+        lowering.position = 0;
+        let a = lowering.allocate_region(64, 1).unwrap();
+        assert_eq!(lowering.regions[a].offset, 0);
+        lowering.position = 2;
+        let constant = lowering
+            .allocate_region_written_at(64, u32::MAX, 0)
+            .unwrap();
+        assert_eq!(lowering.regions[constant].offset, ARENA_ALIGNMENT);
+        let intermediate = lowering.allocate_region(64, 3).unwrap();
+        assert_eq!(lowering.regions[intermediate].offset, 0);
     }
 
     /// Region `a` is read at position 1 and dies; at position 2 the packer hands its bytes to a
