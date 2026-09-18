@@ -86,6 +86,13 @@ this is a storage-and-matmul tier, not a narrower FP16 tier, and copying ADR 000
 
 ## Evidence
 
+- All 170 kernel variants the backend can assemble, the FP8 ones included, pass
+  `spirv-val --target-env vulkan1.3`, and the sweep is now a test rather than a manual step
+  (`tests/targets.rs`). ADR 0007 and ADR 0008 both cited this validation, but nothing ran it;
+  an invalid module surfaces from pipeline creation as an opaque `VK_ERROR_UNKNOWN` naming
+  neither the instruction nor the reason, which cost a bisect during this tier's development.
+  The device suite also runs clean under `VK_LAYER_KHRONOS_validation`.
+
 - Exhaustive: all 256 patterns of each encoding survive `IDENTITY` bit-for-bit on Intel Arc B390
   (Mesa ANV) and lavapipe, in every advertised memory domain. This is the analogue of the FP16
   tier's 65536-pattern `NEGATE` round trip and the reason movement is a raw byte copy.

@@ -101,6 +101,14 @@ cargo run -p virtio-accel-vulkan --example tosa_vulkan
 cargo test -p virtio-accel-vulkan
 ```
 
+Every kernel variant is validated against `spirv-val --target-env vulkan1.3` by
+`tests/targets.rs`. Install it with `spirv-tools` (Debian/Ubuntu:
+`apt install spirv-tools`); without it the sweep skips, and
+`VIRTIO_ACCEL_VULKAN_REQUIRE_SPIRV_VAL=1` turns that absence into a failure so a CI lane cannot
+lose the check by losing the package. The device suite also runs clean under
+`VK_LAYER_KHRONOS_validation` (`apt install vulkan-validationlayers`), which is worth enabling
+when changing resource or submission code.
+
 The example executes the FP32 identity artifact and then the three-operator `tanh(x · w + bias)`
 graph on the preferred device (discrete, integrated, virtual, then CPU) and exits successfully, or
 reports that no device is available. The native tests run against every enumerated device and

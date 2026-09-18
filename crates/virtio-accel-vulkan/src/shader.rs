@@ -452,6 +452,166 @@ impl KernelKey {
         }
     }
 
+    /// Every kernel variant this backend can assemble, at one representative tuning. The
+    /// SPIR-V validation sweep and the specialization-count test both walk this list, so a new
+    /// variant is validated the moment it is added here.
+    pub fn every_variant() -> Vec<KernelKey> {
+        let mut keys = Vec::new();
+        let ops = [
+            ElementwiseOp::Abs,
+            ElementwiseOp::Ceil,
+            ElementwiseOp::Cos,
+            ElementwiseOp::Erf,
+            ElementwiseOp::Exp,
+            ElementwiseOp::Floor,
+            ElementwiseOp::Log,
+            ElementwiseOp::Negate,
+            ElementwiseOp::Reciprocal,
+            ElementwiseOp::Rsqrt,
+            ElementwiseOp::Sin,
+            ElementwiseOp::Sigmoid,
+            ElementwiseOp::Tanh,
+            ElementwiseOp::Clamp(NanMode::Propagate),
+            ElementwiseOp::Clamp(NanMode::Ignore),
+            ElementwiseOp::Add,
+            ElementwiseOp::Sub,
+            ElementwiseOp::Mul,
+            ElementwiseOp::Pow,
+            ElementwiseOp::Maximum(NanMode::Propagate),
+            ElementwiseOp::Minimum(NanMode::Ignore),
+            ElementwiseOp::Equal,
+            ElementwiseOp::Greater,
+            ElementwiseOp::GreaterEqual,
+            ElementwiseOp::LogicalAnd,
+            ElementwiseOp::LogicalOr,
+            ElementwiseOp::LogicalXor,
+            ElementwiseOp::LogicalNot,
+            ElementwiseOp::Select,
+            ElementwiseOp::CopyBytes,
+        ];
+        for op in ops {
+            for float in [Storage::Word, Storage::Half] {
+                for broadcast in [false, true] {
+                    keys.push(KernelKey::Elementwise {
+                        op,
+                        float,
+                        broadcast,
+                        workgroup: 64,
+                        buffers: 17,
+                    });
+                }
+            }
+        }
+        for op in [
+            ReduceOp::Sum,
+            ReduceOp::Product,
+            ReduceOp::Max(NanMode::Propagate),
+            ReduceOp::Min(NanMode::Ignore),
+            ReduceOp::ArgMax(NanMode::Propagate),
+            ReduceOp::ArgMax(NanMode::Ignore),
+        ] {
+            for float in [Storage::Word, Storage::Half] {
+                keys.push(KernelKey::Reduce {
+                    op,
+                    float,
+                    workgroup: 64,
+                    buffers: 17,
+                });
+            }
+        }
+        for float in [Storage::Word, Storage::Half] {
+            keys.push(KernelKey::Matmul {
+                input: float,
+                output: float,
+                tile: 16,
+                buffers: 17,
+            });
+            keys.push(KernelKey::Matmul {
+                input: float,
+                output: float,
+                tile: 8,
+                buffers: 5,
+            });
+        }
+        // The FP8 tier: TOSA's `(FP8, FP8) -> FP16` MATMUL, and exact FP8 data movement.
+        for format in [Fp8Format::E4M3, Fp8Format::E5M2] {
+            keys.push(KernelKey::Matmul {
+                input: Storage::Quarter(format),
+                output: Storage::Half,
+                tile: 16,
+                buffers: 17,
+            });
+            keys.push(KernelKey::Matmul {
+                input: Storage::Quarter(format),
+                output: Storage::Half,
+                tile: 8,
+                buffers: 5,
+            });
+        }
+        for nan_mode in [NanMode::Propagate, NanMode::Ignore] {
+            for float in [Storage::Word, Storage::Half] {
+                keys.push(KernelKey::MaxPool {
+                    nan_mode,
+                    float,
+                    workgroup: 64,
+                    buffers: 17,
+                });
+            }
+        }
+        // The FP8 tier's pooling and ARGMAX: pooling selects an existing encoding, ARGMAX
+        // compares widened values and emits an INT32 index.
+        for format in [Fp8Format::E4M3, Fp8Format::E5M2] {
+            for nan_mode in [NanMode::Propagate, NanMode::Ignore] {
+                keys.push(KernelKey::MaxPool {
+                    nan_mode,
+                    float: Storage::Quarter(format),
+                    workgroup: 64,
+                    buffers: 17,
+                });
+                keys.push(KernelKey::Reduce {
+                    op: ReduceOp::ArgMax(nan_mode),
+                    float: Storage::Quarter(format),
+                    workgroup: 64,
+                    buffers: 17,
+                });
+            }
+        }
+        // Every CAST pair the FP8 tier lowers, both directions.
+        for format in [Fp8Format::E4M3, Fp8Format::E5M2] {
+            for wide in [Storage::Word, Storage::Half] {
+                keys.push(KernelKey::Cast {
+                    input: Storage::Quarter(format),
+                    output: wide,
+                    workgroup: 64,
+                    buffers: 17,
+                });
+                keys.push(KernelKey::Cast {
+                    input: wide,
+                    output: Storage::Quarter(format),
+                    workgroup: 64,
+                    buffers: 17,
+                });
+            }
+        }
+        for storage in [
+            Storage::Word,
+            Storage::Byte,
+            Storage::Half,
+            Storage::Quarter(Fp8Format::E4M3),
+            Storage::Quarter(Fp8Format::E5M2),
+        ] {
+            for contiguous in [false, true] {
+                keys.push(KernelKey::Move {
+                    storage,
+                    contiguous,
+                    workgroup: 64,
+                    buffers: 17,
+                });
+            }
+        }
+        keys
+    }
+
     /// Number of specialization constants the module declares, ids `0..count`.
     pub const fn spec_constant_count(self) -> u32 {
         match self {
@@ -2945,160 +3105,7 @@ mod tests {
 
     /// Every kernel variant the lowering can select, at one representative tuning.
     fn all_keys() -> Vec<KernelKey> {
-        let mut keys = Vec::new();
-        let ops = [
-            ElementwiseOp::Abs,
-            ElementwiseOp::Ceil,
-            ElementwiseOp::Cos,
-            ElementwiseOp::Erf,
-            ElementwiseOp::Exp,
-            ElementwiseOp::Floor,
-            ElementwiseOp::Log,
-            ElementwiseOp::Negate,
-            ElementwiseOp::Reciprocal,
-            ElementwiseOp::Rsqrt,
-            ElementwiseOp::Sin,
-            ElementwiseOp::Sigmoid,
-            ElementwiseOp::Tanh,
-            ElementwiseOp::Clamp(NanMode::Propagate),
-            ElementwiseOp::Clamp(NanMode::Ignore),
-            ElementwiseOp::Add,
-            ElementwiseOp::Sub,
-            ElementwiseOp::Mul,
-            ElementwiseOp::Pow,
-            ElementwiseOp::Maximum(NanMode::Propagate),
-            ElementwiseOp::Minimum(NanMode::Ignore),
-            ElementwiseOp::Equal,
-            ElementwiseOp::Greater,
-            ElementwiseOp::GreaterEqual,
-            ElementwiseOp::LogicalAnd,
-            ElementwiseOp::LogicalOr,
-            ElementwiseOp::LogicalXor,
-            ElementwiseOp::LogicalNot,
-            ElementwiseOp::Select,
-            ElementwiseOp::CopyBytes,
-        ];
-        for op in ops {
-            for float in [Storage::Word, Storage::Half] {
-                for broadcast in [false, true] {
-                    keys.push(KernelKey::Elementwise {
-                        op,
-                        float,
-                        broadcast,
-                        workgroup: 64,
-                        buffers: 17,
-                    });
-                }
-            }
-        }
-        for op in [
-            ReduceOp::Sum,
-            ReduceOp::Product,
-            ReduceOp::Max(NanMode::Propagate),
-            ReduceOp::Min(NanMode::Ignore),
-            ReduceOp::ArgMax(NanMode::Propagate),
-            ReduceOp::ArgMax(NanMode::Ignore),
-        ] {
-            for float in [Storage::Word, Storage::Half] {
-                keys.push(KernelKey::Reduce {
-                    op,
-                    float,
-                    workgroup: 64,
-                    buffers: 17,
-                });
-            }
-        }
-        for float in [Storage::Word, Storage::Half] {
-            keys.push(KernelKey::Matmul {
-                input: float,
-                output: float,
-                tile: 16,
-                buffers: 17,
-            });
-            keys.push(KernelKey::Matmul {
-                input: float,
-                output: float,
-                tile: 8,
-                buffers: 5,
-            });
-        }
-        // The FP8 tier: TOSA's `(FP8, FP8) -> FP16` MATMUL, and exact FP8 data movement.
-        for format in [Fp8Format::E4M3, Fp8Format::E5M2] {
-            keys.push(KernelKey::Matmul {
-                input: Storage::Quarter(format),
-                output: Storage::Half,
-                tile: 16,
-                buffers: 17,
-            });
-            keys.push(KernelKey::Matmul {
-                input: Storage::Quarter(format),
-                output: Storage::Half,
-                tile: 8,
-                buffers: 5,
-            });
-        }
-        for nan_mode in [NanMode::Propagate, NanMode::Ignore] {
-            for float in [Storage::Word, Storage::Half] {
-                keys.push(KernelKey::MaxPool {
-                    nan_mode,
-                    float,
-                    workgroup: 64,
-                    buffers: 17,
-                });
-            }
-        }
-        // The FP8 tier's pooling and ARGMAX: pooling selects an existing encoding, ARGMAX
-        // compares widened values and emits an INT32 index.
-        for format in [Fp8Format::E4M3, Fp8Format::E5M2] {
-            for nan_mode in [NanMode::Propagate, NanMode::Ignore] {
-                keys.push(KernelKey::MaxPool {
-                    nan_mode,
-                    float: Storage::Quarter(format),
-                    workgroup: 64,
-                    buffers: 17,
-                });
-                keys.push(KernelKey::Reduce {
-                    op: ReduceOp::ArgMax(nan_mode),
-                    float: Storage::Quarter(format),
-                    workgroup: 64,
-                    buffers: 17,
-                });
-            }
-        }
-        // Every CAST pair the FP8 tier lowers, both directions.
-        for format in [Fp8Format::E4M3, Fp8Format::E5M2] {
-            for wide in [Storage::Word, Storage::Half] {
-                keys.push(KernelKey::Cast {
-                    input: Storage::Quarter(format),
-                    output: wide,
-                    workgroup: 64,
-                    buffers: 17,
-                });
-                keys.push(KernelKey::Cast {
-                    input: wide,
-                    output: Storage::Quarter(format),
-                    workgroup: 64,
-                    buffers: 17,
-                });
-            }
-        }
-        for storage in [
-            Storage::Word,
-            Storage::Byte,
-            Storage::Half,
-            Storage::Quarter(Fp8Format::E4M3),
-            Storage::Quarter(Fp8Format::E5M2),
-        ] {
-            for contiguous in [false, true] {
-                keys.push(KernelKey::Move {
-                    storage,
-                    contiguous,
-                    workgroup: 64,
-                    buffers: 17,
-                });
-            }
-        }
-        keys
+        KernelKey::every_variant()
     }
 
     /// Walk a module instruction by instruction: word counts tile the body exactly, every id is

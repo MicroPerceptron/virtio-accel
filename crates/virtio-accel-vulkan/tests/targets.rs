@@ -224,3 +224,74 @@ fn every_kernel_variant_assembles_to_valid_spirv_headers() {
         assert_eq!(key.assemble(), words, "deterministic assembly for {key:?}");
     }
 }
+
+/// Every kernel variant passes `spirv-val --target-env vulkan1.3`.
+///
+/// ADR 0007 and ADR 0008 both cite this validation as evidence, but nothing ran it: a module
+/// that no driver accepts is otherwise diagnosed as an opaque `VK_ERROR_UNKNOWN` from pipeline
+/// creation, which names neither the instruction nor the reason. The absence rule mirrors
+/// `VIRTIO_ACCEL_VULKAN_REQUIRE_DEVICE`: without the tool the sweep skips, and
+/// `VIRTIO_ACCEL_VULKAN_REQUIRE_SPIRV_VAL=1` turns that absence into a failure, so a CI lane
+/// cannot lose the check by losing the package.
+#[test]
+fn every_kernel_variant_passes_spirv_val() {
+    use std::io::Write;
+    use std::process::Command;
+    use virtio_accel_vulkan::shader::KernelKey;
+
+    let required =
+        std::env::var_os("VIRTIO_ACCEL_VULKAN_REQUIRE_SPIRV_VAL").is_some_and(|value| value == "1");
+    let probe = Command::new("spirv-val")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|output| output.status.success());
+    let Some(probe) = probe else {
+        assert!(
+            !required,
+            "VIRTIO_ACCEL_VULKAN_REQUIRE_SPIRV_VAL=1 but spirv-val is not on PATH"
+        );
+        eprintln!("skipping: spirv-val is not installed (package `spirv-tools`)");
+        return;
+    };
+    eprintln!(
+        "validating with {}",
+        String::from_utf8_lossy(&probe.stdout).trim()
+    );
+
+    let directory = std::env::temp_dir().join(format!("va-spirv-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).expect("scratch directory");
+    let variants = KernelKey::every_variant();
+    assert!(!variants.is_empty(), "no kernel variants to validate");
+    let mut failures = Vec::new();
+    for (index, key) in variants.iter().enumerate() {
+        let words = key.assemble();
+        let path = directory.join(format!("{index:04}.spv"));
+        let mut file = std::fs::File::create(&path).expect("module file");
+        for word in &words {
+            file.write_all(&word.to_le_bytes()).expect("module bytes");
+        }
+        drop(file);
+        let output = Command::new("spirv-val")
+            .arg("--target-env")
+            .arg("vulkan1.3")
+            .arg(&path)
+            .output()
+            .expect("spirv-val runs");
+        if !output.status.success() {
+            failures.push(format!(
+                "{key:?}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+    assert!(
+        failures.is_empty(),
+        "{} of {} kernel variants are invalid SPIR-V:\n{}",
+        failures.len(),
+        variants.len(),
+        failures.join("\n")
+    );
+    eprintln!("{} kernel variants validated", variants.len());
+}
