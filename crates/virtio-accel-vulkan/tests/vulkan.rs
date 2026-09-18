@@ -3091,3 +3091,108 @@ fn fp8_pooling_and_argmax_execute_on_every_device() {
         }
     }
 }
+
+/// The FP8 MATMUL at aftershock's colour-stage scale and value range, which the small-shape
+/// tests above never reach: `(m, k, n) = (6912, 128, 3)`, falloff in `(0, 1]` and colours around
+/// `0.01..0.08`.
+///
+/// Aftershock observed a light-field mismatch of 0.047 against a peak of 1.0 on this shape --
+/// bit-identical on ANV and on lavapipe, which rules out a driver -- while every existing FP8
+/// test passed on four stacks. The existing tests use `(5, 7, 3)`, so either the shape or the
+/// distribution is what they miss. This test exists to say which.
+///
+/// Unlike the small-shape test this compares in binary32 with a tolerance rather than asserting
+/// bit equality. With `k = 128` a tiled kernel may sum in a different order than the sequential
+/// reference, and f32 reassociation alone would break exact equality without anything being
+/// wrong. The tolerance is generous against the observed 4.7%-of-peak error: anything near that
+/// magnitude fails loudly, while legitimate reassociation lands orders of magnitude below it.
+#[test]
+fn fp8_matmul_holds_at_aftershock_scale() {
+    let (m, k, n) = (6912_usize, 128_usize, 3_usize);
+    for device in devices() {
+        let backend = open(&device);
+        assert!(
+            advertises_fp8(&backend),
+            "{device}: FP8 tier not advertised"
+        );
+        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+            let format = match dtype {
+                DType::FP8E4M3 => virtio_accel_vulkan::shader::Fp8Format::E4M3,
+                _ => virtio_accel_vulkan::shader::Fp8Format::E5M2,
+            };
+            let narrow = |value: f32| virtio_accel_vulkan::shader::f32_to_fp8_bits(format, value);
+            let widen = |bits: u8| -> f32 {
+                match dtype {
+                    DType::FP8E4M3 => virtio_accel_tosa::fp8e4m3_to_f32(bits),
+                    _ => virtio_accel_tosa::fp8e5m2_to_f32(bits),
+                }
+            };
+
+            // Falloff: exp of a non-positive quantity, so (0, 1] with most mass small -- the
+            // distribution that matters, since E4M3 subnormals begin below 2^-6.
+            let a: Vec<u8> = (0..m * k)
+                .map(|index| {
+                    let t = (index % 997) as f32 / 997.0;
+                    narrow((-6.0 * t).exp())
+                })
+                .collect();
+            // Colours: the same order of magnitude aftershock uses.
+            let b: Vec<u8> = (0..k * n)
+                .map(|index| narrow(0.01 + (index % 7) as f32 * 0.01))
+                .collect();
+
+            let mut expected = Vec::with_capacity(m * n);
+            for row in 0..m {
+                for column in 0..n {
+                    let mut accumulator = 0.0_f32;
+                    for inner in 0..k {
+                        accumulator += widen(a[row * k + inner]) * widen(b[inner * n + column]);
+                    }
+                    expected.push(accumulator);
+                }
+            }
+            let peak = expected
+                .iter()
+                .fold(0.0_f32, |worst, &v| worst.max(v.abs()));
+            assert!(peak > 0.0, "reference is empty");
+
+            let artifact = fp8_matmul_artifact(dtype, m as i32, k as i32, n as i32);
+            for domain in advertised_domains(&backend) {
+                let actual = run_graph_for(
+                    &backend,
+                    &artifact,
+                    VULKAN_TOSA_FP8_TARGET,
+                    &[a.clone(), b.clone()],
+                    m * n * 2,
+                    domain,
+                );
+                let got = fp16s_le(&actual);
+                assert_eq!(
+                    got.len(),
+                    expected.len(),
+                    "{device}: {dtype:?} output length"
+                );
+                let mut worst = 0.0_f32;
+                let mut worst_at = 0;
+                for (index, (&bits, &reference)) in got.iter().zip(&expected).enumerate() {
+                    let error = (virtio_accel_vulkan::shader::f16_to_f32(bits) - reference).abs();
+                    if error > worst {
+                        worst = error;
+                        worst_at = index;
+                    }
+                }
+                eprintln!(
+                    "{device}: {dtype:?} {domain:?} worst abs {worst:.6} at {worst_at} \
+                     (peak {peak:.6}, {:.3}% of peak)",
+                    worst / peak * 100.0
+                );
+                assert!(
+                    worst < peak * 0.01,
+                    "{device}: {dtype:?} in {domain:?} is off by {worst} at index {worst_at}, \
+                     {:.2}% of peak {peak} -- far past f32 reassociation",
+                    worst / peak * 100.0
+                );
+            }
+        }
+    }
+}
