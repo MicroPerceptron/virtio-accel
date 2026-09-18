@@ -90,5 +90,12 @@ this is a storage-and-matmul tier, not a narrower FP16 tier, and copying ADR 000
   not FP8 arithmetic — which is what TOSA defines FP8 MATMUL to be.
 - Graphs mixing FP8 matmuls with FP32 elementwise work partition across the two targets. That is
   the honest shape: TOSA has no FP8 elementwise operator to fuse them with.
-- `CAST` remains the most valuable follow-up: it is the only way to produce FP8 inside a graph,
-  and it needs the same mixed-storage kernel key this ADR introduces.
+- FP8 reaches a graph three ways the tier already admits: as a program input, as a `CONST`, and
+  as the result of data movement over either. The dominant shape — a weight matrix narrowed once
+  on the host, as `axnn` has done since its first FP8 support, then carried as packed bytes — is
+  covered today and tested.
+- `CAST` is therefore a refinement rather than the unlock: it is the only operator that *narrows*
+  a wider float to FP8 *inside* a graph, which matters for a graph that computes in FP16 or FP32
+  and re-narrows mid-graph without a host round trip. It needs the same mixed-storage kernel key
+  this ADR introduces. `MAX_POOL2D`, `ARGMAX` and the gather family also output FP8, but only
+  from FP8 that already exists.
