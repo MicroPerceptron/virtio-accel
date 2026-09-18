@@ -650,6 +650,60 @@ pub const fn matmul_workgroups(m: u32, n: u32, batch: u32, tile: u32) -> [u32; 3
 /// The exact binary32 value of a binary16 bit pattern (host side of the kernels' unpack: every
 /// binary16 value, subnormals included, is exactly representable in binary32; NaN payloads are
 /// preserved).
+/// Narrow binary32 to one FP8 encoding with round-to-nearest, ties-to-even.
+///
+/// **Overflow policy.** TOSA 1.0 through 1.2 leave float-to-FP8 overflow undefined, so this is
+/// the crate's policy rather than the spec's. A magnitude too large for E4M3 — which has no
+/// infinity — becomes NaN, not the finite maximum. The reason is that the alternatives are not
+/// symmetric: a consumer who wants saturation can `CLAMP` in a wider dtype before the `CAST`
+/// and get it exactly, while a consumer handed a saturated 448 cannot tell it from a value that
+/// was always 448. NaN preserves the choice; saturation destroys it. It also matches what this
+/// crate already does one format up, where `narrow_f16` signals unrepresentability as infinity
+/// rather than clamping to 65504.
+///
+/// E5M2 needs no policy: it is IEEE-shaped, so overflow becomes infinity like any binary float.
+/// NaN in becomes a canonical quiet NaN out, sign preserved, for both encodings.
+pub fn f32_to_fp8_bits(format: Fp8Format, value: f32) -> u8 {
+    let (mantissa_bits, bias, nan_out, max_finite): (u32, u32, u8, u32) = match format {
+        // E4M3's `0x7f` is its only NaN, so the finite encodings stop at `0x7e` (448).
+        Fp8Format::E4M3 => (3, 7, 0x7f, 0x7e),
+        // E5M2's `0x7c` is infinity; finite encodings stop at `0x7b` (57344).
+        Fp8Format::E5M2 => (2, 15, 0x7e, 0x7b),
+    };
+    let bits = value.to_bits();
+    let sign = ((bits >> 24) as u8) & 0x80;
+    let magnitude = bits & 0x7fff_ffff;
+    if magnitude > 0x7f80_0000 {
+        return sign | nan_out;
+    }
+    let shift = 23 - mantissa_bits;
+    let normal_floor = (128 - bias) << 23;
+    let body = if magnitude >= normal_floor {
+        // Rebias into the target's exponent range, then round the significand with the
+        // add-half-ulp-plus-guard trick; a significand carry increments the exponent by itself.
+        let adjusted = magnitude - ((127 - bias) << 23);
+        let guard = (adjusted >> shift) & 1;
+        let half_ulp = (1 << (shift - 1)) - 1;
+        (adjusted + half_ulp + guard) >> shift
+    } else {
+        // Subnormal or zero: scale into integer range — exact for every representable
+        // subnormal — and round to the nearest integer, ties to even. A rounding carry reaches
+        // the smallest normal encoding on its own.
+        let scale = f32::from_bits((127 + bias - 1 + mantissa_bits) << 23);
+        (f32::from_bits(magnitude) * scale).round_ties_even() as u32
+    };
+    // Rounding has already happened, so landing above the last finite encoding *is* the
+    // overflow test; infinity in reaches it too.
+    if body > max_finite {
+        let overflow = match format {
+            Fp8Format::E4M3 => nan_out,
+            Fp8Format::E5M2 => 0x7c,
+        };
+        return sign | overflow;
+    }
+    sign | body as u8
+}
+
 pub fn f16_to_f32(bits: u16) -> f32 {
     let bits = u32::from(bits);
     let sign = (bits & 0x8000) << 16;
@@ -3215,5 +3269,117 @@ mod tests {
                 case.to_bits()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod fp8_narrowing_tests {
+    use super::*;
+    use virtio_accel_tosa::{fp8e4m3_to_f32, fp8e5m2_to_f32};
+
+    /// An independent oracle: scan every non-negative encoding for the nearest magnitude, ties
+    /// to even, then apply the sign separately as IEEE does — so a value that rounds to zero
+    /// keeps its sign. No bit arithmetic in common with [`f32_to_fp8_bits`].
+    fn nearest_by_search(format: Fp8Format, value: f32) -> u8 {
+        let sign = if value.is_sign_negative() { 0x80 } else { 0x00 };
+        let magnitude = value.abs();
+        let mut best: Option<(f32, u8)> = None;
+        for bits in 0..=0x7f_u8 {
+            let candidate = fp8_decode(format, bits);
+            if !candidate.is_finite() {
+                continue;
+            }
+            let distance = (candidate - magnitude).abs();
+            best = match best {
+                None => Some((distance, bits)),
+                Some((best_distance, _)) if distance < best_distance => Some((distance, bits)),
+                Some((best_distance, best_bits))
+                    if distance == best_distance && bits & 1 == 0 && best_bits & 1 == 1 =>
+                {
+                    Some((distance, bits))
+                }
+                other => other,
+            };
+        }
+        sign | best.expect("a finite encoding exists").1
+    }
+
+    #[test]
+    fn narrowing_round_trips_every_encoding_exactly() {
+        for format in [Fp8Format::E4M3, Fp8Format::E5M2] {
+            for bits in 0..=u8::MAX {
+                let value = match format {
+                    Fp8Format::E4M3 => fp8e4m3_to_f32(bits),
+                    Fp8Format::E5M2 => fp8e5m2_to_f32(bits),
+                };
+                if !value.is_finite() {
+                    continue;
+                }
+                assert_eq!(
+                    f32_to_fp8_bits(format, value),
+                    bits,
+                    "{format:?}: {value} did not return to {bits:#04x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn narrowing_matches_an_independent_nearest_search() {
+        for format in [Fp8Format::E4M3, Fp8Format::E5M2] {
+            let max_finite = match format {
+                Fp8Format::E4M3 => 448.0_f32,
+                Fp8Format::E5M2 => 57344.0_f32,
+            };
+            let mut state = 0x1234_5678_u32;
+            for index in 0..200_000 {
+                // A mix of exact midpoints, subnormal-range values, and pseudo-random draws.
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let value = if index % 3 == 0 {
+                    let a = fp8_decode(format, (index % 256) as u8);
+                    let b = fp8_decode(format, ((index + 1) % 256) as u8);
+                    (a + b) * 0.5
+                } else {
+                    let scaled = (state >> 8) as f32 / (1_u32 << 24) as f32;
+                    (scaled * 2.0 - 1.0) * max_finite * 1.2
+                };
+                if !value.is_finite() {
+                    continue;
+                }
+                let actual = f32_to_fp8_bits(format, value);
+                if value.abs() > max_finite {
+                    continue; // overflow is this crate's policy, not a nearest-value question
+                }
+                assert_eq!(
+                    actual,
+                    nearest_by_search(format, value),
+                    "{format:?}: {value}"
+                );
+            }
+        }
+    }
+
+    fn fp8_decode(format: Fp8Format, bits: u8) -> f32 {
+        match format {
+            Fp8Format::E4M3 => fp8e4m3_to_f32(bits),
+            Fp8Format::E5M2 => fp8e5m2_to_f32(bits),
+        }
+    }
+
+    #[test]
+    fn overflow_policy_is_nan_for_e4m3_and_infinity_for_e5m2() {
+        // 464 is the midpoint above 448 and ties to even, so it stays finite; anything beyond
+        // it is unrepresentable.
+        assert_eq!(f32_to_fp8_bits(Fp8Format::E4M3, 464.0), 0x7e);
+        assert_eq!(f32_to_fp8_bits(Fp8Format::E4M3, 464.001), 0x7f);
+        assert_eq!(f32_to_fp8_bits(Fp8Format::E4M3, -464.001), 0xff);
+        assert_eq!(f32_to_fp8_bits(Fp8Format::E4M3, f32::INFINITY), 0x7f);
+        assert_eq!(f32_to_fp8_bits(Fp8Format::E4M3, f32::NAN), 0x7f);
+        assert_eq!(f32_to_fp8_bits(Fp8Format::E5M2, 1.0e9), 0x7c);
+        assert_eq!(f32_to_fp8_bits(Fp8Format::E5M2, f32::NEG_INFINITY), 0xfc);
+        assert_eq!(f32_to_fp8_bits(Fp8Format::E5M2, f32::NAN), 0x7e);
+        // Signed zero survives.
+        assert_eq!(f32_to_fp8_bits(Fp8Format::E4M3, -0.0), 0x80);
+        assert_eq!(f32_to_fp8_bits(Fp8Format::E5M2, 0.0), 0x00);
     }
 }
