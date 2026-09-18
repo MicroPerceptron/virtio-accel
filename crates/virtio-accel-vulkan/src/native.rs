@@ -153,14 +153,21 @@ impl Tuning {
                 workgroup: self.workgroup,
                 buffers: self.buffers,
             },
-            KernelSpec::Matmul { float } => KernelKey::Matmul {
-                float,
+            KernelSpec::Matmul { input, output } => KernelKey::Matmul {
+                input,
+                output,
                 tile: self.matmul_tile,
                 buffers: self.buffers,
             },
             KernelSpec::MaxPool { nan_mode, float } => KernelKey::MaxPool {
                 nan_mode,
                 float,
+                workgroup: self.workgroup,
+                buffers: self.buffers,
+            },
+            KernelSpec::Cast { input, output } => KernelKey::Cast {
+                input,
+                output,
                 workgroup: self.workgroup,
                 buffers: self.buffers,
             },
@@ -1907,10 +1914,13 @@ impl Drop for PartialProgram<'_> {
 
 impl TosaCapabilityProvider for VulkanAccelerator {
     fn tosa_capabilities(&self) -> &'static [CapabilityDescriptor] {
-        // The FP16 tier needs no device feature at all (ADR 0008): the kernels' binary16
-        // conversions are crate-owned integer and binary32 code, so every device that hosts the
-        // FP32 tier hosts the FP16 tier with identical numerics.
-        &[crate::VULKAN_TOSA_FP16_CAPABILITY]
+        // Neither tier needs a device feature (ADR 0008, ADR 0009): every conversion is
+        // crate-owned integer and binary32 code, so both are advertised on every device the
+        // backend opens, with numerics identical everywhere.
+        &[
+            crate::VULKAN_TOSA_FP16_CAPABILITY,
+            crate::VULKAN_TOSA_FP8_CAPABILITY,
+        ]
     }
 }
 

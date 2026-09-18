@@ -34,6 +34,26 @@ build time (ADR 0002 in `docs/adr/`).
   bit-exactly; MATMUL and reductions accumulate in binary32 (the accumulator width TOSA assigns
   FP16); stores repack with the same neighbour-safe atomics `BOOL` uses. Numerics are
   bit-identical across devices by construction.
+- **The FP8 operator tier** (`VULKAN_TOSA_FP8_CAPABILITY`, `VULKAN_TOSA_FP8_TARGET`, ADR 0009):
+  TOSA's `(FP8, FP8) -> FP16` `MATMUL` over either encoding, plus `CAST`, `MAX_POOL2D`,
+  `ARGMAX`, `IDENTITY`, `RESHAPE`, `TRANSPOSE`, `REVERSE`, `CONCAT`, `CONST` and `CONST_SHAPE` — advertised on every device, again
+  with no device feature. Unlike the FP16 tier this is a *separate target*, because TOSA gates
+  FP8 on the `FP8E4M3` / `FP8E5M2` extensions rather than the base profile, and a *subset*
+  envelope, because TOSA admits no FP8 elementwise operator at all — no arithmetic, comparison,
+  selection, reduction or transcendental lane takes FP8. Packed bytes are widened to binary32 by
+  crate-owned integer code exactly (every FP8 value is representable in binary32), matmuls
+  accumulate in binary32 and narrow once to binary16, and data movement copies the 8-bit lanes as
+  integers, so all 256 patterns of each encoding — NaNs, infinities, subnormals, signed zeros —
+  move bit-exactly. Nothing in the tier writes FP8 except that raw copy, so no binary32-to-FP8
+  narrowing is needed for either. `CAST` carries both FP8 directions, so a chain of FP8 matmuls
+  re-narrows on the device instead of round-tripping to the host; its overflow policy is this
+  crate's, since TOSA leaves float-to-FP8 overflow undefined — too large for E4M3, which has no
+  infinity, becomes NaN rather than saturating, because saturation stays expressible as a
+  `CLAMP` before the cast while a saturated value cannot be told from a genuine one.
+  `MAX_POOL2D` and `ARGMAX` are included: pooling selects an existing encoding rather than
+  computing one, and `ARGMAX` compares widened values and emits an `INT32` index, so neither
+  introduces a rounding decision. The convolution and gather families remain unimplemented for
+  every dtype.
 - **Whole-graph execution** (ADR 0007): the graph's execution order becomes one command buffer of
   compute dispatches with `COMPUTE → COMPUTE` memory barriers between dependent dispatches.
   `CONST` tensors and intermediates live in one per-program arena allocation (lifetime-packed;
@@ -81,6 +101,14 @@ cargo run -p virtio-accel-vulkan --example tosa_vulkan
 cargo test -p virtio-accel-vulkan
 ```
 
+Every kernel variant is validated against `spirv-val --target-env vulkan1.3` by
+`tests/targets.rs`. Install it with `spirv-tools` (Debian/Ubuntu:
+`apt install spirv-tools`); without it the sweep skips, and
+`VIRTIO_ACCEL_VULKAN_REQUIRE_SPIRV_VAL=1` turns that absence into a failure so a CI lane cannot
+lose the check by losing the package. The device suite also runs clean under
+`VK_LAYER_KHRONOS_validation` (`apt install vulkan-validationlayers`), which is worth enabling
+when changing resource or submission code.
+
 The example executes the FP32 identity artifact and then the three-operator `tanh(x · w + bias)`
 graph on the preferred device (discrete, integrated, virtual, then CPU) and exits successfully, or
 reports that no device is available. The native tests run against every enumerated device and
@@ -106,6 +134,24 @@ Intel Arc 140V (Lunar Lake, Mesa 26.0.8 ANV, Vulkan 1.4.335) together with the s
 and 2 ulp (erf) worst case against binary64 on both devices. On 2026-09-17 the same suite passed
 on Apple M4 via MoltenVK 1.4.2 (local validation only, not a CI lane). One crate, no per-driver
 code paths.
+
+**FP8 tier.** Advertised on every device the backend opens, for the same reason the FP16 tier is:
+no conversion in it touches a device feature. On 2026-09-18 the full device suite passed on Intel
+Arc B390 (Panther Lake, Mesa 26.0.8 ANV, Vulkan 1.4.335) with that host's llvmpipe (LLVM 21.1.8),
+independently on a Lunar Lake host (Xe2, Mesa ANV), and on an Apple M3 via MoltenVK — two Intel
+GPU generations, Apple Silicon, and a software ICD, across three unrelated driver stacks, in every
+advertised memory domain, with identical results. That matters more here than for the other tiers:
+the tier's claim is that FP8 numerics *cannot* vary by device, since every widening and narrowing
+is crate-owned integer and binary32 code, and until a second silicon generation ran it that was an
+argument rather than a measurement. The Apple run is the sharpest of the three, because MoltenVK
+translates the SPIR-V to Metal and Apple Silicon flushes denormals: the tier is unaffected because
+widening never produces a binary32 denormal (the smallest FP8 value, 2⁻¹⁶, is a normal binary32)
+and narrowing rounds every denormal input to zero whether or not the device flushed it first. Covered on each: all 256 patterns of both
+encodings through `IDENTITY` bit-for-bit, `MATMUL` against a widened host reference with input and
+with constant operands, `CAST` round-tripping every encoding in both directions and honouring the
+overflow policy, two FP8 matmuls chained through a `CAST`, and `MAX_POOL2D`/`ARGMAX`. All 170
+assembled kernel variants pass `spirv-val --target-env vulkan1.3`, and the device suite runs clean
+under `VK_LAYER_KHRONOS_validation`.
 
 **FP16 tier.** The tier is advertised on every device the backend opens, lavapipe and MoltenVK
 included, so the CI lane covers it continuously. On 2026-09-17 the full FP16 corpus passed on

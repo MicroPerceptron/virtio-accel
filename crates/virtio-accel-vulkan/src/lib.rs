@@ -24,8 +24,9 @@ mod lower;
 pub mod shader;
 
 pub use lower::{
-    LoweringError, VULKAN_TOSA_CAPABILITY, VULKAN_TOSA_FP16_CAPABILITY, VULKAN_TOSA_INTEGER_TARGET,
-    VULKAN_TOSA_TARGET, supports_tosa_dtype, supports_tosa_operator,
+    LoweringError, VULKAN_TOSA_CAPABILITY, VULKAN_TOSA_FP8_CAPABILITY, VULKAN_TOSA_FP8_TARGET,
+    VULKAN_TOSA_FP16_CAPABILITY, VULKAN_TOSA_INTEGER_TARGET, VULKAN_TOSA_TARGET,
+    supports_tosa_dtype, supports_tosa_operator,
 };
 
 #[cfg(not(va_vulkan))]

@@ -30,8 +30,8 @@ use virtio_accel_tosa::{
 };
 use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
 use virtio_accel_vulkan::{
-    InitError, REQUIRED_RESIDENT_BYTES, VULKAN_TOSA_INTEGER_TARGET, VULKAN_TOSA_TARGET,
-    VulkanAccelerator, VulkanEvent,
+    InitError, REQUIRED_RESIDENT_BYTES, VULKAN_TOSA_FP8_TARGET, VULKAN_TOSA_INTEGER_TARGET,
+    VULKAN_TOSA_TARGET, VulkanAccelerator, VulkanEvent,
 };
 
 const IDENTITY_FP32_LOCAL: &[u8] = include_bytes!("data/identity-fp32-v1.0.0.tosa");
@@ -1200,9 +1200,28 @@ fn run_graph(
     output_len: usize,
     domain: MemoryDomain,
 ) -> Vec<u8> {
+    run_graph_for(
+        backend,
+        artifact,
+        VULKAN_TOSA_TARGET,
+        inputs,
+        output_len,
+        domain,
+    )
+}
+
+/// [`run_graph`] against an explicit target, for artifacts outside the FP32/FP16 tier.
+fn run_graph_for(
+    backend: &VulkanAccelerator,
+    artifact: &[u8],
+    target: Target,
+    inputs: &[Vec<u8>],
+    output_len: usize,
+    domain: MemoryDomain,
+) -> Vec<u8> {
     let device = backend.device_name();
     let context = backend.create_context(ContextDesc::default()).unwrap();
-    let program = load(backend, &context, artifact, VULKAN_TOSA_TARGET)
+    let program = load(backend, &context, artifact, target)
         .unwrap_or_else(|error| panic!("{device}: load failed: {error:?}"));
     let output = execute(backend, &context, &program, inputs, output_len, domain);
     release(backend.unload_program(program));
@@ -2464,6 +2483,609 @@ fn fp16_higher_precision_lanes_track_binary64_references() {
                     fp16_within_ulps(*expected, *actual, 1),
                     "{device}: {name}({:#06x}): expected within 1 ulp of {expected:#06x}, got {actual:#06x}",
                     inputs[index]
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The FP8 tier (ADR 0009)
+// ---------------------------------------------------------------------------------------------
+
+fn advertises_fp8(backend: &VulkanAccelerator) -> bool {
+    backend
+        .tosa_capabilities()
+        .iter()
+        .any(|capability| capability.supports_dtype(DType::FP8E4M3, ValueRoles::INPUT))
+}
+
+/// Every FP8 bit pattern of `dtype`, in order.
+fn all_fp8_patterns() -> Vec<u8> {
+    (0..=u8::MAX).collect()
+}
+
+/// An `IDENTITY` over `elements` FP8 scalars: the tier's data-movement path.
+fn fp8_identity_artifact(dtype: DType, elements: i32) -> Vec<u8> {
+    let shape = vec![1, 1, elements];
+    let mut graph = OwnedGraph::new("main");
+    graph
+        .push_tensor(OwnedTensor::new("x", shape.clone(), dtype))
+        .push_tensor(OwnedTensor::new("y", shape, dtype))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Identity,
+            vec!["x".into()],
+            vec!["y".into()],
+        ))
+        .push_input("x")
+        .push_output("y");
+    graph.build(VULKAN_TOSA_FP8_TARGET).unwrap()
+}
+
+/// `(FP8, FP8) -> FP16` MATMUL over `[1, m, k] x [1, k, n]`, with the zero points TOSA requires.
+fn fp8_matmul_artifact(dtype: DType, m: i32, k: i32, n: i32) -> Vec<u8> {
+    let mut graph = OwnedGraph::new("main");
+    graph
+        .push_tensor(OwnedTensor::new("a", vec![1, m, k], dtype))
+        .push_tensor(OwnedTensor::new("b", vec![1, k, n], dtype))
+        .push_tensor(OwnedTensor::constant("a_zp", vec![1], dtype, vec![0]))
+        .push_tensor(OwnedTensor::constant("b_zp", vec![1], dtype, vec![0]))
+        .push_tensor(OwnedTensor::new("y", vec![1, m, n], DType::FP16))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Const,
+            vec![],
+            vec!["a_zp".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Const,
+            vec![],
+            vec!["b_zp".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::MatMul,
+            vec!["a".into(), "b".into(), "a_zp".into(), "b_zp".into()],
+            vec!["y".into()],
+        ))
+        .push_input("a")
+        .push_input("b")
+        .push_output("y");
+    graph.build(VULKAN_TOSA_FP8_TARGET).unwrap()
+}
+
+/// Exhaustive: all 256 patterns of each FP8 encoding move through `IDENTITY` bit-for-bit. The
+/// analogue of the FP16 tier's 65536-pattern `NEGATE` round trip, and the reason data movement
+/// is a raw byte copy rather than a widen/narrow pair — NaNs, subnormals and signed zeros all
+/// survive.
+#[test]
+fn every_fp8_pattern_moves_bit_exactly_on_every_device() {
+    let patterns = all_fp8_patterns();
+    for device in devices() {
+        let backend = open(&device);
+        assert!(
+            advertises_fp8(&backend),
+            "{device}: FP8 tier not advertised"
+        );
+        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+            let artifact = fp8_identity_artifact(dtype, patterns.len() as i32);
+            for domain in advertised_domains(&backend) {
+                let actual = run_graph_for(
+                    &backend,
+                    &artifact,
+                    VULKAN_TOSA_FP8_TARGET,
+                    std::slice::from_ref(&patterns),
+                    patterns.len(),
+                    domain,
+                );
+                assert_eq!(
+                    actual, patterns,
+                    "{device}: {dtype:?} identity in {domain:?} changed a bit pattern"
+                );
+            }
+        }
+    }
+}
+
+/// `(FP8, FP8) -> FP16` MATMUL against a host reference that widens with the crate's own
+/// decoders and accumulates in binary32 — the accumulator width TOSA assigns FP8 MATMUL — then
+/// narrows once. Bit-exact: the kernel performs the same operations in the same order.
+#[test]
+fn fp8_matmul_matches_the_widened_reference_on_every_device() {
+    let (m, k, n) = (5_i32, 7_i32, 3_i32);
+    for device in devices() {
+        let backend = open(&device);
+        assert!(
+            advertises_fp8(&backend),
+            "{device}: FP8 tier not advertised"
+        );
+        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+            // Finite patterns only: this checks arithmetic, and the exhaustive identity test
+            // above already covers NaN and infinity transport.
+            let finite = |seed: usize, count: usize| -> Vec<u8> {
+                (0..count)
+                    .map(|index| {
+                        let bits = ((index * 37 + seed * 11) % 120) as u8;
+                        // Keep both operands well inside each format's finite range.
+                        if index % 3 == 0 { bits | 0x80 } else { bits }
+                    })
+                    .collect()
+            };
+            let a = finite(1, (m * k) as usize);
+            let b = finite(2, (k * n) as usize);
+            let widen = |bits: u8| -> f32 {
+                match dtype {
+                    DType::FP8E4M3 => virtio_accel_tosa::fp8e4m3_to_f32(bits),
+                    _ => virtio_accel_tosa::fp8e5m2_to_f32(bits),
+                }
+            };
+            let mut expected = Vec::new();
+            for row in 0..m as usize {
+                for column in 0..n as usize {
+                    let mut accumulator = 0.0_f32;
+                    for inner in 0..k as usize {
+                        accumulator += widen(a[row * k as usize + inner])
+                            * widen(b[inner * n as usize + column]);
+                    }
+                    expected.push(virtio_accel_vulkan::shader::f32_to_f16_bits(accumulator));
+                }
+            }
+            let artifact = fp8_matmul_artifact(dtype, m, k, n);
+            for domain in advertised_domains(&backend) {
+                let actual = run_graph_for(
+                    &backend,
+                    &artifact,
+                    VULKAN_TOSA_FP8_TARGET,
+                    &[a.clone(), b.clone()],
+                    (m * n) as usize * 2,
+                    domain,
+                );
+                assert_eq!(
+                    fp16s_le(&actual),
+                    expected,
+                    "{device}: {dtype:?} MATMUL in {domain:?}"
+                );
+            }
+        }
+    }
+}
+
+/// The FP8 tier is a distinct target, and the extension bits are load-bearing: an FP8 artifact
+/// is refused under the FP32/FP16 target, because TOSA gates FP8 legality on the extension that
+/// target does not carry. The converse is deliberately *not* asserted — the FP8 target's
+/// envelope is a superset, so an FP32 graph remains legal under it.
+#[test]
+fn fp8_artifacts_are_refused_under_the_float_target() {
+    for device in devices() {
+        let backend = open(&device);
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+            let fp8 = fp8_identity_artifact(dtype, 4);
+            assert!(
+                load(&backend, &context, &fp8, VULKAN_TOSA_TARGET).is_err(),
+                "{device}: a {dtype:?} artifact loaded under the float target"
+            );
+        }
+        release(backend.destroy_context(context));
+    }
+}
+
+/// An FP8 weight matrix as an in-graph `CONST`: the dominant shape, and the reason the tier
+/// does not need `CAST` to be useful. The host narrows once (as `axnn` does) and the constant
+/// crosses as packed bytes.
+#[test]
+fn fp8_matmul_admits_a_constant_weight_matrix() {
+    let (m, k, n) = (4_i32, 6_i32, 2_i32);
+    let weights: Vec<u8> = (0..(k * n) as usize)
+        .map(|index| ((index * 9 + 56) % 120) as u8)
+        .collect();
+    for device in devices() {
+        let backend = open(&device);
+        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+            let mut graph = OwnedGraph::new("main");
+            graph
+                .push_tensor(OwnedTensor::new("a", vec![1, m, k], dtype))
+                .push_tensor(OwnedTensor::constant(
+                    "w",
+                    vec![1, k, n],
+                    dtype,
+                    weights.clone(),
+                ))
+                .push_tensor(OwnedTensor::constant("zp", vec![1], dtype, vec![0]))
+                .push_tensor(OwnedTensor::new("y", vec![1, m, n], DType::FP16));
+            for name in ["w", "zp"] {
+                graph.push_operator(OwnedOperator::new(
+                    OperatorKind::Const,
+                    vec![],
+                    vec![name.into()],
+                ));
+            }
+            graph
+                .push_operator(OwnedOperator::new(
+                    OperatorKind::MatMul,
+                    vec!["a".into(), "w".into(), "zp".into(), "zp".into()],
+                    vec!["y".into()],
+                ))
+                .push_input("a")
+                .push_output("y");
+            let artifact = graph.build(VULKAN_TOSA_FP8_TARGET).unwrap();
+            let a: Vec<u8> = (0..(m * k) as usize)
+                .map(|index| ((index * 13 + 40) % 120) as u8)
+                .collect();
+            let widen = |bits: u8| match dtype {
+                DType::FP8E4M3 => virtio_accel_tosa::fp8e4m3_to_f32(bits),
+                _ => virtio_accel_tosa::fp8e5m2_to_f32(bits),
+            };
+            let mut expected = Vec::new();
+            for row in 0..m as usize {
+                for column in 0..n as usize {
+                    let mut accumulator = 0.0_f32;
+                    for inner in 0..k as usize {
+                        accumulator += widen(a[row * k as usize + inner])
+                            * widen(weights[inner * n as usize + column]);
+                    }
+                    expected.push(virtio_accel_vulkan::shader::f32_to_f16_bits(accumulator));
+                }
+            }
+            for domain in advertised_domains(&backend) {
+                let actual = run_graph_for(
+                    &backend,
+                    &artifact,
+                    VULKAN_TOSA_FP8_TARGET,
+                    std::slice::from_ref(&a),
+                    (m * n) as usize * 2,
+                    domain,
+                );
+                assert_eq!(
+                    fp16s_le(&actual),
+                    expected,
+                    "{device}: {dtype:?} constant-weight MATMUL in {domain:?}"
+                );
+            }
+        }
+    }
+}
+
+/// A `CAST` between two float dtypes, shape `[1, 1, elements]`.
+fn fp8_cast_artifact(from: DType, to: DType, elements: i32) -> Vec<u8> {
+    let shape = vec![1, 1, elements];
+    let mut graph = OwnedGraph::new("main");
+    graph
+        .push_tensor(OwnedTensor::new("x", shape.clone(), from))
+        .push_tensor(OwnedTensor::new("y", shape, to))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Cast,
+            vec!["x".into()],
+            vec!["y".into()],
+        ))
+        .push_input("x")
+        .push_output("y");
+    graph.build(VULKAN_TOSA_FP8_TARGET).unwrap()
+}
+
+/// Exhaustive both ways: every FP8 encoding widens to the value the TOSA crate's own decoder
+/// gives, and every finite value returns to its own encoding. The narrowing direction is the
+/// device twin of `f32_to_fp8_bits`, whose policy and rounding the unit tests pin.
+#[test]
+fn fp8_cast_round_trips_every_encoding_on_every_device() {
+    let patterns: Vec<u8> = (0..=u8::MAX).collect();
+    for device in devices() {
+        let backend = open(&device);
+        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+            let decode = |bits: u8| match dtype {
+                DType::FP8E4M3 => virtio_accel_tosa::fp8e4m3_to_f32(bits),
+                _ => virtio_accel_tosa::fp8e5m2_to_f32(bits),
+            };
+            let widen = fp8_cast_artifact(dtype, DType::FP32, patterns.len() as i32);
+            let narrow = fp8_cast_artifact(DType::FP32, dtype, patterns.len() as i32);
+            for domain in advertised_domains(&backend) {
+                let widened = run_graph_for(
+                    &backend,
+                    &widen,
+                    VULKAN_TOSA_FP8_TARGET,
+                    std::slice::from_ref(&patterns),
+                    patterns.len() * 4,
+                    domain,
+                );
+                let widened: Vec<f32> = widened
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+                    .collect();
+                for (bits, actual) in patterns.iter().zip(&widened) {
+                    let expected = decode(*bits);
+                    assert!(
+                        (expected.is_nan() && actual.is_nan())
+                            || expected.to_bits() == actual.to_bits(),
+                        "{device}: {dtype:?} widen {bits:#04x} in {domain:?}: {actual}"
+                    );
+                }
+                // Narrow the finite values back; NaN and infinity are policy, covered by the
+                // unit tests and the case below.
+                let bytes: Vec<u8> = widened
+                    .iter()
+                    .flat_map(|value| if value.is_finite() { *value } else { 0.0 }.to_le_bytes())
+                    .collect();
+                let narrowed = run_graph_for(
+                    &backend,
+                    &narrow,
+                    VULKAN_TOSA_FP8_TARGET,
+                    std::slice::from_ref(&bytes),
+                    patterns.len(),
+                    domain,
+                );
+                for (index, bits) in patterns.iter().enumerate() {
+                    let expected = if decode(*bits).is_finite() { *bits } else { 0 };
+                    assert_eq!(
+                        narrowed[index], expected,
+                        "{device}: {dtype:?} narrow {bits:#04x} in {domain:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The device honours the overflow policy: E4M3 takes an out-of-range magnitude to NaN rather
+/// than saturating to 448, and E5M2 takes it to infinity.
+#[test]
+fn fp8_cast_overflow_policy_holds_on_every_device() {
+    let values: [f32; 6] = [464.0, 464.001, -464.001, 1.0e9, -1.0e9, 100_000.0];
+    let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+    for device in devices() {
+        let backend = open(&device);
+        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+            let format = match dtype {
+                DType::FP8E4M3 => virtio_accel_vulkan::shader::Fp8Format::E4M3,
+                _ => virtio_accel_vulkan::shader::Fp8Format::E5M2,
+            };
+            let expected: Vec<u8> = values
+                .iter()
+                .map(|value| virtio_accel_vulkan::shader::f32_to_fp8_bits(format, *value))
+                .collect();
+            let artifact = fp8_cast_artifact(DType::FP32, dtype, values.len() as i32);
+            for domain in advertised_domains(&backend) {
+                let actual = run_graph_for(
+                    &backend,
+                    &artifact,
+                    VULKAN_TOSA_FP8_TARGET,
+                    std::slice::from_ref(&bytes),
+                    values.len(),
+                    domain,
+                );
+                assert_eq!(
+                    actual, expected,
+                    "{device}: {dtype:?} overflow in {domain:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Two FP8 matmuls chained through a `CAST`, which is the shape `CAST` exists for: layer one
+/// produces FP16, the cast re-narrows it to FP8, and layer two consumes that — with no host
+/// round trip between the layers.
+#[test]
+fn chained_fp8_matmuls_need_no_host_round_trip() {
+    let (m, k, h, n) = (3_i32, 4_i32, 5_i32, 2_i32);
+    for device in devices() {
+        let backend = open(&device);
+        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+            let format = match dtype {
+                DType::FP8E4M3 => virtio_accel_vulkan::shader::Fp8Format::E4M3,
+                _ => virtio_accel_vulkan::shader::Fp8Format::E5M2,
+            };
+            let decode = |bits: u8| match dtype {
+                DType::FP8E4M3 => virtio_accel_tosa::fp8e4m3_to_f32(bits),
+                _ => virtio_accel_tosa::fp8e5m2_to_f32(bits),
+            };
+            let pick = |seed: usize, count: usize| -> Vec<u8> {
+                (0..count)
+                    .map(|index| ((index * 7 + seed * 5) % 40 + 48) as u8)
+                    .collect()
+            };
+            let a = pick(1, (m * k) as usize);
+            let w1 = pick(2, (k * h) as usize);
+            let w2 = pick(3, (h * n) as usize);
+
+            let mut graph = OwnedGraph::new("main");
+            graph
+                .push_tensor(OwnedTensor::new("a", vec![1, m, k], dtype))
+                .push_tensor(OwnedTensor::constant(
+                    "w1",
+                    vec![1, k, h],
+                    dtype,
+                    w1.clone(),
+                ))
+                .push_tensor(OwnedTensor::constant(
+                    "w2",
+                    vec![1, h, n],
+                    dtype,
+                    w2.clone(),
+                ))
+                .push_tensor(OwnedTensor::constant("zp", vec![1], dtype, vec![0]))
+                .push_tensor(OwnedTensor::new("h16", vec![1, m, h], DType::FP16))
+                .push_tensor(OwnedTensor::new("h8", vec![1, m, h], dtype))
+                .push_tensor(OwnedTensor::new("y", vec![1, m, n], DType::FP16));
+            for name in ["w1", "w2", "zp"] {
+                graph.push_operator(OwnedOperator::new(
+                    OperatorKind::Const,
+                    vec![],
+                    vec![name.into()],
+                ));
+            }
+            graph
+                .push_operator(OwnedOperator::new(
+                    OperatorKind::MatMul,
+                    vec!["a".into(), "w1".into(), "zp".into(), "zp".into()],
+                    vec!["h16".into()],
+                ))
+                .push_operator(OwnedOperator::new(
+                    OperatorKind::Cast,
+                    vec!["h16".into()],
+                    vec!["h8".into()],
+                ))
+                .push_operator(OwnedOperator::new(
+                    OperatorKind::MatMul,
+                    vec!["h8".into(), "w2".into(), "zp".into(), "zp".into()],
+                    vec!["y".into()],
+                ))
+                .push_input("a")
+                .push_output("y");
+            let artifact = graph.build(VULKAN_TOSA_FP8_TARGET).unwrap();
+
+            // Host reference: widen, accumulate in binary32, narrow to FP16, re-narrow to FP8,
+            // widen again, second matmul, narrow to FP16.
+            let mut hidden = Vec::new();
+            for row in 0..m as usize {
+                for column in 0..h as usize {
+                    let mut accumulator = 0.0_f32;
+                    for inner in 0..k as usize {
+                        accumulator += decode(a[row * k as usize + inner])
+                            * decode(w1[inner * h as usize + column]);
+                    }
+                    let as_f16 = virtio_accel_vulkan::shader::f16_to_f32(
+                        virtio_accel_vulkan::shader::f32_to_f16_bits(accumulator),
+                    );
+                    hidden.push(decode(virtio_accel_vulkan::shader::f32_to_fp8_bits(
+                        format, as_f16,
+                    )));
+                }
+            }
+            let mut expected = Vec::new();
+            for row in 0..m as usize {
+                for column in 0..n as usize {
+                    let mut accumulator = 0.0_f32;
+                    for inner in 0..h as usize {
+                        accumulator += hidden[row * h as usize + inner]
+                            * decode(w2[inner * n as usize + column]);
+                    }
+                    expected.push(virtio_accel_vulkan::shader::f32_to_f16_bits(accumulator));
+                }
+            }
+            for domain in advertised_domains(&backend) {
+                let actual = run_graph_for(
+                    &backend,
+                    &artifact,
+                    VULKAN_TOSA_FP8_TARGET,
+                    std::slice::from_ref(&a),
+                    (m * n) as usize * 2,
+                    domain,
+                );
+                assert_eq!(
+                    fp16s_le(&actual),
+                    expected,
+                    "{device}: chained {dtype:?} matmuls in {domain:?}"
+                );
+            }
+        }
+    }
+}
+
+/// `MAX_POOL2D` over FP8: a 1x1x4x4 NHWC plane pooled 2x2, and `ARGMAX` over the last axis of
+/// an FP8 tensor. Pooling selects an existing encoding and ARGMAX emits an INT32 index, so
+/// neither introduces a rounding decision — the results are exact by construction.
+#[test]
+fn fp8_pooling_and_argmax_execute_on_every_device() {
+    for device in devices() {
+        let backend = open(&device);
+        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+            let decode = |bits: u8| match dtype {
+                DType::FP8E4M3 => virtio_accel_tosa::fp8e4m3_to_f32(bits),
+                _ => virtio_accel_tosa::fp8e5m2_to_f32(bits),
+            };
+            // Finite, distinct, both signs.
+            let values: Vec<u8> = (0..16).map(|i| ((i * 5 + 48) % 112) as u8).collect();
+
+            let mut pool = OwnedGraph::new("main");
+            pool.push_tensor(OwnedTensor::new("x", vec![1, 4, 4, 1], dtype))
+                .push_tensor(OwnedTensor::new("y", vec![1, 2, 2, 1], dtype))
+                .push_operator(OwnedOperator::new(
+                    OperatorKind::MaxPool2d {
+                        kernel: [2, 2],
+                        stride: [2, 2],
+                        pad: [0; 4],
+                        nan_mode: NanPropagationMode::PROPAGATE,
+                    },
+                    vec!["x".into()],
+                    vec!["y".into()],
+                ))
+                .push_input("x")
+                .push_output("y");
+            let pool = pool.build(VULKAN_TOSA_FP8_TARGET).unwrap();
+
+            let mut expected_pool = Vec::new();
+            for row in 0..2usize {
+                for column in 0..2usize {
+                    let window = [
+                        values[row * 8 + column * 2],
+                        values[row * 8 + column * 2 + 1],
+                        values[row * 8 + 4 + column * 2],
+                        values[row * 8 + 4 + column * 2 + 1],
+                    ];
+                    let best = window
+                        .iter()
+                        .copied()
+                        .max_by(|a, b| decode(*a).total_cmp(&decode(*b)))
+                        .unwrap();
+                    expected_pool.push(best);
+                }
+            }
+
+            let mut argmax = OwnedGraph::new("main");
+            argmax
+                .push_tensor(OwnedTensor::new("x", vec![1, 4, 4], dtype))
+                .push_tensor(OwnedTensor::new("y", vec![1, 4], DType::INT32))
+                .push_operator(OwnedOperator::new(
+                    OperatorKind::ArgMax {
+                        axis: 2,
+                        nan_mode: NanPropagationMode::PROPAGATE,
+                    },
+                    vec!["x".into()],
+                    vec!["y".into()],
+                ))
+                .push_input("x")
+                .push_output("y");
+            let argmax = argmax.build(VULKAN_TOSA_FP8_TARGET).unwrap();
+
+            let expected_argmax: Vec<i32> = (0..4usize)
+                .map(|row| {
+                    let lane = &values[row * 4..row * 4 + 4];
+                    let mut best = 0usize;
+                    for index in 1..4 {
+                        if decode(lane[index]) > decode(lane[best]) {
+                            best = index;
+                        }
+                    }
+                    best as i32
+                })
+                .collect();
+
+            for domain in advertised_domains(&backend) {
+                let actual = run_graph_for(
+                    &backend,
+                    &pool,
+                    VULKAN_TOSA_FP8_TARGET,
+                    std::slice::from_ref(&values),
+                    4,
+                    domain,
+                );
+                assert_eq!(
+                    actual, expected_pool,
+                    "{device}: {dtype:?} MAX_POOL2D in {domain:?}"
+                );
+                let actual = run_graph_for(
+                    &backend,
+                    &argmax,
+                    VULKAN_TOSA_FP8_TARGET,
+                    std::slice::from_ref(&values),
+                    4 * 4,
+                    domain,
+                );
+                let actual: Vec<i32> = actual
+                    .chunks_exact(4)
+                    .map(|chunk| i32::from_le_bytes(chunk.try_into().unwrap()))
+                    .collect();
+                assert_eq!(
+                    actual, expected_argmax,
+                    "{device}: {dtype:?} ARGMAX in {domain:?}"
                 );
             }
         }

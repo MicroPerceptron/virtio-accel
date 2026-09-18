@@ -203,6 +203,15 @@ const GLSL_FIND_U_MSB: u32 = 75;
 /// A SPIR-V result id.
 pub type Id = u32;
 
+/// Which of the two TOSA FP8 encodings a byte-storage float tensor carries. They differ in
+/// exponent width, bias, and specials: E4M3 has no infinity (`0x7f`/`0xff` are its only NaNs,
+/// finite max 448) while E5M2 is IEEE-shaped (infinity at `0x7c`, finite max 57344).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Fp8Format {
+    E4M3,
+    E5M2,
+}
+
 /// How a tensor's scalars are laid out in the storage words a kernel addresses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Storage {
@@ -210,6 +219,11 @@ pub enum Storage {
     Word,
     /// One byte per element, four to a word (`BOOL`).
     Byte,
+    /// One byte per element, four to a word, holding an FP8 encoding. Geometrically identical
+    /// to [`Self::Byte`]; it is a separate variant because the byte is a raw float pattern, not
+    /// a canonical `0`/`1`, so it is loaded through an exact widening and moved as raw bits
+    /// (ADR 0009).
+    Quarter(Fp8Format),
     /// Two bytes per element, two to a word (`FP16`); the 16-bit lanes are unpacked on load and
     /// repacked with `OpAtomicAnd`/`OpAtomicOr` on store, so a kernel never modifies the
     /// neighbouring element of its word.
@@ -359,11 +373,13 @@ pub enum KernelKey {
         workgroup: u32,
         buffers: u32,
     },
-    /// Batched matrix multiplication over `tile × tile` workgroup-shared binary32 tiles. The
-    /// operands are read at `float` storage and accumulate in binary32 — the accumulator width
-    /// TOSA assigns FP16 MATMUL — and the output is stored back at `float` storage.
+    /// Batched matrix multiplication over `tile × tile` workgroup-shared binary32 tiles. Both
+    /// operands are read at `input` storage and accumulate in binary32 — the accumulator width
+    /// TOSA assigns FP16 and FP8 MATMUL — and the result is stored at `output` storage. The two
+    /// differ only for the FP8 tier, where TOSA defines MATMUL as `(FP8, FP8) -> FP16`.
     Matmul {
-        float: Storage,
+        input: Storage,
+        output: Storage,
         tile: u32,
         buffers: u32,
     },
@@ -371,6 +387,14 @@ pub enum KernelKey {
     MaxPool {
         nan_mode: NanMode,
         float: Storage,
+        workgroup: u32,
+        buffers: u32,
+    },
+    /// Elementwise float conversion: read at `input` storage, write at `output`. One dispatch
+    /// per `CAST` between float dtypes, including both FP8 directions (ADR 0009).
+    Cast {
+        input: Storage,
+        output: Storage,
         workgroup: u32,
         buffers: u32,
     },
@@ -402,10 +426,11 @@ impl KernelKey {
                 buffers,
             } => assemble_reduce(op, float, workgroup, buffers),
             Self::Matmul {
-                float,
+                input,
+                output,
                 tile,
                 buffers,
-            } => assemble_matmul(float, tile, buffers),
+            } => assemble_matmul(input, output, tile, buffers),
             Self::MaxPool {
                 nan_mode,
                 float,
@@ -418,7 +443,173 @@ impl KernelKey {
                 workgroup,
                 buffers,
             } => assemble_move(storage, contiguous, workgroup, buffers),
+            Self::Cast {
+                input,
+                output,
+                workgroup,
+                buffers,
+            } => assemble_cast(input, output, workgroup, buffers),
         }
+    }
+
+    /// Every kernel variant this backend can assemble, at one representative tuning. The
+    /// SPIR-V validation sweep and the specialization-count test both walk this list, so a new
+    /// variant is validated the moment it is added here.
+    pub fn every_variant() -> Vec<KernelKey> {
+        let mut keys = Vec::new();
+        let ops = [
+            ElementwiseOp::Abs,
+            ElementwiseOp::Ceil,
+            ElementwiseOp::Cos,
+            ElementwiseOp::Erf,
+            ElementwiseOp::Exp,
+            ElementwiseOp::Floor,
+            ElementwiseOp::Log,
+            ElementwiseOp::Negate,
+            ElementwiseOp::Reciprocal,
+            ElementwiseOp::Rsqrt,
+            ElementwiseOp::Sin,
+            ElementwiseOp::Sigmoid,
+            ElementwiseOp::Tanh,
+            ElementwiseOp::Clamp(NanMode::Propagate),
+            ElementwiseOp::Clamp(NanMode::Ignore),
+            ElementwiseOp::Add,
+            ElementwiseOp::Sub,
+            ElementwiseOp::Mul,
+            ElementwiseOp::Pow,
+            ElementwiseOp::Maximum(NanMode::Propagate),
+            ElementwiseOp::Minimum(NanMode::Ignore),
+            ElementwiseOp::Equal,
+            ElementwiseOp::Greater,
+            ElementwiseOp::GreaterEqual,
+            ElementwiseOp::LogicalAnd,
+            ElementwiseOp::LogicalOr,
+            ElementwiseOp::LogicalXor,
+            ElementwiseOp::LogicalNot,
+            ElementwiseOp::Select,
+            ElementwiseOp::CopyBytes,
+        ];
+        for op in ops {
+            for float in [Storage::Word, Storage::Half] {
+                for broadcast in [false, true] {
+                    keys.push(KernelKey::Elementwise {
+                        op,
+                        float,
+                        broadcast,
+                        workgroup: 64,
+                        buffers: 17,
+                    });
+                }
+            }
+        }
+        for op in [
+            ReduceOp::Sum,
+            ReduceOp::Product,
+            ReduceOp::Max(NanMode::Propagate),
+            ReduceOp::Min(NanMode::Ignore),
+            ReduceOp::ArgMax(NanMode::Propagate),
+            ReduceOp::ArgMax(NanMode::Ignore),
+        ] {
+            for float in [Storage::Word, Storage::Half] {
+                keys.push(KernelKey::Reduce {
+                    op,
+                    float,
+                    workgroup: 64,
+                    buffers: 17,
+                });
+            }
+        }
+        for float in [Storage::Word, Storage::Half] {
+            keys.push(KernelKey::Matmul {
+                input: float,
+                output: float,
+                tile: 16,
+                buffers: 17,
+            });
+            keys.push(KernelKey::Matmul {
+                input: float,
+                output: float,
+                tile: 8,
+                buffers: 5,
+            });
+        }
+        // The FP8 tier: TOSA's `(FP8, FP8) -> FP16` MATMUL, and exact FP8 data movement.
+        for format in [Fp8Format::E4M3, Fp8Format::E5M2] {
+            keys.push(KernelKey::Matmul {
+                input: Storage::Quarter(format),
+                output: Storage::Half,
+                tile: 16,
+                buffers: 17,
+            });
+            keys.push(KernelKey::Matmul {
+                input: Storage::Quarter(format),
+                output: Storage::Half,
+                tile: 8,
+                buffers: 5,
+            });
+        }
+        for nan_mode in [NanMode::Propagate, NanMode::Ignore] {
+            for float in [Storage::Word, Storage::Half] {
+                keys.push(KernelKey::MaxPool {
+                    nan_mode,
+                    float,
+                    workgroup: 64,
+                    buffers: 17,
+                });
+            }
+        }
+        // The FP8 tier's pooling and ARGMAX: pooling selects an existing encoding, ARGMAX
+        // compares widened values and emits an INT32 index.
+        for format in [Fp8Format::E4M3, Fp8Format::E5M2] {
+            for nan_mode in [NanMode::Propagate, NanMode::Ignore] {
+                keys.push(KernelKey::MaxPool {
+                    nan_mode,
+                    float: Storage::Quarter(format),
+                    workgroup: 64,
+                    buffers: 17,
+                });
+                keys.push(KernelKey::Reduce {
+                    op: ReduceOp::ArgMax(nan_mode),
+                    float: Storage::Quarter(format),
+                    workgroup: 64,
+                    buffers: 17,
+                });
+            }
+        }
+        // Every CAST pair the FP8 tier lowers, both directions.
+        for format in [Fp8Format::E4M3, Fp8Format::E5M2] {
+            for wide in [Storage::Word, Storage::Half] {
+                keys.push(KernelKey::Cast {
+                    input: Storage::Quarter(format),
+                    output: wide,
+                    workgroup: 64,
+                    buffers: 17,
+                });
+                keys.push(KernelKey::Cast {
+                    input: wide,
+                    output: Storage::Quarter(format),
+                    workgroup: 64,
+                    buffers: 17,
+                });
+            }
+        }
+        for storage in [
+            Storage::Word,
+            Storage::Byte,
+            Storage::Half,
+            Storage::Quarter(Fp8Format::E4M3),
+            Storage::Quarter(Fp8Format::E5M2),
+        ] {
+            for contiguous in [false, true] {
+                keys.push(KernelKey::Move {
+                    storage,
+                    contiguous,
+                    workgroup: 64,
+                    buffers: 17,
+                });
+            }
+        }
+        keys
     }
 
     /// Number of specialization constants the module declares, ids `0..count`.
@@ -444,6 +635,7 @@ impl KernelKey {
                     2 + 2 + 1 + MAX_RANK as u32 * 3 + 2
                 }
             }
+            Self::Cast { .. } => 2 + 2 + 1,
         }
     }
 
@@ -453,7 +645,8 @@ impl KernelKey {
             Self::Elementwise { workgroup, .. }
             | Self::Reduce { workgroup, .. }
             | Self::MaxPool { workgroup, .. }
-            | Self::Move { workgroup, .. } => [workgroup, 1, 1],
+            | Self::Move { workgroup, .. }
+            | Self::Cast { workgroup, .. } => [workgroup, 1, 1],
             Self::Matmul { tile, .. } => [tile, tile, 1],
         }
     }
@@ -633,6 +826,60 @@ pub const fn matmul_workgroups(m: u32, n: u32, batch: u32, tile: u32) -> [u32; 3
 /// The exact binary32 value of a binary16 bit pattern (host side of the kernels' unpack: every
 /// binary16 value, subnormals included, is exactly representable in binary32; NaN payloads are
 /// preserved).
+/// Narrow binary32 to one FP8 encoding with round-to-nearest, ties-to-even.
+///
+/// **Overflow policy.** TOSA 1.0 through 1.2 leave float-to-FP8 overflow undefined, so this is
+/// the crate's policy rather than the spec's. A magnitude too large for E4M3 — which has no
+/// infinity — becomes NaN, not the finite maximum. The reason is that the alternatives are not
+/// symmetric: a consumer who wants saturation can `CLAMP` in a wider dtype before the `CAST`
+/// and get it exactly, while a consumer handed a saturated 448 cannot tell it from a value that
+/// was always 448. NaN preserves the choice; saturation destroys it. It also matches what this
+/// crate already does one format up, where `narrow_f16` signals unrepresentability as infinity
+/// rather than clamping to 65504.
+///
+/// E5M2 needs no policy: it is IEEE-shaped, so overflow becomes infinity like any binary float.
+/// NaN in becomes a canonical quiet NaN out, sign preserved, for both encodings.
+pub fn f32_to_fp8_bits(format: Fp8Format, value: f32) -> u8 {
+    let (mantissa_bits, bias, nan_out, max_finite): (u32, u32, u8, u32) = match format {
+        // E4M3's `0x7f` is its only NaN, so the finite encodings stop at `0x7e` (448).
+        Fp8Format::E4M3 => (3, 7, 0x7f, 0x7e),
+        // E5M2's `0x7c` is infinity; finite encodings stop at `0x7b` (57344).
+        Fp8Format::E5M2 => (2, 15, 0x7e, 0x7b),
+    };
+    let bits = value.to_bits();
+    let sign = ((bits >> 24) as u8) & 0x80;
+    let magnitude = bits & 0x7fff_ffff;
+    if magnitude > 0x7f80_0000 {
+        return sign | nan_out;
+    }
+    let shift = 23 - mantissa_bits;
+    let normal_floor = (128 - bias) << 23;
+    let body = if magnitude >= normal_floor {
+        // Rebias into the target's exponent range, then round the significand with the
+        // add-half-ulp-plus-guard trick; a significand carry increments the exponent by itself.
+        let adjusted = magnitude - ((127 - bias) << 23);
+        let guard = (adjusted >> shift) & 1;
+        let half_ulp = (1 << (shift - 1)) - 1;
+        (adjusted + half_ulp + guard) >> shift
+    } else {
+        // Subnormal or zero: scale into integer range — exact for every representable
+        // subnormal — and round to the nearest integer, ties to even. A rounding carry reaches
+        // the smallest normal encoding on its own.
+        let scale = f32::from_bits((127 + bias - 1 + mantissa_bits) << 23);
+        (f32::from_bits(magnitude) * scale).round_ties_even() as u32
+    };
+    // Rounding has already happened, so landing above the last finite encoding *is* the
+    // overflow test; infinity in reaches it too.
+    if body > max_finite {
+        let overflow = match format {
+            Fp8Format::E4M3 => nan_out,
+            Fp8Format::E5M2 => 0x7c,
+        };
+        return sign | overflow;
+    }
+    sign | body as u8
+}
+
 pub fn f16_to_f32(bits: u16) -> f32 {
     let bits = u32::from(bits);
     let sign = (bits & 0x8000) << 16;
@@ -1282,6 +1529,74 @@ impl Builder {
 
     // -- crate-owned binary16 conversions (ADR 0008) --------------------------------------------
 
+    /// Widen packed FP8 bits (a `u32` in `0..=0xff`) to binary32, exactly. The kernel twin of
+    /// [`virtio_accel_tosa::fp8e4m3_to_f32`] / [`virtio_accel_tosa::fp8e5m2_to_f32`]: integer
+    /// expansion for normals and specials, one exact multiply for subnormals. Every FP8 value
+    /// is representable in binary32, so all 256 patterns of each format widen exactly on every
+    /// device, and no `OpFConvert` appears that a driver could demote.
+    fn widen_fp8(&mut self, format: Fp8Format, bits: Id) -> Id {
+        let (exponent_shift, exponent_mask, fraction_mask, rebias, mantissa_shift, scale) =
+            match format {
+                // Subnormal E4M3 is `fraction · 2^-9`; E5M2 is `fraction · 2^-16`.
+                Fp8Format::E4M3 => (3_u32, 0x0f_u32, 0x07_u32, 120_u32, 20_u32, 1.0_f32 / 512.0),
+                Fp8Format::E5M2 => (2, 0x1f, 0x03, 112, 21, 1.0_f32 / 65_536.0),
+            };
+        let zero = self.c_u32(0);
+        let sign_mask = self.c_u32(0x80);
+        let twenty_four = self.c_u32(24);
+        let twenty_three = self.c_u32(23);
+        let sign = self.band(bits, sign_mask);
+        let sign = self.shl(sign, twenty_four);
+        let exponent_shift = self.c_u32(exponent_shift);
+        let exponent_mask_c = self.c_u32(exponent_mask);
+        let fraction_mask_c = self.c_u32(fraction_mask);
+        let exponent = self.shr(bits, exponent_shift);
+        let exponent = self.band(exponent, exponent_mask_c);
+        let fraction = self.band(bits, fraction_mask_c);
+        // Normal: rebias the exponent into binary32 and shift the fraction up.
+        let rebias = self.c_u32(rebias);
+        let biased = self.iadd(exponent, rebias);
+        let normal = self.shl(biased, twenty_three);
+        let mantissa_shift = self.c_u32(mantissa_shift);
+        let shifted = self.shl(fraction, mantissa_shift);
+        let normal = self.bor(normal, shifted);
+        let normal = self.bor(normal, sign);
+        // Subnormal or zero: an exact multiply; a zero fraction keeps the sign, so signed zero
+        // survives.
+        let scale = self.c_f32(scale);
+        let scaled = self.u_to_f(fraction);
+        let subnormal = self.fmul(scaled, scale);
+        let subnormal = self.bitcast_u32(subnormal);
+        let subnormal = self.bor(subnormal, sign);
+        let is_subnormal = self.ieq(exponent, zero);
+        let value = self.select_u32(is_subnormal, subnormal, normal);
+        // Specials differ: E4M3's top exponent stays finite except for the all-ones fraction,
+        // which is its only NaN; E5M2's top exponent is infinity or NaN as usual.
+        match format {
+            Fp8Format::E4M3 => {
+                let quiet_nan = self.c_u32(0x7fc0_0000);
+                let top_exponent = self.c_u32(exponent_mask);
+                let top_fraction = self.c_u32(fraction_mask);
+                let exponent_is_top = self.ieq(exponent, top_exponent);
+                let fraction_is_top = self.ieq(fraction, top_fraction);
+                let is_nan = self.land(exponent_is_top, fraction_is_top);
+                let nan = self.bor(sign, quiet_nan);
+                let value = self.select_u32(is_nan, nan, value);
+                self.bitcast_f32(value)
+            }
+            Fp8Format::E5M2 => {
+                let inf_bits = self.c_u32(0x7f80_0000);
+                let top_exponent = self.c_u32(exponent_mask);
+                let is_infnan = self.ieq(exponent, top_exponent);
+                let infnan = self.bor(sign, inf_bits);
+                let payload = self.shl(fraction, mantissa_shift);
+                let infnan = self.bor(infnan, payload);
+                let value = self.select_u32(is_infnan, infnan, value);
+                self.bitcast_f32(value)
+            }
+        }
+    }
+
     /// Widen packed binary16 bits (a `u32` in `0..=0xffff`) to binary32, exactly. This is the
     /// kernel twin of the host [`f16_to_f32`]: integer expansion only, so every value —
     /// subnormals included — is exact on every device, and there is no `OpFConvert` pattern a
@@ -1330,6 +1645,58 @@ impl Builder {
     /// round-to-nearest-even, NaN canonicalized to the quiet `0x7e00` payload with its sign.
     /// This is the kernel twin of the host [`f32_to_f16_bits`]: integer and binary32 operations
     /// only, so subnormals are produced — never flushed — on every device (ADR 0008).
+    /// Narrow binary32 to FP8, the kernel twin of [`f32_to_fp8_bits`] and bound by its tests.
+    /// Integer rounding throughout, with one `RoundEven` for the subnormal range, so the result
+    /// is identical on every device. The overflow policy is that function's: NaN for E4M3,
+    /// infinity for E5M2 (ADR 0009).
+    fn narrow_fp8(&mut self, format: Fp8Format, value: Id) -> Id {
+        let (mantissa_bits, bias, nan_out, max_finite, overflow_out) = match format {
+            Fp8Format::E4M3 => (3_u32, 7_u32, 0x7f_u32, 0x7e_u32, 0x7f_u32),
+            Fp8Format::E5M2 => (2, 15, 0x7e, 0x7b, 0x7c),
+        };
+        let shift = 23 - mantissa_bits;
+        let twenty_four = self.c_u32(24);
+        let one = self.c_u32(1);
+        let sign_mask = self.c_u32(0x80);
+        let magnitude_mask = self.c_u32(0x7fff_ffff);
+        let inf_bits = self.c_u32(0x7f80_0000);
+        let normal_floor = self.c_u32((128 - bias) << 23);
+        let rebias = self.c_u32((127 - bias) << 23);
+        let shift_c = self.c_u32(shift);
+        let half_ulp = self.c_u32((1 << (shift - 1)) - 1);
+        let scale = self.c_f32(f32::from_bits((127 + bias - 1 + mantissa_bits) << 23));
+        let max_finite_c = self.c_u32(max_finite);
+        let nan_c = self.c_u32(nan_out);
+        let overflow_c = self.c_u32(overflow_out);
+        let bits = self.bitcast_u32(value);
+        let sign = self.shr(bits, twenty_four);
+        let sign = self.band(sign, sign_mask);
+        let magnitude = self.band(bits, magnitude_mask);
+        let is_nan = self.ult(inf_bits, magnitude);
+        let is_normal = self.uge(magnitude, normal_floor);
+        // Normal: rebias, then round the significand with the add-half-ulp-plus-guard trick; a
+        // carry increments the exponent on its own. The subnormal branch discards the wrap.
+        let adjusted = self.isub(magnitude, rebias);
+        let guard = self.shr(adjusted, shift_c);
+        let guard = self.band(guard, one);
+        let rounding = self.iadd(half_ulp, guard);
+        let rounded = self.iadd(adjusted, rounding);
+        let normal_out = self.shr(rounded, shift_c);
+        // Subnormal or zero: scale into integer range, exact for every representable
+        // subnormal, and round to the nearest integer. A carry reaches the smallest normal.
+        let safe_magnitude = self.select_u32(is_normal, normal_floor, magnitude);
+        let scaled = self.bitcast_f32(safe_magnitude);
+        let scaled = self.fmul(scaled, scale);
+        let scaled = self.ext_f32(GLSL_ROUND_EVEN, &[scaled]);
+        let subnormal_out = self.f_to_u(scaled);
+        let body = self.select_u32(is_normal, normal_out, subnormal_out);
+        // Rounding has happened, so landing past the last finite encoding is the overflow test.
+        let overflowed = self.ult(max_finite_c, body);
+        let body = self.select_u32(overflowed, overflow_c, body);
+        let body = self.select_u32(is_nan, nan_c, body);
+        self.bor(sign, body)
+    }
+
     fn narrow_f16(&mut self, value: Id) -> Id {
         let sixteen = self.c_u32(16);
         let thirteen = self.c_u32(13);
@@ -1563,30 +1930,35 @@ impl Builder {
         self.store_word(buffers, operand, element, word);
     }
 
-    /// Byte `element` of a byte-storage operand as a boolean (any nonzero byte is true).
-    fn load_bool(&mut self, buffers: Id, operand: (Id, Id), element: Id) -> Id {
+    /// The raw 8 bits of byte-storage `element` as a `u32` (`0..=0xff`): word load, shift the
+    /// lane down, mask. No interpretation — an FP8 bit pattern passes through untouched.
+    fn load_byte_bits(&mut self, buffers: Id, operand: (Id, Id), element: Id) -> Id {
         let two = self.c_u32(2);
         let three = self.c_u32(3);
         let mask = self.c_u32(0xff);
-        let zero = self.c_u32(0);
         let word_index = self.shr(element, two);
         let word = self.load_word(buffers, operand, word_index);
         let lane = self.band(element, three);
         let eight = self.c_u32(8);
         let shift = self.imul(lane, eight);
         let shifted = self.shr(word, shift);
-        let byte = self.band(shifted, mask);
+        self.band(shifted, mask)
+    }
+
+    /// Byte `element` of a byte-storage operand as a boolean (any nonzero byte is true).
+    fn load_bool(&mut self, buffers: Id, operand: (Id, Id), element: Id) -> Id {
+        let zero = self.c_u32(0);
+        let byte = self.load_byte_bits(buffers, operand, element);
         self.ine(byte, zero)
     }
 
-    /// Write byte `element` of a byte-storage operand as canonical `0`/`1` without touching the
-    /// other bytes of its word: clear with `OpAtomicAnd`, then set with `OpAtomicOr`.
-    fn store_bool(&mut self, buffers: Id, operand: (Id, Id), element: Id, value: Id) {
+    /// Write the low 8 bits of `byte` into byte `element` without touching the other bytes of
+    /// its word: clear with `OpAtomicAnd`, then set with `OpAtomicOr`. The neighbour-safe
+    /// sequence `BOOL` and FP8 lanes share.
+    fn store_byte_bits(&mut self, buffers: Id, operand: (Id, Id), element: Id, byte: Id) {
         let two = self.c_u32(2);
         let three = self.c_u32(3);
         let mask = self.c_u32(0xff);
-        let one = self.c_u32(1);
-        let zero = self.c_u32(0);
         let word_index = self.shr(element, two);
         let pointer = self.word_pointer(buffers, operand, word_index);
         let lane = self.band(element, three);
@@ -1594,13 +1966,21 @@ impl Builder {
         let shift = self.imul(lane, eight);
         let clear = self.shl(mask, shift);
         let clear = self.bnot(clear);
-        let byte = self.select_u32(value, one, zero);
-        let set = self.shl(byte, shift);
+        let masked = self.band(byte, mask);
+        let set = self.shl(masked, shift);
         let scope = self.c_u32(SCOPE_DEVICE);
         let semantics = self.c_u32(MEMORY_SEMANTICS_RELAXED);
         let u32_ty = self.u32_ty();
         self.value(OP_ATOMIC_AND, u32_ty, &[pointer, scope, semantics, clear]);
         self.value(OP_ATOMIC_OR, u32_ty, &[pointer, scope, semantics, set]);
+    }
+
+    /// Write byte `element` of a byte-storage operand as canonical `0`/`1`.
+    fn store_bool(&mut self, buffers: Id, operand: (Id, Id), element: Id, value: Id) {
+        let one = self.c_u32(1);
+        let zero = self.c_u32(0);
+        let byte = self.select_u32(value, one, zero);
+        self.store_byte_bits(buffers, operand, element, byte);
     }
 
     /// The raw 16 bits of half-storage `element` as a `u32` (`0..=0xffff`): word load, shift
@@ -1640,11 +2020,38 @@ impl Builder {
         self.value(OP_ATOMIC_OR, u32_ty, &[pointer, scope, semantics, set]);
     }
 
+    /// Store one binary32 float at `storage`, narrowing where the storage is narrower.
+    fn store_float(
+        &mut self,
+        storage: Storage,
+        buffers: Id,
+        operand: (Id, Id),
+        element: Id,
+        value: Id,
+    ) {
+        match storage {
+            Storage::Word => self.store_f32(buffers, operand, element, value),
+            Storage::Half => {
+                let bits = self.narrow_f16(value);
+                self.store_half_bits(buffers, operand, element, bits);
+            }
+            Storage::Quarter(format) => {
+                let bits = self.narrow_fp8(format, value);
+                self.store_byte_bits(buffers, operand, element, bits);
+            }
+            Storage::Byte => unreachable!("BOOL is not a float storage"),
+        }
+    }
+
     /// Load one float element as binary32: word storage bitcasts, half storage is unpacked and
     /// widened exactly by [`Self::widen_f16`].
     fn load_float(&mut self, storage: Storage, buffers: Id, operand: (Id, Id), element: Id) -> Id {
         match storage {
             Storage::Word => self.load_f32(buffers, operand, element),
+            Storage::Quarter(format) => {
+                let bits = self.load_byte_bits(buffers, operand, element);
+                self.widen_fp8(format, bits)
+            }
             Storage::Half => {
                 let bits = self.load_half_bits(buffers, operand, element);
                 self.widen_f16(bits)
@@ -2250,6 +2657,8 @@ fn assemble_elementwise(
                 b.widen_f16(bits)
             }
             Storage::Byte => b.load_bool(array, *operand, indices[k]),
+            // TOSA admits no FP8 elementwise operator, so the tier never selects this lane.
+            Storage::Quarter(_) => unreachable!("elementwise FP8 operand"),
         };
         values.push(value);
     }
@@ -2277,6 +2686,7 @@ fn assemble_elementwise(
             b.store_half_bits(array, output, i, bits);
         }
         Storage::Byte => b.store_bool(array, output, i, result),
+        Storage::Quarter(_) => unreachable!("elementwise FP8 result"),
     }
     b.end_loop(scope, counter, stride);
     b.end_main();
@@ -2386,13 +2796,7 @@ fn assemble_reduce(op: ReduceOp, float: Storage, workgroup: u32, buffers: u32) -
         }
         _ => {
             let acc = b.load(f32_ty, acc_var);
-            match float {
-                Storage::Half => {
-                    let bits = b.narrow_f16(acc);
-                    b.store_half_bits(array, output, o, bits);
-                }
-                _ => b.store_f32(array, output, o, acc),
-            }
+            b.store_float(float, array, output, o, acc);
         }
     }
     b.end_loop(scope, counter, stride);
@@ -2410,7 +2814,7 @@ fn assemble_reduce(op: ReduceOp, float: Storage, workgroup: u32, buffers: u32) -
 /// k - k0)`, never a padded zero product, so signed zeros survive.
 ///
 /// Specialization order: `lhs`, `rhs`, output `(buffer, base)`; `m`, `n`, `k`, `batch`.
-fn assemble_matmul(float: Storage, tile: u32, buffers: u32) -> Vec<u32> {
+fn assemble_matmul(input: Storage, output_storage: Storage, tile: u32, buffers: u32) -> Vec<u32> {
     let mut b = Builder::new();
     let array = b.buffer_array(buffers);
     let lhs = b.spec_operand();
@@ -2475,7 +2879,7 @@ fn assemble_matmul(float: Storage, tile: u32, buffers: u32) -> Vec<u32> {
     let lhs_ok = b.land(row_ok, ka_ok);
     let lhs_index = b.iadd(lhs_row, ka);
     let lhs_index = b.select_u32(lhs_ok, lhs_index, zero);
-    let lhs_loaded = b.load_float(float, array, lhs, lhs_index);
+    let lhs_loaded = b.load_float(input, array, lhs, lhs_index);
     let lhs_value = b.select_f32(lhs_ok, lhs_loaded, zero_f);
     let kb = b.iadd(k0, ty);
     let kb_ok = b.ult(kb, k);
@@ -2483,7 +2887,7 @@ fn assemble_matmul(float: Storage, tile: u32, buffers: u32) -> Vec<u32> {
     let rhs_index = b.imul(kb, n);
     let rhs_index = b.iadd(rhs_index, rhs_col);
     let rhs_index = b.select_u32(rhs_ok, rhs_index, zero);
-    let rhs_loaded = b.load_float(float, array, rhs, rhs_index);
+    let rhs_loaded = b.load_float(input, array, rhs, rhs_index);
     let rhs_value = b.select_f32(rhs_ok, rhs_loaded, zero_f);
     let lhs_slot = b.access_chain(workgroup_ptr, lhs_tile, &[local_index]);
     b.store(lhs_slot, lhs_value);
@@ -2516,12 +2920,14 @@ fn assemble_matmul(float: Storage, tile: u32, buffers: u32) -> Vec<u32> {
         let out_index = b.iadd(out_batch, out_row);
         let out_index = b.iadd(out_index, col);
         let acc = b.load(f32_ty, acc_var);
-        match float {
+        match output_storage {
             Storage::Half => {
                 let bits = b.narrow_f16(acc);
                 b.store_half_bits(array, output, out_index, bits);
             }
-            _ => b.store_f32(array, output, out_index, acc),
+            // TOSA defines no MATMUL whose result is FP8 or BOOL; the tier never selects one.
+            Storage::Byte | Storage::Quarter(_) => unreachable!("MATMUL result storage"),
+            Storage::Word => b.store_f32(array, output, out_index, acc),
         }
     });
     b.end_main();
@@ -2606,13 +3012,7 @@ fn assemble_max_pool(nan_mode: NanMode, float: Storage, workgroup: u32, buffers:
     b.end_loop(cols, kw_var, one);
     b.end_loop(rows, kh_var, one);
     let acc = b.load(f32_ty, acc_var);
-    match float {
-        Storage::Half => {
-            let bits = b.narrow_f16(acc);
-            b.store_half_bits(array, output, o, bits);
-        }
-        _ => b.store_f32(array, output, o, acc),
-    }
+    b.store_float(float, array, output, o, acc);
     b.end_loop(scope, counter, stride);
     b.end_main();
     b.finish([workgroup, 1, 1])
@@ -2623,6 +3023,29 @@ fn assemble_max_pool(nan_mode: NanMode, float: Storage, workgroup: u32, buffers:
 ///
 /// Specialization order: input, output `(buffer, base)`; `count`; then (strided only)
 /// `dims[MAX_RANK]`, `in_strides[MAX_RANK]`, `in_offset`, `out_strides[MAX_RANK]`, `out_offset`.
+/// Elementwise float conversion over `count` elements: load at `input` storage as binary32,
+/// store at `output` storage. Every narrowing is crate-owned integer code, so a `CAST` produces
+/// the same bits on every device.
+fn assemble_cast(
+    input: Storage,
+    output_storage: Storage,
+    workgroup: u32,
+    buffers: u32,
+) -> Vec<u32> {
+    let mut b = Builder::new();
+    let array = b.buffer_array(buffers);
+    let source = b.spec_operand();
+    let destination = b.spec_operand();
+    let count = b.spec_u32(1);
+    let (counter, stride) = b.grid_stride(workgroup);
+    let (scope, i) = b.begin_loop(counter, count);
+    let value = b.load_float(input, array, source, i);
+    b.store_float(output_storage, array, destination, i, value);
+    b.end_loop(scope, counter, stride);
+    b.end_main();
+    b.finish([workgroup, 1, 1])
+}
+
 fn assemble_move(storage: Storage, contiguous: bool, workgroup: u32, buffers: u32) -> Vec<u32> {
     let mut b = Builder::new();
     let array = b.buffer_array(buffers);
@@ -2658,6 +3081,12 @@ fn assemble_move(storage: Storage, contiguous: bool, workgroup: u32, buffers: u3
             let value = b.load_bool(array, input, source);
             b.store_bool(array, output, destination, value);
         }
+        // A raw 8-bit lane copy: FP8 bit patterns — NaNs, subnormals, signed zeros — move
+        // exactly. The `Byte` arm above must not be reused: it canonicalizes to `0`/`1`.
+        Storage::Quarter(_) => {
+            let bits = b.load_byte_bits(array, input, source);
+            b.store_byte_bits(array, output, destination, bits);
+        }
         // A raw 16-bit lane copy: no float conversion, so every binary16 bit pattern — NaN
         // payloads and subnormals included — moves exactly.
         Storage::Half => {
@@ -2676,102 +3105,7 @@ mod tests {
 
     /// Every kernel variant the lowering can select, at one representative tuning.
     fn all_keys() -> Vec<KernelKey> {
-        let mut keys = Vec::new();
-        let ops = [
-            ElementwiseOp::Abs,
-            ElementwiseOp::Ceil,
-            ElementwiseOp::Cos,
-            ElementwiseOp::Erf,
-            ElementwiseOp::Exp,
-            ElementwiseOp::Floor,
-            ElementwiseOp::Log,
-            ElementwiseOp::Negate,
-            ElementwiseOp::Reciprocal,
-            ElementwiseOp::Rsqrt,
-            ElementwiseOp::Sin,
-            ElementwiseOp::Sigmoid,
-            ElementwiseOp::Tanh,
-            ElementwiseOp::Clamp(NanMode::Propagate),
-            ElementwiseOp::Clamp(NanMode::Ignore),
-            ElementwiseOp::Add,
-            ElementwiseOp::Sub,
-            ElementwiseOp::Mul,
-            ElementwiseOp::Pow,
-            ElementwiseOp::Maximum(NanMode::Propagate),
-            ElementwiseOp::Minimum(NanMode::Ignore),
-            ElementwiseOp::Equal,
-            ElementwiseOp::Greater,
-            ElementwiseOp::GreaterEqual,
-            ElementwiseOp::LogicalAnd,
-            ElementwiseOp::LogicalOr,
-            ElementwiseOp::LogicalXor,
-            ElementwiseOp::LogicalNot,
-            ElementwiseOp::Select,
-            ElementwiseOp::CopyBytes,
-        ];
-        for op in ops {
-            for float in [Storage::Word, Storage::Half] {
-                for broadcast in [false, true] {
-                    keys.push(KernelKey::Elementwise {
-                        op,
-                        float,
-                        broadcast,
-                        workgroup: 64,
-                        buffers: 17,
-                    });
-                }
-            }
-        }
-        for op in [
-            ReduceOp::Sum,
-            ReduceOp::Product,
-            ReduceOp::Max(NanMode::Propagate),
-            ReduceOp::Min(NanMode::Ignore),
-            ReduceOp::ArgMax(NanMode::Propagate),
-            ReduceOp::ArgMax(NanMode::Ignore),
-        ] {
-            for float in [Storage::Word, Storage::Half] {
-                keys.push(KernelKey::Reduce {
-                    op,
-                    float,
-                    workgroup: 64,
-                    buffers: 17,
-                });
-            }
-        }
-        for float in [Storage::Word, Storage::Half] {
-            keys.push(KernelKey::Matmul {
-                float,
-                tile: 16,
-                buffers: 17,
-            });
-            keys.push(KernelKey::Matmul {
-                float,
-                tile: 8,
-                buffers: 5,
-            });
-        }
-        for nan_mode in [NanMode::Propagate, NanMode::Ignore] {
-            for float in [Storage::Word, Storage::Half] {
-                keys.push(KernelKey::MaxPool {
-                    nan_mode,
-                    float,
-                    workgroup: 64,
-                    buffers: 17,
-                });
-            }
-        }
-        for storage in [Storage::Word, Storage::Byte, Storage::Half] {
-            for contiguous in [false, true] {
-                keys.push(KernelKey::Move {
-                    storage,
-                    contiguous,
-                    workgroup: 64,
-                    buffers: 17,
-                });
-            }
-        }
-        keys
+        KernelKey::every_variant()
     }
 
     /// Walk a module instruction by instruction: word counts tile the body exactly, every id is
@@ -2908,6 +3242,21 @@ mod tests {
                         pad_top: 0,
                         pad_left: 0,
                     },
+                ),
+                // A CAST's specialization payload is a contiguous move's: two operands and a
+                // count.
+                KernelKey::Cast { .. } => move_spec(
+                    operand,
+                    operand,
+                    MoveGeometry {
+                        count: 8,
+                        dims: [1; MAX_RANK],
+                        in_strides: [1; MAX_RANK],
+                        in_offset: 0,
+                        out_strides: [1; MAX_RANK],
+                        out_offset: 0,
+                    },
+                    true,
                 ),
                 KernelKey::Move { contiguous, .. } => move_spec(
                     operand,
@@ -3079,5 +3428,117 @@ mod tests {
                 case.to_bits()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod fp8_narrowing_tests {
+    use super::*;
+    use virtio_accel_tosa::{fp8e4m3_to_f32, fp8e5m2_to_f32};
+
+    /// An independent oracle: scan every non-negative encoding for the nearest magnitude, ties
+    /// to even, then apply the sign separately as IEEE does — so a value that rounds to zero
+    /// keeps its sign. No bit arithmetic in common with [`f32_to_fp8_bits`].
+    fn nearest_by_search(format: Fp8Format, value: f32) -> u8 {
+        let sign = if value.is_sign_negative() { 0x80 } else { 0x00 };
+        let magnitude = value.abs();
+        let mut best: Option<(f32, u8)> = None;
+        for bits in 0..=0x7f_u8 {
+            let candidate = fp8_decode(format, bits);
+            if !candidate.is_finite() {
+                continue;
+            }
+            let distance = (candidate - magnitude).abs();
+            best = match best {
+                None => Some((distance, bits)),
+                Some((best_distance, _)) if distance < best_distance => Some((distance, bits)),
+                Some((best_distance, best_bits))
+                    if distance == best_distance && bits & 1 == 0 && best_bits & 1 == 1 =>
+                {
+                    Some((distance, bits))
+                }
+                other => other,
+            };
+        }
+        sign | best.expect("a finite encoding exists").1
+    }
+
+    #[test]
+    fn narrowing_round_trips_every_encoding_exactly() {
+        for format in [Fp8Format::E4M3, Fp8Format::E5M2] {
+            for bits in 0..=u8::MAX {
+                let value = match format {
+                    Fp8Format::E4M3 => fp8e4m3_to_f32(bits),
+                    Fp8Format::E5M2 => fp8e5m2_to_f32(bits),
+                };
+                if !value.is_finite() {
+                    continue;
+                }
+                assert_eq!(
+                    f32_to_fp8_bits(format, value),
+                    bits,
+                    "{format:?}: {value} did not return to {bits:#04x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn narrowing_matches_an_independent_nearest_search() {
+        for format in [Fp8Format::E4M3, Fp8Format::E5M2] {
+            let max_finite = match format {
+                Fp8Format::E4M3 => 448.0_f32,
+                Fp8Format::E5M2 => 57344.0_f32,
+            };
+            let mut state = 0x1234_5678_u32;
+            for index in 0..200_000 {
+                // A mix of exact midpoints, subnormal-range values, and pseudo-random draws.
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let value = if index % 3 == 0 {
+                    let a = fp8_decode(format, (index % 256) as u8);
+                    let b = fp8_decode(format, ((index + 1) % 256) as u8);
+                    (a + b) * 0.5
+                } else {
+                    let scaled = (state >> 8) as f32 / (1_u32 << 24) as f32;
+                    (scaled * 2.0 - 1.0) * max_finite * 1.2
+                };
+                if !value.is_finite() {
+                    continue;
+                }
+                let actual = f32_to_fp8_bits(format, value);
+                if value.abs() > max_finite {
+                    continue; // overflow is this crate's policy, not a nearest-value question
+                }
+                assert_eq!(
+                    actual,
+                    nearest_by_search(format, value),
+                    "{format:?}: {value}"
+                );
+            }
+        }
+    }
+
+    fn fp8_decode(format: Fp8Format, bits: u8) -> f32 {
+        match format {
+            Fp8Format::E4M3 => fp8e4m3_to_f32(bits),
+            Fp8Format::E5M2 => fp8e5m2_to_f32(bits),
+        }
+    }
+
+    #[test]
+    fn overflow_policy_is_nan_for_e4m3_and_infinity_for_e5m2() {
+        // 464 is the midpoint above 448 and ties to even, so it stays finite; anything beyond
+        // it is unrepresentable.
+        assert_eq!(f32_to_fp8_bits(Fp8Format::E4M3, 464.0), 0x7e);
+        assert_eq!(f32_to_fp8_bits(Fp8Format::E4M3, 464.001), 0x7f);
+        assert_eq!(f32_to_fp8_bits(Fp8Format::E4M3, -464.001), 0xff);
+        assert_eq!(f32_to_fp8_bits(Fp8Format::E4M3, f32::INFINITY), 0x7f);
+        assert_eq!(f32_to_fp8_bits(Fp8Format::E4M3, f32::NAN), 0x7f);
+        assert_eq!(f32_to_fp8_bits(Fp8Format::E5M2, 1.0e9), 0x7c);
+        assert_eq!(f32_to_fp8_bits(Fp8Format::E5M2, f32::NEG_INFINITY), 0xfc);
+        assert_eq!(f32_to_fp8_bits(Fp8Format::E5M2, f32::NAN), 0x7e);
+        // Signed zero survives.
+        assert_eq!(f32_to_fp8_bits(Fp8Format::E4M3, -0.0), 0x80);
+        assert_eq!(f32_to_fp8_bits(Fp8Format::E5M2, 0.0), 0x00);
     }
 }
