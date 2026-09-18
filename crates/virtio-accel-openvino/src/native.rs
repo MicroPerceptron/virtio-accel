@@ -585,6 +585,8 @@ const fn element_code(element: OvElement) -> ffi::ov_element_type_e {
     match element {
         OvElement::F32 => ffi::ELEMENT_F32,
         OvElement::F16 => ffi::ELEMENT_F16,
+        OvElement::F8E4M3 => ffi::ELEMENT_F8E4M3,
+        OvElement::F8E5M2 => ffi::ELEMENT_F8E5M2,
         OvElement::I8 => ffi::ELEMENT_I8,
         OvElement::I32 => ffi::ELEMENT_I32,
         OvElement::I64 => ffi::ELEMENT_I64,

@@ -19,8 +19,9 @@
 mod lower;
 
 pub use lower::{
-    LoweringError, OPENVINO_TOSA_CAPABILITY, OPENVINO_TOSA_INTEGER_CAPABILITY,
-    OPENVINO_TOSA_INTEGER_TARGET, OPENVINO_TOSA_TARGET, supports_tosa_dtype,
+    LoweringError, OPENVINO_TOSA_CAPABILITY, OPENVINO_TOSA_FP8_CAPABILITY,
+    OPENVINO_TOSA_FP8_TARGET, OPENVINO_TOSA_INTEGER_CAPABILITY, OPENVINO_TOSA_INTEGER_TARGET,
+    OPENVINO_TOSA_TARGET, supports_tosa_dtype,
     supports_tosa_operator,
 };
 
@@ -30,7 +31,11 @@ use virtio_accel_tosa::TosaCapabilityProvider;
 
 #[cfg(va_openvino)]
 const TOSA_CAPABILITIES: &[CapabilityDescriptor] =
-    &[OPENVINO_TOSA_CAPABILITY, OPENVINO_TOSA_INTEGER_CAPABILITY];
+    &[
+        OPENVINO_TOSA_CAPABILITY,
+        OPENVINO_TOSA_INTEGER_CAPABILITY,
+        OPENVINO_TOSA_FP8_CAPABILITY,
+    ];
 #[cfg(not(va_openvino))]
 const TOSA_CAPABILITIES: &[CapabilityDescriptor] = &[];
 
