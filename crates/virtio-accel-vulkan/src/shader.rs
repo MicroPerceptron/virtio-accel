@@ -203,6 +203,15 @@ const GLSL_FIND_U_MSB: u32 = 75;
 /// A SPIR-V result id.
 pub type Id = u32;
 
+/// Which of the two TOSA FP8 encodings a byte-storage float tensor carries. They differ in
+/// exponent width, bias, and specials: E4M3 has no infinity (`0x7f`/`0xff` are its only NaNs,
+/// finite max 448) while E5M2 is IEEE-shaped (infinity at `0x7c`, finite max 57344).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Fp8Format {
+    E4M3,
+    E5M2,
+}
+
 /// How a tensor's scalars are laid out in the storage words a kernel addresses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Storage {
@@ -210,6 +219,11 @@ pub enum Storage {
     Word,
     /// One byte per element, four to a word (`BOOL`).
     Byte,
+    /// One byte per element, four to a word, holding an FP8 encoding. Geometrically identical
+    /// to [`Self::Byte`]; it is a separate variant because the byte is a raw float pattern, not
+    /// a canonical `0`/`1`, so it is loaded through an exact widening and moved as raw bits
+    /// (ADR 0009).
+    Quarter(Fp8Format),
     /// Two bytes per element, two to a word (`FP16`); the 16-bit lanes are unpacked on load and
     /// repacked with `OpAtomicAnd`/`OpAtomicOr` on store, so a kernel never modifies the
     /// neighbouring element of its word.
@@ -359,11 +373,13 @@ pub enum KernelKey {
         workgroup: u32,
         buffers: u32,
     },
-    /// Batched matrix multiplication over `tile × tile` workgroup-shared binary32 tiles. The
-    /// operands are read at `float` storage and accumulate in binary32 — the accumulator width
-    /// TOSA assigns FP16 MATMUL — and the output is stored back at `float` storage.
+    /// Batched matrix multiplication over `tile × tile` workgroup-shared binary32 tiles. Both
+    /// operands are read at `input` storage and accumulate in binary32 — the accumulator width
+    /// TOSA assigns FP16 and FP8 MATMUL — and the result is stored at `output` storage. The two
+    /// differ only for the FP8 tier, where TOSA defines MATMUL as `(FP8, FP8) -> FP16`.
     Matmul {
-        float: Storage,
+        input: Storage,
+        output: Storage,
         tile: u32,
         buffers: u32,
     },
@@ -402,10 +418,11 @@ impl KernelKey {
                 buffers,
             } => assemble_reduce(op, float, workgroup, buffers),
             Self::Matmul {
-                float,
+                input,
+                output,
                 tile,
                 buffers,
-            } => assemble_matmul(float, tile, buffers),
+            } => assemble_matmul(input, output, tile, buffers),
             Self::MaxPool {
                 nan_mode,
                 float,
@@ -1282,6 +1299,74 @@ impl Builder {
 
     // -- crate-owned binary16 conversions (ADR 0008) --------------------------------------------
 
+    /// Widen packed FP8 bits (a `u32` in `0..=0xff`) to binary32, exactly. The kernel twin of
+    /// [`virtio_accel_tosa::fp8e4m3_to_f32`] / [`virtio_accel_tosa::fp8e5m2_to_f32`]: integer
+    /// expansion for normals and specials, one exact multiply for subnormals. Every FP8 value
+    /// is representable in binary32, so all 256 patterns of each format widen exactly on every
+    /// device, and no `OpFConvert` appears that a driver could demote.
+    fn widen_fp8(&mut self, format: Fp8Format, bits: Id) -> Id {
+        let (exponent_shift, exponent_mask, fraction_mask, rebias, mantissa_shift, scale) =
+            match format {
+                // Subnormal E4M3 is `fraction · 2^-9`; E5M2 is `fraction · 2^-16`.
+                Fp8Format::E4M3 => (3_u32, 0x0f_u32, 0x07_u32, 120_u32, 20_u32, 1.0_f32 / 512.0),
+                Fp8Format::E5M2 => (2, 0x1f, 0x03, 112, 21, 1.0_f32 / 65_536.0),
+            };
+        let zero = self.c_u32(0);
+        let sign_mask = self.c_u32(0x80);
+        let twenty_four = self.c_u32(24);
+        let twenty_three = self.c_u32(23);
+        let sign = self.band(bits, sign_mask);
+        let sign = self.shl(sign, twenty_four);
+        let exponent_shift = self.c_u32(exponent_shift);
+        let exponent_mask_c = self.c_u32(exponent_mask);
+        let fraction_mask_c = self.c_u32(fraction_mask);
+        let exponent = self.shr(bits, exponent_shift);
+        let exponent = self.band(exponent, exponent_mask_c);
+        let fraction = self.band(bits, fraction_mask_c);
+        // Normal: rebias the exponent into binary32 and shift the fraction up.
+        let rebias = self.c_u32(rebias);
+        let biased = self.iadd(exponent, rebias);
+        let normal = self.shl(biased, twenty_three);
+        let mantissa_shift = self.c_u32(mantissa_shift);
+        let shifted = self.shl(fraction, mantissa_shift);
+        let normal = self.bor(normal, shifted);
+        let normal = self.bor(normal, sign);
+        // Subnormal or zero: an exact multiply; a zero fraction keeps the sign, so signed zero
+        // survives.
+        let scale = self.c_f32(scale);
+        let scaled = self.u_to_f(fraction);
+        let subnormal = self.fmul(scaled, scale);
+        let subnormal = self.bitcast_u32(subnormal);
+        let subnormal = self.bor(subnormal, sign);
+        let is_subnormal = self.ieq(exponent, zero);
+        let value = self.select_u32(is_subnormal, subnormal, normal);
+        // Specials differ: E4M3's top exponent stays finite except for the all-ones fraction,
+        // which is its only NaN; E5M2's top exponent is infinity or NaN as usual.
+        match format {
+            Fp8Format::E4M3 => {
+                let quiet_nan = self.c_u32(0x7fc0_0000);
+                let top_exponent = self.c_u32(exponent_mask);
+                let top_fraction = self.c_u32(fraction_mask);
+                let exponent_is_top = self.ieq(exponent, top_exponent);
+                let fraction_is_top = self.ieq(fraction, top_fraction);
+                let is_nan = self.land(exponent_is_top, fraction_is_top);
+                let nan = self.bor(sign, quiet_nan);
+                let value = self.select_u32(is_nan, nan, value);
+                self.bitcast_f32(value)
+            }
+            Fp8Format::E5M2 => {
+                let inf_bits = self.c_u32(0x7f80_0000);
+                let top_exponent = self.c_u32(exponent_mask);
+                let is_infnan = self.ieq(exponent, top_exponent);
+                let infnan = self.bor(sign, inf_bits);
+                let payload = self.shl(fraction, mantissa_shift);
+                let infnan = self.bor(infnan, payload);
+                let value = self.select_u32(is_infnan, infnan, value);
+                self.bitcast_f32(value)
+            }
+        }
+    }
+
     /// Widen packed binary16 bits (a `u32` in `0..=0xffff`) to binary32, exactly. This is the
     /// kernel twin of the host [`f16_to_f32`]: integer expansion only, so every value —
     /// subnormals included — is exact on every device, and there is no `OpFConvert` pattern a
@@ -1563,30 +1648,35 @@ impl Builder {
         self.store_word(buffers, operand, element, word);
     }
 
-    /// Byte `element` of a byte-storage operand as a boolean (any nonzero byte is true).
-    fn load_bool(&mut self, buffers: Id, operand: (Id, Id), element: Id) -> Id {
+    /// The raw 8 bits of byte-storage `element` as a `u32` (`0..=0xff`): word load, shift the
+    /// lane down, mask. No interpretation — an FP8 bit pattern passes through untouched.
+    fn load_byte_bits(&mut self, buffers: Id, operand: (Id, Id), element: Id) -> Id {
         let two = self.c_u32(2);
         let three = self.c_u32(3);
         let mask = self.c_u32(0xff);
-        let zero = self.c_u32(0);
         let word_index = self.shr(element, two);
         let word = self.load_word(buffers, operand, word_index);
         let lane = self.band(element, three);
         let eight = self.c_u32(8);
         let shift = self.imul(lane, eight);
         let shifted = self.shr(word, shift);
-        let byte = self.band(shifted, mask);
+        self.band(shifted, mask)
+    }
+
+    /// Byte `element` of a byte-storage operand as a boolean (any nonzero byte is true).
+    fn load_bool(&mut self, buffers: Id, operand: (Id, Id), element: Id) -> Id {
+        let zero = self.c_u32(0);
+        let byte = self.load_byte_bits(buffers, operand, element);
         self.ine(byte, zero)
     }
 
-    /// Write byte `element` of a byte-storage operand as canonical `0`/`1` without touching the
-    /// other bytes of its word: clear with `OpAtomicAnd`, then set with `OpAtomicOr`.
-    fn store_bool(&mut self, buffers: Id, operand: (Id, Id), element: Id, value: Id) {
+    /// Write the low 8 bits of `byte` into byte `element` without touching the other bytes of
+    /// its word: clear with `OpAtomicAnd`, then set with `OpAtomicOr`. The neighbour-safe
+    /// sequence `BOOL` and FP8 lanes share.
+    fn store_byte_bits(&mut self, buffers: Id, operand: (Id, Id), element: Id, byte: Id) {
         let two = self.c_u32(2);
         let three = self.c_u32(3);
         let mask = self.c_u32(0xff);
-        let one = self.c_u32(1);
-        let zero = self.c_u32(0);
         let word_index = self.shr(element, two);
         let pointer = self.word_pointer(buffers, operand, word_index);
         let lane = self.band(element, three);
@@ -1594,13 +1684,21 @@ impl Builder {
         let shift = self.imul(lane, eight);
         let clear = self.shl(mask, shift);
         let clear = self.bnot(clear);
-        let byte = self.select_u32(value, one, zero);
-        let set = self.shl(byte, shift);
+        let masked = self.band(byte, mask);
+        let set = self.shl(masked, shift);
         let scope = self.c_u32(SCOPE_DEVICE);
         let semantics = self.c_u32(MEMORY_SEMANTICS_RELAXED);
         let u32_ty = self.u32_ty();
         self.value(OP_ATOMIC_AND, u32_ty, &[pointer, scope, semantics, clear]);
         self.value(OP_ATOMIC_OR, u32_ty, &[pointer, scope, semantics, set]);
+    }
+
+    /// Write byte `element` of a byte-storage operand as canonical `0`/`1`.
+    fn store_bool(&mut self, buffers: Id, operand: (Id, Id), element: Id, value: Id) {
+        let one = self.c_u32(1);
+        let zero = self.c_u32(0);
+        let byte = self.select_u32(value, one, zero);
+        self.store_byte_bits(buffers, operand, element, byte);
     }
 
     /// The raw 16 bits of half-storage `element` as a `u32` (`0..=0xffff`): word load, shift
@@ -1645,6 +1743,10 @@ impl Builder {
     fn load_float(&mut self, storage: Storage, buffers: Id, operand: (Id, Id), element: Id) -> Id {
         match storage {
             Storage::Word => self.load_f32(buffers, operand, element),
+            Storage::Quarter(format) => {
+                let bits = self.load_byte_bits(buffers, operand, element);
+                self.widen_fp8(format, bits)
+            }
             Storage::Half => {
                 let bits = self.load_half_bits(buffers, operand, element);
                 self.widen_f16(bits)
@@ -2250,6 +2352,8 @@ fn assemble_elementwise(
                 b.widen_f16(bits)
             }
             Storage::Byte => b.load_bool(array, *operand, indices[k]),
+            // TOSA admits no FP8 elementwise operator, so the tier never selects this lane.
+            Storage::Quarter(_) => unreachable!("elementwise FP8 operand"),
         };
         values.push(value);
     }
@@ -2277,6 +2381,7 @@ fn assemble_elementwise(
             b.store_half_bits(array, output, i, bits);
         }
         Storage::Byte => b.store_bool(array, output, i, result),
+        Storage::Quarter(_) => unreachable!("elementwise FP8 result"),
     }
     b.end_loop(scope, counter, stride);
     b.end_main();
@@ -2410,7 +2515,7 @@ fn assemble_reduce(op: ReduceOp, float: Storage, workgroup: u32, buffers: u32) -
 /// k - k0)`, never a padded zero product, so signed zeros survive.
 ///
 /// Specialization order: `lhs`, `rhs`, output `(buffer, base)`; `m`, `n`, `k`, `batch`.
-fn assemble_matmul(float: Storage, tile: u32, buffers: u32) -> Vec<u32> {
+fn assemble_matmul(input: Storage, output_storage: Storage, tile: u32, buffers: u32) -> Vec<u32> {
     let mut b = Builder::new();
     let array = b.buffer_array(buffers);
     let lhs = b.spec_operand();
@@ -2475,7 +2580,7 @@ fn assemble_matmul(float: Storage, tile: u32, buffers: u32) -> Vec<u32> {
     let lhs_ok = b.land(row_ok, ka_ok);
     let lhs_index = b.iadd(lhs_row, ka);
     let lhs_index = b.select_u32(lhs_ok, lhs_index, zero);
-    let lhs_loaded = b.load_float(float, array, lhs, lhs_index);
+    let lhs_loaded = b.load_float(input, array, lhs, lhs_index);
     let lhs_value = b.select_f32(lhs_ok, lhs_loaded, zero_f);
     let kb = b.iadd(k0, ty);
     let kb_ok = b.ult(kb, k);
@@ -2483,7 +2588,7 @@ fn assemble_matmul(float: Storage, tile: u32, buffers: u32) -> Vec<u32> {
     let rhs_index = b.imul(kb, n);
     let rhs_index = b.iadd(rhs_index, rhs_col);
     let rhs_index = b.select_u32(rhs_ok, rhs_index, zero);
-    let rhs_loaded = b.load_float(float, array, rhs, rhs_index);
+    let rhs_loaded = b.load_float(input, array, rhs, rhs_index);
     let rhs_value = b.select_f32(rhs_ok, rhs_loaded, zero_f);
     let lhs_slot = b.access_chain(workgroup_ptr, lhs_tile, &[local_index]);
     b.store(lhs_slot, lhs_value);
@@ -2516,12 +2621,14 @@ fn assemble_matmul(float: Storage, tile: u32, buffers: u32) -> Vec<u32> {
         let out_index = b.iadd(out_batch, out_row);
         let out_index = b.iadd(out_index, col);
         let acc = b.load(f32_ty, acc_var);
-        match float {
+        match output_storage {
             Storage::Half => {
                 let bits = b.narrow_f16(acc);
                 b.store_half_bits(array, output, out_index, bits);
             }
-            _ => b.store_f32(array, output, out_index, acc),
+            // TOSA defines no MATMUL whose result is FP8 or BOOL; the tier never selects one.
+            Storage::Byte | Storage::Quarter(_) => unreachable!("MATMUL result storage"),
+            Storage::Word => b.store_f32(array, output, out_index, acc),
         }
     });
     b.end_main();
@@ -2658,6 +2765,12 @@ fn assemble_move(storage: Storage, contiguous: bool, workgroup: u32, buffers: u3
             let value = b.load_bool(array, input, source);
             b.store_bool(array, output, destination, value);
         }
+        // A raw 8-bit lane copy: FP8 bit patterns — NaNs, subnormals, signed zeros — move
+        // exactly. The `Byte` arm above must not be reused: it canonicalizes to `0`/`1`.
+        Storage::Quarter(_) => {
+            let bits = b.load_byte_bits(array, input, source);
+            b.store_byte_bits(array, output, destination, bits);
+        }
         // A raw 16-bit lane copy: no float conversion, so every binary16 bit pattern — NaN
         // payloads and subnormals included — moves exactly.
         Storage::Half => {
@@ -2741,12 +2854,29 @@ mod tests {
         }
         for float in [Storage::Word, Storage::Half] {
             keys.push(KernelKey::Matmul {
-                float,
+                input: float,
+                output: float,
                 tile: 16,
                 buffers: 17,
             });
             keys.push(KernelKey::Matmul {
-                float,
+                input: float,
+                output: float,
+                tile: 8,
+                buffers: 5,
+            });
+        }
+        // The FP8 tier: TOSA's `(FP8, FP8) -> FP16` MATMUL, and exact FP8 data movement.
+        for format in [Fp8Format::E4M3, Fp8Format::E5M2] {
+            keys.push(KernelKey::Matmul {
+                input: Storage::Quarter(format),
+                output: Storage::Half,
+                tile: 16,
+                buffers: 17,
+            });
+            keys.push(KernelKey::Matmul {
+                input: Storage::Quarter(format),
+                output: Storage::Half,
                 tile: 8,
                 buffers: 5,
             });
@@ -2761,7 +2891,13 @@ mod tests {
                 });
             }
         }
-        for storage in [Storage::Word, Storage::Byte, Storage::Half] {
+        for storage in [
+            Storage::Word,
+            Storage::Byte,
+            Storage::Half,
+            Storage::Quarter(Fp8Format::E4M3),
+            Storage::Quarter(Fp8Format::E5M2),
+        ] {
             for contiguous in [false, true] {
                 keys.push(KernelKey::Move {
                     storage,

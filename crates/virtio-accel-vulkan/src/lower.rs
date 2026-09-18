@@ -33,8 +33,8 @@ use virtio_accel_tosa::{
 };
 
 use crate::shader::{
-    ElementwiseOp, ElementwiseSpec, MAX_RANK, MoveGeometry, NanMode, Operand, PoolGeometry,
-    ReduceOp, Storage, matmul_spec, max_pool_spec, move_spec, reduce_spec,
+    ElementwiseOp, ElementwiseSpec, Fp8Format, MAX_RANK, MoveGeometry, NanMode, Operand,
+    PoolGeometry, ReduceOp, Storage, matmul_spec, max_pool_spec, move_spec, reduce_spec,
 };
 
 /// The FP32 base tier: TOSA 1.0, floating-point profile, level 8K, no extensions.
@@ -43,6 +43,21 @@ pub const VULKAN_TOSA_TARGET: Target = Target::new(
     ProfileSet::FLOATING_POINT,
     Level::Level8K,
     ExtensionSet::NONE,
+);
+
+/// The FP8 tier's target: TOSA 1.0, floating-point profile, level 8K, both FP8 extensions.
+///
+/// Unlike the FP16 tier, this cannot share [`VULKAN_TOSA_TARGET`]'s identity. FP16 lives in the
+/// base floating-point profile, so narrowing dtypes under one target was enough (ADR 0008); FP8
+/// legality is gated on `ExtensionSet::FP8E4M3` / `FP8E5M2`, so the envelope itself differs and
+/// the tier needs a target of its own — the same split `virtio-accel-xdna` makes (ADR 0009).
+pub const VULKAN_TOSA_FP8_TARGET: Target = Target::new(
+    Version::TOSA_1_0,
+    ProfileSet::FLOATING_POINT,
+    Level::Level8K,
+    ExtensionSet::NONE
+        .union(ExtensionSet::FP8E4M3)
+        .union(ExtensionSet::FP8E5M2),
 );
 
 /// The provisional integer tier: TOSA 1.0, integer profile, level 8K, no extensions.
@@ -162,6 +177,51 @@ pub const VULKAN_TOSA_FP16_CAPABILITY: CapabilityDescriptor = CapabilityDescript
     },
 };
 
+/// The FP8 tier's dtypes: both FP8 encodings in every role, plus the FP16 that TOSA assigns as
+/// the result of an FP8 MATMUL, and INT32 for shape operands.
+const FLOAT8_DTYPES: &[DTypeCapability] = &[
+    DTypeCapability::new(DType::FP8E4M3, ValueRoles::ALL),
+    DTypeCapability::new(DType::FP8E5M2, ValueRoles::ALL),
+    DTypeCapability::new(DType::FP16, ValueRoles::ALL),
+    DTypeCapability::new(DType::INT32, ValueRoles::ALL),
+];
+
+/// The FP8 tier's operators: what TOSA admits for FP8 *and* this crate executes. Deliberately a
+/// subset, not [`FLOAT_OPERATORS`] — TOSA admits no FP8 elementwise operator at all (no
+/// arithmetic, comparison, selection, reduction or transcendental lane takes FP8), so the tier
+/// is MATMUL plus the data movement that feeds it. A capability descriptor cannot express
+/// per-operator dtype legality, so listing the 42-operator table here would advertise FP8 lanes
+/// that admission would then reject.
+///
+/// `CAST`, `MAX_POOL2D` and `ARGMAX` are admitted by TOSA for FP8 and are deliberately absent:
+/// they need kernels this tier does not yet carry.
+const FLOAT8_OPERATORS: &[OperatorCapability] = &[
+    OperatorCapability::constrained(Op::MATMUL, OperatorConstraints::ZERO_ZERO_POINTS),
+    OperatorCapability::new(Op::CONCAT),
+    OperatorCapability::constrained(Op::RESHAPE, OperatorConstraints::CONSTANT_PARAMETERS),
+    OperatorCapability::new(Op::REVERSE),
+    OperatorCapability::new(Op::TRANSPOSE),
+    OperatorCapability::new(Op::CONST),
+    OperatorCapability::new(Op::CONST_SHAPE),
+    OperatorCapability::new(Op::IDENTITY),
+];
+
+/// The FP8 tier's admitted boundary (ADR 0009): `(FP8, FP8) -> FP16` MATMUL and exact FP8 data
+/// movement. Like the FP16 tier it needs no device feature — the widening is crate-owned integer
+/// and binary32 code and nothing writes FP8 except a raw byte copy — so it is advertised on
+/// every device the backend opens, with numerics identical everywhere.
+pub const VULKAN_TOSA_FP8_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
+    target: VULKAN_TOSA_FP8_TARGET,
+    dtypes: FLOAT8_DTYPES,
+    operators: FLOAT8_OPERATORS,
+    graph: GraphCapabilities {
+        max_regions: 1,
+        max_blocks: 1,
+        dynamic_shapes: false,
+        runtime_conditions: RuntimeConditionSupport::None,
+    },
+};
+
 /// Whether the FP32 tier admits `op`.
 pub const fn supports_tosa_operator(op: Op) -> bool {
     VULKAN_TOSA_CAPABILITY.supports_operator(op)
@@ -171,6 +231,8 @@ pub const fn supports_tosa_operator(op: Op) -> bool {
 pub const fn supports_tosa_dtype(dtype: DType) -> bool {
     VULKAN_TOSA_FP16_CAPABILITY.supports_dtype(dtype, ValueRoles::INPUT)
         || VULKAN_TOSA_FP16_CAPABILITY.supports_dtype(dtype, ValueRoles::OUTPUT)
+        || VULKAN_TOSA_FP8_CAPABILITY.supports_dtype(dtype, ValueRoles::INPUT)
+        || VULKAN_TOSA_FP8_CAPABILITY.supports_dtype(dtype, ValueRoles::OUTPUT)
 }
 
 /// Why an artifact was not admitted.
@@ -216,7 +278,8 @@ pub(crate) enum KernelSpec {
         float: Storage,
     },
     Matmul {
-        float: Storage,
+        input: Storage,
+        output: Storage,
     },
     MaxPool {
         nan_mode: NanMode,
@@ -305,7 +368,7 @@ impl ProgramPlan {
 
 /// Admit `bytes` for `target` and produce its plan, or explain the rejection.
 pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<ProgramPlan, LoweringError> {
-    if target != VULKAN_TOSA_TARGET {
+    if target != VULKAN_TOSA_TARGET && target != VULKAN_TOSA_FP8_TARGET {
         return Err(LoweringError::UnsupportedTarget);
     }
     let model = parse(bytes).map_err(LoweringError::Parse)?;
@@ -365,6 +428,8 @@ fn pad_leading(values: &[u32], fill: u32) -> [u32; MAX_RANK] {
 fn storage_of(dtype: DType) -> Storage {
     match dtype {
         DType::BOOL => Storage::Byte,
+        DType::FP8E4M3 => Storage::Quarter(Fp8Format::E4M3),
+        DType::FP8E5M2 => Storage::Quarter(Fp8Format::E5M2),
         DType::FP16 => Storage::Half,
         _ => Storage::Word,
     }
@@ -372,7 +437,7 @@ fn storage_of(dtype: DType) -> Storage {
 
 fn scalar_bytes(dtype: DType) -> u64 {
     match dtype {
-        DType::BOOL => 1,
+        DType::BOOL | DType::FP8E4M3 | DType::FP8E5M2 => 1,
         DType::FP16 => 2,
         _ => 4,
     }
@@ -591,7 +656,12 @@ impl<'a, 'b> Lowering<'a, 'b> {
         let dtype = tensor.dtype();
         if !matches!(
             dtype,
-            DType::FP32 | DType::FP16 | DType::BOOL | DType::INT32
+            DType::FP32
+                | DType::FP16
+                | DType::BOOL
+                | DType::INT32
+                | DType::FP8E4M3
+                | DType::FP8E5M2
         ) {
             return Err(LoweringError::UnsupportedType(dtype));
         }
@@ -625,6 +695,19 @@ impl<'a, 'b> Lowering<'a, 'b> {
     fn float_shape(&mut self, value: ValueId) -> Result<TensorShape, LoweringError> {
         let shape = self.shape(value)?;
         if !matches!(shape.dtype, DType::FP32 | DType::FP16) {
+            return Err(LoweringError::UnsupportedType(shape.dtype));
+        }
+        Ok(shape)
+    }
+
+    /// The shape of a MATMUL operand: a float the tier multiplies, which is `FP32`/`FP16` or,
+    /// under the FP8 target, either FP8 encoding.
+    fn matmul_operand_shape(&mut self, value: ValueId) -> Result<TensorShape, LoweringError> {
+        let shape = self.shape(value)?;
+        if !matches!(
+            shape.dtype,
+            DType::FP32 | DType::FP16 | DType::FP8E4M3 | DType::FP8E5M2
+        ) {
             return Err(LoweringError::UnsupportedType(shape.dtype));
         }
         Ok(shape)
@@ -1055,9 +1138,15 @@ impl<'a, 'b> Lowering<'a, 'b> {
         let [lhs, rhs, lhs_zp, rhs_zp] = inputs else {
             return Err(LoweringError::UnsupportedGraph);
         };
-        let lhs_shape = self.float_shape(*lhs)?;
+        let lhs_shape = self.matmul_operand_shape(*lhs)?;
         let rhs_shape = self.typed_shape(*rhs, lhs_shape.dtype)?;
-        let out_shape = self.typed_shape(output, lhs_shape.dtype)?;
+        // TOSA defines FP8 MATMUL as `(FP8, FP8) -> FP16`; every other admitted operand type
+        // keeps its own dtype.
+        let result_dtype = match lhs_shape.dtype {
+            DType::FP8E4M3 | DType::FP8E5M2 => DType::FP16,
+            dtype => dtype,
+        };
+        let out_shape = self.typed_shape(output, result_dtype)?;
         // TOSA 1.0 floating-point MATMUL admits only zero zero-points: the two trailing inputs
         // must be `CONST` tensors whose serialized payload is all-zero (signed zero included).
         for zero_point in [lhs_zp, rhs_zp] {
@@ -1088,7 +1177,8 @@ impl<'a, 'b> Lowering<'a, 'b> {
         );
         self.dispatch(
             KernelSpec::Matmul {
-                float: lhs_shape.storage(),
+                input: lhs_shape.storage(),
+                output: out_shape.storage(),
             },
             spec,
             Work::Matmul { m, n, batch },
@@ -1512,6 +1602,9 @@ impl<'a, 'b> Lowering<'a, 'b> {
                         u16::from_le_bytes(chunk.try_into().expect("two bytes")) & 0x7fff == 0
                     })
             }
+            // Both FP8 encodings put the sign in bit 7, so this admits signed zero and nothing
+            // else, exactly as the FP32 and FP16 arms do.
+            DType::FP8E4M3 | DType::FP8E5M2 => bytes.iter().all(|byte| byte & 0x7f == 0),
             _ => bytes.iter().all(|byte| *byte == 0),
         };
         if bytes.is_empty() || !zero {
@@ -1670,7 +1763,8 @@ mod tests {
         assert_eq!(
             plan.dispatches[0].kernel,
             KernelSpec::Matmul {
-                float: Storage::Half
+                input: Storage::Half,
+                output: Storage::Half
             }
         );
         assert_eq!(plan.slot(0).unwrap().byte_len, 6 * 2);
@@ -1741,7 +1835,8 @@ mod tests {
         assert_eq!(
             dispatch.kernel,
             KernelSpec::Matmul {
-                float: Storage::Word
+                input: Storage::Word,
+                output: Storage::Word
             }
         );
         assert_eq!(

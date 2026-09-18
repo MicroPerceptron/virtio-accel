@@ -159,16 +159,37 @@ fn fp16_capability_extends_the_fp32_boundary() {
 
 #[test]
 fn every_kernel_variant_assembles_to_valid_spirv_headers() {
-    use virtio_accel_vulkan::shader::{KernelKey, NanMode, ReduceOp, Storage};
+    use virtio_accel_vulkan::shader::{Fp8Format, KernelKey, NanMode, ReduceOp, Storage};
     let keys = [
         KernelKey::Matmul {
-            float: Storage::Word,
+            input: Storage::Word,
+            output: Storage::Word,
             tile: 16,
             buffers: 17,
         },
         KernelKey::Matmul {
-            float: Storage::Half,
+            input: Storage::Half,
+            output: Storage::Half,
             tile: 16,
+            buffers: 17,
+        },
+        // The FP8 tier's `(FP8, FP8) -> FP16` MATMUL, one variant per encoding.
+        KernelKey::Matmul {
+            input: Storage::Quarter(Fp8Format::E4M3),
+            output: Storage::Half,
+            tile: 16,
+            buffers: 17,
+        },
+        KernelKey::Matmul {
+            input: Storage::Quarter(Fp8Format::E5M2),
+            output: Storage::Half,
+            tile: 16,
+            buffers: 17,
+        },
+        KernelKey::Move {
+            storage: Storage::Quarter(Fp8Format::E4M3),
+            contiguous: true,
+            workgroup: 64,
             buffers: 17,
         },
         KernelKey::Reduce {
