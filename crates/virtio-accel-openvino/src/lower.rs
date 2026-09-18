@@ -354,6 +354,45 @@ pub(crate) struct LoweredModel {
     pub features: Vec<LoweredFeature>,
 }
 
+/// A one-element FP8 `IDENTITY` document, for asking a device's compiler whether it accepts FP8
+/// at all.
+///
+/// Built through the same [`IrBuilder`] the real lowering uses, so it cannot drift from the
+/// document format that is known to work -- hand-written probe XML would be a second format to
+/// keep correct. FP8E4M3 stands in for both encodings: a compiler with no FP8 support at all
+/// rejects the type, and one that supports the extension supports both halves of it.
+pub(crate) fn fp8_probe_document() -> LoweredModel {
+    const ELEMENT: OvElement = OvElement::F8E4M3;
+    const DIMS: &[i64] = &[1];
+    // Three layers and two values: inside every bound `IrBuilder::new` checks.
+    let mut builder = IrBuilder::new(2).expect("a three-layer document is always within bounds");
+    let parameter = builder.emit_layer(
+        "Parameter",
+        "opset1",
+        "fp8_probe_input",
+        &format!("shape=\"1\" element_type=\"{}\"", ELEMENT.element_type()),
+        &[],
+        &[(ELEMENT, DIMS)],
+    )[0];
+    let identity = builder.emit_layer(
+        "Convert",
+        "opset1",
+        "fp8_probe_identity",
+        &format!("destination_type=\"{}\"", ELEMENT.element_type()),
+        &[(parameter, DIMS)],
+        &[(ELEMENT, DIMS)],
+    )[0];
+    builder.emit_layer(
+        "Result",
+        "opset1",
+        "fp8_probe_output",
+        "",
+        &[(identity, DIMS)],
+        &[],
+    );
+    builder.finish()
+}
+
 /// Whether the initial OpenVINO lowering tier can lower `op` for supported types and attributes.
 pub const fn supports_tosa_operator(op: Op) -> bool {
     OPENVINO_TOSA_CAPABILITY.supports_operator(op)

@@ -63,6 +63,11 @@ See the [`virtio-accel-coreml` support boundary](crates/virtio-accel-coreml/READ
   preference — the NPU compiler's IE dialect declares `MatMul` operands without the FP8 types, so
   MLIR's verifier rejects a raw FP8 `MatMul` before the hardware is consulted. What is native is the
   FP8 *boundary*: parameters stay FP8 through compilation, so nothing converts on the host.
+  The tier is **advertised per device, not per backend**: FP8 support turned out to be arch-gated —
+  Intel NPU arch 5010 (Panther Lake) compiles FP8 while arch 40XX (Lunar Lake) refuses even an FP8
+  `IDENTITY` — so each instance compiles a one-element FP8 graph at open and withholds the
+  descriptor when the device rejects it. There is no property to read instead:
+  `OPTIMIZATION_CAPABILITIES` omits FP8 on 5010, where it works.
 - **Runtime:** NPU and GPU require their Intel Level Zero driver or compute runtime. The CPU plugin is exercised in CI.
 - **Explicit limits:** unsupported INT8 operators and packed INT4 graphs are rejected rather than dequantized. FP8 arithmetic beyond `MATMUL` is not reachable: TOSA admits no FP8 elementwise operator at all.
 

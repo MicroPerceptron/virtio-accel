@@ -31,11 +31,19 @@ use virtio_accel_tosa::TosaCapabilityProvider;
 
 #[cfg(va_openvino)]
 const TOSA_CAPABILITIES: &[CapabilityDescriptor] =
-    &[
-        OPENVINO_TOSA_CAPABILITY,
-        OPENVINO_TOSA_INTEGER_CAPABILITY,
-        OPENVINO_TOSA_FP8_CAPABILITY,
-    ];
+    &[OPENVINO_TOSA_CAPABILITY, OPENVINO_TOSA_INTEGER_CAPABILITY];
+/// What an instance advertises when its device's compiler accepted the FP8 probe.
+///
+/// FP8 support is a property of the device, not of this backend: Intel NPU arch 5010 (Panther
+/// Lake) compiles FP8 graphs and arch 40XX (Lunar Lake) refuses even an FP8 `IDENTITY`. An
+/// unconditional descriptor would have a placement layer admit an FP8 graph and then fail it at
+/// load, which is exactly the silent-then-explode behaviour this crate refuses everywhere else.
+#[cfg(va_openvino)]
+const TOSA_CAPABILITIES_WITH_FP8: &[CapabilityDescriptor] = &[
+    OPENVINO_TOSA_CAPABILITY,
+    OPENVINO_TOSA_INTEGER_CAPABILITY,
+    OPENVINO_TOSA_FP8_CAPABILITY,
+];
 #[cfg(not(va_openvino))]
 const TOSA_CAPABILITIES: &[CapabilityDescriptor] = &[];
 

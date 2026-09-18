@@ -579,12 +579,14 @@ footer { padding-block: 44px 52px; }
           on the same target the Vulkan backend uses &mdash; movement bit-exact, MATMUL widened to
           binary16, which is the accumulator type TOSA already assigns FP8 MATMUL.</p>
         <p class="bk-device"><b>Intel NPU, GPU or CPU</b>CPU plugin proven in CI; the FP8 tier
-          compiles and round-trips on an Intel NPU (arch 5010, Panther Lake)</p>
+          compiles and round-trips on an Intel NPU at arch 5010 (Panther Lake), and is withheld on
+          devices whose compiler rejects FP8 &mdash; arch 40XX among them &mdash; by probing at
+          open rather than trusting an allowlist</p>
         <p class="bk-label">Program dtypes</p>
         <ul class="bk-dtypes">
           <li class="dt on">FP32<span class="sr-only"> supported</span></li>
           <li class="dt on">FP16<span class="sr-only"> supported</span></li>
-          <li class="dt on">FP8<span class="sr-only"> supported as a widened tier</span></li>
+          <li class="dt on">FP8<span class="sr-only"> supported as a widened tier, on devices whose compiler accepts FP8</span></li>
           <li class="dt on">INT8<span class="sr-only"> supported</span></li>
           <li class="dt">INT4<span class="sr-only"> not supported</span></li>
         </ul>

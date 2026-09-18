@@ -550,6 +550,52 @@ impl Drop for CompiledModelHandle {
     }
 }
 
+/// Read an IR document into a model, sharing the caller's weights memory when there is any.
+fn read_model(
+    core: &CoreHandle,
+    xml: &[u8],
+    weights: Option<&TensorHandle>,
+) -> Result<ModelHandle, BackendError> {
+    let mut model = ptr::null_mut();
+    // SAFETY: core, document bytes, and the (possibly null) weights tensor are live for this
+    // synchronous call; the created model shares the weights memory, which the caller keeps
+    // resident for as long as the model lives.
+    let status = unsafe {
+        ffi::ov_core_read_model_from_memory_buffer(
+            core.as_const_ptr(),
+            xml.as_ptr().cast(),
+            xml.len(),
+            weights.map_or(ptr::null(), TensorHandle::as_const_ptr),
+            &mut model,
+        )
+    };
+    check_status(status)?;
+    NonNull::new(model)
+        .map(|model| ModelHandle { model })
+        .ok_or(BackendError::External {
+            domain: OPENVINO_EXTERNAL_DOMAIN,
+            code: 0,
+        })
+}
+
+/// Whether this device's compiler accepts an FP8 graph, asked by compiling the smallest one.
+///
+/// Advertised capability has to be true of the device in hand, not of the backend in general.
+/// Intel NPU arch 5010 (Panther Lake) compiles FP8; arch 40XX (Lunar Lake) refuses even an FP8
+/// `IDENTITY`, and the FP8 handling in the driver-side compiler's own tree is arch-gated. There
+/// is no property to read for this -- `OPTIMIZATION_CAPABILITIES` omits FP8 on 5010, where it
+/// works -- so the tier is probed rather than branded, and a driver that gains FP8 later starts
+/// advertising it here with no allowlist to edit.
+fn device_accepts_fp8(core: &CoreHandle, device: &CStr) -> bool {
+    let probe = crate::lower::fp8_probe_document();
+    let Ok(model) = read_model(core, &probe.xml, None) else {
+        return false;
+    };
+    let accepted = compile_with_accuracy(core, &model, device).is_ok();
+    drop(model);
+    accepted
+}
+
 /// The only C-variadic call site: compile with the `ACCURACY` execution-mode hint so plugins may
 /// not silently run a declared-FP32 model at reduced precision.
 fn compile_with_accuracy(
@@ -825,6 +871,8 @@ pub struct OpenVinoAccelerator {
     direct_binding_admissions: AtomicU64,
     explicit_transfer_bytes: AtomicU64,
     info: DeviceInfo,
+    /// Whether this device's compiler accepts FP8, probed once at open.
+    fp8: bool,
 }
 
 impl std::fmt::Debug for OpenVinoAccelerator {
@@ -868,6 +916,7 @@ impl OpenVinoAccelerator {
     fn with_selected(core: Arc<CoreHandle>, device: String) -> Result<Self, InitError> {
         let info = device_info_for(&device);
         let device = CString::new(device).map_err(|_| InitError::DeviceUnavailable)?;
+        let fp8 = device_accepts_fp8(&core, &device);
         Ok(Self {
             core,
             device,
@@ -875,7 +924,13 @@ impl OpenVinoAccelerator {
             direct_binding_admissions: AtomicU64::new(0),
             explicit_transfer_bytes: AtomicU64::new(0),
             info,
+            fp8,
         })
+    }
+
+    /// Whether this instance advertises the FP8 tier, which depends on the device it opened.
+    pub fn advertises_fp8(&self) -> bool {
+        self.fp8
     }
 
     /// The enumerated name of the device this instance executes on.
@@ -1024,7 +1079,11 @@ impl OpenVinoAccelerator {
 
 impl TosaCapabilityProvider for OpenVinoAccelerator {
     fn tosa_capabilities(&self) -> &'static [CapabilityDescriptor] {
-        crate::TOSA_CAPABILITIES
+        if self.fp8 {
+            crate::TOSA_CAPABILITIES_WITH_FP8
+        } else {
+            crate::TOSA_CAPABILITIES
+        }
     }
 }
 
@@ -1245,28 +1304,7 @@ impl Accelerator for OpenVinoAccelerator {
             )?)
         };
 
-        let mut model = ptr::null_mut();
-        // SAFETY: core, document bytes, and the (possibly null) weights tensor are live for this
-        // synchronous call; the created model shares the weights memory, which the returned
-        // program keeps resident.
-        let status = unsafe {
-            ffi::ov_core_read_model_from_memory_buffer(
-                self.core.as_const_ptr(),
-                lowered.xml.as_ptr().cast(),
-                lowered.xml.len(),
-                weights_tensor
-                    .as_ref()
-                    .map_or(ptr::null(), TensorHandle::as_const_ptr),
-                &mut model,
-            )
-        };
-        check_status(status)?;
-        let model = NonNull::new(model)
-            .map(|model| ModelHandle { model })
-            .ok_or(BackendError::External {
-                domain: OPENVINO_EXTERNAL_DOMAIN,
-                code: 0,
-            })?;
+        let model = read_model(&self.core, &lowered.xml, weights_tensor.as_ref())?;
         let compiled = compile_with_accuracy(&self.core, &model, &self.device)?;
         drop(model);
 
@@ -1686,7 +1724,14 @@ mod tests {
     #[test]
     fn fp8_tier_graphs_compile_on_the_device() {
         let Some(backend) = backend() else { return };
-        eprintln!("FP8 tier device: {}", backend.device_name());
+        eprintln!(
+            "FP8 tier device: {} (FP8 advertised: {})",
+            backend.device_name(),
+            backend.advertises_fp8()
+        );
+        if !backend.advertises_fp8() {
+            return;
+        }
         let context = backend.create_context(ContextDesc::default()).unwrap();
         for dtype in [
             virtio_accel_tosa::DType::FP8E4M3,
@@ -1714,6 +1759,34 @@ mod tests {
         backend.destroy_context(context).unwrap();
     }
 
+    /// Advertisement must match what the device will actually do, in both directions. A device
+    /// that advertises FP8 loads an FP8 graph; a device that does not must refuse it at load
+    /// rather than accept the program and fail later. Intel NPU arch 5010 takes the first branch
+    /// and arch 40XX the second, so this is the one FP8 test that is meaningful on every device.
+    #[test]
+    fn fp8_advertisement_matches_what_the_device_accepts() {
+        let Some(backend) = backend() else { return };
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        let artifact = crate::lower::fp8_matmul_graph(virtio_accel_tosa::DType::FP8E4M3);
+        let outcome = backend.load_program(
+            &context,
+            tosa_artifact_for(&SliceSource(&artifact), crate::OPENVINO_TOSA_FP8_TARGET),
+        );
+        match (backend.advertises_fp8(), outcome) {
+            (true, Ok(program)) => backend.unload_program(program).unwrap(),
+            (true, Err(error)) => panic!(
+                "{}: advertises FP8 but refused an FP8 graph: {error:?}",
+                backend.device_name()
+            ),
+            (false, Err(_)) => {}
+            (false, Ok(_)) => panic!(
+                "{}: does not advertise FP8 but accepted an FP8 graph",
+                backend.device_name()
+            ),
+        }
+        backend.destroy_context(context).unwrap();
+    }
+
     /// The lowering tests assert the emitted document's shape; this asserts the real compiler
     /// builds a blob from it. The distinction is the whole point of the widening: a raw FP8
     /// MatMul reaches MLIR's verifier and is rejected, because the NPU compiler's IE dialect
@@ -1721,9 +1794,16 @@ mod tests {
     #[test]
     fn fp8_identity_moves_every_byte_pattern_on_the_device() {
         let Some(backend) = backend() else { return };
-        // Name the device: FP8 movement works on every plugin, so a pass says nothing about
+        // Name the device: FP8 movement works on several plugins, so a pass says nothing about
         // which one ran it. The evidence pin needs the device, not just the result.
-        eprintln!("FP8 device: {}", backend.device_name());
+        eprintln!(
+            "FP8 device: {} (FP8 advertised: {})",
+            backend.device_name(),
+            backend.advertises_fp8()
+        );
+        if !backend.advertises_fp8() {
+            return;
+        }
         for case in [IDENTITY_FP8E4M3, IDENTITY_FP8E5M2] {
             let context = backend.create_context(ContextDesc::default()).unwrap();
             let program = backend
