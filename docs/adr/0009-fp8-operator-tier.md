@@ -123,6 +123,42 @@ this is a storage-and-matmul tier, not a narrower FP16 tier, and copying ADR 000
   The converse is not asserted, because the FP8 target's envelope is a superset and an FP32
   graph remains legal under it.
 
+## The OpenVINO tier
+
+The OpenVINO backend carries the same tier on the same target, so a graph admitted by one backend
+is admitted by the other. Three things differ, and all three are forced rather than chosen.
+
+`MATMUL` widens its FP8 operands to binary16 at emission. The NPU compiler's IE dialect declares
+MatMul operands as `RankedTensorOf<[F16, F32, F64, SI32, quant_QuantizedType]>`, so MLIR's own
+verifier rejects a MatMul over raw FP8 — the failure is `Failed to create a valid MLIR module for
+the IR model`, thrown before the compiler asks the hardware anything. The widening costs nothing
+semantically, because TOSA already accumulates FP8 `MATMUL` into FP16: the widened operands and
+the declared output type agree, so nothing narrows back. `MAX_POOL2D` widens around the window
+only — no plugin has an FP8 pooling primitive, the CPU plugin reporting an empty primitive list —
+and that round trip is exact for every finite value, since each widened tap is an exact FP8 value
+and the maximum is therefore one of them. Data movement never widens, so it stays bit-exact.
+
+The tier's operator envelope is the shared float list *plus* `CAST`, not the eleven-operator
+Vulkan list. `CAST` cannot join `FLOAT_OPERATORS` itself: that list is the surface shared with the
+Core ML provider, and a cross-provider test asserts the two agree operator for operator. Because
+the envelope is a superset, FP16 arithmetic over FP8-sourced operands is reachable here — which is
+what an FP8-weighted graph with FP16 activations needs, and what TOSA's own rules permit, since it
+admits no FP8 elementwise operator in any tier.
+
+What is native on the NPU is the FP8 *boundary*: parameters stay FP8 through compilation on NPU,
+GPU and CPU alike, so nothing converts on the host and the bandwidth saving is real. Whether the
+MAC array multiplies FP8 operands directly is not established by anything observable here. The
+driver-side compiler's FP8 references are confined to KV-cache validation and quantization scales,
+with no FP8 string near matmul or convolution, and the DPU register contract carries FP8 on the
+PPE convert, ODU output and scale paths. That is consistent with FP8 storage plus wider
+arithmetic, and it does not rule out a native multiplier — the compiler never asks the device.
+
+Evidence: on 2026-09-18 on an Intel NPU at arch 5010 (Panther Lake, OpenVINO 2026.4), the tier's
+`MATMUL`, `MAX_POOL2D` and `TRANSPOSE` graphs all compile for both encodings, and FP8 `IDENTITY`
+round-trips all 256 patterns of each encoding bit-exactly. Both device tests report the device
+they ran on, because FP8 movement succeeds on every plugin and a bare pass would not say which
+one executed it.
+
 ## Consequences
 
 - A consumer that places FP8 work now has a provider that accepts it on every Vulkan device,
