@@ -1745,10 +1745,7 @@ mod tests {
                 let program = backend
                     .load_program(
                         &context,
-                        tosa_artifact_for(
-                            &SliceSource(&artifact),
-                            crate::OPENVINO_TOSA_FP8_TARGET,
-                        ),
+                        tosa_artifact_for(&SliceSource(&artifact), crate::OPENVINO_TOSA_FP8_TARGET),
                     )
                     .unwrap_or_else(|error| {
                         panic!("{dtype:?} {name}: device compilation failed: {error:?}")
@@ -1809,10 +1806,7 @@ mod tests {
             let program = backend
                 .load_program(
                     &context,
-                    tosa_artifact_for(
-                        &SliceSource(case.artifact),
-                        crate::OPENVINO_TOSA_FP8_TARGET,
-                    ),
+                    tosa_artifact_for(&SliceSource(case.artifact), crate::OPENVINO_TOSA_FP8_TARGET),
                 )
                 .unwrap_or_else(|error| panic!("{}: load rejected: {error:?}", case.name));
             let bytes = program.slots[0].byte_len;
@@ -1872,7 +1866,11 @@ mod tests {
             backend
                 .read_buffer(&output, 0, &mut SliceSink(&mut result))
                 .unwrap();
-            assert_eq!(result, payload, "{}: FP8 movement is not bit-exact", case.name);
+            assert_eq!(
+                result, payload,
+                "{}: FP8 movement is not bit-exact",
+                case.name
+            );
             backend.destroy_event(event).unwrap();
         }
     }
