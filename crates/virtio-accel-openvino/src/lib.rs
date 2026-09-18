@@ -21,8 +21,7 @@ mod lower;
 pub use lower::{
     LoweringError, OPENVINO_TOSA_CAPABILITY, OPENVINO_TOSA_FP8_CAPABILITY,
     OPENVINO_TOSA_FP8_TARGET, OPENVINO_TOSA_INTEGER_CAPABILITY, OPENVINO_TOSA_INTEGER_TARGET,
-    OPENVINO_TOSA_TARGET, supports_tosa_dtype,
-    supports_tosa_operator,
+    OPENVINO_TOSA_TARGET, supports_tosa_dtype, supports_tosa_operator,
 };
 
 use virtio_accel_tosa::CapabilityDescriptor;

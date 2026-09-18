@@ -1431,8 +1431,12 @@ fn validate_operator_types(
         }
     };
     let is_float = |dtype| matches!(dtype, DType::FP16 | DType::FP32);
-    let is_float_or_fp8 =
-        |dtype| matches!(dtype, DType::FP16 | DType::FP32 | DType::FP8E4M3 | DType::FP8E5M2);
+    let is_float_or_fp8 = |dtype| {
+        matches!(
+            dtype,
+            DType::FP16 | DType::FP32 | DType::FP8E4M3 | DType::FP8E5M2
+        )
+    };
     let is_movable = |dtype| {
         matches!(
             dtype,
@@ -1627,7 +1631,6 @@ mod fp8_graphs_impl {
             .push_output("y");
         graph.build(OPENVINO_TOSA_FP8_TARGET).unwrap()
     }
-
 }
 
 #[cfg(test)]
@@ -1721,7 +1724,10 @@ mod tests {
             } else {
                 "F8E5M2"
             };
-            assert!(xml.contains(spelling), "{dtype:?}: boundary lost its FP8 type");
+            assert!(
+                xml.contains(spelling),
+                "{dtype:?}: boundary lost its FP8 type"
+            );
         }
     }
 
