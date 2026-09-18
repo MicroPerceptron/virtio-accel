@@ -2667,3 +2667,79 @@ fn fp8_artifacts_are_refused_under_the_float_target() {
         release(backend.destroy_context(context));
     }
 }
+
+/// An FP8 weight matrix as an in-graph `CONST`: the dominant shape, and the reason the tier
+/// does not need `CAST` to be useful. The host narrows once (as `axnn` does) and the constant
+/// crosses as packed bytes.
+#[test]
+fn fp8_matmul_admits_a_constant_weight_matrix() {
+    let (m, k, n) = (4_i32, 6_i32, 2_i32);
+    let weights: Vec<u8> = (0..(k * n) as usize)
+        .map(|index| ((index * 9 + 56) % 120) as u8)
+        .collect();
+    for device in devices() {
+        let backend = open(&device);
+        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+            let mut graph = OwnedGraph::new("main");
+            graph
+                .push_tensor(OwnedTensor::new("a", vec![1, m, k], dtype))
+                .push_tensor(OwnedTensor::constant(
+                    "w",
+                    vec![1, k, n],
+                    dtype,
+                    weights.clone(),
+                ))
+                .push_tensor(OwnedTensor::constant("zp", vec![1], dtype, vec![0]))
+                .push_tensor(OwnedTensor::new("y", vec![1, m, n], DType::FP16));
+            for name in ["w", "zp"] {
+                graph.push_operator(OwnedOperator::new(
+                    OperatorKind::Const,
+                    vec![],
+                    vec![name.into()],
+                ));
+            }
+            graph
+                .push_operator(OwnedOperator::new(
+                    OperatorKind::MatMul,
+                    vec!["a".into(), "w".into(), "zp".into(), "zp".into()],
+                    vec!["y".into()],
+                ))
+                .push_input("a")
+                .push_output("y");
+            let artifact = graph.build(VULKAN_TOSA_FP8_TARGET).unwrap();
+            let a: Vec<u8> = (0..(m * k) as usize)
+                .map(|index| ((index * 13 + 40) % 120) as u8)
+                .collect();
+            let widen = |bits: u8| match dtype {
+                DType::FP8E4M3 => virtio_accel_tosa::fp8e4m3_to_f32(bits),
+                _ => virtio_accel_tosa::fp8e5m2_to_f32(bits),
+            };
+            let mut expected = Vec::new();
+            for row in 0..m as usize {
+                for column in 0..n as usize {
+                    let mut accumulator = 0.0_f32;
+                    for inner in 0..k as usize {
+                        accumulator += widen(a[row * k as usize + inner])
+                            * widen(weights[inner * n as usize + column]);
+                    }
+                    expected.push(virtio_accel_vulkan::shader::f32_to_f16_bits(accumulator));
+                }
+            }
+            for domain in advertised_domains(&backend) {
+                let actual = run_graph_for(
+                    &backend,
+                    &artifact,
+                    VULKAN_TOSA_FP8_TARGET,
+                    std::slice::from_ref(&a),
+                    (m * n) as usize * 2,
+                    domain,
+                );
+                assert_eq!(
+                    fp16s_le(&actual),
+                    expected,
+                    "{device}: {dtype:?} constant-weight MATMUL in {domain:?}"
+                );
+            }
+        }
+    }
+}
