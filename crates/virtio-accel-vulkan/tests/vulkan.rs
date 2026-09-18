@@ -30,8 +30,8 @@ use virtio_accel_tosa::{
 };
 use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
 use virtio_accel_vulkan::{
-    InitError, REQUIRED_RESIDENT_BYTES, VULKAN_TOSA_INTEGER_TARGET, VULKAN_TOSA_TARGET,
-    VulkanAccelerator, VulkanEvent,
+    InitError, REQUIRED_RESIDENT_BYTES, VULKAN_TOSA_FP8_TARGET, VULKAN_TOSA_INTEGER_TARGET,
+    VULKAN_TOSA_TARGET, VulkanAccelerator, VulkanEvent,
 };
 
 const IDENTITY_FP32_LOCAL: &[u8] = include_bytes!("data/identity-fp32-v1.0.0.tosa");
@@ -1200,9 +1200,28 @@ fn run_graph(
     output_len: usize,
     domain: MemoryDomain,
 ) -> Vec<u8> {
+    run_graph_for(
+        backend,
+        artifact,
+        VULKAN_TOSA_TARGET,
+        inputs,
+        output_len,
+        domain,
+    )
+}
+
+/// [`run_graph`] against an explicit target, for artifacts outside the FP32/FP16 tier.
+fn run_graph_for(
+    backend: &VulkanAccelerator,
+    artifact: &[u8],
+    target: Target,
+    inputs: &[Vec<u8>],
+    output_len: usize,
+    domain: MemoryDomain,
+) -> Vec<u8> {
     let device = backend.device_name();
     let context = backend.create_context(ContextDesc::default()).unwrap();
-    let program = load(backend, &context, artifact, VULKAN_TOSA_TARGET)
+    let program = load(backend, &context, artifact, target)
         .unwrap_or_else(|error| panic!("{device}: load failed: {error:?}"));
     let output = execute(backend, &context, &program, inputs, output_len, domain);
     release(backend.unload_program(program));
@@ -2467,5 +2486,184 @@ fn fp16_higher_precision_lanes_track_binary64_references() {
                 );
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The FP8 tier (ADR 0009)
+// ---------------------------------------------------------------------------------------------
+
+fn advertises_fp8(backend: &VulkanAccelerator) -> bool {
+    backend
+        .tosa_capabilities()
+        .iter()
+        .any(|capability| capability.supports_dtype(DType::FP8E4M3, ValueRoles::INPUT))
+}
+
+/// Every FP8 bit pattern of `dtype`, in order.
+fn all_fp8_patterns() -> Vec<u8> {
+    (0..=u8::MAX).collect()
+}
+
+/// An `IDENTITY` over `elements` FP8 scalars: the tier's data-movement path.
+fn fp8_identity_artifact(dtype: DType, elements: i32) -> Vec<u8> {
+    let shape = vec![1, 1, elements];
+    let mut graph = OwnedGraph::new("main");
+    graph
+        .push_tensor(OwnedTensor::new("x", shape.clone(), dtype))
+        .push_tensor(OwnedTensor::new("y", shape, dtype))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Identity,
+            vec!["x".into()],
+            vec!["y".into()],
+        ))
+        .push_input("x")
+        .push_output("y");
+    graph.build(VULKAN_TOSA_FP8_TARGET).unwrap()
+}
+
+/// `(FP8, FP8) -> FP16` MATMUL over `[1, m, k] x [1, k, n]`, with the zero points TOSA requires.
+fn fp8_matmul_artifact(dtype: DType, m: i32, k: i32, n: i32) -> Vec<u8> {
+    let mut graph = OwnedGraph::new("main");
+    graph
+        .push_tensor(OwnedTensor::new("a", vec![1, m, k], dtype))
+        .push_tensor(OwnedTensor::new("b", vec![1, k, n], dtype))
+        .push_tensor(OwnedTensor::constant("a_zp", vec![1], dtype, vec![0]))
+        .push_tensor(OwnedTensor::constant("b_zp", vec![1], dtype, vec![0]))
+        .push_tensor(OwnedTensor::new("y", vec![1, m, n], DType::FP16))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Const,
+            vec![],
+            vec!["a_zp".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Const,
+            vec![],
+            vec!["b_zp".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::MatMul,
+            vec!["a".into(), "b".into(), "a_zp".into(), "b_zp".into()],
+            vec!["y".into()],
+        ))
+        .push_input("a")
+        .push_input("b")
+        .push_output("y");
+    graph.build(VULKAN_TOSA_FP8_TARGET).unwrap()
+}
+
+/// Exhaustive: all 256 patterns of each FP8 encoding move through `IDENTITY` bit-for-bit. The
+/// analogue of the FP16 tier's 65536-pattern `NEGATE` round trip, and the reason data movement
+/// is a raw byte copy rather than a widen/narrow pair — NaNs, subnormals and signed zeros all
+/// survive.
+#[test]
+fn every_fp8_pattern_moves_bit_exactly_on_every_device() {
+    let patterns = all_fp8_patterns();
+    for device in devices() {
+        let backend = open(&device);
+        assert!(
+            advertises_fp8(&backend),
+            "{device}: FP8 tier not advertised"
+        );
+        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+            let artifact = fp8_identity_artifact(dtype, patterns.len() as i32);
+            for domain in advertised_domains(&backend) {
+                let actual = run_graph_for(
+                    &backend,
+                    &artifact,
+                    VULKAN_TOSA_FP8_TARGET,
+                    std::slice::from_ref(&patterns),
+                    patterns.len(),
+                    domain,
+                );
+                assert_eq!(
+                    actual, patterns,
+                    "{device}: {dtype:?} identity in {domain:?} changed a bit pattern"
+                );
+            }
+        }
+    }
+}
+
+/// `(FP8, FP8) -> FP16` MATMUL against a host reference that widens with the crate's own
+/// decoders and accumulates in binary32 — the accumulator width TOSA assigns FP8 MATMUL — then
+/// narrows once. Bit-exact: the kernel performs the same operations in the same order.
+#[test]
+fn fp8_matmul_matches_the_widened_reference_on_every_device() {
+    let (m, k, n) = (5_i32, 7_i32, 3_i32);
+    for device in devices() {
+        let backend = open(&device);
+        assert!(
+            advertises_fp8(&backend),
+            "{device}: FP8 tier not advertised"
+        );
+        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+            // Finite patterns only: this checks arithmetic, and the exhaustive identity test
+            // above already covers NaN and infinity transport.
+            let finite = |seed: usize, count: usize| -> Vec<u8> {
+                (0..count)
+                    .map(|index| {
+                        let bits = ((index * 37 + seed * 11) % 120) as u8;
+                        // Keep both operands well inside each format's finite range.
+                        if index % 3 == 0 { bits | 0x80 } else { bits }
+                    })
+                    .collect()
+            };
+            let a = finite(1, (m * k) as usize);
+            let b = finite(2, (k * n) as usize);
+            let widen = |bits: u8| -> f32 {
+                match dtype {
+                    DType::FP8E4M3 => virtio_accel_tosa::fp8e4m3_to_f32(bits),
+                    _ => virtio_accel_tosa::fp8e5m2_to_f32(bits),
+                }
+            };
+            let mut expected = Vec::new();
+            for row in 0..m as usize {
+                for column in 0..n as usize {
+                    let mut accumulator = 0.0_f32;
+                    for inner in 0..k as usize {
+                        accumulator += widen(a[row * k as usize + inner])
+                            * widen(b[inner * n as usize + column]);
+                    }
+                    expected.push(virtio_accel_vulkan::shader::f32_to_f16_bits(accumulator));
+                }
+            }
+            let artifact = fp8_matmul_artifact(dtype, m, k, n);
+            for domain in advertised_domains(&backend) {
+                let actual = run_graph_for(
+                    &backend,
+                    &artifact,
+                    VULKAN_TOSA_FP8_TARGET,
+                    &[a.clone(), b.clone()],
+                    (m * n) as usize * 2,
+                    domain,
+                );
+                assert_eq!(
+                    fp16s_le(&actual),
+                    expected,
+                    "{device}: {dtype:?} MATMUL in {domain:?}"
+                );
+            }
+        }
+    }
+}
+
+/// The FP8 tier is a distinct target, and the extension bits are load-bearing: an FP8 artifact
+/// is refused under the FP32/FP16 target, because TOSA gates FP8 legality on the extension that
+/// target does not carry. The converse is deliberately *not* asserted — the FP8 target's
+/// envelope is a superset, so an FP32 graph remains legal under it.
+#[test]
+fn fp8_artifacts_are_refused_under_the_float_target() {
+    for device in devices() {
+        let backend = open(&device);
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+            let fp8 = fp8_identity_artifact(dtype, 4);
+            assert!(
+                load(&backend, &context, &fp8, VULKAN_TOSA_TARGET).is_err(),
+                "{device}: a {dtype:?} artifact loaded under the float target"
+            );
+        }
+        release(backend.destroy_context(context));
     }
 }

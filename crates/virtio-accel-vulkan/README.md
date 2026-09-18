@@ -34,6 +34,19 @@ build time (ADR 0002 in `docs/adr/`).
   bit-exactly; MATMUL and reductions accumulate in binary32 (the accumulator width TOSA assigns
   FP16); stores repack with the same neighbour-safe atomics `BOOL` uses. Numerics are
   bit-identical across devices by construction.
+- **The FP8 operator tier** (`VULKAN_TOSA_FP8_CAPABILITY`, `VULKAN_TOSA_FP8_TARGET`, ADR 0009):
+  TOSA's `(FP8, FP8) -> FP16` `MATMUL` over either encoding, plus `IDENTITY`, `RESHAPE`,
+  `TRANSPOSE`, `REVERSE`, `CONCAT`, `CONST` and `CONST_SHAPE` — advertised on every device, again
+  with no device feature. Unlike the FP16 tier this is a *separate target*, because TOSA gates
+  FP8 on the `FP8E4M3` / `FP8E5M2` extensions rather than the base profile, and a *subset*
+  envelope, because TOSA admits no FP8 elementwise operator at all — no arithmetic, comparison,
+  selection, reduction or transcendental lane takes FP8. Packed bytes are widened to binary32 by
+  crate-owned integer code exactly (every FP8 value is representable in binary32), matmuls
+  accumulate in binary32 and narrow once to binary16, and data movement copies the 8-bit lanes as
+  integers, so all 256 patterns of each encoding — NaNs, infinities, subnormals, signed zeros —
+  move bit-exactly. Nothing in the tier writes FP8 except that raw copy, so no binary32-to-FP8
+  narrowing exists. `CAST`, `MAX_POOL2D` and `ARGMAX` are admitted by TOSA for FP8 and are not
+  yet implemented.
 - **Whole-graph execution** (ADR 0007): the graph's execution order becomes one command buffer of
   compute dispatches with `COMPUTE → COMPUTE` memory barriers between dependent dispatches.
   `CONST` tensors and intermediates live in one per-program arena allocation (lifetime-packed;
