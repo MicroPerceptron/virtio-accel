@@ -877,6 +877,29 @@ impl OpenVinoAccelerator {
     }
 
     /// The enumerated name of the device this instance executes on.
+    /// Export the plugin-compiled form of `program` to `path` through
+    /// `ov_compiled_model_export_model`: the NPU plugin writes its VPUX ELF, the GPU plugin its
+    /// serialized graph with the OpenCL program binaries (Intel GT zebin ELFs) embedded. The
+    /// bytes are the runtime's own export format for this device and OpenVINO version; a
+    /// consumer that keeps them must bind them to the artifact and version that produced them.
+    /// The program stays loaded and usable afterwards.
+    pub fn export_program(
+        &self,
+        program: &OpenVinoProgram,
+        path: &std::path::Path,
+    ) -> Result<(), BackendError> {
+        let path = CString::new(path.as_os_str().as_encoded_bytes())
+            .map_err(|_| BackendError::InvalidArgument)?;
+        // SAFETY: the compiled model is live for the program's lifetime and `path` is a valid
+        // NUL-terminated string for the duration of the call.
+        unsafe {
+            check_status(ffi::ov_compiled_model_export_model(
+                program.compiled.as_const_ptr(),
+                path.as_ptr(),
+            ))
+        }
+    }
+
     pub fn device_name(&self) -> &str {
         self.device.to_str().unwrap_or_default()
     }
