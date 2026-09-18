@@ -36,6 +36,10 @@ pub(crate) const ELEMENT_I8: ov_element_type_e = 7;
 pub(crate) const ELEMENT_I32: ov_element_type_e = 9;
 pub(crate) const ELEMENT_I64: ov_element_type_e = 10;
 pub(crate) const ELEMENT_U8: ov_element_type_e = 16;
+pub(crate) const ELEMENT_F8E4M3: ov_element_type_e = 21;
+/// `f8e5m2`. Upstream spells the enumerator `F8E5M3` -- a typo in `ov_common.h`, whose own
+/// doc comment on the same line reads "f8e5m2 element type". The code, 22, is what matters.
+pub(crate) const ELEMENT_F8E5M2: ov_element_type_e = 22;
 
 macro_rules! opaque_handle {
     ($(#[$doc:meta] $name:ident),* $(,)?) => {

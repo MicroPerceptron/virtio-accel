@@ -42,6 +42,18 @@ pub const OPENVINO_TOSA_INTEGER_TARGET: Target = Target::new(
     ExtensionSet::NONE,
 );
 
+/// TOSA FP8 target (ADR 0009), mirroring `VULKAN_TOSA_FP8_TARGET` exactly.
+///
+/// TOSA gates FP8 legality on the `FP8E4M3` / `FP8E5M2` extensions rather than on the base
+/// floating-point profile, so the FP8 envelope is a distinct *target* rather than a dtype
+/// narrowing of [`OPENVINO_TOSA_TARGET`] -- unlike FP16, which shares the float target identity.
+pub const OPENVINO_TOSA_FP8_TARGET: Target = Target::new(
+    Version::TOSA_1_0,
+    ProfileSet::FLOATING_POINT,
+    Level::Level8K,
+    ExtensionSet::FP8E4M3.union(ExtensionSet::FP8E5M2),
+);
+
 const FLOAT_DTYPES: &[DTypeCapability] = &[
     DTypeCapability::new(DType::FP16, ValueRoles::ALL),
     DTypeCapability::new(DType::FP32, ValueRoles::ALL),
@@ -112,6 +124,33 @@ const FLOAT_OPERATORS: &[OperatorCapability] = &[
     OperatorCapability::new(Op::IDENTITY),
 ];
 
+/// The FP8 tier's dtypes: both encodings in every role, plus FP16 because TOSA's FP8 `MATMUL`
+/// accumulates into it and INT32 because `ARGMAX` indexes with it. Mirrors the Vulkan tier's
+/// `FLOAT8_DTYPES` so a graph admitted by one backend is admitted by the other.
+const FLOAT8_DTYPES: &[DTypeCapability] = &[
+    DTypeCapability::new(DType::FP8E4M3, ValueRoles::ALL),
+    DTypeCapability::new(DType::FP8E5M2, ValueRoles::ALL),
+    DTypeCapability::new(DType::FP16, ValueRoles::ALL),
+    DTypeCapability::new(DType::INT32, ValueRoles::ALL),
+];
+
+/// The FP8 tier's operators, identical to the Vulkan tier's list. Deliberately a subset of
+/// [`FLOAT_OPERATORS`] rather than a narrowing of it: TOSA admits no FP8 elementwise operator at
+/// all, so no arithmetic, comparison, selection, reduction or transcendental lane takes FP8.
+const FLOAT8_OPERATORS: &[OperatorCapability] = &[
+    OperatorCapability::constrained(Op::MATMUL, OperatorConstraints::ZERO_ZERO_POINTS),
+    OperatorCapability::new(Op::CONCAT),
+    OperatorCapability::constrained(Op::RESHAPE, OperatorConstraints::CONSTANT_PARAMETERS),
+    OperatorCapability::new(Op::REVERSE),
+    OperatorCapability::new(Op::TRANSPOSE),
+    OperatorCapability::new(Op::CONST),
+    OperatorCapability::new(Op::CONST_SHAPE),
+    OperatorCapability::new(Op::IDENTITY),
+    OperatorCapability::new(Op::CAST),
+    OperatorCapability::new(Op::MAX_POOL2D),
+    OperatorCapability::new(Op::ARGMAX),
+];
+
 const INTEGER_OPERATORS: &[OperatorCapability] = &[
     OperatorCapability::new(Op::CONST),
     OperatorCapability::new(Op::IDENTITY),
@@ -144,6 +183,36 @@ pub const OPENVINO_TOSA_INTEGER_CAPABILITY: CapabilityDescriptor = CapabilityDes
     },
 };
 
+/// FP8 capability boundary (ADR 0009): `(FP8, FP8) -> FP16` MATMUL and exact FP8 data movement.
+pub const OPENVINO_TOSA_FP8_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
+    target: OPENVINO_TOSA_FP8_TARGET,
+    dtypes: FLOAT8_DTYPES,
+    operators: FLOAT8_OPERATORS,
+    graph: GraphCapabilities {
+        max_regions: 1,
+        max_blocks: 1,
+        dynamic_shapes: false,
+        runtime_conditions: RuntimeConditionSupport::None,
+    },
+};
+
+/// The descriptor that governs `target`, or `None` if this backend does not lower it.
+///
+/// Admission must consult the descriptor for the target actually being lowered rather than a
+/// fixed one: the FP8 tier carries operators (`CAST`) the float tier does not, and rejects most
+/// of the operators the float tier admits, so one hardcoded descriptor cannot gate both.
+fn capability_for(target: Target) -> Option<&'static CapabilityDescriptor> {
+    if target == OPENVINO_TOSA_TARGET {
+        Some(&OPENVINO_TOSA_CAPABILITY)
+    } else if target == OPENVINO_TOSA_INTEGER_TARGET {
+        Some(&OPENVINO_TOSA_INTEGER_CAPABILITY)
+    } else if target == OPENVINO_TOSA_FP8_TARGET {
+        Some(&OPENVINO_TOSA_FP8_CAPABILITY)
+    } else {
+        None
+    }
+}
+
 /// Weights-blob entries are aligned generously so every element type loads aligned.
 const WEIGHTS_ALIGNMENT: usize = 64;
 
@@ -171,6 +240,8 @@ impl std::error::Error for LoweringError {}
 pub(crate) enum OvElement {
     F32,
     F16,
+    F8E4M3,
+    F8E5M2,
     I8,
     I32,
     I64,
@@ -183,6 +254,8 @@ impl OvElement {
         match self {
             Self::F32 => "f32",
             Self::F16 => "f16",
+            Self::F8E4M3 => "f8e4m3",
+            Self::F8E5M2 => "f8e5m2",
             Self::I8 => "i8",
             Self::I32 => "i32",
             Self::I64 => "i64",
@@ -195,6 +268,9 @@ impl OvElement {
         match self {
             Self::F32 => "FP32",
             Self::F16 => "FP16",
+            // Not "FP8E4M3": OpenVINO writes the FP8 port precisions without the FP prefix.
+            Self::F8E4M3 => "F8E4M3",
+            Self::F8E5M2 => "F8E5M2",
             Self::I8 => "I8",
             Self::I32 => "I32",
             Self::I64 => "I64",
@@ -207,7 +283,7 @@ impl OvElement {
         match self {
             Self::F32 | Self::I32 => 4,
             Self::F16 => 2,
-            Self::I8 => 1,
+            Self::F8E4M3 | Self::F8E5M2 | Self::I8 => 1,
             Self::I64 => 8,
             Self::Bool => 1,
         }
@@ -217,6 +293,8 @@ impl OvElement {
         match dtype {
             DType::FP32 => Ok(Self::F32),
             DType::FP16 => Ok(Self::F16),
+            DType::FP8E4M3 => Ok(Self::F8E4M3),
+            DType::FP8E5M2 => Ok(Self::F8E5M2),
             DType::INT8 => Ok(Self::I8),
             DType::INT32 => Ok(Self::I32),
             DType::BOOL => Ok(Self::Bool),
@@ -230,6 +308,8 @@ fn boundary_element(dtype: DType) -> Result<OvElement, LoweringError> {
     match dtype {
         DType::FP16 => Ok(OvElement::F16),
         DType::FP32 => Ok(OvElement::F32),
+        DType::FP8E4M3 => Ok(OvElement::F8E4M3),
+        DType::FP8E5M2 => Ok(OvElement::F8E5M2),
         DType::INT8 => Ok(OvElement::I8),
         DType::INT32 => Ok(OvElement::I32),
         DType::BOOL => Ok(OvElement::Bool),
@@ -278,6 +358,8 @@ pub const fn supports_tosa_dtype(dtype: DType) -> bool {
         || OPENVINO_TOSA_CAPABILITY.supports_dtype(dtype, ValueRoles::OUTPUT)
         || OPENVINO_TOSA_INTEGER_CAPABILITY.supports_dtype(dtype, ValueRoles::INPUT)
         || OPENVINO_TOSA_INTEGER_CAPABILITY.supports_dtype(dtype, ValueRoles::OUTPUT)
+        || OPENVINO_TOSA_FP8_CAPABILITY.supports_dtype(dtype, ValueRoles::INPUT)
+        || OPENVINO_TOSA_FP8_CAPABILITY.supports_dtype(dtype, ValueRoles::OUTPUT)
 }
 
 /// A produced tensor inside the document: one output port of one layer.
@@ -474,9 +556,7 @@ fn element_byte_len(element: OvElement, dims: &[i64]) -> Result<u64, LoweringErr
 }
 
 pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, LoweringError> {
-    if target != OPENVINO_TOSA_TARGET && target != OPENVINO_TOSA_INTEGER_TARGET {
-        return Err(LoweringError::UnsupportedGraph);
-    }
+    let capability = capability_for(target).ok_or(LoweringError::UnsupportedGraph)?;
     let model = parse(bytes).map_err(LoweringError::Parse)?;
     let analysis = model.analyze_for(target).map_err(LoweringError::Analysis)?;
     validate_target_types(&analysis, target)?;
@@ -540,7 +620,7 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, L
     }
 
     for operator in analysis.execution_order(block) {
-        encode_operator(&mut builder, &analysis, *operator)?;
+        encode_operator(&mut builder, &analysis, *operator, capability)?;
     }
 
     for (index, value) in outputs.iter().copied().enumerate() {
@@ -587,6 +667,15 @@ fn validate_target_types(analysis: &TosaAnalysis<'_>, target: Target) -> Result<
             dtype == DType::INT8
                 && !(analysis.serialized_constant(value.id()).is_some()
                     && constant_is_parameter_only(analysis, value.id()))
+        } else if target == OPENVINO_TOSA_FP8_TARGET {
+            // The FP8 tier's own dtypes and no others. FP16 is legal here because TOSA's FP8
+            // `MATMUL` accumulates into it and INT32 because `ARGMAX` indexes with it; a graph
+            // carrying FP32 or INT8 belongs to another tier and must not be relabeled into this
+            // one. The float branch above cannot serve: it admits FP32 and FP16 alike.
+            !matches!(
+                dtype,
+                DType::FP8E4M3 | DType::FP8E5M2 | DType::FP16 | DType::INT32
+            )
         } else {
             matches!(dtype, DType::FP16 | DType::FP32)
         };
@@ -641,10 +730,11 @@ fn encode_operator(
     builder: &mut IrBuilder,
     analysis: &TosaAnalysis<'_>,
     operator_id: virtio_accel_tosa::OperatorId,
+    capability: &CapabilityDescriptor,
 ) -> Result<(), LoweringError> {
     let operator = analysis.operator(operator_id);
     let op = operator.op();
-    if !supports_tosa_operator(op) {
+    if !capability.supports_operator(op) {
         return Err(LoweringError::UnsupportedOperator(op));
     }
     let all_inputs = analysis.operator_inputs(operator_id);
@@ -1387,12 +1477,16 @@ mod tests {
 
     #[test]
     fn reports_the_exact_integer_boundary_independently_of_other_low_precision_types() {
-        for dtype in [DType::INT4, DType::FP8E4M3, DType::FP8E5M2] {
+        // INT4 has no tier here and must stay out of the reported boundary. FP8 left this list
+        // when the FP8 tier landed (ADR 0009); it is now reported like any other admitted dtype.
+        for dtype in [DType::INT4] {
             assert!(!supports_tosa_dtype(dtype), "{dtype:?}");
         }
         for dtype in [
             DType::FP16,
             DType::FP32,
+            DType::FP8E4M3,
+            DType::FP8E5M2,
             DType::INT8,
             DType::INT32,
             DType::BOOL,
