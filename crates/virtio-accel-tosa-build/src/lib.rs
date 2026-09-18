@@ -59,6 +59,9 @@ mod slot {
     pub const VERSION_PATCH: u16 = 8;
     pub const VERSION_DRAFT: u16 = 10;
 
+    pub const ARGMAX_AXIS: u16 = 4;
+    pub const ARGMAX_NAN_MODE: u16 = 6;
+
     pub const NAN_MODE: u16 = 4;
     pub const MAX_POOL_KERNEL: u16 = 4;
     pub const MAX_POOL_STRIDE: u16 = 6;
@@ -133,6 +136,10 @@ impl<'a> Tensor<'a> {
 #[non_exhaustive]
 pub enum OperatorKind {
     MatMul,
+    ArgMax {
+        axis: i32,
+        nan_mode: NanPropagationMode,
+    },
     MaxPool2d {
         kernel: [i32; 2],
         stride: [i32; 2],
@@ -187,6 +194,7 @@ impl OperatorKind {
     pub const fn op(self) -> Op {
         match self {
             Self::MatMul => Op::MATMUL,
+            Self::ArgMax { .. } => Op::ARGMAX,
             Self::MaxPool2d { .. } => Op::MAX_POOL2D,
             Self::Sigmoid => Op::SIGMOID,
             Self::Tanh => Op::TANH,
@@ -700,6 +708,10 @@ fn operator_table(builder: &mut FlatBufferBuilder<'_>, operator: Operator<'_>) -
             OperatorKind::Maximum { nan_mode } | OperatorKind::Minimum { nan_mode } => {
                 builder.push_slot::<u32>(slot::NAN_MODE, nan_mode.get(), 0);
             }
+            OperatorKind::ArgMax { axis, nan_mode } => {
+                builder.push_slot::<i32>(slot::ARGMAX_AXIS, axis, 0);
+                builder.push_slot::<u32>(slot::ARGMAX_NAN_MODE, nan_mode.get(), 0);
+            }
             OperatorKind::MaxPool2d { .. } => {
                 let (kernel, stride, pad, nan_mode) =
                     max_pool.expect("MAX_POOL2D vectors were constructed");
@@ -1008,6 +1020,14 @@ mod tests {
     fn every_operator_kind_serializes_its_pinned_opcode_and_union_tag() {
         let cases = [
             (OperatorKind::MatMul, Op::MATMUL, 7),
+            (
+                OperatorKind::ArgMax {
+                    axis: 1,
+                    nan_mode: NanPropagationMode::PROPAGATE,
+                },
+                Op::ARGMAX,
+                1,
+            ),
             (OperatorKind::Erf, Op::ERF, 12),
             (
                 OperatorKind::MaxPool2d {

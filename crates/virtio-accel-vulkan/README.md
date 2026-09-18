@@ -35,8 +35,8 @@ build time (ADR 0002 in `docs/adr/`).
   FP16); stores repack with the same neighbour-safe atomics `BOOL` uses. Numerics are
   bit-identical across devices by construction.
 - **The FP8 operator tier** (`VULKAN_TOSA_FP8_CAPABILITY`, `VULKAN_TOSA_FP8_TARGET`, ADR 0009):
-  TOSA's `(FP8, FP8) -> FP16` `MATMUL` over either encoding, plus `IDENTITY`, `RESHAPE`,
-  `TRANSPOSE`, `REVERSE`, `CONCAT`, `CONST` and `CONST_SHAPE` — advertised on every device, again
+  TOSA's `(FP8, FP8) -> FP16` `MATMUL` over either encoding, plus `CAST`, `MAX_POOL2D`,
+  `ARGMAX`, `IDENTITY`, `RESHAPE`, `TRANSPOSE`, `REVERSE`, `CONCAT`, `CONST` and `CONST_SHAPE` — advertised on every device, again
   with no device feature. Unlike the FP16 tier this is a *separate target*, because TOSA gates
   FP8 on the `FP8E4M3` / `FP8E5M2` extensions rather than the base profile, and a *subset*
   envelope, because TOSA admits no FP8 elementwise operator at all — no arithmetic, comparison,
@@ -50,7 +50,10 @@ build time (ADR 0002 in `docs/adr/`).
   crate's, since TOSA leaves float-to-FP8 overflow undefined — too large for E4M3, which has no
   infinity, becomes NaN rather than saturating, because saturation stays expressible as a
   `CLAMP` before the cast while a saturated value cannot be told from a genuine one.
-  `MAX_POOL2D` and `ARGMAX` are admitted by TOSA for FP8 and are not yet implemented.
+  `MAX_POOL2D` and `ARGMAX` are included: pooling selects an existing encoding rather than
+  computing one, and `ARGMAX` compares widened values and emits an `INT32` index, so neither
+  introduces a rounding decision. The convolution and gather families remain unimplemented for
+  every dtype.
 - **Whole-graph execution** (ADR 0007): the graph's execution order becomes one command buffer of
   compute dispatches with `COMPUTE → COMPUTE` memory barriers between dependent dispatches.
   `CONST` tensors and intermediates live in one per-program arena allocation (lifetime-packed;
