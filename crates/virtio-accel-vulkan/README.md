@@ -135,6 +135,20 @@ and 2 ulp (erf) worst case against binary64 on both devices. On 2026-09-17 the s
 on Apple M4 via MoltenVK 1.4.2 (local validation only, not a CI lane). One crate, no per-driver
 code paths.
 
+**FP8 tier.** Advertised on every device the backend opens, for the same reason the FP16 tier is:
+no conversion in it touches a device feature. On 2026-09-18 the full device suite passed on Intel
+Arc B390 (Panther Lake, Mesa 26.0.8 ANV, Vulkan 1.4.335) with that host's llvmpipe (LLVM 21.1.8),
+and independently on a Lunar Lake host (Xe2, Mesa ANV) — two Intel generations and a software ICD,
+in every advertised memory domain, with identical results. That matters more here than for the
+other tiers: the tier's claim is that FP8 numerics *cannot* vary by device, since every widening
+and narrowing is crate-owned integer and binary32 code, and until a second silicon generation ran
+it that was an argument rather than a measurement. Covered on each: all 256 patterns of both
+encodings through `IDENTITY` bit-for-bit, `MATMUL` against a widened host reference with input and
+with constant operands, `CAST` round-tripping every encoding in both directions and honouring the
+overflow policy, two FP8 matmuls chained through a `CAST`, and `MAX_POOL2D`/`ARGMAX`. All 170
+assembled kernel variants pass `spirv-val --target-env vulkan1.3`, and the device suite runs clean
+under `VK_LAYER_KHRONOS_validation`.
+
 **FP16 tier.** The tier is advertised on every device the backend opens, lavapipe and MoltenVK
 included, so the CI lane covers it continuously. On 2026-09-17 the full FP16 corpus passed on
 Apple M4 via MoltenVK 1.4.2: the ten bit-exact cases, the ulp-tolerated unary/comparison/

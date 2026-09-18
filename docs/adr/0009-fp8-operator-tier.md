@@ -1,8 +1,8 @@
 # 9. FP8 operator tier: a separate target, exact widening, no FP8 arithmetic
 
-- Status: accepted (implemented; the exhaustive 256-pattern identity round trip for both
-  encodings and the `(FP8, FP8) -> FP16` MATMUL corpus pass on Intel Arc B390 (Mesa ANV) and
-  Mesa lavapipe, in every advertised memory domain)
+- Status: accepted (implemented; the full device suite passes on Intel Arc B390 (Panther Lake,
+  Mesa ANV), on a Lunar Lake host (Xe2, Mesa ANV), and on Mesa lavapipe, in every advertised
+  memory domain, with identical results across all three)
 - Extends: ADR 0003 (checked-in shaders), ADR 0007 (operator tier mechanics), ADR 0008 (whose
   crate-owned-conversion argument this reuses)
 - Resolves: the FP8 half of the low-precision boundary — the tier's target, capability
@@ -93,8 +93,12 @@ this is a storage-and-matmul tier, not a narrower FP16 tier, and copying ADR 000
   neither the instruction nor the reason, which cost a bisect during this tier's development.
   The device suite also runs clean under `VK_LAYER_KHRONOS_validation`.
 
-- Exhaustive: all 256 patterns of each encoding survive `IDENTITY` bit-for-bit on Intel Arc B390
-  (Mesa ANV) and lavapipe, in every advertised memory domain. This is the analogue of the FP16
+- Two Intel silicon generations agree exactly. The tier's claim is that FP8 numerics cannot vary
+  by device, because every widening and narrowing is crate-owned integer and binary32 code with
+  no device feature involved; Panther Lake (Xe3 class) and Lunar Lake (Xe2) producing identical
+  results, alongside a software ICD, is that claim measured rather than argued.
+- Exhaustive: all 256 patterns of each encoding survive `IDENTITY` bit-for-bit on every device,
+  in every advertised memory domain. This is the analogue of the FP16
   tier's 65536-pattern `NEGATE` round trip and the reason movement is a raw byte copy.
 - `(FP8, FP8) -> FP16` MATMUL is bit-exact against a host reference that widens with the TOSA
   crate's own decoders, accumulates in binary32 and narrows once, on both devices and in every
