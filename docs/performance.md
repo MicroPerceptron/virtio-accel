@@ -268,16 +268,50 @@ The FP32 operator tier (ADR 0007) adds the structural optimizations a real graph
 timing is worth publishing: a whole graph is one command buffer with barriers only between
 dependent dispatches; constants and intermediates live in one device-local arena per program with
 lifetime-packed regions, `RESHAPE`/`IDENTITY` views instead of copies, and dead operators elided;
-`MATMUL` is a shared-memory tiled kernel (16×16, bit-identical to the sequential sum); pipelines
-are created against a per-instance `VkPipelineCache`; every 1-D kernel is a grid-stride loop so
+`MATMUL` is a register-tiled shared-memory kernel (a 64 × 64 block per workgroup, a flat 8 × 64
+block for eight rows or fewer; bit-identical to the sequential sum — ADR 0010); pipelines are
+created against a per-instance `VkPipelineCache`; every 1-D kernel is a grid-stride loop so
 dispatch counts stay inside `maxComputeWorkGroupCount` at any tensor size. Known costs, recorded so
-they are measured rather than assumed: predicate (`BOOL`) outputs are written with two atomics per
-element, and `SIN`/`COS` evaluate both range reductions and select.
+they are measured rather than assumed: predicate (`BOOL`) elementwise outputs, strided sub-word
+moves, and `MATMUL`'s FP16 result are written with two atomics per element, and `SIN`/`COS`
+evaluate both range reductions and select.
 
-Warm-latency numbers are not yet published: the first measurement should follow the XDNA structure
-(load once, warm 20, measure 200) on the Intel ANV reference box before this section claims any
-timing; the broadened tier still owes a MoltenVK run (the same commands above). What is claimed
-today is correctness and copy-path shape, not wall-clock values.
+Warm-latency numbers in the XDNA structure (load once, warm 20, measure 200) are not yet
+published; the throughput benchmark below reports the submission floor it measures alongside
+each case, and the broadened tier still owes a MoltenVK run (the same commands above).
+
+### Vulkan FP8 tier throughput (ADR 0010)
+
+`cargo bench -p virtio-accel-vulkan` times whole TOSA graphs submit-to-fence through the public
+`Accelerator` surface, per enumerated device, after a warm-up of at least 300 ms per case so a
+frequency-scaling GPU is at clock. On 2026-09-18, Intel Arc (Panther Lake, Mesa 26.0.8 ANV,
+Vulkan 1.4.335), `Device` memory domain, median of 10 timed submissions, 16 Mi elements for the
+elementwise cases; "before" is the kernels as shipped by ADR 0009 under the same harness:
+
+| Case | Before | After |
+|---|---:|---:|
+| `IDENTITY` FP8 | 4.60 ms, 7.3 GB/s | 0.37 ms, 92 GB/s |
+| `IDENTITY` FP16 | 1.70 ms, 39 GB/s | 0.66 ms, 102 GB/s |
+| `IDENTITY` FP32 | 1.22 ms, 110 GB/s | 1.23 ms, 109 GB/s |
+| `CAST` FP8 → FP16 | 1.67 ms, 30 GB/s | 0.57 ms, 88 GB/s |
+| `CAST` FP16 → FP8 | 3.27 ms, 15 GB/s | 0.50 ms, 100 GB/s |
+| `CAST` FP32 → FP8 | 3.27 ms, 26 GB/s | 0.80 ms, 105 GB/s |
+| `CAST` FP32 → FP16 | 1.88 ms, 54 GB/s | 0.93 ms, 108 GB/s |
+| `MATMUL` FP8 → FP16, 1024³ | 3.76 ms, 572 GFLOP/s | 1.46 ms, 1475 GFLOP/s |
+| `MATMUL` FP16, 1024³ | 2.86 ms, 751 GFLOP/s | 1.19 ms, 1798 GFLOP/s |
+| `MATMUL` FP32, 1024³ | 2.74 ms, 785 GFLOP/s | 1.12 ms, 1921 GFLOP/s |
+| `CAST` FP8 → FP16 + `MATMUL` FP16, 1024³ | 3.24 ms | 1.33 ms |
+| GEMV FP8 → FP16, 1 × 4096 × 4096 | 0.98 ms, 17 GB/s of weights | 0.75 ms, 22 GB/s of weights |
+| GEMV FP16, 1 × 4096 × 4096 | 1.06 ms, 32 GB/s of weights | 0.70 ms, 48 GB/s of weights |
+| GEMV FP32, 1 × 4096 × 4096 | 1.06 ms, 63 GB/s of weights | 0.74 ms, 91 GB/s of weights |
+| `CAST` FP8 → FP16 + GEMV FP16, 1 × 4096 × 4096 | 2.73 ms | 1.11 ms |
+
+GB/s counts bytes read plus written; the GEMV weight figures count the weight matrix alone. The
+submission floor (a four-element identity) measured 100–170 µs across runs and is included in
+every number. What the table says about the FP8 tier: data movement now runs at the device's copy
+rate, so the quarter-width storage delivers its bandwidth; GEMV does not yet — FP8, FP16 and FP32
+take the same wall time, so the FP8 kernel is bound by staging instructions rather than by the
+bytes it streams, and the 4× headroom the FP32 rate demonstrates is the next objective.
 
 ## Qualcomm Hexagon evidence status
 

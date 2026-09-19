@@ -67,9 +67,12 @@ build time (ADR 0002 in `docs/adr/`).
   |x| = 8192, Payne–Hanek above it, within one ulp of binary64 references in the lavapipe
   tests) instead of the driver's built-ins, whose precision Vulkan specifies loosely or not at
   all; NaN modes (`PROPAGATE`/`IGNORE`) follow the TOSA pseudocode literally; `MATMUL` is a
-  shared-memory tiled kernel bit-identical to the sequential ascending-k sum. `BOOL` tensors are
-  read by word and written with `OpAtomicAnd`/`OpAtomicOr`, so a predicate output never modifies
-  a neighbouring byte, even at an unaligned tail.
+  register-tiled shared-memory kernel (a 64 × 64 output block per workgroup, or a flat 8 × 64
+  block for eight rows or fewer — ADR 0010) bit-identical to the sequential ascending-k sum.
+  `BOOL` tensors are read by word and written with `OpAtomicAnd`/`OpAtomicOr`, so a predicate
+  output never modifies a neighbouring byte, even at an unaligned tail; contiguous FP8, FP16 and
+  `BOOL` copies and casts write whole words per invocation and take that atomic path only for a
+  tensor's final partial word.
 - **Memory domains** (ADR 0005): `Host` and `Shared` are persistently mapped host-coherent
   allocations; `Device` is device-local memory reached only through bounded staging inside
   `write_buffer`/`read_buffer`. `Shared` and `Device` are advertised only when the device exposes
@@ -108,6 +111,18 @@ Every kernel variant is validated against `spirv-val --target-env vulkan1.3` by
 lose the check by losing the package. The device suite also runs clean under
 `VK_LAYER_KHRONOS_validation` (`apt install vulkan-validationlayers`), which is worth enabling
 when changing resource or submission code.
+
+Throughput is measured by the crate's benchmark (ADR 0010), which times whole TOSA graphs
+submit-to-fence on every enumerated device and prints a Markdown table per device:
+
+```sh
+cargo bench -p virtio-accel-vulkan
+```
+
+`VIRTIO_ACCEL_VULKAN_BENCH_DEVICE=<substring>` pins a device, `VIRTIO_ACCEL_VULKAN_BENCH_CASE`
+a case, `VIRTIO_ACCEL_VULKAN_BENCH_ITERS` the timed submissions per case (default 10), and
+`VIRTIO_ACCEL_VULKAN_BENCH_QUICK=1` runs the small sizes only, for a software ICD. Numbers are
+recorded in `docs/performance.md`.
 
 The example executes the FP32 identity artifact and then the three-operator `tanh(x · w + bias)`
 graph on the preferred device (discrete, integrated, virtual, then CPU) and exits successfully, or
@@ -149,7 +164,7 @@ widening never produces a binary32 denormal (the smallest FP8 value, 2⁻¹⁶, 
 and narrowing rounds every denormal input to zero whether or not the device flushed it first. Covered on each: all 256 patterns of both
 encodings through `IDENTITY` bit-for-bit, `MATMUL` against a widened host reference with input and
 with constant operands, `CAST` round-tripping every encoding in both directions and honouring the
-overflow policy, two FP8 matmuls chained through a `CAST`, and `MAX_POOL2D`/`ARGMAX`. All 170
+overflow policy, two FP8 matmuls chained through a `CAST`, and `MAX_POOL2D`/`ARGMAX`. All 176
 assembled kernel variants pass `spirv-val --target-env vulkan1.3`, and the device suite runs clean
 under `VK_LAYER_KHRONOS_validation`.
 
