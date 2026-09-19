@@ -117,6 +117,9 @@ mod bench {
     struct Sample {
         median: Duration,
         min: Duration,
+        /// Median wall time of `submit` alone: descriptor update, command recording, queue
+        /// submission — the host's share of the floor.
+        submit: Duration,
         dispatches: usize,
     }
 
@@ -167,17 +170,18 @@ mod bench {
                 MemoryDomain::Host
             };
             println!("\n### {device} ({domain:?} domain, {iterations} timed submissions)\n");
-            println!("| group | case | dispatches | median | min | throughput |");
-            println!("|---|---|---:|---:|---:|---:|");
+            println!("| group | case | dispatches | median | min | submit | throughput |");
+            println!("|---|---|---:|---:|---:|---:|---:|");
             for case in &cases {
                 let sample = time_case(&backend, case, domain, iterations);
                 println!(
-                    "| {} | {} | {} | {} | {} | {} |",
+                    "| {} | {} | {} | {} | {} | {} | {} |",
                     case.group,
                     case.name,
                     sample.dispatches,
                     format_duration(sample.median),
                     format_duration(sample.min),
+                    format_duration(sample.submit),
                     format_throughput(case.metric, sample.median),
                 );
             }
@@ -604,6 +608,7 @@ mod bench {
         });
 
         let mut durations = Vec::with_capacity(iterations);
+        let mut submits = Vec::with_capacity(iterations);
         let warmup_started = Instant::now();
         let mut warmups = 0;
         while durations.len() < iterations {
@@ -618,6 +623,7 @@ mod bench {
                         panic!("{device}: {} indeterminate: {error:?}", case.name)
                     }
                 });
+            let submitted = start.elapsed();
             loop {
                 match backend.poll_event(&event).unwrap() {
                     EventState::Pending => std::hint::spin_loop(),
@@ -631,14 +637,17 @@ mod bench {
             });
             if warmups >= WARMUPS && warmup_started.elapsed() >= WARMUP_FLOOR {
                 durations.push(elapsed);
+                submits.push(submitted);
             } else {
                 warmups += 1;
             }
         }
         durations.sort();
+        submits.sort();
         let sample = Sample {
             median: durations[durations.len() / 2],
             min: durations[0],
+            submit: submits[submits.len() / 2],
             dispatches: program.dispatch_count(),
         };
 
