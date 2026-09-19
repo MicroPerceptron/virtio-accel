@@ -1806,6 +1806,13 @@ fn tiled_matmul_is_bit_identical_to_the_sequential_reference() {
             (2, 33, 45, 17),
             (1, 16, 16, 16),
             (3, 7, 100, 5),
+            // Past one 64-wide block on both sides, with a partial final `k` step.
+            (1, 65, 70, 130),
+            (2, 64, 64, 64),
+            // Skinny: one row, and the eight-row decode shape, over odd widths.
+            (1, 1, 300, 257),
+            (1, 8, 129, 65),
+            (1, 9, 33, 128),
         ] {
             let a = pseudo_random((batch * m * k) as usize, 7);
             let b = pseudo_random((batch * k * n) as usize, 11);
@@ -2590,14 +2597,18 @@ fn every_fp8_pattern_moves_bit_exactly_on_every_device() {
 /// narrows once. Bit-exact: the kernel performs the same operations in the same order.
 #[test]
 fn fp8_matmul_matches_the_widened_reference_on_every_device() {
-    let (m, k, n) = (5_i32, 7_i32, 3_i32);
     for device in devices() {
         let backend = open(&device);
         assert!(
             advertises_fp8(&backend),
             "{device}: FP8 tier not advertised"
         );
-        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+        // A one-block shape, one past the 64-wide block with a partial `k` step, and the
+        // single-row decode shape.
+        for ((m, k, n), dtype) in [(5_i32, 7_i32, 3_i32), (70, 66, 65), (1, 200, 130)]
+            .into_iter()
+            .flat_map(|shape| [(shape, DType::FP8E4M3), (shape, DType::FP8E5M2)])
+        {
             // Finite patterns only: this checks arithmetic, and the exhaustive identity test
             // above already covers NaN and infinity transport.
             let finite = |seed: usize, count: usize| -> Vec<u8> {
@@ -2641,7 +2652,7 @@ fn fp8_matmul_matches_the_widened_reference_on_every_device() {
                 assert_eq!(
                     fp16s_le(&actual),
                     expected,
-                    "{device}: {dtype:?} MATMUL in {domain:?}"
+                    "{device}: {dtype:?} MATMUL {m}x{k}x{n} in {domain:?}"
                 );
             }
         }

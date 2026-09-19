@@ -70,7 +70,8 @@ const _: () = assert!(
 /// `maxComputeWorkGroupInvocations` is only the specification minimum (128).
 const PREFERRED_WORKGROUP: u32 = 256;
 const FALLBACK_WORKGROUP: u32 = 128;
-/// Preferred MATMUL tile (16 × 16 = 256 invocations, 2 KiB shared), and the fallback tile.
+/// Preferred MATMUL tile (16 × 16 = 256 invocations computing a 64 × 64 block over 8 KiB of
+/// shared slabs), and the fallback tile (8 × 8 invocations, a 32 × 32 block, 2 KiB shared).
 const PREFERRED_MATMUL_TILE: u32 = 16;
 const FALLBACK_MATMUL_TILE: u32 = 8;
 /// Bytes every `VkBuffer` size is rounded up to so byte-storage tensors can be addressed by
@@ -104,7 +105,7 @@ impl Tuning {
             invocations >= tile * tile
                 && size[0] >= tile
                 && size[1] >= tile
-                && limits.max_compute_shared_memory_size >= 2 * tile * tile * 4
+                && limits.max_compute_shared_memory_size >= shader::matmul_shared_bytes(tile)
         };
         let matmul_tile = if tile_fits(PREFERRED_MATMUL_TILE) {
             PREFERRED_MATMUL_TILE

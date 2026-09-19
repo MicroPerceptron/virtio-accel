@@ -384,7 +384,8 @@ pub enum KernelKey {
         workgroup: u32,
         buffers: u32,
     },
-    /// Batched matrix multiplication over `tile × tile` workgroup-shared binary32 tiles. Both
+    /// Batched, register-tiled matrix multiplication: a `tile × tile` workgroup computes a
+    /// [`matmul_block`]-sided output square from workgroup-shared binary32 slabs. Both
     /// operands are read at `input` storage and accumulate in binary32 — the accumulator width
     /// TOSA assigns FP16 and FP8 MATMUL — and the result is stored at `output` storage. The two
     /// differ only for the FP8 tier, where TOSA defines MATMUL as `(FP8, FP8) -> FP16`.
@@ -825,9 +826,26 @@ pub const fn linear_workgroups(count: u32, workgroup: u32, limit: u32) -> u32 {
     }
 }
 
+/// Outputs per invocation per side of the register-tiled MATMUL: each invocation of a
+/// `tile × tile` workgroup accumulates a `MATMUL_MICRO × MATMUL_MICRO` block, so the workgroup
+/// covers a [`matmul_block`]-sided square of the result.
+pub const MATMUL_MICRO: u32 = 4;
+
+/// Side of the output square one MATMUL workgroup of `tile × tile` invocations computes.
+pub const fn matmul_block(tile: u32) -> u32 {
+    tile * MATMUL_MICRO
+}
+
+/// Bytes of workgroup-shared memory the MATMUL kernel at `tile` declares: two binary32 tiles of
+/// `block × tile` elements (the lhs slab transposed, the rhs slab as is).
+pub const fn matmul_shared_bytes(tile: u32) -> u32 {
+    2 * matmul_block(tile) * tile * 4
+}
+
 /// Workgroup counts of a tiled MATMUL over `m` rows, `n` columns, and `batch` batches.
 pub const fn matmul_workgroups(m: u32, n: u32, batch: u32, tile: u32) -> [u32; 3] {
-    [n.div_ceil(tile), m.div_ceil(tile), batch]
+    let block = matmul_block(tile);
+    [n.div_ceil(block), m.div_ceil(block), batch]
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2924,17 +2942,34 @@ fn assemble_reduce(op: ReduceOp, float: Storage, workgroup: u32, buffers: u32) -
     b.finish([workgroup, 1, 1])
 }
 
-/// Batched MATMUL over `tile × tile` workgroup tiles of both operands, reading `float` storage
-/// (FP32 words or packed FP16) and accumulating in binary32 — the accumulator width TOSA
-/// assigns FP16 MATMUL, and the FP32 tier's own width.
+/// Batched, register-tiled MATMUL reading `input` storage (FP32 words, packed FP16, or packed
+/// FP8) and accumulating in binary32 — the accumulator width TOSA assigns FP16 and FP8 MATMUL,
+/// and the FP32 tier's own width.
 ///
 /// `out[b, m, n] = Σ_k lhs[b, m, k] · rhs[b, k, n]`, accumulated in ascending `k` with separately
-/// rounded multiply and add, so the result is bit-identical to the untiled loop. Out-of-range
-/// tile loads read element zero and contribute nothing: the inner loop bound is `min(tile,
-/// k - k0)`, never a padded zero product, so signed zeros survive.
+/// rounded multiply and add, so every element is bit-identical to the untiled sequential loop.
+///
+/// Geometry: a `tile × tile` workgroup computes a [`matmul_block`]-sided output square, each
+/// invocation a [`MATMUL_MICRO`]² register block whose rows are `i · tile + ty` and columns
+/// `j · tile + tx` — interleaved rather than contiguous, so the invocations of a row of the
+/// workgroup read consecutive columns and write consecutive outputs. Per `tile`-deep step of
+/// `k` the workgroup stages a `block × tile` slab of each operand in shared memory
+/// cooperatively (`MATMUL_MICRO` elements per invocation per operand, consecutive invocations
+/// loading consecutive addresses, the lhs slab stored transposed so its inner-loop reads are
+/// conflict-free), then every invocation issues `2 · MATMUL_MICRO` shared loads for
+/// `MATMUL_MICRO²` multiply-adds. The one-output-per-invocation kernel this replaces issued two
+/// shared loads per multiply-add and staged one element per invocation; on Intel Xe3 it ran a
+/// 1024³ FP8 MATMUL at 570 GFLOP/s, below its own FP32 rate, because the per-element FP8
+/// widening was paid once per multiply-add rather than once per `MATMUL_MICRO` of them.
+///
+/// Out-of-range slab loads read element zero and contribute nothing: the inner loop bound is
+/// `min(tile, k - k0)`, never a padded zero product, so signed zeros survive. Out-of-range
+/// outputs are computed and discarded.
 ///
 /// Specialization order: `lhs`, `rhs`, output `(buffer, base)`; `m`, `n`, `k`, `batch`.
 fn assemble_matmul(input: Storage, output_storage: Storage, tile: u32, buffers: u32) -> Vec<u32> {
+    let micro = MATMUL_MICRO;
+    let block = matmul_block(tile);
     let mut b = Builder::new();
     let array = b.buffer_array(buffers);
     let lhs = b.spec_operand();
@@ -2944,15 +2979,16 @@ fn assemble_matmul(input: Storage, output_storage: Storage, tile: u32, buffers: 
     let n = b.spec_u32(1);
     let k = b.spec_u32(1);
     let _batch = b.spec_u32(1);
-    let lhs_tile = b.shared_f32_array(tile * tile);
-    let rhs_tile = b.shared_f32_array(tile * tile);
+    // lhs slab transposed: `[kk][row]`; rhs slab as is: `[kk][col]`. Both `tile × block`.
+    let lhs_tile = b.shared_f32_array(block * tile);
+    let rhs_tile = b.shared_f32_array(block * tile);
     let local_id = b.builtin_uvec3(BUILT_IN_LOCAL_INVOCATION_ID);
     let group_id = b.builtin_uvec3(BUILT_IN_WORKGROUP_ID);
 
     b.begin_main();
     let u32_ty = b.u32_ty();
     let f32_ty = b.f32_ty();
-    let acc_var = b.local(f32_ty);
+    let accumulators: Vec<Id> = (0..micro * micro).map(|_| b.local(f32_ty)).collect();
     let t_var = b.local(u32_ty);
     let kk_var = b.local(u32_ty);
     let tx = b.builtin_component(local_id, 0);
@@ -2961,95 +2997,141 @@ fn assemble_matmul(input: Storage, output_storage: Storage, tile: u32, buffers: 
     let gy = b.builtin_component(group_id, 1);
     let z = b.builtin_component(group_id, 2);
     let tile_c = b.c_u32(tile);
-    let row = b.imul(gy, tile_c);
-    let row = b.iadd(row, ty);
-    let col = b.imul(gx, tile_c);
-    let col = b.iadd(col, tx);
-    let row_ok = b.ult(row, m);
-    let col_ok = b.ult(col, n);
+    let block_c = b.c_u32(block);
     let zero = b.c_u32(0);
     let one = b.c_u32(1);
     let zero_f = b.c_f32(0.0);
-    b.store(acc_var, zero_f);
+    for accumulator in &accumulators {
+        b.store(*accumulator, zero_f);
+    }
     b.store(t_var, zero);
+    let row0 = b.imul(gy, block_c);
+    let col0 = b.imul(gx, block_c);
+    let lid = b.imul(ty, tile_c);
+    let lid = b.iadd(lid, tx);
     // lhs batch base: z * m * k; rhs batch base: z * k * n.
     let lhs_batch = b.imul(z, m);
     let lhs_batch = b.imul(lhs_batch, k);
     let rhs_batch = b.imul(z, k);
     let rhs_batch = b.imul(rhs_batch, n);
-    let lhs_row = b.imul(row, k);
-    let lhs_row = b.iadd(lhs_batch, lhs_row);
-    let rhs_col = b.iadd(rhs_batch, col);
-    let local_index = b.imul(ty, tile_c);
-    let local_index = b.iadd(local_index, tx);
-    let workgroup_ptr = {
-        let f32_ty = b.f32_ty();
-        b.pointer(STORAGE_CLASS_WORKGROUP, f32_ty)
-    };
-    let tiles = {
+    let workgroup_ptr = b.pointer(STORAGE_CLASS_WORKGROUP, f32_ty);
+    let steps = {
         let k_plus = b.iadd(k, tile_c);
         let k_plus = b.isub(k_plus, one);
         b.udiv(k_plus, tile_c)
     };
-    let (outer, t) = b.begin_loop(t_var, tiles);
+    let (outer, t) = b.begin_loop(t_var, steps);
     let k0 = b.imul(t, tile_c);
-    // Load lhs[row, k0 + tx] and rhs[k0 + ty, col], zero when out of range.
-    let ka = b.iadd(k0, tx);
-    let ka_ok = b.ult(ka, k);
-    let lhs_ok = b.land(row_ok, ka_ok);
-    let lhs_index = b.iadd(lhs_row, ka);
-    let lhs_index = b.select_u32(lhs_ok, lhs_index, zero);
-    let lhs_loaded = b.load_float(input, array, lhs, lhs_index);
-    let lhs_value = b.select_f32(lhs_ok, lhs_loaded, zero_f);
-    let kb = b.iadd(k0, ty);
-    let kb_ok = b.ult(kb, k);
-    let rhs_ok = b.land(kb_ok, col_ok);
-    let rhs_index = b.imul(kb, n);
-    let rhs_index = b.iadd(rhs_index, rhs_col);
-    let rhs_index = b.select_u32(rhs_ok, rhs_index, zero);
-    let rhs_loaded = b.load_float(input, array, rhs, rhs_index);
-    let rhs_value = b.select_f32(rhs_ok, rhs_loaded, zero_f);
-    let lhs_slot = b.access_chain(workgroup_ptr, lhs_tile, &[local_index]);
-    b.store(lhs_slot, lhs_value);
-    let rhs_slot = b.access_chain(workgroup_ptr, rhs_tile, &[local_index]);
-    b.store(rhs_slot, rhs_value);
+    // Stage the slabs: element `q · tile² + lid` of each `block × tile` slab, `q` unrolled.
+    for q in 0..micro {
+        let offset = b.c_u32(q * tile * tile);
+        let index = b.iadd(offset, lid);
+        // lhs slab element `index` is (row = index / tile, kk = index % tile): consecutive
+        // invocations read consecutive `k` of one row.
+        let row = b.udiv(index, tile_c);
+        let kk = b.umod(index, tile_c);
+        let global_row = b.iadd(row0, row);
+        let global_k = b.iadd(k0, kk);
+        let row_ok = b.ult(global_row, m);
+        let k_ok = b.ult(global_k, k);
+        let ok = b.land(row_ok, k_ok);
+        let element = b.imul(global_row, k);
+        let element = b.iadd(element, lhs_batch);
+        let element = b.iadd(element, global_k);
+        let element = b.select_u32(ok, element, zero);
+        let loaded = b.load_float(input, array, lhs, element);
+        let value = b.select_f32(ok, loaded, zero_f);
+        let slot = b.imul(kk, block_c);
+        let slot = b.iadd(slot, row);
+        let pointer = b.access_chain(workgroup_ptr, lhs_tile, &[slot]);
+        b.store(pointer, value);
+        // rhs slab element `index` is (kk = index / block, col = index % block): consecutive
+        // invocations read consecutive `n` of one row of `rhs`.
+        let kk = b.udiv(index, block_c);
+        let col = b.umod(index, block_c);
+        let global_k = b.iadd(k0, kk);
+        let global_col = b.iadd(col0, col);
+        let k_ok = b.ult(global_k, k);
+        let col_ok = b.ult(global_col, n);
+        let ok = b.land(k_ok, col_ok);
+        let element = b.imul(global_k, n);
+        let element = b.iadd(element, rhs_batch);
+        let element = b.iadd(element, global_col);
+        let element = b.select_u32(ok, element, zero);
+        let loaded = b.load_float(input, array, rhs, element);
+        let value = b.select_f32(ok, loaded, zero_f);
+        let slot = b.imul(kk, block_c);
+        let slot = b.iadd(slot, col);
+        let pointer = b.access_chain(workgroup_ptr, rhs_tile, &[slot]);
+        b.store(pointer, value);
+    }
     b.workgroup_barrier();
     let remaining = b.isub(k, k0);
     let k_max = b.umin(remaining, tile_c);
     b.store(kk_var, zero);
     let (inner, kk) = b.begin_loop(kk_var, k_max);
-    let a_index = b.imul(ty, tile_c);
-    let a_index = b.iadd(a_index, kk);
-    let a_ptr = b.access_chain(workgroup_ptr, lhs_tile, &[a_index]);
-    let a = b.load(f32_ty, a_ptr);
-    let b_index = b.imul(kk, tile_c);
-    let b_index = b.iadd(b_index, tx);
-    let b_ptr = b.access_chain(workgroup_ptr, rhs_tile, &[b_index]);
-    let bv = b.load(f32_ty, b_ptr);
-    let acc = b.load(f32_ty, acc_var);
-    let next = b.fma_free(a, bv, acc);
-    b.store(acc_var, next);
+    let slab_row = b.imul(kk, block_c);
+    let a: Vec<Id> = (0..micro)
+        .map(|i| {
+            let offset = b.c_u32(i * tile);
+            let local_row = b.iadd(offset, ty);
+            let slot = b.iadd(slab_row, local_row);
+            let pointer = b.access_chain(workgroup_ptr, lhs_tile, &[slot]);
+            b.load(f32_ty, pointer)
+        })
+        .collect();
+    let bv: Vec<Id> = (0..micro)
+        .map(|j| {
+            let offset = b.c_u32(j * tile);
+            let local_col = b.iadd(offset, tx);
+            let slot = b.iadd(slab_row, local_col);
+            let pointer = b.access_chain(workgroup_ptr, rhs_tile, &[slot]);
+            b.load(f32_ty, pointer)
+        })
+        .collect();
+    for i in 0..micro {
+        for j in 0..micro {
+            let accumulator = accumulators[(i * micro + j) as usize];
+            let acc = b.load(f32_ty, accumulator);
+            let next = b.fma_free(a[i as usize], bv[j as usize], acc);
+            b.store(accumulator, next);
+        }
+    }
     b.end_loop(inner, kk_var, one);
     b.workgroup_barrier();
     b.end_loop(outer, t_var, one);
-    let in_range = b.land(row_ok, col_ok);
-    b.if_then(in_range, |b| {
-        let out_batch = b.imul(z, m);
-        let out_batch = b.imul(out_batch, n);
+    let out_batch = b.imul(z, m);
+    let out_batch = b.imul(out_batch, n);
+    for i in 0..micro {
+        let offset = b.c_u32(i * tile);
+        let row = b.iadd(row0, offset);
+        let row = b.iadd(row, ty);
+        let row_ok = b.ult(row, m);
         let out_row = b.imul(row, n);
-        let out_index = b.iadd(out_batch, out_row);
-        let out_index = b.iadd(out_index, col);
-        let acc = b.load(f32_ty, acc_var);
-        match output_storage {
-            Storage::Half => {
-                let bits = b.narrow_f16(acc);
-                b.store_half_bits(array, output, out_index, bits);
-            }
-            // TOSA defines no MATMUL whose result is FP8 or BOOL; the tier never selects one.
-            Storage::Byte | Storage::Quarter(_) => unreachable!("MATMUL result storage"),
-            Storage::Word => b.store_f32(array, output, out_index, acc),
+        let out_row = b.iadd(out_batch, out_row);
+        for j in 0..micro {
+            let offset = b.c_u32(j * tile);
+            let col = b.iadd(col0, offset);
+            let col = b.iadd(col, tx);
+            let col_ok = b.ult(col, n);
+            let in_range = b.land(row_ok, col_ok);
+            let accumulator = accumulators[(i * micro + j) as usize];
+            b.if_then(in_range, |b| {
+                let out_index = b.iadd(out_row, col);
+                let acc = b.load(f32_ty, accumulator);
+                match output_storage {
+                    Storage::Half => {
+                        let bits = b.narrow_f16(acc);
+                        b.store_half_bits(array, output, out_index, bits);
+                    }
+                    // TOSA defines no MATMUL whose result is FP8 or BOOL; the tier never
+                    // selects one.
+                    Storage::Byte | Storage::Quarter(_) => unreachable!("MATMUL result storage"),
+                    Storage::Word => b.store_f32(array, output, out_index, acc),
+                }
+            });
         }
-    });
+    }
     b.end_main();
     b.finish([tile, tile, 1])
 }
@@ -3488,11 +3570,15 @@ mod tests {
 
     #[test]
     fn matmul_workgroups_cover_all_dimensions() {
+        assert_eq!(matmul_block(16), 64);
+        assert_eq!(matmul_block(8), 32);
+        assert_eq!(matmul_shared_bytes(16), 8192);
         assert_eq!(matmul_workgroups(1, 1, 1, 16), [1, 1, 1]);
-        assert_eq!(matmul_workgroups(16, 16, 1, 16), [1, 1, 1]);
-        assert_eq!(matmul_workgroups(17, 16, 1, 16), [1, 2, 1]);
-        assert_eq!(matmul_workgroups(16, 17, 1, 16), [2, 1, 1]);
-        assert_eq!(matmul_workgroups(8, 8, 3, 8), [1, 1, 3]);
+        assert_eq!(matmul_workgroups(64, 64, 1, 16), [1, 1, 1]);
+        assert_eq!(matmul_workgroups(65, 64, 1, 16), [1, 2, 1]);
+        assert_eq!(matmul_workgroups(64, 65, 1, 16), [2, 1, 1]);
+        assert_eq!(matmul_workgroups(32, 32, 3, 8), [1, 1, 3]);
+        assert_eq!(matmul_workgroups(33, 8, 3, 8), [1, 2, 3]);
     }
 
     #[test]
