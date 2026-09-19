@@ -198,6 +198,7 @@ const GLSL_EXP: u32 = 27;
 const GLSL_LOG: u32 = 28;
 const GLSL_INVERSE_SQRT: u32 = 32;
 const GLSL_UMIN: u32 = 38;
+const GLSL_FMA: u32 = 50;
 const GLSL_FIND_U_MSB: u32 = 75;
 
 /// A SPIR-V result id.
@@ -395,13 +396,14 @@ pub enum KernelKey {
         tile: u32,
         buffers: u32,
     },
-    /// The same kernel at [`MatmulGeometry::skinny`]: a flat `SKINNY_ROWS × 4·tile` block for
-    /// `m ≤` [`SKINNY_ROWS`], where the register-tiled square would idle most of its rows and
-    /// starve the device of workgroups. Same storages and accumulation as [`Self::Matmul`].
-    MatmulSkinny {
-        input: Storage,
+    /// Split-`k` streaming MATMUL for `m ≤` [`STREAM_ROWS`] rows ([`assemble_matmul_stream`]):
+    /// a 1-D workgroup of [`STREAM_WORKGROUP`] invocations over [`STREAM_COLUMNS`] columns of
+    /// `rhs` (read at `rhs` storage, a word per invocation), the lhs read as binary32 words —
+    /// lowering widens a narrower lhs beforehand — and one fixed-order reduction of the `k`
+    /// slices at the end. Same accumulator width as [`Self::Matmul`].
+    MatmulStream {
+        rhs: Storage,
         output: Storage,
-        tile: u32,
         buffers: u32,
     },
     /// NHWC max pooling with padding excluded from the window, at `float` storage.
@@ -452,12 +454,11 @@ impl KernelKey {
                 tile,
                 buffers,
             } => assemble_matmul(input, output, MatmulGeometry::wide(tile), buffers),
-            Self::MatmulSkinny {
-                input,
+            Self::MatmulStream {
+                rhs,
                 output,
-                tile,
                 buffers,
-            } => assemble_matmul(input, output, MatmulGeometry::skinny(tile), buffers),
+            } => assemble_matmul_stream(rhs, output, buffers),
             Self::MaxPool {
                 nan_mode,
                 float,
@@ -561,21 +562,30 @@ impl KernelKey {
             });
         }
         for float in [Storage::Word, Storage::Half] {
-            for (tile, buffers) in [(16, 17), (8, 5)] {
-                keys.push(KernelKey::MatmulSkinny {
-                    input: float,
-                    output: float,
-                    tile,
-                    buffers,
-                });
-            }
+            keys.push(KernelKey::MatmulStream {
+                rhs: float,
+                output: float,
+                buffers: 17,
+            });
         }
+        // The lhs widening lowering inserts ahead of a skinny FP16 MATMUL.
+        keys.push(KernelKey::Cast {
+            input: Storage::Half,
+            output: Storage::Word,
+            workgroup: 64,
+            buffers: 17,
+        });
+        keys.push(KernelKey::Cast {
+            input: Storage::Word,
+            output: Storage::Half,
+            workgroup: 64,
+            buffers: 17,
+        });
         // The FP8 tier: TOSA's `(FP8, FP8) -> FP16` MATMUL, and exact FP8 data movement.
         for format in [Fp8Format::E4M3, Fp8Format::E5M2] {
-            keys.push(KernelKey::MatmulSkinny {
-                input: Storage::Quarter(format),
+            keys.push(KernelKey::MatmulStream {
+                rhs: Storage::Quarter(format),
                 output: Storage::Half,
-                tile: 16,
                 buffers: 17,
             });
             keys.push(KernelKey::Matmul {
@@ -669,7 +679,7 @@ impl KernelKey {
                 base + shape + op.extra_spec_constants()
             }
             Self::Reduce { .. } => 2 + 2 + 3,
-            Self::Matmul { .. } | Self::MatmulSkinny { .. } => 3 * 2 + 4,
+            Self::Matmul { .. } | Self::MatmulStream { .. } => 3 * 2 + 4,
             Self::MaxPool { .. } => 2 + 2 + 12,
             Self::Move { contiguous, .. } => {
                 if contiguous {
@@ -691,7 +701,7 @@ impl KernelKey {
             | Self::Move { workgroup, .. }
             | Self::Cast { workgroup, .. } => [workgroup, 1, 1],
             Self::Matmul { tile, .. } => MatmulGeometry::wide(tile).local_size(),
-            Self::MatmulSkinny { tile, .. } => MatmulGeometry::skinny(tile).local_size(),
+            Self::MatmulStream { .. } => [STREAM_WORKGROUP, 1, 1],
         }
     }
 }
@@ -863,36 +873,45 @@ pub const fn linear_workgroups(count: u32, workgroup: u32, limit: u32) -> u32 {
 /// covers a [`matmul_block`]-sided square of the result.
 pub const MATMUL_MICRO: u32 = 4;
 
-/// Rows of the skinny MATMUL block, and the row count at or below which lowering selects it.
-pub const SKINNY_ROWS: u32 = 8;
+/// Rows the streaming MATMUL kernel carries per invocation, and the row count at or below which
+/// lowering selects it over the register-tiled kernel.
+pub const STREAM_ROWS: u32 = 8;
+
+/// Output columns one streaming MATMUL workgroup covers.
+pub const STREAM_COLUMNS: u32 = 16;
+
+/// Invocations of a streaming MATMUL workgroup: `STREAM_COLUMNS / lanes` weight words times
+/// `STREAM_WORKGROUP / that` slices of `k`.
+pub const STREAM_WORKGROUP: u32 = 64;
+
+/// Bytes of workgroup-shared memory the streaming kernel declares for its final reduction:
+/// every invocation's `STREAM_ROWS × lanes` partial sums, at the widest lane count.
+pub const fn stream_matmul_shared_bytes() -> u32 {
+    STREAM_WORKGROUP * STREAM_ROWS * 4 * 4
+}
+
+/// Workgroup counts of a streaming MATMUL over `n` columns and `batch` batches.
+pub const fn stream_matmul_workgroups(n: u32, batch: u32) -> [u32; 3] {
+    [n.div_ceil(STREAM_COLUMNS), 1, batch]
+}
 
 /// Side of the output square one MATMUL workgroup of `tile × tile` invocations computes.
 pub const fn matmul_block(tile: u32) -> u32 {
     tile * MATMUL_MICRO
 }
 
-/// Columns of the skinny MATMUL block at `tile`.
-pub const fn skinny_block(tile: u32) -> u32 {
-    MatmulGeometry::skinny(tile).block_n()
-}
-
-/// Bytes of workgroup-shared memory the MATMUL kernels at `tile` declare, whichever geometry is
-/// larger.
+/// Bytes of workgroup-shared memory the MATMUL kernels at `tile` declare, whichever kernel
+/// needs more.
 pub const fn matmul_shared_bytes(tile: u32) -> u32 {
     let wide = MatmulGeometry::wide(tile).shared_bytes();
-    let skinny = MatmulGeometry::skinny(tile).shared_bytes();
-    if wide > skinny { wide } else { skinny }
+    let stream = stream_matmul_shared_bytes();
+    if wide > stream { wide } else { stream }
 }
 
 /// Workgroup counts of a tiled MATMUL over `m` rows, `n` columns, and `batch` batches.
 pub const fn matmul_workgroups(m: u32, n: u32, batch: u32, tile: u32) -> [u32; 3] {
     let block = matmul_block(tile);
     [n.div_ceil(block), m.div_ceil(block), batch]
-}
-
-/// Workgroup counts of a skinny MATMUL over `n` columns and `batch` batches.
-pub const fn skinny_matmul_workgroups(n: u32, batch: u32, tile: u32) -> [u32; 3] {
-    [n.div_ceil(skinny_block(tile)), 1, batch]
 }
 
 /// Shape of one MATMUL workgroup: `tile_x × tile_y` invocations, each accumulating a
@@ -905,10 +924,6 @@ pub struct MatmulGeometry {
     pub micro_m: u32,
     pub micro_n: u32,
     pub depth: u32,
-    /// Unroll the `depth` iterations of a full step. Pays on the skinny geometry (two
-    /// multiply-adds per iteration, 0.47 → 0.42 ms on the decode GEMV) and costs on the wide one
-    /// (sixteen per iteration; the unrolled body's register pressure slowed 1024³ by a quarter).
-    pub unroll: bool,
 }
 
 impl MatmulGeometry {
@@ -921,23 +936,6 @@ impl MatmulGeometry {
             micro_m: MATMUL_MICRO,
             micro_n: MATMUL_MICRO,
             depth: tile,
-            unroll: false,
-        }
-    }
-
-    /// The flat geometry for `m ≤` [`SKINNY_ROWS`]: the same `tile²` invocations laid out
-    /// `4·tile` wide and `tile / 4` tall, [`SKINNY_ROWS`] rows split among the `tile_y`
-    /// invocations of a column, one column each, `2·tile` deep — an 8 × 64 block at the
-    /// preferred tile. A decode-shaped layer thus gets `n / 64` workgroups of 256 invocations
-    /// all staging the weight slab, instead of `n / 64` workgroups idling 56 of 64 rows.
-    pub const fn skinny(tile: u32) -> Self {
-        Self {
-            tile_x: 4 * tile,
-            tile_y: tile / 4,
-            micro_m: SKINNY_ROWS / (tile / 4),
-            micro_n: 1,
-            depth: 2 * tile,
-            unroll: true,
         }
     }
 
@@ -1665,10 +1663,25 @@ impl Builder {
         let ty = self.f32_ty();
         self.value(OP_F_NEGATE, ty, &[a])
     }
+    /// `a · b + c` as two separately rounded operations, never contracted: the polynomial
+    /// lanes were tuned against binary64 references with exactly this rounding.
     fn fma_free(&mut self, a: Id, b: Id, c: Id) -> Id {
-        // `a * b + c` as two separately rounded operations (never contracted).
         let product = self.fmul(a, b);
         self.fadd(product, c)
+    }
+    /// `a · b + c` as one fused multiply-add: the GLSL `Fma` instruction decorated
+    /// `NoContraction`, which Vulkan defines as a single correctly rounded operation rather than
+    /// a multiply the driver may or may not fuse with the add (ADR 0011).
+    fn fma(&mut self, a: Id, b: Id, c: Id) -> Id {
+        let ty = self.f32_ty();
+        let glsl = self.glsl;
+        let id = self.value(OP_EXT_INST, ty, &[glsl, GLSL_FMA, a, b, c]);
+        instruction(
+            &mut self.annotations,
+            OP_DECORATE,
+            &[id, DECORATION_NO_CONTRACTION],
+        );
+        id
     }
 
     // -- crate-owned binary16 conversions (ADR 0008) --------------------------------------------
@@ -3219,7 +3232,6 @@ fn assemble_matmul(
         micro_m,
         micro_n,
         depth,
-        unroll,
     } = geometry;
     let invocations = geometry.invocations();
     let block_m = geometry.block_m();
@@ -3352,33 +3364,15 @@ fn assemble_matmul(
             for j in 0..micro_n {
                 let accumulator = accumulators[(i * micro_n + j) as usize];
                 let acc = b.load(f32_ty, accumulator);
-                let next = b.fma_free(a[i as usize], bv[j as usize], acc);
+                let next = b.fma(a[i as usize], bv[j as usize], acc);
                 b.store(accumulator, next);
             }
         }
     };
-    let looped = |b: &mut Builder, limit: Id| {
-        b.store(kk_var, zero);
-        let (inner, kk) = b.begin_loop(kk_var, limit);
-        step(b, kk);
-        b.end_loop(inner, kk_var, one);
-    };
-    if unroll {
-        // A full step — every one but possibly the last — runs the `depth` iterations unrolled,
-        // so there is no counter to carry and the compiler can schedule the shared loads of one
-        // `kk` under the multiply-adds of the previous; the partial final step loops.
-        let full = b.ieq(k_max, depth_c);
-        b.if_then(full, |b| {
-            for kk in 0..depth {
-                let kk = b.c_u32(kk);
-                step(b, kk);
-            }
-        });
-        let partial = b.lnot(full);
-        b.if_then(partial, |b| looped(b, k_max));
-    } else {
-        looped(&mut b, k_max);
-    }
+    b.store(kk_var, zero);
+    let (inner, kk) = b.begin_loop(kk_var, k_max);
+    step(&mut b, kk);
+    b.end_loop(inner, kk_var, one);
     b.workgroup_barrier();
     b.end_loop(outer, t_var, one);
     let out_batch = b.imul(z, m);
@@ -3415,6 +3409,216 @@ fn assemble_matmul(
     }
     b.end_main();
     b.finish(geometry.local_size())
+}
+
+/// Split-`k` streaming MATMUL for `m ≤` [`STREAM_ROWS`]: the decode shape, a few activation rows
+/// against a wide weight matrix, where the kernel's only job is to stream `rhs` once at the
+/// memory system's rate.
+///
+/// A 1-D workgroup of [`STREAM_WORKGROUP`] invocations covers [`STREAM_COLUMNS`] columns.
+/// Invocation `lid` owns weight word `lid % words` — `lanes` adjacent columns, four FP8, two
+/// FP16 or one FP32 — and `k` slice `lid / words` of `splits = STREAM_WORKGROUP / words` equal
+/// slices, and carries all [`STREAM_ROWS`] rows of those columns in registers. Its loop is one
+/// `rhs` word load, one uniform binary32 lhs load per row, and `rows · lanes` fused
+/// multiply-adds — no shared memory, no barrier, and no widening of the lhs, which lowering
+/// pre-widens to binary32 (an `m × k` intermediate, negligible next to `rhs`) when the tier's
+/// lhs is narrower. Rows at or past `m` are compiled out: the row test is on a specialization
+/// constant. At the end every invocation writes its partials to shared memory and each
+/// invocation reduces two outputs over the `splits` slices in ascending order, then stores.
+///
+/// Numerics (ADR 0011): binary32 accumulation with fused multiply-add, `k` split into `splits`
+/// contiguous ascending slices summed in fixed order. Not bit-identical to the sequential sum,
+/// but deterministic: the same device always produces the same bits, and every device whose
+/// `Fma` is correctly rounded produces the same bits as every other.
+///
+/// The `rhs` word path needs every row of `rhs` word-aligned, i.e. `n` a multiple of `lanes`;
+/// the check is on the specialization constant `n`, so only one path survives pipeline
+/// creation, and an unaligned `n` falls back to per-element loads.
+///
+/// Specialization order: `lhs`, `rhs`, output `(buffer, base)`; `m`, `n`, `k`, `batch` — the
+/// same payload as [`assemble_matmul`].
+fn assemble_matmul_stream(rhs_storage: Storage, output_storage: Storage, buffers: u32) -> Vec<u32> {
+    let lanes = rhs_storage.lanes();
+    let words = STREAM_COLUMNS / lanes;
+    let splits = STREAM_WORKGROUP / words;
+    let rows = STREAM_ROWS;
+    let mut b = Builder::new();
+    let array = b.buffer_array(buffers);
+    let lhs = b.spec_operand();
+    let rhs = b.spec_operand();
+    let output = b.spec_operand();
+    let m = b.spec_u32(1);
+    let n = b.spec_u32(1);
+    let k = b.spec_u32(1);
+    let _batch = b.spec_u32(1);
+    let partials = b.shared_f32_array(STREAM_WORKGROUP * rows * lanes);
+    let local_id = b.builtin_uvec3(BUILT_IN_LOCAL_INVOCATION_ID);
+    let group_id = b.builtin_uvec3(BUILT_IN_WORKGROUP_ID);
+
+    b.begin_main();
+    let u32_ty = b.u32_ty();
+    let f32_ty = b.f32_ty();
+    let accumulators: Vec<Id> = (0..rows * lanes).map(|_| b.local(f32_ty)).collect();
+    let kk_var = b.local(u32_ty);
+    let lid = b.builtin_component(local_id, 0);
+    let gx = b.builtin_component(group_id, 0);
+    let z = b.builtin_component(group_id, 2);
+    let zero = b.c_u32(0);
+    let one = b.c_u32(1);
+    let zero_f = b.c_f32(0.0);
+    let words_c = b.c_u32(words);
+    let lanes_c = b.c_u32(lanes);
+    let splits_c = b.c_u32(splits);
+    let columns_c = b.c_u32(STREAM_COLUMNS);
+    for accumulator in &accumulators {
+        b.store(*accumulator, zero_f);
+    }
+    let w = b.umod(lid, words_c);
+    let slice = b.udiv(lid, words_c);
+    let col0 = b.imul(gx, columns_c);
+    let word_col = b.imul(w, lanes_c);
+    let col_base = b.iadd(col0, word_col);
+    // This invocation's `k` slice: `[slice · chunk, min(k, (slice + 1) · chunk))`.
+    let splits_less_one = b.c_u32(splits - 1);
+    let k_plus = b.iadd(k, splits_less_one);
+    let chunk = b.udiv(k_plus, splits_c);
+    let k_begin = b.imul(slice, chunk);
+    let k_end = b.iadd(k_begin, chunk);
+    let k_end = b.umin(k_end, k);
+    let lhs_batch = b.imul(z, m);
+    let lhs_batch = b.imul(lhs_batch, k);
+    let rhs_batch = b.imul(z, k);
+    let rhs_batch = b.imul(rhs_batch, n);
+    let rhs_col = b.iadd(rhs_batch, col_base);
+    let row_ok: Vec<Id> = (0..rows)
+        .map(|i| {
+            let row = b.c_u32(i);
+            b.ult(row, m)
+        })
+        .collect();
+    let lhs_rows: Vec<Id> = (0..rows)
+        .map(|i| {
+            let row = b.c_u32(i);
+            let offset = b.imul(row, k);
+            b.iadd(lhs_batch, offset)
+        })
+        .collect();
+    // Element index of `rhs[kk, col_base]`, clamped to zero when the word lies past `n`.
+    let rhs_word_element = |b: &mut Builder, kk: Id| {
+        let col_ok = b.ult(col_base, n);
+        let element = b.imul(kk, n);
+        let element = b.iadd(element, rhs_col);
+        b.select_u32(col_ok, element, zero)
+    };
+    // The inner product over the slice, `load_rhs` yielding the `lanes` weights at `kk`.
+    let accumulate = |b: &mut Builder, load_rhs: &dyn Fn(&mut Builder, Id) -> Vec<Id>| {
+        b.store(kk_var, k_begin);
+        let (scope, kk) = b.begin_loop(kk_var, k_end);
+        let weights = load_rhs(b, kk);
+        for i in 0..rows as usize {
+            b.if_then(row_ok[i], |b| {
+                let element = b.iadd(lhs_rows[i], kk);
+                let a = b.load_f32(array, lhs, element);
+                for (l, weight) in weights.iter().enumerate() {
+                    let accumulator = accumulators[i * lanes as usize + l];
+                    let acc = b.load(f32_ty, accumulator);
+                    let next = b.fma(a, *weight, acc);
+                    b.store(accumulator, next);
+                }
+            });
+        }
+        b.end_loop(scope, kk_var, one);
+    };
+    if lanes == 1 {
+        accumulate(&mut b, &|b, kk| {
+            let element = rhs_word_element(b, kk);
+            vec![b.load_f32(array, rhs, element)]
+        });
+    } else {
+        let remainder = b.umod(n, lanes_c);
+        let aligned = b.ieq(remainder, zero);
+        b.if_then(aligned, |b| {
+            accumulate(b, &|b, kk| {
+                let element = rhs_word_element(b, kk);
+                let bits = b.load_lane_group(rhs_storage, array, rhs, element, lanes);
+                bits.into_iter()
+                    .map(|bits| b.widen_bits(rhs_storage, bits))
+                    .collect()
+            });
+        });
+        let unaligned = b.lnot(aligned);
+        b.if_then(unaligned, |b| {
+            accumulate(b, &|b, kk| {
+                (0..lanes)
+                    .map(|l| {
+                        let l = b.c_u32(l);
+                        let col = b.iadd(col_base, l);
+                        let col_ok = b.ult(col, n);
+                        let element = b.imul(kk, n);
+                        let element = b.iadd(element, rhs_batch);
+                        let element = b.iadd(element, col);
+                        let element = b.select_u32(col_ok, element, zero);
+                        b.load_float(rhs_storage, array, rhs, element)
+                    })
+                    .collect()
+            });
+        });
+    }
+    // Partials to shared memory: invocation `lid`'s block of `rows · lanes` values.
+    let workgroup_ptr = b.pointer(STORAGE_CLASS_WORKGROUP, f32_ty);
+    let block = b.c_u32(rows * lanes);
+    let base = b.imul(lid, block);
+    for (index, accumulator) in accumulators.iter().enumerate() {
+        let offset = b.c_u32(index as u32);
+        let slot = b.iadd(base, offset);
+        let value = b.load(f32_ty, *accumulator);
+        let pointer = b.access_chain(workgroup_ptr, partials, &[slot]);
+        b.store(pointer, value);
+    }
+    b.workgroup_barrier();
+    // Reduce: output `o = lid · per_invocation + j` is row `o / STREAM_COLUMNS`, column
+    // `o % STREAM_COLUMNS`, summed over the slices in ascending order from slice zero.
+    let per_invocation = rows * STREAM_COLUMNS / STREAM_WORKGROUP;
+    let per_invocation_c = b.c_u32(per_invocation);
+    let first = b.imul(lid, per_invocation_c);
+    let out_batch = b.imul(z, m);
+    let out_batch = b.imul(out_batch, n);
+    for j in 0..per_invocation {
+        let j = b.c_u32(j);
+        let o = b.iadd(first, j);
+        let row = b.udiv(o, columns_c);
+        let col = b.umod(o, columns_c);
+        let word = b.udiv(col, lanes_c);
+        let lane = b.umod(col, lanes_c);
+        let within = b.imul(row, lanes_c);
+        let within = b.iadd(within, lane);
+        let mut sum = None;
+        for split in 0..splits {
+            let offset = b.c_u32(split * words);
+            let owner = b.iadd(offset, word);
+            let slot = b.imul(owner, block);
+            let slot = b.iadd(slot, within);
+            let pointer = b.access_chain(workgroup_ptr, partials, &[slot]);
+            let partial = b.load(f32_ty, pointer);
+            sum = Some(match sum {
+                None => partial,
+                Some(sum) => b.fadd(sum, partial),
+            });
+        }
+        let sum = sum.expect("at least one slice");
+        let global_col = b.iadd(col0, col);
+        let row_in = b.ult(row, m);
+        let col_in = b.ult(global_col, n);
+        let in_range = b.land(row_in, col_in);
+        b.if_then(in_range, |b| {
+            let out = b.imul(row, n);
+            let out = b.iadd(out, out_batch);
+            let out = b.iadd(out, global_col);
+            b.store_float(output_storage, array, output, out, sum);
+        });
+    }
+    b.end_main();
+    b.finish([STREAM_WORKGROUP, 1, 1])
 }
 
 /// NHWC MAX_POOL2D at `float` storage: one invocation per output element folds its window with
@@ -3780,7 +3984,7 @@ mod tests {
                 }
                 .words(broadcast),
                 KernelKey::Reduce { .. } => reduce_spec(operand, operand, 2, 3, 1),
-                KernelKey::Matmul { .. } | KernelKey::MatmulSkinny { .. } => {
+                KernelKey::Matmul { .. } | KernelKey::MatmulStream { .. } => {
                     matmul_spec(operand, operand, operand, 1, 2, 3, 1)
                 }
                 KernelKey::MaxPool { .. } => max_pool_spec(
@@ -3856,27 +4060,30 @@ mod tests {
         assert_eq!(matmul_block(16), 64);
         assert_eq!(matmul_block(8), 32);
         assert_eq!(MatmulGeometry::wide(16).shared_bytes(), 8192);
-        assert_eq!(MatmulGeometry::skinny(16).shared_bytes(), (8 + 64) * 32 * 4);
-        assert_eq!(matmul_shared_bytes(16), (8 + 64) * 32 * 4);
+        assert_eq!(stream_matmul_shared_bytes(), 8192);
+        assert_eq!(matmul_shared_bytes(8), 8192);
         for tile in [8, 16] {
-            for geometry in [MatmulGeometry::wide(tile), MatmulGeometry::skinny(tile)] {
-                assert_eq!(geometry.invocations(), tile * tile, "{geometry:?}");
-                assert_eq!(
-                    (geometry.block_m() * geometry.depth) % geometry.invocations(),
-                    0,
-                    "{geometry:?}"
-                );
-                assert_eq!(
-                    (geometry.block_n() * geometry.depth) % geometry.invocations(),
-                    0,
-                    "{geometry:?}"
-                );
-            }
-            assert_eq!(MatmulGeometry::skinny(tile).block_m(), SKINNY_ROWS);
+            let geometry = MatmulGeometry::wide(tile);
+            assert_eq!(geometry.invocations(), tile * tile, "{geometry:?}");
+            assert_eq!(
+                (geometry.block_m() * geometry.depth) % geometry.invocations(),
+                0,
+                "{geometry:?}"
+            );
+            assert_eq!(
+                (geometry.block_n() * geometry.depth) % geometry.invocations(),
+                0,
+                "{geometry:?}"
+            );
         }
-        assert_eq!(skinny_block(16), 64);
-        assert_eq!(skinny_matmul_workgroups(4096, 2, 16), [64, 1, 2]);
-        assert_eq!(skinny_matmul_workgroups(65, 1, 8), [3, 1, 1]);
+        // Every storage's word count divides the workgroup, and the outputs divide evenly.
+        for lanes in [1, 2, 4] {
+            let words = STREAM_COLUMNS / lanes;
+            assert_eq!(STREAM_WORKGROUP % words, 0);
+            assert_eq!((STREAM_ROWS * STREAM_COLUMNS) % STREAM_WORKGROUP, 0);
+        }
+        assert_eq!(stream_matmul_workgroups(4096, 2), [256, 1, 2]);
+        assert_eq!(stream_matmul_workgroups(17, 1), [2, 1, 1]);
         assert_eq!(matmul_workgroups(1, 1, 1, 16), [1, 1, 1]);
         assert_eq!(matmul_workgroups(64, 64, 1, 16), [1, 1, 1]);
         assert_eq!(matmul_workgroups(65, 64, 1, 16), [1, 2, 1]);

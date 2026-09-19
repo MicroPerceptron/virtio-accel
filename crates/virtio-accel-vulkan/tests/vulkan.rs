@@ -1795,10 +1795,45 @@ fn pseudo_random(count: usize, seed: u32) -> Vec<f32> {
         .collect()
 }
 
-/// The tiled MATMUL kernel is bit-identical to a sequential ascending-k loop with separately
-/// rounded multiplies and adds, at sizes that are not tile multiples and across batches.
+/// Binary32 MATMUL against a binary64 sequential reference, within the bound its accumulation
+/// admits (ADR 0011): fused multiply-adds over `k` products, plus a fixed-order reduction of at
+/// most 64 partial sums in the streaming kernel — `(k + 64) · 2⁻²³ · Σ|aᵢ·bᵢ|`, generously.
+fn assert_matmul_within_bound(
+    device: &str,
+    label: &str,
+    actual: &[f32],
+    a: &[f32],
+    b: &[f32],
+    (batch, m, k, n): (usize, usize, usize, usize),
+) {
+    for z in 0..batch {
+        for i in 0..m {
+            for j in 0..n {
+                let mut exact = 0.0_f64;
+                let mut magnitude = 0.0_f64;
+                for kk in 0..k {
+                    let product =
+                        f64::from(a[(z * m + i) * k + kk]) * f64::from(b[(z * k + kk) * n + j]);
+                    exact += product;
+                    magnitude += product.abs();
+                }
+                let got = f64::from(actual[(z * m + i) * n + j]);
+                let bound = (k as f64 + 64.0) * 2f64.powi(-23) * magnitude + f64::MIN_POSITIVE;
+                assert!(
+                    (got - exact).abs() <= bound,
+                    "{device}: {label} [{batch},{m},{k}]x[{batch},{k},{n}] element ({z},{i},{j}): \
+                     {got} vs {exact} (bound {bound})"
+                );
+            }
+        }
+    }
+}
+
+/// Every MATMUL kernel tracks the sequential binary64 reference within its error bound, over
+/// shapes that exercise the register-tiled kernel across block edges and the streaming kernel
+/// over one to eight rows.
 #[test]
-fn tiled_matmul_is_bit_identical_to_the_sequential_reference() {
+fn matmul_tracks_the_sequential_reference_within_its_bound() {
     for device in devices() {
         let backend = open(&device);
         for (batch, m, k, n) in [
@@ -1809,40 +1844,61 @@ fn tiled_matmul_is_bit_identical_to_the_sequential_reference() {
             // Past one 64-wide block on both sides, with a partial final `k` step.
             (1, 65, 70, 130),
             (2, 64, 64, 64),
-            // Skinny: one row, and the eight-row decode shape, over odd widths.
+            // Streaming: one row and the eight-row decode shape, over widths that are and are
+            // not a multiple of the columns per workgroup, and `k` that does not split evenly.
             (1, 1, 300, 257),
             (1, 8, 129, 65),
+            (2, 3, 1000, 16),
             (1, 9, 33, 128),
         ] {
             let a = pseudo_random((batch * m * k) as usize, 7);
             let b = pseudo_random((batch * k * n) as usize, 11);
-            let mut expected = vec![0_f32; (batch * m * n) as usize];
-            for z in 0..batch as usize {
-                for i in 0..m as usize {
-                    for j in 0..n as usize {
-                        let mut acc = 0_f32;
-                        for kk in 0..k as usize {
-                            let product = a[(z * m as usize + i) * k as usize + kk]
-                                * b[(z * k as usize + kk) * n as usize + j];
-                            acc += product;
-                        }
-                        expected[(z * m as usize + i) * n as usize + j] = acc;
-                    }
-                }
-            }
             let actual = floats_le(&run_graph(
                 &backend,
                 &matmul_artifact(batch, m, k, n),
                 &[float_bytes_le(&a), float_bytes_le(&b)],
-                expected.len() * 4,
+                (batch * m * n) as usize * 4,
                 MemoryDomain::Host,
             ));
-            for (index, (got, want)) in actual.iter().zip(&expected).enumerate() {
-                assert_eq!(
-                    got.to_bits(),
-                    want.to_bits(),
-                    "{device}: [{batch},{m},{k}]x[{batch},{k},{n}] element {index}: {got} vs {want}"
-                );
+            assert_matmul_within_bound(
+                &device,
+                "FP32 MATMUL",
+                &actual,
+                &a,
+                &b,
+                (batch as usize, m as usize, k as usize, n as usize),
+            );
+        }
+    }
+}
+
+/// MATMUL is deterministic on a device: the same graph over the same bytes yields the same bits
+/// on every submission and in every memory domain. ADR 0011 gives up bit-identity to the
+/// sequential sum (fused multiply-add, split `k`), not repeatability; and it gives up identity
+/// *across* devices only because drivers differ on whether `Fma` is fused (lavapipe matches a
+/// separately rounded host reference, ANV a fused one).
+#[test]
+fn matmul_results_are_deterministic_on_each_device() {
+    let shapes = [(1, 65, 70, 33), (1, 1, 4096, 64), (1, 8, 300, 40)];
+    for device in devices() {
+        let backend = open(&device);
+        for (batch, m, k, n) in shapes {
+            let a = pseudo_random((batch * m * k) as usize, 3);
+            let b = pseudo_random((batch * k * n) as usize, 5);
+            let artifact = matmul_artifact(batch, m, k, n);
+            let inputs = [float_bytes_le(&a), float_bytes_le(&b)];
+            let bytes = (batch * m * n) as usize * 4;
+            let first = run_graph(&backend, &artifact, &inputs, bytes, MemoryDomain::Host);
+            for domain in advertised_domains(&backend) {
+                for _ in 0..2 {
+                    let again = run_graph(&backend, &artifact, &inputs, bytes, domain);
+                    assert_eq!(
+                        again,
+                        first,
+                        "{device}: MATMUL {:?} differs between submissions ({domain:?})",
+                        (batch, m, k, n)
+                    );
+                }
             }
         }
     }
@@ -2169,6 +2225,19 @@ fn fp16_negate_round_trips_every_binary16_bit_pattern() {
                 );
             }
         }
+    }
+}
+
+/// A binary16 MATMUL result against a binary32-sequential reference narrowed once: the two
+/// binary32 sums differ by at most a few ulps (ADR 0011), so their binary16 roundings are equal
+/// or adjacent.
+fn assert_fp16_within_one_ulp(device: &str, label: &str, actual: &[u16], expected: &[u16]) {
+    assert_eq!(actual.len(), expected.len(), "{device}: {label}: length");
+    for (index, (got, want)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            fp16_within_ulps(*want, *got, 1),
+            "{device}: {label}: element {index}: {got:#06x} vs {want:#06x}"
+        );
     }
 }
 
@@ -2649,10 +2718,11 @@ fn fp8_matmul_matches_the_widened_reference_on_every_device() {
                     (m * n) as usize * 2,
                     domain,
                 );
-                assert_eq!(
-                    fp16s_le(&actual),
-                    expected,
-                    "{device}: {dtype:?} MATMUL {m}x{k}x{n} in {domain:?}"
+                assert_fp16_within_one_ulp(
+                    &device,
+                    &format!("{dtype:?} MATMUL {m}x{k}x{n} in {domain:?}"),
+                    &fp16s_le(&actual),
+                    &expected,
                 );
             }
         }
@@ -2745,10 +2815,11 @@ fn fp8_matmul_admits_a_constant_weight_matrix() {
                     (m * n) as usize * 2,
                     domain,
                 );
-                assert_eq!(
-                    fp16s_le(&actual),
-                    expected,
-                    "{device}: {dtype:?} constant-weight MATMUL in {domain:?}"
+                assert_fp16_within_one_ulp(
+                    &device,
+                    &format!("{dtype:?} constant-weight MATMUL in {domain:?}"),
+                    &fp16s_le(&actual),
+                    &expected,
                 );
             }
         }
