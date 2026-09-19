@@ -20,7 +20,8 @@
 //! Runs against every enumerated device (`VIRTIO_ACCEL_VULKAN_BENCH_DEVICE=<substring>` pins
 //! one), in the `Device` memory domain when the device advertises it and `Host` otherwise.
 //! `VIRTIO_ACCEL_VULKAN_BENCH_ITERS` (default 10) sets the timed submissions per case after two
-//! warm-ups; `VIRTIO_ACCEL_VULKAN_BENCH_QUICK=1` runs the small sizes only, for a software ICD.
+//! warm-ups; `VIRTIO_ACCEL_VULKAN_BENCH_QUICK=1` runs the small sizes only, for a software ICD;
+//! `VIRTIO_ACCEL_VULKAN_BENCH_CASE=<substring>` keeps only matching cases (plus the floor).
 //! Output is a Markdown table per device. Without a Vulkan loader or device the bench exits 0.
 //!
 //! This is a plain `harness = false` binary rather than a Criterion bench: the workspace bans
@@ -132,7 +133,15 @@ mod bench {
             .and_then(|value| value.parse().ok())
             .unwrap_or(10);
         let quick = env_flag("VIRTIO_ACCEL_VULKAN_BENCH_QUICK");
-        let cases = cases(quick);
+        let case_filter = std::env::var("VIRTIO_ACCEL_VULKAN_BENCH_CASE").ok();
+        let cases: Vec<Case> = cases(quick)
+            .into_iter()
+            .filter(|case| {
+                case_filter.as_ref().is_none_or(|filter| {
+                    case.group == "floor" || case.name.contains(filter.as_str())
+                })
+            })
+            .collect();
         for device in devices {
             if filter
                 .as_ref()
