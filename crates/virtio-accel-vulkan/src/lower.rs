@@ -948,13 +948,15 @@ impl<'a, 'b> Lowering<'a, 'b> {
             out_offset: 0,
         };
         let spec = move_spec(self.operand(from), self.operand(to), geometry, true);
+        // A contiguous copy runs one invocation per destination word (`shader`), so the work
+        // item count is words, not elements.
         self.dispatch(
             KernelSpec::Move {
                 storage,
                 contiguous: true,
             },
             spec,
-            Work::Linear(source.elements),
+            Work::Linear(source.elements.div_ceil(storage.lanes())),
             &[from],
             to,
             output,
@@ -1187,13 +1189,14 @@ impl<'a, 'b> Lowering<'a, 'b> {
             out_offset: 0,
         };
         let spec = move_spec(self.operand(from), self.operand(to), geometry, true);
+        // One invocation per destination word (`shader::assemble_contiguous_lanes`).
         self.dispatch(
             KernelSpec::Cast {
                 input: source.storage(),
                 output: destination.storage(),
             },
             spec,
-            Work::Linear(source.elements),
+            Work::Linear(source.elements.div_ceil(destination.storage().lanes())),
             &[from],
             to,
             output,
@@ -1832,7 +1835,8 @@ mod tests {
                 contiguous: true
             }
         );
-        assert_eq!(plan.dispatches[0].work, Work::Linear(expected));
+        // Two binary16 lanes per destination word, one invocation per word.
+        assert_eq!(plan.dispatches[0].work, Work::Linear(expected.div_ceil(2)));
 
         let plan = lower_tosa(MATMUL_FP16.artifact, VULKAN_TOSA_TARGET).unwrap();
         assert_eq!(
