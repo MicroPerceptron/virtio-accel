@@ -905,6 +905,10 @@ pub struct MatmulGeometry {
     pub micro_m: u32,
     pub micro_n: u32,
     pub depth: u32,
+    /// Unroll the `depth` iterations of a full step. Pays on the skinny geometry (two
+    /// multiply-adds per iteration, 0.47 → 0.42 ms on the decode GEMV) and costs on the wide one
+    /// (sixteen per iteration; the unrolled body's register pressure slowed 1024³ by a quarter).
+    pub unroll: bool,
 }
 
 impl MatmulGeometry {
@@ -917,6 +921,7 @@ impl MatmulGeometry {
             micro_m: MATMUL_MICRO,
             micro_n: MATMUL_MICRO,
             depth: tile,
+            unroll: false,
         }
     }
 
@@ -932,6 +937,7 @@ impl MatmulGeometry {
             micro_m: SKINNY_ROWS / (tile / 4),
             micro_n: 1,
             depth: 2 * tile,
+            unroll: true,
         }
     }
 
@@ -3213,6 +3219,7 @@ fn assemble_matmul(
         micro_m,
         micro_n,
         depth,
+        unroll,
     } = geometry;
     let invocations = geometry.invocations();
     let block_m = geometry.block_m();
@@ -3319,37 +3326,59 @@ fn assemble_matmul(
     b.workgroup_barrier();
     let remaining = b.isub(k, k0);
     let k_max = b.umin(remaining, depth_c);
-    b.store(kk_var, zero);
-    let (inner, kk) = b.begin_loop(kk_var, k_max);
-    let lhs_row = b.imul(kk, block_m_c);
-    let rhs_row = b.imul(kk, block_n_c);
-    let a: Vec<Id> = (0..micro_m)
-        .map(|i| {
-            let offset = b.c_u32(i * tile_y);
-            let local_row = b.iadd(offset, ty);
-            let slot = b.iadd(lhs_row, local_row);
-            let pointer = b.access_chain(workgroup_ptr, lhs_tile, &[slot]);
-            b.load(f32_ty, pointer)
-        })
-        .collect();
-    let bv: Vec<Id> = (0..micro_n)
-        .map(|j| {
-            let offset = b.c_u32(j * tile_x);
-            let local_col = b.iadd(offset, tx);
-            let slot = b.iadd(rhs_row, local_col);
-            let pointer = b.access_chain(workgroup_ptr, rhs_tile, &[slot]);
-            b.load(f32_ty, pointer)
-        })
-        .collect();
-    for i in 0..micro_m {
-        for j in 0..micro_n {
-            let accumulator = accumulators[(i * micro_n + j) as usize];
-            let acc = b.load(f32_ty, accumulator);
-            let next = b.fma_free(a[i as usize], bv[j as usize], acc);
-            b.store(accumulator, next);
+    // One `kk` of the inner product for every register-block element.
+    let step = |b: &mut Builder, kk: Id| {
+        let lhs_row = b.imul(kk, block_m_c);
+        let rhs_row = b.imul(kk, block_n_c);
+        let a: Vec<Id> = (0..micro_m)
+            .map(|i| {
+                let offset = b.c_u32(i * tile_y);
+                let local_row = b.iadd(offset, ty);
+                let slot = b.iadd(lhs_row, local_row);
+                let pointer = b.access_chain(workgroup_ptr, lhs_tile, &[slot]);
+                b.load(f32_ty, pointer)
+            })
+            .collect();
+        let bv: Vec<Id> = (0..micro_n)
+            .map(|j| {
+                let offset = b.c_u32(j * tile_x);
+                let local_col = b.iadd(offset, tx);
+                let slot = b.iadd(rhs_row, local_col);
+                let pointer = b.access_chain(workgroup_ptr, rhs_tile, &[slot]);
+                b.load(f32_ty, pointer)
+            })
+            .collect();
+        for i in 0..micro_m {
+            for j in 0..micro_n {
+                let accumulator = accumulators[(i * micro_n + j) as usize];
+                let acc = b.load(f32_ty, accumulator);
+                let next = b.fma_free(a[i as usize], bv[j as usize], acc);
+                b.store(accumulator, next);
+            }
         }
+    };
+    let looped = |b: &mut Builder, limit: Id| {
+        b.store(kk_var, zero);
+        let (inner, kk) = b.begin_loop(kk_var, limit);
+        step(b, kk);
+        b.end_loop(inner, kk_var, one);
+    };
+    if unroll {
+        // A full step — every one but possibly the last — runs the `depth` iterations unrolled,
+        // so there is no counter to carry and the compiler can schedule the shared loads of one
+        // `kk` under the multiply-adds of the previous; the partial final step loops.
+        let full = b.ieq(k_max, depth_c);
+        b.if_then(full, |b| {
+            for kk in 0..depth {
+                let kk = b.c_u32(kk);
+                step(b, kk);
+            }
+        });
+        let partial = b.lnot(full);
+        b.if_then(partial, |b| looped(b, k_max));
+    } else {
+        looped(&mut b, k_max);
     }
-    b.end_loop(inner, kk_var, one);
     b.workgroup_barrier();
     b.end_loop(outer, t_var, one);
     let out_batch = b.imul(z, m);
