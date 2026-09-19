@@ -3047,6 +3047,132 @@ fn assemble_reduce(op: ReduceOp, float: Storage, workgroup: u32, buffers: u32) -
     b.finish([workgroup, 1, 1])
 }
 
+/// One operand slab of the MATMUL kernel: `rows × cols` elements whose element `(r, c)` lives at
+/// `base + (row0 + r) · stride + (col0 + c)` and is in range when `row0 + r < row_limit` and
+/// `col0 + c < col_limit`; staged to `tile` at slot `c · rows + r` when `transposed`, else
+/// `r · cols + c`.
+struct Slab {
+    operand: (Id, Id),
+    rows: u32,
+    cols: u32,
+    row0: Id,
+    col0: Id,
+    stride: Id,
+    base: Id,
+    row_limit: Id,
+    col_limit: Id,
+    transposed: bool,
+    tile: Id,
+}
+
+/// Stage a slab cooperatively: the `invocations` of the workgroup take slab elements (or, for
+/// sub-word storage, slab *words*) `q · invocations + lid` in turn, so consecutive invocations
+/// read consecutive addresses. Out-of-range elements read element zero and stage `0.0`.
+///
+/// Sub-word storage is staged a storage word per invocation — four FP8 or two FP16 elements
+/// from one `OpLoad` — whenever `stride` is a multiple of the lanes per word, which makes every
+/// slab row word-aligned (`col0` and `base` are multiples of the row length or of `stride`).
+/// The check is on a specialization constant, so the driver folds it and only one path
+/// survives pipeline creation. This is what makes FP8 cheaper than FP32 rather than merely
+/// smaller: on Intel Xe3 the per-element path issued one load instruction per element whatever
+/// the width, and a GEMV over 16 MiB of FP8 weights ran no faster than one over 64 MiB of FP32,
+/// because the memory pipeline was bound by load instructions rather than bytes.
+fn stage_slab(b: &mut Builder, input: Storage, array: Id, invocations: u32, lid: Id, slab: &Slab) {
+    let f32_ty = b.f32_ty();
+    let workgroup_ptr = b.pointer(STORAGE_CLASS_WORKGROUP, f32_ty);
+    let zero = b.c_u32(0);
+    let zero_f = b.c_f32(0.0);
+    let rows_c = b.c_u32(slab.rows);
+    let cols_c = b.c_u32(slab.cols);
+    let elements = slab.rows * slab.cols;
+    let slot = |b: &mut Builder, r: Id, c: Id| {
+        if slab.transposed {
+            let slot = b.imul(c, rows_c);
+            b.iadd(slot, r)
+        } else {
+            let slot = b.imul(r, cols_c);
+            b.iadd(slot, c)
+        }
+    };
+    // Element `(r, c)`'s global index and validity.
+    let locate = |b: &mut Builder, r: Id, c: Id| {
+        let global_row = b.iadd(slab.row0, r);
+        let global_col = b.iadd(slab.col0, c);
+        let row_ok = b.ult(global_row, slab.row_limit);
+        let col_ok = b.ult(global_col, slab.col_limit);
+        let ok = b.land(row_ok, col_ok);
+        let element = b.imul(global_row, slab.stride);
+        let element = b.iadd(element, slab.base);
+        let element = b.iadd(element, global_col);
+        let element = b.select_u32(ok, element, zero);
+        (element, ok)
+    };
+    // `q · invocations + lid` over `count` items, guarded only when the count does not divide.
+    let each = |b: &mut Builder, count: u32, body: &dyn Fn(&mut Builder, Id)| {
+        for q in 0..count.div_ceil(invocations) {
+            let offset = b.c_u32(q * invocations);
+            let index = b.iadd(offset, lid);
+            if count % invocations == 0 {
+                body(b, index);
+            } else {
+                let limit = b.c_u32(count);
+                let in_range = b.ult(index, limit);
+                b.if_then(in_range, |b| body(b, index));
+            }
+        }
+    };
+    let scalar = |b: &mut Builder| {
+        each(b, elements, &|b, index| {
+            let r = b.udiv(index, cols_c);
+            let c = b.umod(index, cols_c);
+            let (element, ok) = locate(b, r, c);
+            let loaded = b.load_float(input, array, slab.operand, element);
+            let value = b.select_f32(ok, loaded, zero_f);
+            let slot = slot(b, r, c);
+            let pointer = b.access_chain(workgroup_ptr, slab.tile, &[slot]);
+            b.store(pointer, value);
+        });
+    };
+    let lanes = input.lanes();
+    if lanes == 1 || slab.cols % lanes != 0 {
+        scalar(b);
+        return;
+    }
+    let lanes_c = b.c_u32(lanes);
+    let words_per_row = slab.cols / lanes;
+    let words_per_row_c = b.c_u32(words_per_row);
+    let remainder = b.umod(slab.stride, lanes_c);
+    let aligned = b.ieq(remainder, zero);
+    b.if_then(aligned, |b| {
+        each(b, elements / lanes, &|b, word| {
+            let r = b.udiv(word, words_per_row_c);
+            let word_in_row = b.umod(word, words_per_row_c);
+            let c = b.imul(word_in_row, lanes_c);
+            // `stride`, `base` and `col0` are all multiples of `lanes` here and `col_limit`
+            // need not be, but a word is either wholly inside the tensor or wholly past it
+            // only when `col_limit` is a multiple of `lanes`; check the last lane too.
+            let (element, ok) = locate(b, r, c);
+            let last = b.c_u32(lanes - 1);
+            let last_col = b.iadd(c, last);
+            let (_, last_ok) = locate(b, r, last_col);
+            let ok = b.land(ok, last_ok);
+            let element = b.select_u32(ok, element, zero);
+            let bits = b.load_lane_group(input, array, slab.operand, element, lanes);
+            for (lane, bits) in bits.into_iter().enumerate() {
+                let widened = b.widen_bits(input, bits);
+                let value = b.select_f32(ok, widened, zero_f);
+                let lane_c = b.c_u32(lane as u32);
+                let col = b.iadd(c, lane_c);
+                let slot = slot(b, r, col);
+                let pointer = b.access_chain(workgroup_ptr, slab.tile, &[slot]);
+                b.store(pointer, value);
+            }
+        });
+    });
+    let unaligned = b.lnot(aligned);
+    b.if_then(unaligned, scalar);
+}
+
 /// Batched, register-tiled MATMUL reading `input` storage (FP32 words, packed FP16, or packed
 /// FP8) and accumulating in binary32 — the accumulator width TOSA assigns FP16 and FP8 MATMUL,
 /// and the FP32 tier's own width.
@@ -3148,50 +3274,48 @@ fn assemble_matmul(
     };
     let (outer, t) = b.begin_loop(t_var, steps);
     let k0 = b.imul(t, depth_c);
-    // Stage the lhs slab: element `q · invocations + lid` is (row = index / depth,
-    // kk = index % depth), so consecutive invocations read consecutive `k` of one row.
-    for q in 0..(block_m * depth / invocations) {
-        let offset = b.c_u32(q * invocations);
-        let index = b.iadd(offset, lid);
-        let row = b.udiv(index, depth_c);
-        let kk = b.umod(index, depth_c);
-        let global_row = b.iadd(row0, row);
-        let global_k = b.iadd(k0, kk);
-        let row_ok = b.ult(global_row, m);
-        let k_ok = b.ult(global_k, k);
-        let ok = b.land(row_ok, k_ok);
-        let element = b.imul(global_row, k);
-        let element = b.iadd(element, lhs_batch);
-        let element = b.iadd(element, global_k);
-        let element = b.select_u32(ok, element, zero);
-        let loaded = b.load_float(input, array, lhs, element);
-        let value = b.select_f32(ok, loaded, zero_f);
-        let slot = b.imul(kk, block_m_c);
-        let slot = b.iadd(slot, row);
-        let pointer = b.access_chain(workgroup_ptr, lhs_tile, &[slot]);
-        b.store(pointer, value);
-    }
-    // Stage the rhs slab: element `index` is (kk = index / block_n, col = index % block_n), so
-    // consecutive invocations read consecutive `n` of one row of `rhs`.
-    for q in 0..(block_n * depth / invocations) {
-        let offset = b.c_u32(q * invocations);
-        let index = b.iadd(offset, lid);
-        let kk = b.udiv(index, block_n_c);
-        let col = b.umod(index, block_n_c);
-        let global_k = b.iadd(k0, kk);
-        let global_col = b.iadd(col0, col);
-        let k_ok = b.ult(global_k, k);
-        let col_ok = b.ult(global_col, n);
-        let ok = b.land(k_ok, col_ok);
-        let element = b.imul(global_k, n);
-        let element = b.iadd(element, rhs_batch);
-        let element = b.iadd(element, global_col);
-        let element = b.select_u32(ok, element, zero);
-        let loaded = b.load_float(input, array, rhs, element);
-        let value = b.select_f32(ok, loaded, zero_f);
-        let pointer = b.access_chain(workgroup_ptr, rhs_tile, &[index]);
-        b.store(pointer, value);
-    }
+    // Stage both slabs. lhs: `block_m` rows of `depth` consecutive `k`, stored transposed;
+    // rhs: `depth` rows of `block_n` consecutive `n`.
+    stage_slab(
+        &mut b,
+        input,
+        array,
+        invocations,
+        lid,
+        &Slab {
+            operand: lhs,
+            rows: block_m,
+            cols: depth,
+            row0,
+            col0: k0,
+            stride: k,
+            base: lhs_batch,
+            row_limit: m,
+            col_limit: k,
+            transposed: true,
+            tile: lhs_tile,
+        },
+    );
+    stage_slab(
+        &mut b,
+        input,
+        array,
+        invocations,
+        lid,
+        &Slab {
+            operand: rhs,
+            rows: depth,
+            cols: block_n,
+            row0: k0,
+            col0,
+            stride: n,
+            base: rhs_batch,
+            row_limit: k,
+            col_limit: n,
+            transposed: false,
+            tile: rhs_tile,
+        },
+    );
     b.workgroup_barrier();
     let remaining = b.isub(k, k0);
     let k_max = b.umin(remaining, depth_c);
