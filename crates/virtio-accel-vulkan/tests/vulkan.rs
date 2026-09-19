@@ -28,10 +28,10 @@ use virtio_accel_core::{
 use virtio_accel_tosa::{
     DType, NanPropagationMode, Target, TosaCapabilityProvider, ValueRoles, parse,
 };
-use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
+use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedShape, OwnedTensor};
 use virtio_accel_vulkan::{
     InitError, REQUIRED_RESIDENT_BYTES, VULKAN_TOSA_FP8_TARGET, VULKAN_TOSA_INTEGER_TARGET,
-    VULKAN_TOSA_TARGET, VulkanAccelerator, VulkanEvent,
+    VULKAN_TOSA_TARGET, VulkanAccelerator, VulkanEvent, VulkanOptions,
 };
 
 const IDENTITY_FP32_LOCAL: &[u8] = include_bytes!("data/identity-fp32-v1.0.0.tosa");
@@ -520,7 +520,15 @@ fn copies_aligned_offset_bindings_exactly() {
 #[test]
 fn segmented_transfers_reach_device_local_memory_through_staging() {
     for device in devices() {
-        let backend = open(&device);
+        // The discrete-GPU plan on every device, so the staged path runs here even where the
+        // default plan maps `Device` memory (ADR 0012).
+        let backend = VulkanAccelerator::with_device_options(
+            &device,
+            VulkanOptions {
+                map_unified_device_memory: false,
+            },
+        )
+        .unwrap_or_else(|error| panic!("{device}: backend initialization failed: {error}"));
         if !advertised_domains(&backend).contains(&MemoryDomain::Device) {
             eprintln!("{device}: no device-local memory type; staging path not exercised");
             continue;
@@ -2562,6 +2570,138 @@ fn fp16_higher_precision_lanes_track_binary64_references() {
                 );
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Copies eliminated (ADR 0012)
+// ---------------------------------------------------------------------------------------------
+
+/// On a unified-memory device (one heap) the default plan maps `Device` allocations, so a
+/// transfer is one copy and the buffer reports host visibility; the staged plan is opt-in
+/// (exercised above). A device with more than one heap keeps the staged plan by default.
+#[test]
+fn device_domain_is_mapped_on_unified_memory_devices() {
+    for device in devices() {
+        let backend = open(&device);
+        if !advertised_domains(&backend).contains(&MemoryDomain::Device) {
+            continue;
+        }
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        let desc = BufferDesc::new(
+            4096,
+            BUFFER_ALIGNMENT,
+            MemoryDomain::Device,
+            BufferUsage::TRANSFER_SOURCE | BufferUsage::TRANSFER_DESTINATION,
+        )
+        .unwrap();
+        let (mut buffer, info) = backend
+            .allocate_buffer(&context, desc)
+            .unwrap()
+            .into_parts();
+        let properties = info.properties();
+        assert!(properties.contains(virtio_accel_core::BufferProperties::DEVICE_LOCAL));
+        eprintln!(
+            "{device}: Device domain {}",
+            if properties.contains(virtio_accel_core::BufferProperties::HOST_VISIBLE) {
+                "mapped (unified memory)"
+            } else {
+                "staged (separate heaps)"
+            }
+        );
+        let pattern: Vec<u8> = (0..4096_u32).map(|i| (i * 7 % 251) as u8).collect();
+        backend
+            .write_buffer(&mut buffer, 0, &SliceSource(&pattern))
+            .unwrap();
+        let mut sink = VecSink(vec![0; 4096]);
+        backend.read_buffer(&buffer, 0, &mut sink).unwrap();
+        assert_eq!(sink.0, pattern, "{device}");
+        release(backend.free_buffer(buffer));
+        release(backend.destroy_context(context));
+    }
+}
+
+/// `RESHAPE` at the program boundary costs no dispatch: a reshaped input is read in place by
+/// its consumer, and an output produced by reshaping a single-use intermediate is written by
+/// that intermediate's producer. `[6] -> RESHAPE [1, 2, 3] -> MATMUL -> [1, 2, 2] -> RESHAPE
+/// [4]` is one dispatch, and its result is the plain matmul's.
+#[test]
+fn boundary_reshapes_are_views_not_copies() {
+    let zero = 0_f32.to_le_bytes().to_vec();
+    let mut graph = OwnedGraph::new("main");
+    graph
+        .push_tensor(OwnedTensor::new("x", vec![6], DType::FP32))
+        .push_tensor(OwnedTensor::new("a", vec![1, 2, 3], DType::FP32))
+        .push_tensor(OwnedTensor::new("b", vec![1, 3, 2], DType::FP32))
+        .push_tensor(OwnedTensor::constant(
+            "a_zp",
+            vec![1],
+            DType::FP32,
+            zero.clone(),
+        ))
+        .push_tensor(OwnedTensor::constant("b_zp", vec![1], DType::FP32, zero))
+        .push_tensor(OwnedTensor::new("p", vec![1, 2, 2], DType::FP32))
+        .push_tensor(OwnedTensor::new("y", vec![4], DType::FP32))
+        .push_shape(OwnedShape::new("a_shape", vec![1, 2, 3]))
+        .push_shape(OwnedShape::new("y_shape", vec![4]));
+    for name in ["a_zp", "b_zp"] {
+        graph.push_operator(OwnedOperator::new(
+            OperatorKind::Const,
+            vec![],
+            vec![name.into()],
+        ));
+    }
+    for name in ["a_shape", "y_shape"] {
+        graph.push_operator(OwnedOperator::new(
+            OperatorKind::ConstShape,
+            vec![],
+            vec![name.into()],
+        ));
+    }
+    graph
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Reshape,
+            vec!["x".into(), "a_shape".into()],
+            vec!["a".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::MatMul,
+            vec!["a".into(), "b".into(), "a_zp".into(), "b_zp".into()],
+            vec!["p".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Reshape,
+            vec!["p".into(), "y_shape".into()],
+            vec!["y".into()],
+        ))
+        .push_input("x")
+        .push_input("b")
+        .push_output("y");
+    let artifact = graph.build(VULKAN_TOSA_TARGET).unwrap();
+    let a = [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let b = [1.0_f32, 0.0, 0.0, 1.0, 1.0, 1.0];
+    let expected = [4.0_f32, 5.0, 10.0, 11.0];
+    for device in devices() {
+        let backend = open(&device);
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        let program = load(&backend, &context, &artifact, VULKAN_TOSA_TARGET).unwrap();
+        assert_eq!(
+            program.dispatch_count(),
+            1,
+            "{device}: both reshapes should be views"
+        );
+        assert_eq!(program.arena_bytes(), 0, "{device}: nothing to stage");
+        let actual = floats_le(&execute(
+            &backend,
+            &context,
+            &program,
+            &[float_bytes_le(&a), float_bytes_le(&b)],
+            16,
+            MemoryDomain::Host,
+        ));
+        assert_eq!(actual, expected, "{device}");
+        release(backend.unload_program(program));
+        release(backend.destroy_context(context));
     }
 }
 
