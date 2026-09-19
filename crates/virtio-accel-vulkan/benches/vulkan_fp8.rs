@@ -19,8 +19,8 @@
 //!
 //! Runs against every enumerated device (`VIRTIO_ACCEL_VULKAN_BENCH_DEVICE=<substring>` pins
 //! one), in the `Device` memory domain when the device advertises it and `Host` otherwise.
-//! `VIRTIO_ACCEL_VULKAN_BENCH_ITERS` (default 10) sets the timed submissions per case after two
-//! warm-ups; `VIRTIO_ACCEL_VULKAN_BENCH_QUICK=1` runs the small sizes only, for a software ICD;
+//! `VIRTIO_ACCEL_VULKAN_BENCH_ITERS` (default 10) sets the timed submissions per case after the
+//! warm-up (two submissions and at least 300 ms, so a frequency-scaling GPU is at clock); `VIRTIO_ACCEL_VULKAN_BENCH_QUICK=1` runs the small sizes only, for a software ICD;
 //! `VIRTIO_ACCEL_VULKAN_BENCH_CASE=<substring>` keeps only matching cases (plus the floor).
 //! Output is a Markdown table per device. Without a Vulkan loader or device the bench exits 0.
 //!
@@ -52,7 +52,13 @@ mod bench {
     };
 
     const BUFFER_ALIGNMENT: u64 = 4096;
+    /// Untimed submissions before each case: at least this many, and for at least
+    /// `WARMUP_FLOOR` of wall time. The floor matters on a device with dynamic frequency
+    /// scaling — an integrated Intel GPU ramps its clock over hundreds of milliseconds of
+    /// sustained work, and the first heavy case after a light one otherwise reports its ramp
+    /// (bimodal samples, median 1.7× the minimum).
     const WARMUPS: usize = 2;
+    const WARMUP_FLOOR: Duration = Duration::from_millis(300);
 
     /// A contiguous host source: the backend's `write_buffer` takes a trait object.
     #[derive(Debug)]
@@ -598,7 +604,9 @@ mod bench {
         });
 
         let mut durations = Vec::with_capacity(iterations);
-        for round in 0..WARMUPS + iterations {
+        let warmup_started = Instant::now();
+        let mut warmups = 0;
+        while durations.len() < iterations {
             let start = Instant::now();
             let event = backend
                 .submit(&queue, &program, &bindings, Timeout::Infinite)
@@ -621,8 +629,10 @@ mod bench {
             backend.destroy_event(event).unwrap_or_else(|failure| {
                 panic!("{device}: event release failed: {:?}", failure.error())
             });
-            if round >= WARMUPS {
+            if warmups >= WARMUPS && warmup_started.elapsed() >= WARMUP_FLOOR {
                 durations.push(elapsed);
+            } else {
+                warmups += 1;
             }
         }
         durations.sort();

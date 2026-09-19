@@ -3069,7 +3069,10 @@ fn assemble_reduce(op: ReduceOp, float: Storage, workgroup: u32, buffers: u32) -
 /// one-output-per-invocation kernel this replaces issued two shared loads per multiply-add and
 /// staged one element per invocation; on Intel Xe3 it ran a 1024³ FP8 MATMUL at 570 GFLOP/s,
 /// below its own FP32 rate, because the per-element FP8 widening was paid once per multiply-add
-/// rather than once per `MATMUL_MICRO` of them.
+/// rather than once per `MATMUL_MICRO` of them. (A 256-entry shared-memory widening table,
+/// built per workgroup, was measured against the inline integer expansion on Intel Xe3 and made
+/// no difference within noise; the expansion stays, having no table to build or barrier to wait
+/// on.)
 ///
 /// Out-of-range slab loads read element zero and contribute nothing: the inner loop bound is
 /// `min(depth, k - k0)`, never a padded zero product, so signed zeros survive. Out-of-range
