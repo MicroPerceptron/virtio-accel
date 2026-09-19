@@ -230,6 +230,17 @@ pub enum Storage {
     Half,
 }
 
+impl Storage {
+    /// Elements packed into one 32-bit storage word.
+    pub const fn lanes(self) -> u32 {
+        match self {
+            Self::Word => 1,
+            Self::Half => 2,
+            Self::Byte | Self::Quarter(_) => 4,
+        }
+    }
+}
+
 /// TOSA NaN-propagation attribute value a kernel is specialized for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NanMode {
@@ -2060,6 +2071,115 @@ impl Builder {
         }
     }
 
+    /// The raw bits of the `lanes` consecutive elements `base..base + lanes` of a `storage`
+    /// operand, one `u32` per element (`0..=0xff` at byte storage, `0..=0xffff` at half storage,
+    /// the whole word otherwise), loading every storage word the group touches exactly once.
+    ///
+    /// `base` must be a multiple of `lanes`. When the source packs no more elements per word
+    /// than the group holds, the group starts on a word boundary and each lane's word and shift
+    /// are compile-time constants; when it packs more (FP8 bytes feeding an FP16 pair), the group
+    /// is a sub-span of one word at a run-time byte offset, and still one load.
+    fn load_lane_group(
+        &mut self,
+        storage: Storage,
+        buffers: Id,
+        operand: (Id, Id),
+        base: Id,
+        lanes: u32,
+    ) -> Vec<Id> {
+        let source_lanes = storage.lanes();
+        let lane_bits = 32 / source_lanes;
+        let first = match source_lanes.trailing_zeros() {
+            0 => base,
+            shift => {
+                let shift = self.c_u32(shift);
+                self.shr(base, shift)
+            }
+        };
+        let words: Vec<Id> = (0..lanes.div_ceil(source_lanes))
+            .map(|word| {
+                let word = self.c_u32(word);
+                let index = self.iadd(first, word);
+                self.load_word(buffers, operand, index)
+            })
+            .collect();
+        if lane_bits == 32 {
+            return words;
+        }
+        let mask = self.c_u32((1 << lane_bits) - 1);
+        let offset = (source_lanes > lanes).then(|| {
+            let modulus = self.c_u32(source_lanes - 1);
+            self.band(base, modulus)
+        });
+        (0..lanes)
+            .map(|lane| {
+                let word = words[(lane / source_lanes) as usize];
+                let shift = match offset {
+                    None => self.c_u32((lane % source_lanes) * lane_bits),
+                    Some(offset) => {
+                        let lane = self.c_u32(lane % source_lanes);
+                        let position = self.iadd(offset, lane);
+                        let bits = self.c_u32(lane_bits);
+                        self.imul(position, bits)
+                    }
+                };
+                let shifted = self.shr(word, shift);
+                self.band(shifted, mask)
+            })
+            .collect()
+    }
+
+    /// Pack lane values — each already within `32 / values.len()` bits — into one storage word,
+    /// lane 0 lowest.
+    fn pack_lanes(&mut self, values: &[Id]) -> Id {
+        let lane_bits = 32 / values.len() as u32;
+        let mut word = values[0];
+        for (lane, value) in values.iter().enumerate().skip(1) {
+            let shift = self.c_u32(lane as u32 * lane_bits);
+            let shifted = self.shl(*value, shift);
+            word = self.bor(word, shifted);
+        }
+        word
+    }
+
+    /// Store raw bits into one element of `storage` without touching its word neighbours.
+    fn store_lane_bits(
+        &mut self,
+        storage: Storage,
+        buffers: Id,
+        operand: (Id, Id),
+        element: Id,
+        bits: Id,
+    ) {
+        match storage {
+            Storage::Word => self.store_word(buffers, operand, element, bits),
+            Storage::Half => self.store_half_bits(buffers, operand, element, bits),
+            Storage::Byte | Storage::Quarter(_) => {
+                self.store_byte_bits(buffers, operand, element, bits)
+            }
+        }
+    }
+
+    /// Widen one element's raw storage bits to binary32.
+    fn widen_bits(&mut self, storage: Storage, bits: Id) -> Id {
+        match storage {
+            Storage::Word => self.bitcast_f32(bits),
+            Storage::Half => self.widen_f16(bits),
+            Storage::Quarter(format) => self.widen_fp8(format, bits),
+            Storage::Byte => unreachable!("byte storage is not a float lane"),
+        }
+    }
+
+    /// Narrow binary32 to the raw storage bits of `storage`, crate-owned rounding throughout.
+    fn narrow_bits(&mut self, storage: Storage, value: Id) -> Id {
+        match storage {
+            Storage::Word => self.bitcast_u32(value),
+            Storage::Half => self.narrow_f16(value),
+            Storage::Quarter(format) => self.narrow_fp8(format, value),
+            Storage::Byte => unreachable!("BOOL is not a float storage"),
+        }
+    }
+
     /// Decompose linear index `i` over `dims` (last dimension fastest) and accumulate per-operand
     /// element indices from `strides`.
     fn strided_indices(
@@ -3018,19 +3138,44 @@ fn assemble_max_pool(nan_mode: NanMode, float: Storage, workgroup: u32, buffers:
     b.finish([workgroup, 1, 1])
 }
 
-/// Strided copy: `out[out_offset + Σ c_d · out_stride_d] = in[in_offset + Σ c_d · in_stride_d]`
-/// over the iteration space `dims`; `contiguous` degenerates to `out[i] = in[i]`.
-///
-/// Specialization order: input, output `(buffer, base)`; `count`; then (strided only)
-/// `dims[MAX_RANK]`, `in_strides[MAX_RANK]`, `in_offset`, `out_strides[MAX_RANK]`, `out_offset`.
 /// Elementwise float conversion over `count` elements: load at `input` storage as binary32,
 /// store at `output` storage. Every narrowing is crate-owned integer code, so a `CAST` produces
-/// the same bits on every device.
+/// the same bits on every device. Sub-word outputs are written a whole word per invocation
+/// ([`assemble_contiguous_lanes`]).
+///
+/// Specialization order: input, output `(buffer, base)`; `count`.
 fn assemble_cast(
     input: Storage,
     output_storage: Storage,
     workgroup: u32,
     buffers: u32,
+) -> Vec<u32> {
+    assemble_contiguous_lanes(input, output_storage, workgroup, buffers, |b, bits| {
+        let value = b.widen_bits(input, bits);
+        b.narrow_bits(output_storage, value)
+    })
+}
+
+/// A contiguous lane kernel: `out[i] = convert(in[i])` over `count` elements, where `convert`
+/// maps one element's raw source bits to its raw destination bits.
+///
+/// Word-storage outputs run one element per invocation. Sub-word outputs (`Half`, `Byte`, FP8
+/// `Quarter`) run one *destination word* per invocation: the invocation loads the source lanes
+/// of that word's elements (each source word once), converts them, packs them, and stores the
+/// word with a plain `OpStore`. That is the difference between a copy and a read-modify-write:
+/// the per-element path clears and sets every lane through two device-scope atomics on a word
+/// three other invocations are also atomically updating, which on Intel Xe3 ran FP8 `IDENTITY`
+/// at 6 GB/s against 109 GB/s for FP32. Only a tensor's final partial word — whose remaining
+/// bytes are not the tensor's to write — still goes through the neighbour-safe atomic sequence,
+/// lane by lane, so the documented guarantee holds unchanged.
+///
+/// Specialization order: input, output `(buffer, base)`; `count` (elements).
+fn assemble_contiguous_lanes(
+    input: Storage,
+    output: Storage,
+    workgroup: u32,
+    buffers: u32,
+    convert: impl Fn(&mut Builder, Id) -> Id,
 ) -> Vec<u32> {
     let mut b = Builder::new();
     let array = b.buffer_array(buffers);
@@ -3038,40 +3183,86 @@ fn assemble_cast(
     let destination = b.spec_operand();
     let count = b.spec_u32(1);
     let (counter, stride) = b.grid_stride(workgroup);
-    let (scope, i) = b.begin_loop(counter, count);
-    let value = b.load_float(input, array, source, i);
-    b.store_float(output_storage, array, destination, i, value);
-    b.end_loop(scope, counter, stride);
+    let lanes = output.lanes();
+    if lanes == 1 {
+        let (scope, i) = b.begin_loop(counter, count);
+        let bits = b.load_lane_group(input, array, source, i, 1)[0];
+        let word = convert(&mut b, bits);
+        b.store_word(array, destination, i, word);
+        b.end_loop(scope, counter, stride);
+    } else {
+        let lanes_c = b.c_u32(lanes);
+        let lanes_less_one = b.c_u32(lanes - 1);
+        let words = b.iadd(count, lanes_less_one);
+        let words = b.udiv(words, lanes_c);
+        let (scope, w) = b.begin_loop(counter, words);
+        let base = b.imul(w, lanes_c);
+        let sources = b.load_lane_group(input, array, source, base, lanes);
+        let bits: Vec<Id> = sources
+            .iter()
+            .map(|source_bits| convert(&mut b, *source_bits))
+            .collect();
+        let packed = b.pack_lanes(&bits);
+        let end = b.iadd(base, lanes_c);
+        let full = b.uge(count, end);
+        b.if_then(full, |b| b.store_word(array, destination, w, packed));
+        let partial = b.lnot(full);
+        b.if_then(partial, |b| {
+            for (lane, bits) in bits.iter().enumerate() {
+                let lane = b.c_u32(lane as u32);
+                let element = b.iadd(base, lane);
+                let in_range = b.ult(element, count);
+                b.if_then(in_range, |b| {
+                    b.store_lane_bits(output, array, destination, element, *bits);
+                });
+            }
+        });
+        b.end_loop(scope, counter, stride);
+    }
     b.end_main();
     b.finish([workgroup, 1, 1])
 }
 
+/// Strided copy: `out[out_offset + Σ c_d · out_stride_d] = in[in_offset + Σ c_d · in_stride_d]`
+/// over the iteration space `dims`; `contiguous` degenerates to `out[i] = in[i]`, which runs
+/// through [`assemble_contiguous_lanes`] — a whole-word copy for sub-word storage, with `BOOL`
+/// canonicalized to `0`/`1` lane by lane and FP8/FP16 bit patterns moved untouched.
+///
+/// Specialization order: input, output `(buffer, base)`; `count`; then (strided only)
+/// `dims[MAX_RANK]`, `in_strides[MAX_RANK]`, `in_offset`, `out_strides[MAX_RANK]`, `out_offset`.
 fn assemble_move(storage: Storage, contiguous: bool, workgroup: u32, buffers: u32) -> Vec<u32> {
+    if contiguous {
+        return assemble_contiguous_lanes(storage, storage, workgroup, buffers, |b, bits| {
+            match storage {
+                // Canonical `0`/`1`: any nonzero byte is true.
+                Storage::Byte => {
+                    let zero = b.c_u32(0);
+                    let one = b.c_u32(1);
+                    let set = b.ine(bits, zero);
+                    b.select_u32(set, one, zero)
+                }
+                // Raw lanes: an FP8 or binary16 pattern — NaN payload, subnormal, signed
+                // zero — moves exactly. The `Byte` arm above must not be reused for these.
+                Storage::Word | Storage::Half | Storage::Quarter(_) => bits,
+            }
+        });
+    }
     let mut b = Builder::new();
     let array = b.buffer_array(buffers);
     let input = b.spec_operand();
     let output = b.spec_operand();
     let count = b.spec_u32(1);
-    let geometry = (!contiguous).then(|| {
-        let dims = b.spec_dims();
-        let in_strides = b.spec_strides();
-        let in_offset = b.spec_u32(0);
-        let out_strides = b.spec_strides();
-        let out_offset = b.spec_u32(0);
-        (dims, in_strides, in_offset, out_strides, out_offset)
-    });
+    let dims = b.spec_dims();
+    let in_strides = b.spec_strides();
+    let in_offset = b.spec_u32(0);
+    let out_strides = b.spec_strides();
+    let out_offset = b.spec_u32(0);
 
     let (counter, stride) = b.grid_stride(workgroup);
     let (scope, i) = b.begin_loop(counter, count);
-    let (source, destination) = match &geometry {
-        Some((dims, in_strides, in_offset, out_strides, out_offset)) => {
-            let indices = b.strided_indices(i, dims, &[*in_strides, *out_strides]);
-            let source = b.iadd(indices[0], *in_offset);
-            let destination = b.iadd(indices[1], *out_offset);
-            (source, destination)
-        }
-        None => (i, i),
-    };
+    let indices = b.strided_indices(i, &dims, &[in_strides, out_strides]);
+    let source = b.iadd(indices[0], in_offset);
+    let destination = b.iadd(indices[1], out_offset);
     match storage {
         Storage::Word => {
             let word = b.load_word(array, input, source);
