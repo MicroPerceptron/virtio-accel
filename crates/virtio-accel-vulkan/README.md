@@ -33,7 +33,8 @@ build time (ADR 0002 in `docs/adr/`).
   lanes as integers, so `IDENTITY_EDGES_FP16` — NaN payloads, subnormals, signed zeros — moves
   bit-exactly; MATMUL and reductions accumulate in binary32 (the accumulator width TOSA assigns
   FP16); stores repack with the same neighbour-safe atomics `BOOL` uses. Numerics are
-  bit-identical across devices by construction.
+  bit-identical across devices by construction for every operator but `MATMUL`, whose fused
+  multiply-add is deterministic per device (ADR 0011).
 - **The FP8 operator tier** (`VULKAN_TOSA_FP8_CAPABILITY`, `VULKAN_TOSA_FP8_TARGET`, ADR 0009):
   TOSA's `(FP8, FP8) -> FP16` `MATMUL` over either encoding, plus `CAST`, `MAX_POOL2D`,
   `ARGMAX`, `IDENTITY`, `RESHAPE`, `TRANSPOSE`, `REVERSE`, `CONCAT`, `CONST` and `CONST_SHAPE` — advertised on every device, again
@@ -67,9 +68,11 @@ build time (ADR 0002 in `docs/adr/`).
   |x| = 8192, Payne–Hanek above it, within one ulp of binary64 references in the lavapipe
   tests) instead of the driver's built-ins, whose precision Vulkan specifies loosely or not at
   all; NaN modes (`PROPAGATE`/`IGNORE`) follow the TOSA pseudocode literally; `MATMUL` is a
-  register-tiled shared-memory kernel (a 64 × 64 output block per workgroup, or a flat 8 × 64
-  block for eight rows or fewer, with FP8 and FP16 operands staged a storage word per invocation
-  — ADR 0010) bit-identical to the sequential ascending-k sum.
+  register-tiled shared-memory kernel (a 64 × 64 output block per workgroup, FP8 and FP16
+  operands staged a storage word per invocation — ADR 0010) for more than eight rows and a
+  barrier-free split-k streaming kernel for eight or fewer (ADR 0011), both accumulating in
+  binary32 with fused multiply-add: within `(k + 64) · 2⁻²³ · Σ|aᵢ·bᵢ|` of the exact sum and
+  deterministic per device, no longer bit-identical to the sequential sum.
   `BOOL` tensors are read by word and written with `OpAtomicAnd`/`OpAtomicOr`, so a predicate
   output never modifies a neighbouring byte, even at an unaligned tail; contiguous FP8, FP16 and
   `BOOL` copies and casts write whole words per invocation and take that atomic path only for a

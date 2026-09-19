@@ -268,8 +268,9 @@ The FP32 operator tier (ADR 0007) adds the structural optimizations a real graph
 timing is worth publishing: a whole graph is one command buffer with barriers only between
 dependent dispatches; constants and intermediates live in one device-local arena per program with
 lifetime-packed regions, `RESHAPE`/`IDENTITY` views instead of copies, and dead operators elided;
-`MATMUL` is a register-tiled shared-memory kernel (a 64 × 64 block per workgroup, a flat 8 × 64
-block for eight rows or fewer; bit-identical to the sequential sum — ADR 0010); pipelines are
+`MATMUL` is a register-tiled shared-memory kernel (a 64 × 64 block per workgroup, ADR 0010) or,
+for eight rows or fewer, a barrier-free split-k streaming kernel (ADR 0011), both with fused
+multiply-add and a stated error bound rather than bit-identity to the sequential sum; pipelines are
 created against a per-instance `VkPipelineCache`; every 1-D kernel is a grid-stride loop so
 dispatch counts stay inside `maxComputeWorkGroupCount` at any tensor size. Known costs, recorded so
 they are measured rather than assumed: predicate (`BOOL`) elementwise outputs, strided sub-word

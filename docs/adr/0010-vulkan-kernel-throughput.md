@@ -159,12 +159,13 @@ vulkan1.3`; the device suite runs clean under `VK_LAYER_KHRONOS_validation`.
   not yet at the memory bound: net of the floor it streams weights at about half the rate the
   FP32 kernel demonstrates. What remains is per-step fixed cost (two barriers and a shared
   round trip per 32 `k`) that bytes do not amortize; the constraint that closes the obvious
-  door (no split-`k`) is ADR 0007's, and reopening it would be a numerics decision, not a
-  performance one.
+  door (no split-`k`) is ADR 0007's, and reopening it is a numerics decision, not a
+  performance one. ADR 0011 takes that decision: it replaces the flat geometry of §4 with a
+  split-`k` streaming kernel and fuses the multiply-add in both kernels.
 - The square MATMUL runs at about 1.5–1.9 TFLOP/s against an arithmetic ceiling near half the
   device's fused-multiply-add peak (every multiply-add is two separately rounded instructions
-  by ADR 0007). Larger micro-blocks trade occupancy for shared-load pressure and were not
-  explored.
+  by ADR 0007; ADR 0011 fuses them). Larger micro-blocks trade occupancy for shared-load
+  pressure and were not explored.
 - Strided moves over sub-word storage, the FP16 output store of MATMUL, and `BOOL` elementwise
   outputs still take the per-element atomic path. None is on a measured hot path.
 - Every kernel change from here has a number to beat, and the number is taken on metal.
