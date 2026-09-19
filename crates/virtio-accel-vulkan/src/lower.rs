@@ -604,7 +604,8 @@ impl<'a, 'b> Lowering<'a, 'b> {
             self.locations.insert(*value, Location::Slot(slot));
         }
 
-        // Liveness: the last live consumer of every value.
+        // Liveness: the last live consumer of every value, and how many consumers it has.
+        let mut consumers: HashMap<ValueId, u32> = HashMap::new();
         for (position, operator_id) in self.order.iter().enumerate() {
             let operator = self.analysis.operator(*operator_id);
             if self.skipped(operator) {
@@ -612,8 +613,10 @@ impl<'a, 'b> Lowering<'a, 'b> {
             }
             for input in self.analysis.operator_inputs(*operator_id) {
                 self.last_use.insert(*input, position as u32);
+                *consumers.entry(*input).or_default() += 1;
             }
         }
+        self.alias_outputs(&consumers)?;
 
         for (position, operator_id) in self.order.iter().enumerate() {
             self.position = position as u32;
@@ -806,6 +809,39 @@ impl<'a, 'b> Lowering<'a, 'b> {
         Ok(self.regions.len() - 1)
     }
 
+    /// A program output produced by `IDENTITY` or `RESHAPE` from an intermediate that nothing
+    /// else reads is the intermediate under another shape: its producer writes the output slot
+    /// directly and the copy operator becomes a no-op (ADR 0012). Inputs, outputs and constants
+    /// already have their bytes elsewhere and are left alone; a second consumer would need the
+    /// intermediate to outlive the output slot's binding contract, so it is left alone too.
+    fn alias_outputs(&mut self, consumers: &HashMap<ValueId, u32>) -> Result<(), LoweringError> {
+        for output in self.outputs {
+            let Some(producer) = self.analysis.value(*output).producer() else {
+                continue;
+            };
+            let operator = self.analysis.operator(producer);
+            if self.skipped(operator) || !matches!(operator.op(), Op::IDENTITY | Op::RESHAPE) {
+                continue;
+            }
+            let Some(source) = self.analysis.operator_inputs(producer).first().copied() else {
+                continue;
+            };
+            if self.locations.contains_key(&source)
+                || self.analysis.serialized_constant(source).is_some()
+                || consumers.get(&source) != Some(&1)
+            {
+                continue;
+            }
+            let (from, to) = (self.shape(source)?, self.shape(*output)?);
+            if from.dtype != to.dtype || from.elements != to.elements {
+                continue;
+            }
+            let slot = self.locations[output];
+            self.locations.insert(source, slot);
+        }
+        Ok(())
+    }
+
     fn value_last_use(&self, value: ValueId) -> u32 {
         self.last_use.get(&value).copied().unwrap_or(self.position)
     }
@@ -920,7 +956,9 @@ impl<'a, 'b> Lowering<'a, 'b> {
     // -- operators ----------------------------------------------------------------------------
 
     /// `IDENTITY` (and any copy of `expected_inputs` operands whose first is the source): a
-    /// view when both ends live in the arena, otherwise a contiguous copy.
+    /// view whenever the result is an intermediate — over an arena region, whose lifetime the
+    /// view extends, or directly over a bound input slot — and a contiguous copy only when the
+    /// result is a program output that no producer could write directly (ADR 0012).
     fn lower_copy(
         &mut self,
         inputs: &[ValueId],
@@ -936,16 +974,22 @@ impl<'a, 'b> Lowering<'a, 'b> {
             return Err(LoweringError::UnsupportedGraph);
         }
         let from = self.input_location(inputs[0])?;
-        if let Location::Region(region) = from {
-            if !self.locations.contains_key(&output) {
-                // Arena to arena: alias the region and extend its lifetime over the view.
+        if !self.locations.contains_key(&output) {
+            // An intermediate: alias the source's bytes. An arena region's lifetime extends
+            // over the view; a bound input slot is read-only for the whole submission.
+            if let Location::Region(region) = from {
                 let live_end = self.value_last_use(output);
                 self.regions[region].live_end = self.regions[region].live_end.max(live_end);
-                self.locations.insert(output, from);
-                return Ok(());
             }
+            self.locations.insert(output, from);
+            return Ok(());
         }
         let to = self.output_location(output)?;
+        if to == from {
+            // The source was aliased to this output slot ahead of time (`alias_outputs`) and
+            // its producer has already written the bytes where they belong.
+            return Ok(());
+        }
         let storage = source.storage();
         let geometry = MoveGeometry {
             count: source.elements,

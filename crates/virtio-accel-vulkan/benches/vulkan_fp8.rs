@@ -21,7 +21,8 @@
 //! one), in the `Device` memory domain when the device advertises it and `Host` otherwise.
 //! `VIRTIO_ACCEL_VULKAN_BENCH_ITERS` (default 10) sets the timed submissions per case after the
 //! warm-up (two submissions and at least 300 ms, so a frequency-scaling GPU is at clock); `VIRTIO_ACCEL_VULKAN_BENCH_QUICK=1` runs the small sizes only, for a software ICD;
-//! `VIRTIO_ACCEL_VULKAN_BENCH_CASE=<substring>` keeps only matching cases (plus the floor).
+//! `VIRTIO_ACCEL_VULKAN_BENCH_CASE=<substring>` keeps only matching cases (plus the floor);
+//! `VIRTIO_ACCEL_VULKAN_BENCH_DOMAIN=host|shared|device` overrides the memory domain.
 //! Output is a Markdown table per device. Without a Vulkan loader or device the bench exits 0.
 //!
 //! This is a plain `harness = false` binary rather than a Criterion bench: the workspace bans
@@ -161,17 +162,50 @@ mod bench {
             let backend = VulkanAccelerator::with_device(&device)
                 .unwrap_or_else(|error| panic!("{device}: initialization failed: {error}"));
             let info = backend.device_info().unwrap();
-            let domain = if info
-                .capabilities
-                .supports_memory_domain(MemoryDomain::Device)
+            let requested = match std::env::var("VIRTIO_ACCEL_VULKAN_BENCH_DOMAIN")
+                .as_deref()
+                .map(str::to_ascii_lowercase)
+                .as_deref()
             {
-                MemoryDomain::Device
-            } else {
-                MemoryDomain::Host
+                Ok("host") => Some(MemoryDomain::Host),
+                Ok("shared") => Some(MemoryDomain::Shared),
+                Ok("device") => Some(MemoryDomain::Device),
+                _ => None,
+            };
+            let domain = match requested {
+                Some(domain) if info.capabilities.supports_memory_domain(domain) => domain,
+                Some(domain) => {
+                    eprintln!("{device}: {domain:?} domain not advertised; skipped");
+                    continue;
+                }
+                None if info
+                    .capabilities
+                    .supports_memory_domain(MemoryDomain::Device) =>
+                {
+                    MemoryDomain::Device
+                }
+                None => MemoryDomain::Host,
             };
             println!("\n### {device} ({domain:?} domain, {iterations} timed submissions)\n");
             println!("| group | case | dispatches | median | min | submit | throughput |");
             println!("|---|---|---:|---:|---:|---:|---:|");
+            if case_filter
+                .as_ref()
+                .is_none_or(|filter| "transfer".contains(filter.as_str()))
+            {
+                let bytes: u64 = if quick { 16 << 20 } else { 64 << 20 };
+                let (write, read) = time_transfer(&backend, bytes, domain, iterations);
+                println!(
+                    "| transfer | write_buffer {bytes} B | – | {} | – | – | {:.2} GB/s |",
+                    format_duration(write),
+                    bytes as f64 / write.as_secs_f64() / 1e9
+                );
+                println!(
+                    "| transfer | read_buffer {bytes} B | – | {} | – | – | {:.2} GB/s |",
+                    format_duration(read),
+                    bytes as f64 / read.as_secs_f64() / 1e9
+                );
+            }
             for case in &cases {
                 let sample = time_case(&backend, case, domain, iterations);
                 println!(
@@ -534,6 +568,54 @@ mod bench {
     }
 
     // -- execution -------------------------------------------------------------------------------
+
+    /// Median wall time of one `write_buffer` and one `read_buffer` of `bytes` in `domain`: the
+    /// guest's transfer cost, which is a mapped memcpy in `Host`/`Shared` and a staged copy
+    /// through a transient buffer plus a GPU copy in `Device` on a device where that domain is
+    /// not host-visible.
+    fn time_transfer(
+        backend: &VulkanAccelerator,
+        bytes: u64,
+        domain: MemoryDomain,
+        iterations: usize,
+    ) -> (Duration, Duration) {
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        let mut buffer = allocate(
+            backend,
+            &context,
+            bytes,
+            domain,
+            BufferUsage::TRANSFER_DESTINATION | BufferUsage::TRANSFER_SOURCE,
+        );
+        let source = finite_bytes(DType::FP32, bytes / 4, 9);
+        let mut sink = vec![0_u8; bytes as usize];
+        let (mut writes, mut reads) = (Vec::new(), Vec::new());
+        for round in 0..WARMUPS + iterations {
+            let start = Instant::now();
+            backend
+                .write_buffer(&mut buffer, 0, &SliceSource(&source))
+                .unwrap();
+            let write = start.elapsed();
+            let start = Instant::now();
+            backend
+                .read_buffer(&buffer, 0, &mut VecSink(&mut sink))
+                .unwrap();
+            let read = start.elapsed();
+            if round >= WARMUPS {
+                writes.push(write);
+                reads.push(read);
+            }
+        }
+        assert_eq!(sink, source, "transfer round trip");
+        backend.free_buffer(buffer).map_err(|f| f.error()).unwrap();
+        backend
+            .destroy_context(context)
+            .map_err(|f| f.error())
+            .unwrap();
+        writes.sort();
+        reads.sort();
+        (writes[writes.len() / 2], reads[reads.len() / 2])
+    }
 
     fn allocate(
         backend: &VulkanAccelerator,
