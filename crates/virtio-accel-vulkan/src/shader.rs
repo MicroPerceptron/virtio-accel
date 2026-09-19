@@ -395,6 +395,15 @@ pub enum KernelKey {
         tile: u32,
         buffers: u32,
     },
+    /// The same kernel at [`MatmulGeometry::skinny`]: a flat `SKINNY_ROWS × 4·tile` block for
+    /// `m ≤` [`SKINNY_ROWS`], where the register-tiled square would idle most of its rows and
+    /// starve the device of workgroups. Same storages and accumulation as [`Self::Matmul`].
+    MatmulSkinny {
+        input: Storage,
+        output: Storage,
+        tile: u32,
+        buffers: u32,
+    },
     /// NHWC max pooling with padding excluded from the window, at `float` storage.
     MaxPool {
         nan_mode: NanMode,
@@ -442,7 +451,13 @@ impl KernelKey {
                 output,
                 tile,
                 buffers,
-            } => assemble_matmul(input, output, tile, buffers),
+            } => assemble_matmul(input, output, MatmulGeometry::wide(tile), buffers),
+            Self::MatmulSkinny {
+                input,
+                output,
+                tile,
+                buffers,
+            } => assemble_matmul(input, output, MatmulGeometry::skinny(tile), buffers),
             Self::MaxPool {
                 nan_mode,
                 float,
@@ -545,8 +560,24 @@ impl KernelKey {
                 buffers: 5,
             });
         }
+        for float in [Storage::Word, Storage::Half] {
+            for (tile, buffers) in [(16, 17), (8, 5)] {
+                keys.push(KernelKey::MatmulSkinny {
+                    input: float,
+                    output: float,
+                    tile,
+                    buffers,
+                });
+            }
+        }
         // The FP8 tier: TOSA's `(FP8, FP8) -> FP16` MATMUL, and exact FP8 data movement.
         for format in [Fp8Format::E4M3, Fp8Format::E5M2] {
+            keys.push(KernelKey::MatmulSkinny {
+                input: Storage::Quarter(format),
+                output: Storage::Half,
+                tile: 16,
+                buffers: 17,
+            });
             keys.push(KernelKey::Matmul {
                 input: Storage::Quarter(format),
                 output: Storage::Half,
@@ -638,7 +669,7 @@ impl KernelKey {
                 base + shape + op.extra_spec_constants()
             }
             Self::Reduce { .. } => 2 + 2 + 3,
-            Self::Matmul { .. } => 3 * 2 + 4,
+            Self::Matmul { .. } | Self::MatmulSkinny { .. } => 3 * 2 + 4,
             Self::MaxPool { .. } => 2 + 2 + 12,
             Self::Move { contiguous, .. } => {
                 if contiguous {
@@ -659,7 +690,8 @@ impl KernelKey {
             | Self::MaxPool { workgroup, .. }
             | Self::Move { workgroup, .. }
             | Self::Cast { workgroup, .. } => [workgroup, 1, 1],
-            Self::Matmul { tile, .. } => [tile, tile, 1],
+            Self::Matmul { tile, .. } => MatmulGeometry::wide(tile).local_size(),
+            Self::MatmulSkinny { tile, .. } => MatmulGeometry::skinny(tile).local_size(),
         }
     }
 }
@@ -831,21 +863,98 @@ pub const fn linear_workgroups(count: u32, workgroup: u32, limit: u32) -> u32 {
 /// covers a [`matmul_block`]-sided square of the result.
 pub const MATMUL_MICRO: u32 = 4;
 
+/// Rows of the skinny MATMUL block, and the row count at or below which lowering selects it.
+pub const SKINNY_ROWS: u32 = 8;
+
 /// Side of the output square one MATMUL workgroup of `tile × tile` invocations computes.
 pub const fn matmul_block(tile: u32) -> u32 {
     tile * MATMUL_MICRO
 }
 
-/// Bytes of workgroup-shared memory the MATMUL kernel at `tile` declares: two binary32 tiles of
-/// `block × tile` elements (the lhs slab transposed, the rhs slab as is).
+/// Columns of the skinny MATMUL block at `tile`.
+pub const fn skinny_block(tile: u32) -> u32 {
+    MatmulGeometry::skinny(tile).block_n()
+}
+
+/// Bytes of workgroup-shared memory the MATMUL kernels at `tile` declare, whichever geometry is
+/// larger.
 pub const fn matmul_shared_bytes(tile: u32) -> u32 {
-    2 * matmul_block(tile) * tile * 4
+    let wide = MatmulGeometry::wide(tile).shared_bytes();
+    let skinny = MatmulGeometry::skinny(tile).shared_bytes();
+    if wide > skinny { wide } else { skinny }
 }
 
 /// Workgroup counts of a tiled MATMUL over `m` rows, `n` columns, and `batch` batches.
 pub const fn matmul_workgroups(m: u32, n: u32, batch: u32, tile: u32) -> [u32; 3] {
     let block = matmul_block(tile);
     [n.div_ceil(block), m.div_ceil(block), batch]
+}
+
+/// Workgroup counts of a skinny MATMUL over `n` columns and `batch` batches.
+pub const fn skinny_matmul_workgroups(n: u32, batch: u32, tile: u32) -> [u32; 3] {
+    [n.div_ceil(skinny_block(tile)), 1, batch]
+}
+
+/// Shape of one MATMUL workgroup: `tile_x × tile_y` invocations, each accumulating a
+/// `micro_m × micro_n` register block, over shared-memory slabs `depth` deep in `k`. Every
+/// dimension is a power of two and the two slabs stage evenly over the invocations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MatmulGeometry {
+    pub tile_x: u32,
+    pub tile_y: u32,
+    pub micro_m: u32,
+    pub micro_n: u32,
+    pub depth: u32,
+}
+
+impl MatmulGeometry {
+    /// The square register-tiled geometry: `tile × tile` invocations, [`MATMUL_MICRO`]² each,
+    /// `tile` deep — a 64 × 64 block at the preferred tile.
+    pub const fn wide(tile: u32) -> Self {
+        Self {
+            tile_x: tile,
+            tile_y: tile,
+            micro_m: MATMUL_MICRO,
+            micro_n: MATMUL_MICRO,
+            depth: tile,
+        }
+    }
+
+    /// The flat geometry for `m ≤` [`SKINNY_ROWS`]: the same `tile²` invocations laid out
+    /// `4·tile` wide and `tile / 4` tall, [`SKINNY_ROWS`] rows split among the `tile_y`
+    /// invocations of a column, one column each, `2·tile` deep — an 8 × 64 block at the
+    /// preferred tile. A decode-shaped layer thus gets `n / 64` workgroups of 256 invocations
+    /// all staging the weight slab, instead of `n / 64` workgroups idling 56 of 64 rows.
+    pub const fn skinny(tile: u32) -> Self {
+        Self {
+            tile_x: 4 * tile,
+            tile_y: tile / 4,
+            micro_m: SKINNY_ROWS / (tile / 4),
+            micro_n: 1,
+            depth: 2 * tile,
+        }
+    }
+
+    pub const fn invocations(self) -> u32 {
+        self.tile_x * self.tile_y
+    }
+
+    pub const fn block_m(self) -> u32 {
+        self.tile_y * self.micro_m
+    }
+
+    pub const fn block_n(self) -> u32 {
+        self.tile_x * self.micro_n
+    }
+
+    pub const fn local_size(self) -> [u32; 3] {
+        [self.tile_x, self.tile_y, 1]
+    }
+
+    /// Two binary32 slabs: lhs `block_m × depth` (stored transposed) and rhs `depth × block_n`.
+    pub const fn shared_bytes(self) -> u32 {
+        (self.block_m() + self.block_n()) * self.depth * 4
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2949,27 +3058,42 @@ fn assemble_reduce(op: ReduceOp, float: Storage, workgroup: u32, buffers: u32) -
 /// `out[b, m, n] = Σ_k lhs[b, m, k] · rhs[b, k, n]`, accumulated in ascending `k` with separately
 /// rounded multiply and add, so every element is bit-identical to the untiled sequential loop.
 ///
-/// Geometry: a `tile × tile` workgroup computes a [`matmul_block`]-sided output square, each
-/// invocation a [`MATMUL_MICRO`]² register block whose rows are `i · tile + ty` and columns
-/// `j · tile + tx` — interleaved rather than contiguous, so the invocations of a row of the
-/// workgroup read consecutive columns and write consecutive outputs. Per `tile`-deep step of
-/// `k` the workgroup stages a `block × tile` slab of each operand in shared memory
-/// cooperatively (`MATMUL_MICRO` elements per invocation per operand, consecutive invocations
-/// loading consecutive addresses, the lhs slab stored transposed so its inner-loop reads are
-/// conflict-free), then every invocation issues `2 · MATMUL_MICRO` shared loads for
-/// `MATMUL_MICRO²` multiply-adds. The one-output-per-invocation kernel this replaces issued two
-/// shared loads per multiply-add and staged one element per invocation; on Intel Xe3 it ran a
-/// 1024³ FP8 MATMUL at 570 GFLOP/s, below its own FP32 rate, because the per-element FP8
-/// widening was paid once per multiply-add rather than once per `MATMUL_MICRO` of them.
+/// Geometry ([`MatmulGeometry`]): a `tile_x × tile_y` workgroup computes a `block_m × block_n`
+/// output block, each invocation a `micro_m × micro_n` register block whose rows are
+/// `i · tile_y + ty` and columns `j · tile_x + tx` — interleaved rather than contiguous, so the
+/// invocations of a row of the workgroup read consecutive columns and write consecutive
+/// outputs. Per `depth`-deep step of `k` the workgroup stages a slab of each operand in shared
+/// memory cooperatively (consecutive invocations loading consecutive addresses, the lhs slab
+/// stored transposed so its inner-loop reads are conflict-free), then every invocation issues
+/// `micro_m + micro_n` shared loads for `micro_m · micro_n` multiply-adds. The
+/// one-output-per-invocation kernel this replaces issued two shared loads per multiply-add and
+/// staged one element per invocation; on Intel Xe3 it ran a 1024³ FP8 MATMUL at 570 GFLOP/s,
+/// below its own FP32 rate, because the per-element FP8 widening was paid once per multiply-add
+/// rather than once per `MATMUL_MICRO` of them.
 ///
 /// Out-of-range slab loads read element zero and contribute nothing: the inner loop bound is
-/// `min(tile, k - k0)`, never a padded zero product, so signed zeros survive. Out-of-range
+/// `min(depth, k - k0)`, never a padded zero product, so signed zeros survive. Out-of-range
 /// outputs are computed and discarded.
 ///
 /// Specialization order: `lhs`, `rhs`, output `(buffer, base)`; `m`, `n`, `k`, `batch`.
-fn assemble_matmul(input: Storage, output_storage: Storage, tile: u32, buffers: u32) -> Vec<u32> {
-    let micro = MATMUL_MICRO;
-    let block = matmul_block(tile);
+fn assemble_matmul(
+    input: Storage,
+    output_storage: Storage,
+    geometry: MatmulGeometry,
+    buffers: u32,
+) -> Vec<u32> {
+    let MatmulGeometry {
+        tile_x,
+        tile_y,
+        micro_m,
+        micro_n,
+        depth,
+    } = geometry;
+    let invocations = geometry.invocations();
+    let block_m = geometry.block_m();
+    let block_n = geometry.block_n();
+    debug_assert_eq!((block_m * depth) % invocations, 0, "lhs slab stages evenly");
+    debug_assert_eq!((block_n * depth) % invocations, 0, "rhs slab stages evenly");
     let mut b = Builder::new();
     let array = b.buffer_array(buffers);
     let lhs = b.spec_operand();
@@ -2979,16 +3103,17 @@ fn assemble_matmul(input: Storage, output_storage: Storage, tile: u32, buffers: 
     let n = b.spec_u32(1);
     let k = b.spec_u32(1);
     let _batch = b.spec_u32(1);
-    // lhs slab transposed: `[kk][row]`; rhs slab as is: `[kk][col]`. Both `tile × block`.
-    let lhs_tile = b.shared_f32_array(block * tile);
-    let rhs_tile = b.shared_f32_array(block * tile);
+    // lhs slab transposed: `[kk][row]`, `depth × block_m`; rhs slab as is: `[kk][col]`,
+    // `depth × block_n`.
+    let lhs_tile = b.shared_f32_array(block_m * depth);
+    let rhs_tile = b.shared_f32_array(block_n * depth);
     let local_id = b.builtin_uvec3(BUILT_IN_LOCAL_INVOCATION_ID);
     let group_id = b.builtin_uvec3(BUILT_IN_WORKGROUP_ID);
 
     b.begin_main();
     let u32_ty = b.u32_ty();
     let f32_ty = b.f32_ty();
-    let accumulators: Vec<Id> = (0..micro * micro).map(|_| b.local(f32_ty)).collect();
+    let accumulators: Vec<Id> = (0..micro_m * micro_n).map(|_| b.local(f32_ty)).collect();
     let t_var = b.local(u32_ty);
     let kk_var = b.local(u32_ty);
     let tx = b.builtin_component(local_id, 0);
@@ -2996,8 +3121,10 @@ fn assemble_matmul(input: Storage, output_storage: Storage, tile: u32, buffers: 
     let gx = b.builtin_component(group_id, 0);
     let gy = b.builtin_component(group_id, 1);
     let z = b.builtin_component(group_id, 2);
-    let tile_c = b.c_u32(tile);
-    let block_c = b.c_u32(block);
+    let tile_x_c = b.c_u32(tile_x);
+    let depth_c = b.c_u32(depth);
+    let block_m_c = b.c_u32(block_m);
+    let block_n_c = b.c_u32(block_n);
     let zero = b.c_u32(0);
     let one = b.c_u32(1);
     let zero_f = b.c_f32(0.0);
@@ -3005,9 +3132,9 @@ fn assemble_matmul(input: Storage, output_storage: Storage, tile: u32, buffers: 
         b.store(*accumulator, zero_f);
     }
     b.store(t_var, zero);
-    let row0 = b.imul(gy, block_c);
-    let col0 = b.imul(gx, block_c);
-    let lid = b.imul(ty, tile_c);
+    let row0 = b.imul(gy, block_m_c);
+    let col0 = b.imul(gx, block_n_c);
+    let lid = b.imul(ty, tile_x_c);
     let lid = b.iadd(lid, tx);
     // lhs batch base: z * m * k; rhs batch base: z * k * n.
     let lhs_batch = b.imul(z, m);
@@ -3016,20 +3143,19 @@ fn assemble_matmul(input: Storage, output_storage: Storage, tile: u32, buffers: 
     let rhs_batch = b.imul(rhs_batch, n);
     let workgroup_ptr = b.pointer(STORAGE_CLASS_WORKGROUP, f32_ty);
     let steps = {
-        let k_plus = b.iadd(k, tile_c);
+        let k_plus = b.iadd(k, depth_c);
         let k_plus = b.isub(k_plus, one);
-        b.udiv(k_plus, tile_c)
+        b.udiv(k_plus, depth_c)
     };
     let (outer, t) = b.begin_loop(t_var, steps);
-    let k0 = b.imul(t, tile_c);
-    // Stage the slabs: element `q · tile² + lid` of each `block × tile` slab, `q` unrolled.
-    for q in 0..micro {
-        let offset = b.c_u32(q * tile * tile);
+    let k0 = b.imul(t, depth_c);
+    // Stage the lhs slab: element `q · invocations + lid` is (row = index / depth,
+    // kk = index % depth), so consecutive invocations read consecutive `k` of one row.
+    for q in 0..(block_m * depth / invocations) {
+        let offset = b.c_u32(q * invocations);
         let index = b.iadd(offset, lid);
-        // lhs slab element `index` is (row = index / tile, kk = index % tile): consecutive
-        // invocations read consecutive `k` of one row.
-        let row = b.udiv(index, tile_c);
-        let kk = b.umod(index, tile_c);
+        let row = b.udiv(index, depth_c);
+        let kk = b.umod(index, depth_c);
         let global_row = b.iadd(row0, row);
         let global_k = b.iadd(k0, kk);
         let row_ok = b.ult(global_row, m);
@@ -3041,14 +3167,18 @@ fn assemble_matmul(input: Storage, output_storage: Storage, tile: u32, buffers: 
         let element = b.select_u32(ok, element, zero);
         let loaded = b.load_float(input, array, lhs, element);
         let value = b.select_f32(ok, loaded, zero_f);
-        let slot = b.imul(kk, block_c);
+        let slot = b.imul(kk, block_m_c);
         let slot = b.iadd(slot, row);
         let pointer = b.access_chain(workgroup_ptr, lhs_tile, &[slot]);
         b.store(pointer, value);
-        // rhs slab element `index` is (kk = index / block, col = index % block): consecutive
-        // invocations read consecutive `n` of one row of `rhs`.
-        let kk = b.udiv(index, block_c);
-        let col = b.umod(index, block_c);
+    }
+    // Stage the rhs slab: element `index` is (kk = index / block_n, col = index % block_n), so
+    // consecutive invocations read consecutive `n` of one row of `rhs`.
+    for q in 0..(block_n * depth / invocations) {
+        let offset = b.c_u32(q * invocations);
+        let index = b.iadd(offset, lid);
+        let kk = b.udiv(index, block_n_c);
+        let col = b.umod(index, block_n_c);
         let global_k = b.iadd(k0, kk);
         let global_col = b.iadd(col0, col);
         let k_ok = b.ult(global_k, k);
@@ -3060,38 +3190,37 @@ fn assemble_matmul(input: Storage, output_storage: Storage, tile: u32, buffers: 
         let element = b.select_u32(ok, element, zero);
         let loaded = b.load_float(input, array, rhs, element);
         let value = b.select_f32(ok, loaded, zero_f);
-        let slot = b.imul(kk, block_c);
-        let slot = b.iadd(slot, col);
-        let pointer = b.access_chain(workgroup_ptr, rhs_tile, &[slot]);
+        let pointer = b.access_chain(workgroup_ptr, rhs_tile, &[index]);
         b.store(pointer, value);
     }
     b.workgroup_barrier();
     let remaining = b.isub(k, k0);
-    let k_max = b.umin(remaining, tile_c);
+    let k_max = b.umin(remaining, depth_c);
     b.store(kk_var, zero);
     let (inner, kk) = b.begin_loop(kk_var, k_max);
-    let slab_row = b.imul(kk, block_c);
-    let a: Vec<Id> = (0..micro)
+    let lhs_row = b.imul(kk, block_m_c);
+    let rhs_row = b.imul(kk, block_n_c);
+    let a: Vec<Id> = (0..micro_m)
         .map(|i| {
-            let offset = b.c_u32(i * tile);
+            let offset = b.c_u32(i * tile_y);
             let local_row = b.iadd(offset, ty);
-            let slot = b.iadd(slab_row, local_row);
+            let slot = b.iadd(lhs_row, local_row);
             let pointer = b.access_chain(workgroup_ptr, lhs_tile, &[slot]);
             b.load(f32_ty, pointer)
         })
         .collect();
-    let bv: Vec<Id> = (0..micro)
+    let bv: Vec<Id> = (0..micro_n)
         .map(|j| {
-            let offset = b.c_u32(j * tile);
+            let offset = b.c_u32(j * tile_x);
             let local_col = b.iadd(offset, tx);
-            let slot = b.iadd(slab_row, local_col);
+            let slot = b.iadd(rhs_row, local_col);
             let pointer = b.access_chain(workgroup_ptr, rhs_tile, &[slot]);
             b.load(f32_ty, pointer)
         })
         .collect();
-    for i in 0..micro {
-        for j in 0..micro {
-            let accumulator = accumulators[(i * micro + j) as usize];
+    for i in 0..micro_m {
+        for j in 0..micro_n {
+            let accumulator = accumulators[(i * micro_n + j) as usize];
             let acc = b.load(f32_ty, accumulator);
             let next = b.fma_free(a[i as usize], bv[j as usize], acc);
             b.store(accumulator, next);
@@ -3102,20 +3231,20 @@ fn assemble_matmul(input: Storage, output_storage: Storage, tile: u32, buffers: 
     b.end_loop(outer, t_var, one);
     let out_batch = b.imul(z, m);
     let out_batch = b.imul(out_batch, n);
-    for i in 0..micro {
-        let offset = b.c_u32(i * tile);
+    for i in 0..micro_m {
+        let offset = b.c_u32(i * tile_y);
         let row = b.iadd(row0, offset);
         let row = b.iadd(row, ty);
         let row_ok = b.ult(row, m);
         let out_row = b.imul(row, n);
         let out_row = b.iadd(out_batch, out_row);
-        for j in 0..micro {
-            let offset = b.c_u32(j * tile);
+        for j in 0..micro_n {
+            let offset = b.c_u32(j * tile_x);
             let col = b.iadd(col0, offset);
             let col = b.iadd(col, tx);
             let col_ok = b.ult(col, n);
             let in_range = b.land(row_ok, col_ok);
-            let accumulator = accumulators[(i * micro + j) as usize];
+            let accumulator = accumulators[(i * micro_n + j) as usize];
             b.if_then(in_range, |b| {
                 let out_index = b.iadd(out_row, col);
                 let acc = b.load(f32_ty, accumulator);
@@ -3133,7 +3262,7 @@ fn assemble_matmul(input: Storage, output_storage: Storage, tile: u32, buffers: 
         }
     }
     b.end_main();
-    b.finish([tile, tile, 1])
+    b.finish(geometry.local_size())
 }
 
 /// NHWC MAX_POOL2D at `float` storage: one invocation per output element folds its window with
@@ -3499,7 +3628,9 @@ mod tests {
                 }
                 .words(broadcast),
                 KernelKey::Reduce { .. } => reduce_spec(operand, operand, 2, 3, 1),
-                KernelKey::Matmul { .. } => matmul_spec(operand, operand, operand, 1, 2, 3, 1),
+                KernelKey::Matmul { .. } | KernelKey::MatmulSkinny { .. } => {
+                    matmul_spec(operand, operand, operand, 1, 2, 3, 1)
+                }
                 KernelKey::MaxPool { .. } => max_pool_spec(
                     operand,
                     operand,
@@ -3572,7 +3703,28 @@ mod tests {
     fn matmul_workgroups_cover_all_dimensions() {
         assert_eq!(matmul_block(16), 64);
         assert_eq!(matmul_block(8), 32);
-        assert_eq!(matmul_shared_bytes(16), 8192);
+        assert_eq!(MatmulGeometry::wide(16).shared_bytes(), 8192);
+        assert_eq!(MatmulGeometry::skinny(16).shared_bytes(), (8 + 64) * 32 * 4);
+        assert_eq!(matmul_shared_bytes(16), (8 + 64) * 32 * 4);
+        for tile in [8, 16] {
+            for geometry in [MatmulGeometry::wide(tile), MatmulGeometry::skinny(tile)] {
+                assert_eq!(geometry.invocations(), tile * tile, "{geometry:?}");
+                assert_eq!(
+                    (geometry.block_m() * geometry.depth) % geometry.invocations(),
+                    0,
+                    "{geometry:?}"
+                );
+                assert_eq!(
+                    (geometry.block_n() * geometry.depth) % geometry.invocations(),
+                    0,
+                    "{geometry:?}"
+                );
+            }
+            assert_eq!(MatmulGeometry::skinny(tile).block_m(), SKINNY_ROWS);
+        }
+        assert_eq!(skinny_block(16), 64);
+        assert_eq!(skinny_matmul_workgroups(4096, 2, 16), [64, 1, 2]);
+        assert_eq!(skinny_matmul_workgroups(65, 1, 8), [3, 1, 1]);
         assert_eq!(matmul_workgroups(1, 1, 1, 16), [1, 1, 1]);
         assert_eq!(matmul_workgroups(64, 64, 1, 16), [1, 1, 1]);
         assert_eq!(matmul_workgroups(65, 64, 1, 16), [1, 2, 1]);

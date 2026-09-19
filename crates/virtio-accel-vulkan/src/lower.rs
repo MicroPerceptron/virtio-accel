@@ -284,6 +284,11 @@ pub(crate) enum KernelSpec {
         input: Storage,
         output: Storage,
     },
+    /// The skinny MATMUL kernel, selected when `m ≤ shader::SKINNY_ROWS`.
+    MatmulSkinny {
+        input: Storage,
+        output: Storage,
+    },
     Cast {
         input: Storage,
         output: Storage,
@@ -305,6 +310,8 @@ pub(crate) enum Work {
     Linear(u32),
     /// A tiled MATMUL over `m × n` outputs per batch.
     Matmul { m: u32, n: u32, batch: u32 },
+    /// A skinny MATMUL over `n` columns per batch.
+    MatmulSkinny { n: u32, batch: u32 },
 }
 
 /// One recorded `vkCmdDispatch`.
@@ -1245,17 +1252,27 @@ impl<'a, 'b> Lowering<'a, 'b> {
             k,
             batch,
         );
-        self.dispatch(
-            KernelSpec::Matmul {
-                input: lhs_shape.storage(),
-                output: out_shape.storage(),
-            },
-            spec,
-            Work::Matmul { m, n, batch },
-            &[from_lhs, from_rhs],
-            to,
-            output,
-        );
+        // A few rows against a wide matrix is bandwidth-bound and gets the skinny kernel; the
+        // register-tiled kernel takes everything else. Both accumulate identically.
+        let (input, output_storage) = (lhs_shape.storage(), out_shape.storage());
+        let (kernel, work) = if m <= crate::shader::SKINNY_ROWS {
+            (
+                KernelSpec::MatmulSkinny {
+                    input,
+                    output: output_storage,
+                },
+                Work::MatmulSkinny { n, batch },
+            )
+        } else {
+            (
+                KernelSpec::Matmul {
+                    input,
+                    output: output_storage,
+                },
+                Work::Matmul { m, n, batch },
+            )
+        };
+        self.dispatch(kernel, spec, work, &[from_lhs, from_rhs], to, output);
         Ok(())
     }
 
@@ -1841,7 +1858,7 @@ mod tests {
         let plan = lower_tosa(MATMUL_FP16.artifact, VULKAN_TOSA_TARGET).unwrap();
         assert_eq!(
             plan.dispatches[0].kernel,
-            KernelSpec::Matmul {
+            KernelSpec::MatmulSkinny {
                 input: Storage::Half,
                 output: Storage::Half
             }
@@ -1911,21 +1928,15 @@ mod tests {
         assert_eq!(plan.slot(2).unwrap().byte_len, 4 * 4);
         assert_eq!(plan.dispatches.len(), 1);
         let dispatch = &plan.dispatches[0];
+        // Two rows: the skinny kernel.
         assert_eq!(
             dispatch.kernel,
-            KernelSpec::Matmul {
+            KernelSpec::MatmulSkinny {
                 input: Storage::Word,
                 output: Storage::Word
             }
         );
-        assert_eq!(
-            dispatch.work,
-            Work::Matmul {
-                m: 2,
-                n: 2,
-                batch: 1
-            }
-        );
+        assert_eq!(dispatch.work, Work::MatmulSkinny { n: 2, batch: 1 });
         // lhs, rhs, out operands then m, n, k, batch.
         assert_eq!(dispatch.spec, vec![0, 0, 1, 0, 2, 0, 2, 2, 3, 1]);
         // The zero-point constants are consumed at admission, never uploaded.
