@@ -316,6 +316,12 @@ the rate the FP32 kernel shows the memory system delivers; the remainder is per-
 recorded in ADR 0010 as the next objective. The 1024³ cases vary about ±15% run to run on this
 device even at 30 samples.
 
+Transfers (ADR 0012), same device, 64 MiB, median of 10: `write_buffer` into the `Device` domain
+took 32.6 ms (2.1 GB/s) through the staged path and 2.59 ms (25.9 GB/s) once a single-heap
+device maps that domain; `read_buffer` 25.1 → 2.47 ms. `Shared` measures the same 2.59 / 2.48 ms,
+and kernel throughput is identical in all three domains on this unified-memory device. The bench
+takes `VIRTIO_ACCEL_VULKAN_BENCH_DOMAIN=host|shared|device` and times both transfers per run.
+
 ## Qualcomm Hexagon evidence status
 
 `virtio-accel-hexagon` includes an ignored release-mode measurement for fixed submission overhead:
