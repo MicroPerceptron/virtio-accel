@@ -1668,114 +1668,110 @@ impl Builder {
     // -- crate-owned binary16 conversions (ADR 0008) --------------------------------------------
 
     /// Widen packed FP8 bits (a `u32` in `0..=0xff`) to binary32, exactly. The kernel twin of
-    /// [`virtio_accel_tosa::fp8e4m3_to_f32`] / [`virtio_accel_tosa::fp8e5m2_to_f32`]: integer
-    /// expansion for normals and specials, one exact multiply for subnormals. Every FP8 value
-    /// is representable in binary32, so all 256 patterns of each format widen exactly on every
-    /// device, and no `OpFConvert` appears that a driver could demote.
+    /// [`virtio_accel_tosa::fp8e4m3_to_f32`] / [`virtio_accel_tosa::fp8e5m2_to_f32`]; every FP8
+    /// value is representable in binary32, so all 256 patterns of each format widen exactly on
+    /// every device, and no `OpFConvert` appears that a driver could demote.
+    ///
+    /// The exponent-offset construction (shared with [`Self::widen_f16`]): place the magnitude
+    /// bits at the top of a binary32 significand under a fixed exponent `K` chosen so that a
+    /// *normal* encoding reads off directly as `1.m · 2^(e - bias)`. A subnormal encoding then
+    /// reads as `1.m · 2^(1 - bias)` and the value wanted is `0.m · 2^(1 - bias)`, which is
+    /// `(x - 2^(1 - bias)) · 2` — two exact binary32 operations, since `x` and the constant
+    /// share a binade. Nothing here produces a binary32 denormal (the smallest result is the
+    /// format's smallest subnormal, `2^-9` or `2^-16`), so a device that flushes denormals
+    /// computes the same bits. Specials are one compare and one select. About half the
+    /// instructions of the integer-only expansion it replaced, which matters because the
+    /// MATMUL kernels widen every staged element.
     fn widen_fp8(&mut self, format: Fp8Format, bits: Id) -> Id {
-        let (exponent_shift, exponent_mask, fraction_mask, rebias, mantissa_shift, scale) =
-            match format {
-                // Subnormal E4M3 is `fraction · 2^-9`; E5M2 is `fraction · 2^-16`.
-                Fp8Format::E4M3 => (3_u32, 0x0f_u32, 0x07_u32, 120_u32, 20_u32, 1.0_f32 / 512.0),
-                Fp8Format::E5M2 => (2, 0x1f, 0x03, 112, 21, 1.0_f32 / 65_536.0),
-            };
+        // Mantissa width, the fixed exponent `K = 127 - bias`, and the top exponent field.
+        let (mantissa_bits, k, top_exponent) = match format {
+            Fp8Format::E4M3 => (3_u32, 120_u32, 15_u32),
+            Fp8Format::E5M2 => (2, 112, 31),
+        };
+        let magnitude_mask = self.c_u32(0x7f);
+        let shift = self.c_u32(23 - mantissa_bits);
+        let k_bits = self.c_u32(k << 23);
+        let mantissa_shift = self.c_u32(mantissa_bits);
         let zero = self.c_u32(0);
+        let implicit_one = self.c_f32(f32::from_bits(k << 23));
         let sign_mask = self.c_u32(0x80);
         let twenty_four = self.c_u32(24);
-        let twenty_three = self.c_u32(23);
-        let sign = self.band(bits, sign_mask);
-        let sign = self.shl(sign, twenty_four);
-        let exponent_shift = self.c_u32(exponent_shift);
-        let exponent_mask_c = self.c_u32(exponent_mask);
-        let fraction_mask_c = self.c_u32(fraction_mask);
-        let exponent = self.shr(bits, exponent_shift);
-        let exponent = self.band(exponent, exponent_mask_c);
-        let fraction = self.band(bits, fraction_mask_c);
-        // Normal: rebias the exponent into binary32 and shift the fraction up.
-        let rebias = self.c_u32(rebias);
-        let biased = self.iadd(exponent, rebias);
-        let normal = self.shl(biased, twenty_three);
-        let mantissa_shift = self.c_u32(mantissa_shift);
-        let shifted = self.shl(fraction, mantissa_shift);
-        let normal = self.bor(normal, shifted);
-        let normal = self.bor(normal, sign);
-        // Subnormal or zero: an exact multiply; a zero fraction keeps the sign, so signed zero
-        // survives.
-        let scale = self.c_f32(scale);
-        let scaled = self.u_to_f(fraction);
-        let subnormal = self.fmul(scaled, scale);
-        let subnormal = self.bitcast_u32(subnormal);
-        let subnormal = self.bor(subnormal, sign);
+        let magnitude = self.band(bits, magnitude_mask);
+        let placed = self.shl(magnitude, shift);
+        // An add, not an or: the encoding's exponent field and `K` overlap in the binary32
+        // exponent bits, and the construction is `e + K`.
+        let x_bits = self.iadd(placed, k_bits);
+        let x = self.bitcast_f32(x_bits);
+        let exponent = self.shr(magnitude, mantissa_shift);
         let is_subnormal = self.ieq(exponent, zero);
-        let value = self.select_u32(is_subnormal, subnormal, normal);
+        let difference = self.fsub(x, implicit_one);
+        let subnormal = self.fadd(difference, difference);
+        let value = self.select_f32(is_subnormal, subnormal, x);
+        let value = self.bitcast_u32(value);
         // Specials differ: E4M3's top exponent stays finite except for the all-ones fraction,
-        // which is its only NaN; E5M2's top exponent is infinity or NaN as usual.
-        match format {
+        // which is its only NaN; E5M2's top exponent is infinity or NaN as usual, payload kept.
+        let value = match format {
             Fp8Format::E4M3 => {
+                let nan_pattern = self.c_u32(0x7f);
                 let quiet_nan = self.c_u32(0x7fc0_0000);
-                let top_exponent = self.c_u32(exponent_mask);
-                let top_fraction = self.c_u32(fraction_mask);
-                let exponent_is_top = self.ieq(exponent, top_exponent);
-                let fraction_is_top = self.ieq(fraction, top_fraction);
-                let is_nan = self.land(exponent_is_top, fraction_is_top);
-                let nan = self.bor(sign, quiet_nan);
-                let value = self.select_u32(is_nan, nan, value);
-                self.bitcast_f32(value)
+                let is_nan = self.ieq(magnitude, nan_pattern);
+                self.select_u32(is_nan, quiet_nan, value)
             }
             Fp8Format::E5M2 => {
+                let top = self.c_u32(top_exponent);
                 let inf_bits = self.c_u32(0x7f80_0000);
-                let top_exponent = self.c_u32(exponent_mask);
-                let is_infnan = self.ieq(exponent, top_exponent);
-                let infnan = self.bor(sign, inf_bits);
-                let payload = self.shl(fraction, mantissa_shift);
-                let infnan = self.bor(infnan, payload);
-                let value = self.select_u32(is_infnan, infnan, value);
-                self.bitcast_f32(value)
+                let fraction_mask = self.c_u32((1 << mantissa_bits) - 1);
+                let is_infnan = self.ieq(exponent, top);
+                let fraction = self.band(magnitude, fraction_mask);
+                let payload = self.shl(fraction, shift);
+                let infnan = self.bor(inf_bits, payload);
+                self.select_u32(is_infnan, infnan, value)
             }
-        }
+        };
+        let sign = self.band(bits, sign_mask);
+        let sign = self.shl(sign, twenty_four);
+        let value = self.bor(value, sign);
+        self.bitcast_f32(value)
     }
 
     /// Widen packed binary16 bits (a `u32` in `0..=0xffff`) to binary32, exactly. This is the
-    /// kernel twin of the host [`f16_to_f32`]: integer expansion only, so every value —
-    /// subnormals included — is exact on every device, and there is no `OpFConvert` pattern a
-    /// driver can demote back to f16 (ADR 0008: ANV, RADV, and Apple all demote them).
+    /// kernel twin of the host [`f16_to_f32`], by the exponent-offset construction described at
+    /// [`Self::widen_fp8`] (`K = 112`, subnormals as `(x - 2^-15) · 2`): every value —
+    /// subnormals included — is exact on every device, no binary32 denormal is ever formed, and
+    /// there is no `OpFConvert` pattern a driver can demote back to f16 (ADR 0008).
     fn widen_f16(&mut self, bits: Id) -> Id {
-        let sixteen = self.c_u32(16);
-        let ten = self.c_u32(10);
+        let magnitude_mask = self.c_u32(0x7fff);
         let thirteen = self.c_u32(13);
-        let twenty_three = self.c_u32(23);
+        let ten = self.c_u32(10);
+        let sixteen = self.c_u32(16);
+        let k_bits = self.c_u32(112 << 23);
+        let implicit_one = self.c_f32(f32::from_bits(112 << 23));
         let zero = self.c_u32(0);
-        let sign_mask = self.c_u32(0x8000);
-        let exponent_mask = self.c_u32(0x1f);
-        let mantissa_mask = self.c_u32(0x3ff);
-        let rebias = self.c_u32(112);
-        let inf_bits = self.c_u32(0x7f80_0000);
         let thirty_one = self.c_u32(31);
-        let scale = self.c_f32(1.0 / 16_777_216.0);
+        let inf_bits = self.c_u32(0x7f80_0000);
+        let mantissa_mask = self.c_u32(0x3ff);
+        let sign_mask = self.c_u32(0x8000);
+        let magnitude = self.band(bits, magnitude_mask);
+        let placed = self.shl(magnitude, thirteen);
+        // An add, not an or: the encoding's exponent field and `K` overlap in the binary32
+        // exponent bits, and the construction is `e + K`.
+        let x_bits = self.iadd(placed, k_bits);
+        let x = self.bitcast_f32(x_bits);
+        let exponent = self.shr(magnitude, ten);
+        let is_subnormal = self.ieq(exponent, zero);
+        let difference = self.fsub(x, implicit_one);
+        let subnormal = self.fadd(difference, difference);
+        let value = self.select_f32(is_subnormal, subnormal, x);
+        let value = self.bitcast_u32(value);
+        // Infinity or NaN: exponent all ones, payload preserved.
+        let is_infnan = self.ieq(exponent, thirty_one);
+        let mantissa = self.band(magnitude, mantissa_mask);
+        let payload = self.shl(mantissa, thirteen);
+        let infnan = self.bor(inf_bits, payload);
+        let value = self.select_u32(is_infnan, infnan, value);
         let sign = self.band(bits, sign_mask);
         let sign = self.shl(sign, sixteen);
-        let exponent = self.shr(bits, ten);
-        let exponent = self.band(exponent, exponent_mask);
-        let mantissa = self.band(bits, mantissa_mask);
-        // Normal: rebias the exponent (+112) and shift the mantissa up.
-        let biased = self.iadd(exponent, rebias);
-        let normal = self.shl(biased, twenty_three);
-        let shifted = self.shl(mantissa, thirteen);
-        let normal = self.bor(normal, shifted);
-        let normal = self.bor(normal, sign);
-        // Subnormal or zero: `mantissa · 2^-24`, exact for every 10-bit mantissa.
-        let scaled = self.u_to_f(mantissa);
-        let subnormal = self.fmul(scaled, scale);
-        let subnormal = self.bitcast_u32(subnormal);
-        let subnormal = self.bor(subnormal, sign);
-        // Infinity or NaN: exponent all ones, payload preserved.
-        let infnan = self.bor(sign, inf_bits);
-        let shifted = self.shl(mantissa, thirteen);
-        let infnan = self.bor(infnan, shifted);
-        let is_subnormal = self.ieq(exponent, zero);
-        let is_infnan = self.ieq(exponent, thirty_one);
-        let value = self.select_u32(is_subnormal, subnormal, normal);
-        let value = self.select_u32(is_infnan, infnan, value);
+        let value = self.bor(value, sign);
         self.bitcast_f32(value)
     }
 
