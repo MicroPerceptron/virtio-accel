@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::ffi::CStr;
 use std::ptr::NonNull;
 use std::rc::Rc;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ash::vk;
 use virtio_accel_core::{
@@ -308,6 +308,12 @@ struct PhysicalDeviceRecord {
     limits: vk::PhysicalDeviceLimits,
     memory: vk::PhysicalDeviceMemoryProperties,
     buffer_device_address: bool,
+    /// `minImportedHostPointerAlignment` when the device offers `VK_EXT_external_memory_host`,
+    /// the one extension this backend enables, and only for
+    /// [`VulkanAccelerator::import_host_buffer`] (ADR 0013).
+    host_import_alignment: Option<u64>,
+    /// Vulkan 1.2 `timelineSemaphore`, enabled when reported, for host gates (ADR 0013).
+    timeline_semaphore: bool,
     tuning: Tuning,
 }
 
@@ -351,6 +357,7 @@ impl PhysicalDeviceRecord {
 
         // SAFETY: `handle` is a live physical device of `instance`.
         let memory = unsafe { instance.get_physical_device_memory_properties(handle) };
+        let host_import_alignment = host_import_alignment(instance, handle);
         let name = CStr::from_bytes_until_nul(bytemuck_i8_to_u8(&properties.device_name))
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|_| String::from("vulkan-device"));
@@ -365,6 +372,8 @@ impl PhysicalDeviceRecord {
             limits: properties.limits,
             memory,
             buffer_device_address: vulkan12.buffer_device_address == vk::TRUE,
+            host_import_alignment,
+            timeline_semaphore: vulkan12.timeline_semaphore == vk::TRUE,
             tuning,
         })
     }
@@ -387,6 +396,23 @@ impl PhysicalDeviceRecord {
             AcceleratorClass::GPU
         }
     }
+}
+
+/// `minImportedHostPointerAlignment`, when `handle` offers `VK_EXT_external_memory_host`.
+fn host_import_alignment(instance: &ash::Instance, handle: vk::PhysicalDevice) -> Option<u64> {
+    // SAFETY: `handle` is a live physical device of `instance`; no layer is named.
+    let extensions = unsafe { instance.enumerate_device_extension_properties(handle) }.ok()?;
+    let name = ash::ext::external_memory_host::NAME;
+    extensions
+        .iter()
+        .any(|extension| extension.extension_name_as_c_str() == Ok(name))
+        .then_some(())?;
+    let mut host = vk::PhysicalDeviceExternalMemoryHostPropertiesEXT::default();
+    let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut host);
+    // SAFETY: as above; the chained structure belongs to an extension the device reported.
+    unsafe { instance.get_physical_device_properties2(handle, &mut properties) };
+    let alignment = host.min_imported_host_pointer_alignment;
+    alignment.is_power_of_two().then_some(alignment)
 }
 
 /// View a driver-filled `c_char` name array as bytes for `CStr` parsing.
@@ -571,6 +597,8 @@ struct Shared {
     /// Assembled kernel modules by variant; assembled once per instance, on first use.
     modules: RefCell<HashMap<KernelKey, Rc<[u32]>>>,
     memory_plan: MemoryPlan,
+    /// The `VK_EXT_external_memory_host` entry points, when the extension was enabled.
+    host_memory: Option<ash::ext::external_memory_host::Device>,
     info: DeviceInfo,
     /// Sticky device-loss flag: after `VK_ERROR_DEVICE_LOST` no entry point is re-entered except
     /// destruction (ADR 0006).
@@ -594,14 +622,25 @@ impl Shared {
         // `synchronization2` is core in 1.3 but still an opt-in feature (ADR 0005);
         // `bufferDeviceAddress` is enabled only to measure allocation alignment honestly.
         let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default()
-            .buffer_device_address(physical.buffer_device_address);
+            .buffer_device_address(physical.buffer_device_address)
+            .timeline_semaphore(physical.timeline_semaphore);
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default().synchronization2(true);
+        // `VK_EXT_external_memory_host`, when offered, only for importing caller memory
+        // (ADR 0013); nothing else depends on it.
+        let extensions = [ash::ext::external_memory_host::NAME.as_ptr()];
+        let enabled = if physical.host_import_alignment.is_some() {
+            &extensions[..]
+        } else {
+            &[]
+        };
         let info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
+            .enabled_extension_names(enabled)
             .push_next(&mut vulkan12)
             .push_next(&mut vulkan13);
         // SAFETY: `physical.handle` belongs to `instance.instance`; every pointed-to structure
-        // outlives the call; the requested features were reported supported by the probe.
+        // outlives the call; the requested features and extension were reported supported by the
+        // probe.
         let device = unsafe {
             instance
                 .instance
@@ -682,6 +721,9 @@ impl Shared {
         };
 
         let info = device_info(&physical, memory_plan);
+        let host_memory = physical
+            .host_import_alignment
+            .map(|_| ash::ext::external_memory_host::Device::new(&instance.instance, &device));
         Ok(Rc::new(Self {
             device,
             physical,
@@ -691,6 +733,7 @@ impl Shared {
             pipeline_cache,
             modules: RefCell::new(HashMap::new()),
             memory_plan,
+            host_memory,
             info,
             poisoned: Cell::new(false),
             counters: Counters::default(),
@@ -1212,6 +1255,9 @@ pub struct VulkanBuffer {
     buffer: vk::Buffer,
     memory: vk::DeviceMemory,
     mapped: Option<NonNull<u8>>,
+    /// The memory is the caller's, imported (ADR 0013): `mapped` is the caller's pointer, not a
+    /// `vkMapMemory` mapping, and the bytes outlive this handle.
+    imported: bool,
     state: Rc<BufferState>,
 }
 
@@ -1222,6 +1268,7 @@ impl std::fmt::Debug for VulkanBuffer {
             .field("context", &self.context.id)
             .field("desc", &self.desc)
             .field("mapped", &self.mapped.is_some())
+            .field("imported", &self.imported)
             .finish_non_exhaustive()
     }
 }
@@ -1249,9 +1296,11 @@ impl Drop for VulkanBuffer {
             shared.wait_idle();
         }
         // SAFETY: this handle owns the mapping, buffer, and memory, all created together in
-        // `allocate` and released exactly once here, in the reverse order.
+        // `allocate` (or `import`, which maps nothing) and released exactly once here, in the
+        // reverse order. Freeing imported memory releases the device's claim on the caller's
+        // pages, never the pages.
         unsafe {
-            if self.mapped.is_some() {
+            if self.mapped.is_some() && !self.imported {
                 shared.device.unmap_memory(self.memory);
             }
             shared.device.destroy_buffer(self.buffer, None);
@@ -1379,6 +1428,113 @@ impl<'a> RawAllocation<'a> {
         } else if !map {
             // Nothing observable to measure: the binding requirement is the only guarantee.
             alignment = alignment.min(requirements.alignment.max(1));
+        }
+        raw.measured_alignment = alignment;
+        Ok(raw)
+    }
+
+    /// Create a buffer over `len` bytes of caller memory at `pointer`, imported as a host
+    /// allocation (`VK_EXT_external_memory_host`) into a host-coherent memory type, and bind it
+    /// at offset 0. Nothing is mapped: the caller's pointer is the host's view.
+    ///
+    /// # Safety
+    ///
+    /// `pointer..pointer + len` is live host memory that stays allocated and mapped until the
+    /// memory object is freed; `pointer` and `len` are multiples of the device's
+    /// `minImportedHostPointerAlignment`.
+    unsafe fn import(
+        shared: &'a Shared,
+        pointer: NonNull<u8>,
+        len: u64,
+    ) -> Result<Self, BackendError> {
+        let device = &shared.device;
+        let host = shared
+            .host_memory
+            .as_ref()
+            .ok_or(BackendError::Unsupported)?;
+        let handle_type = vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT;
+        let mut host_properties = vk::MemoryHostPointerPropertiesEXT::default();
+        // SAFETY: the extension is enabled on this device, so the entry point is loaded; the
+        // caller vouches for the pointer; the out-structure is a live local. `ash` 0.38 has no
+        // wrapper for this command, so the raw pointer is called and its result checked.
+        unsafe {
+            (host.fp().get_memory_host_pointer_properties_ext)(
+                host.device(),
+                handle_type,
+                pointer.as_ptr().cast(),
+                &mut host_properties,
+            )
+        }
+        .result()
+        .map_err(|result| shared.fail(result))?;
+        let mut external = vk::ExternalMemoryBufferCreateInfo::default().handle_types(handle_type);
+        let buffer_info = vk::BufferCreateInfo::default()
+            .size(len)
+            .usage(buffer_usage(&shared.physical))
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .push_next(&mut external);
+        // SAFETY: the device is live and `buffer_info` and its chain are live locals.
+        let buffer = unsafe { device.create_buffer(&buffer_info, None) }
+            .map_err(|result| shared.fail(result))?;
+        // SAFETY: `buffer` is live.
+        let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+        let coherent =
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        let memory = &shared.physical.memory;
+        // A host-coherent type both the pointer and the buffer allow, device-local first.
+        let memory_type = (0..memory.memory_type_count)
+            .filter(|&index| {
+                host_properties.memory_type_bits & requirements.memory_type_bits & (1 << index) != 0
+                    && memory.memory_types[index as usize]
+                        .property_flags
+                        .contains(coherent)
+            })
+            .min_by_key(|&index| {
+                !memory.memory_types[index as usize]
+                    .property_flags
+                    .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+            });
+        let mut raw = Self {
+            shared,
+            buffer,
+            memory: vk::DeviceMemory::null(),
+            mapped: None,
+            allocation_bytes: 0,
+            measured_alignment: 0,
+            memory_flags: vk::MemoryPropertyFlags::empty(),
+        };
+        let memory_type = memory_type.ok_or(BackendError::Incompatible)?;
+        raw.memory_flags = memory.memory_types[memory_type as usize].property_flags;
+        if requirements.size > len {
+            return Err(BackendError::ResourceLimit);
+        }
+        let mut import = vk::ImportMemoryHostPointerInfoEXT::default()
+            .handle_type(handle_type)
+            .host_pointer(pointer.as_ptr().cast());
+        let mut flags =
+            vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
+        let mut allocate_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(len)
+            .memory_type_index(memory_type)
+            .push_next(&mut import);
+        if shared.physical.buffer_device_address {
+            allocate_info = allocate_info.push_next(&mut flags);
+        }
+        // SAFETY: the device is live; the chained structures outlive the call; the caller
+        // vouches that the range is live, aligned host memory, and the type admits the pointer.
+        raw.memory = unsafe { device.allocate_memory(&allocate_info, None) }
+            .map_err(|result| shared.fail(result))?;
+        raw.allocation_bytes = len;
+        // SAFETY: fresh buffer and memory; offset 0 satisfies every alignment requirement.
+        unsafe { device.bind_buffer_memory(buffer, raw.memory, 0) }
+            .map_err(|result| shared.fail(result))?;
+        let mut alignment = address_alignment(pointer.as_ptr() as u64);
+        if shared.physical.buffer_device_address {
+            let address_info = vk::BufferDeviceAddressInfo::default().buffer(buffer);
+            // SAFETY: the feature is enabled, the buffer carries the device-address usage, and
+            // its memory was allocated with the device-address flag.
+            let address = unsafe { device.get_buffer_device_address(&address_info) };
+            alignment = alignment.min(address_alignment(address));
         }
         raw.measured_alignment = alignment;
         Ok(raw)
@@ -1670,6 +1826,123 @@ impl Drop for VulkanEvent {
 }
 
 /// Vulkan backend instance bound to one physical device.
+/// A timeline semaphore the host raises, which [`VulkanAccelerator::submit_after`] submissions
+/// wait on (ADR 0013): work is queued before its inputs exist, and whoever produces them (a
+/// thread finishing a storage read, say) releases it with a [`VulkanGateSignal`], without a
+/// round trip through the thread that owns the backend.
+///
+/// Dropping the gate releases every submission still waiting on it, then waits for the device
+/// to idle before destroying the semaphore, so no submission can wait forever.
+pub struct VulkanHostGate {
+    shared: Rc<Shared>,
+    core: Arc<GateCore>,
+    /// The highest value any submission was queued to wait for.
+    awaited: Cell<u64>,
+}
+
+struct GateCore {
+    device: ash::Device,
+    semaphore: vk::Semaphore,
+    state: Mutex<GateState>,
+}
+
+struct GateState {
+    /// Cleared, under the lock, before the semaphore is destroyed.
+    open: bool,
+    raised: u64,
+}
+
+/// The raising half of a [`VulkanHostGate`], for any thread.
+#[derive(Clone)]
+pub struct VulkanGateSignal {
+    core: Arc<GateCore>,
+}
+
+impl std::fmt::Debug for VulkanHostGate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VulkanHostGate")
+            .field("awaited", &self.awaited.get())
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for VulkanGateSignal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VulkanGateSignal")
+            .finish_non_exhaustive()
+    }
+}
+
+impl VulkanGateSignal {
+    /// Raise the gate to `value`, releasing every submission waiting for it or less. A value at
+    /// or below the gate's current one changes nothing, so raises may arrive in any order.
+    /// Returns `false`, raising nothing, once the gate has been dropped.
+    pub fn raise(&self, value: u64) -> Result<bool, BackendError> {
+        // The state is two plain fields written together; a panic elsewhere cannot tear it.
+        let mut state = self
+            .core
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if !state.open {
+            return Ok(false);
+        }
+        if value > state.raised {
+            let info = vk::SemaphoreSignalInfo::default()
+                .semaphore(self.core.semaphore)
+                .value(value);
+            // SAFETY: the gate is open, so its device and semaphore are live: the gate closes
+            // under this lock before destroying either. The value exceeds the semaphore's current
+            // one (`raised` tracks every signal, and only this path signals).
+            unsafe { self.core.device.signal_semaphore(&info) }.map_err(backend_error)?;
+            state.raised = value;
+        }
+        Ok(true)
+    }
+}
+
+impl VulkanHostGate {
+    /// A raising handle for another thread.
+    pub fn signal(&self) -> VulkanGateSignal {
+        VulkanGateSignal {
+            core: Arc::clone(&self.core),
+        }
+    }
+}
+
+impl Drop for VulkanHostGate {
+    fn drop(&mut self) {
+        let mut state = self
+            .core
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let awaited = self.awaited.get();
+        if awaited > state.raised {
+            let info = vk::SemaphoreSignalInfo::default()
+                .semaphore(self.core.semaphore)
+                .value(awaited);
+            // SAFETY: the gate is still open and the value exceeds the current one. Releasing
+            // the waiters is what lets the idle wait below return.
+            if unsafe { self.core.device.signal_semaphore(&info) }.is_ok() {
+                state.raised = awaited;
+            }
+        }
+        state.open = false;
+        drop(state);
+        self.shared.wait_idle();
+        // SAFETY: no submission still references the semaphore (the device is idle), no raise
+        // can reach it (closed under the lock above), and it is destroyed exactly once.
+        unsafe {
+            self.shared
+                .device
+                .destroy_semaphore(self.core.semaphore, None)
+        };
+    }
+}
+
 pub struct VulkanAccelerator {
     shared: Rc<Shared>,
     next_id: Cell<u64>,
@@ -1739,6 +2012,141 @@ impl VulkanAccelerator {
     /// Whether this instance observed device loss and refuses further work.
     pub fn is_poisoned(&self) -> bool {
         self.shared.poisoned.get()
+    }
+
+    /// A new [`VulkanHostGate`] at value 0, or `Unsupported` without timeline semaphores.
+    pub fn host_gate(&self) -> Result<VulkanHostGate, BackendError> {
+        let shared = &self.shared;
+        shared.check_live()?;
+        if !shared.physical.timeline_semaphore {
+            return Err(BackendError::Unsupported);
+        }
+        let mut timeline = vk::SemaphoreTypeCreateInfo::default()
+            .semaphore_type(vk::SemaphoreType::TIMELINE)
+            .initial_value(0);
+        let info = vk::SemaphoreCreateInfo::default().push_next(&mut timeline);
+        // SAFETY: the device is live with `timelineSemaphore` enabled; `info` is a live local.
+        let semaphore = unsafe { shared.device.create_semaphore(&info, None) }
+            .map_err(|result| shared.fail(result))?;
+        Ok(VulkanHostGate {
+            shared: Rc::clone(shared),
+            core: Arc::new(GateCore {
+                device: shared.device.clone(),
+                semaphore,
+                state: Mutex::new(GateState {
+                    open: true,
+                    raised: 0,
+                }),
+            }),
+            awaited: Cell::new(0),
+        })
+    }
+
+    /// [`Accelerator::submit`], the work waiting on the device until `gate` reaches `value`
+    /// (ADR 0013). The bindings are held from now, as `submit` holds them, with one difference
+    /// the gate exists for: the bytes of the program's *input* bindings may still be written
+    /// until the gate is raised to `value` (by host stores into an imported buffer, or by a
+    /// device's DMA the host has seen complete), because raising the gate orders every host
+    /// operation before it ahead of the device's wait. Outputs, and inputs after the raise,
+    /// follow `submit`'s rules.
+    // The result type is `Accelerator::submit`'s, whose event travels in the failure.
+    #[allow(clippy::result_large_err)]
+    pub fn submit_after(
+        &self,
+        queue: &VulkanQueue,
+        program: &VulkanProgram,
+        bindings: &[BindingRef<'_, VulkanBuffer>],
+        gate: &VulkanHostGate,
+        value: u64,
+    ) -> Result<VulkanEvent, SubmitFailure<VulkanEvent>> {
+        if !Rc::ptr_eq(&gate.shared, &self.shared) {
+            return Err(SubmitFailure::Rejected(BackendError::InvalidArgument));
+        }
+        gate.awaited.set(gate.awaited.get().max(value));
+        let wait = Some((gate.core.semaphore, value));
+        self.submit_waiting(queue, program, bindings, Timeout::Infinite, wait)
+    }
+
+    /// The alignment [`import_host_buffer`](Self::import_host_buffer) requires of a pointer and a
+    /// length, or `None` when the device cannot import host memory.
+    pub fn host_import_alignment(&self) -> Option<u64> {
+        self.shared.physical.host_import_alignment
+    }
+
+    /// A buffer over caller-owned host memory, imported rather than copied (ADR 0013): the device
+    /// addresses `memory..memory + len` itself, so bytes placed there by the host, or by another
+    /// device's DMA, are the buffer's contents with no `write_buffer`. Behaves as an allocated
+    /// buffer of `desc` in every other respect: bound by submissions, gated while in flight, read
+    /// and written by the explicit transfers, released by `free_buffer`. Its domain must be
+    /// `Host` or `Shared`, the domains whose contract is host-visible memory.
+    ///
+    /// This is a host-side API of this backend, not a protocol feature: the protocol's external
+    /// memory import remains deferred.
+    ///
+    /// # Safety
+    ///
+    /// `memory..memory + len` must be live host memory (anonymous or huge-page mappings; not a
+    /// device mapping) that stays allocated and mapped, and is not remapped, until the buffer is
+    /// released and no submission that bound it is still executing. While a submission that binds
+    /// the buffer is in flight, the host must not write bytes that submission reads or read bytes
+    /// it writes.
+    pub unsafe fn import_host_buffer(
+        &self,
+        context: &VulkanContext,
+        desc: BufferDesc,
+        memory: NonNull<u8>,
+        len: u64,
+    ) -> Result<AllocatedBuffer<VulkanBuffer>, BackendError> {
+        let shared = &self.shared;
+        shared.info.validate_buffer_desc(desc)?;
+        shared.check_live()?;
+        let alignment = shared
+            .physical
+            .host_import_alignment
+            .ok_or(BackendError::Unsupported)?;
+        if !matches!(desc.domain, MemoryDomain::Host | MemoryDomain::Shared) {
+            return Err(BackendError::Unsupported);
+        }
+        if memory.as_ptr() as u64 % alignment != 0 || len % alignment != 0 || desc.bytes() > len {
+            return Err(BackendError::InvalidArgument);
+        }
+        if shared.counters.buffers.get()
+            >= u64::from(MAX_BUFFERS_PER_CONTEXT) * u64::from(MAX_CONTEXTS)
+        {
+            return Err(BackendError::ResourceLimit);
+        }
+        // SAFETY: the caller vouches for the range; alignment was checked above.
+        let raw = unsafe { RawAllocation::import(shared, memory, len) }?;
+        if raw.measured_alignment < desc.alignment() {
+            return Err(BackendError::ResourceLimit);
+        }
+        let mut properties = BufferProperties::DIRECT_BINDING | BufferProperties::HOST_VISIBLE;
+        if raw
+            .memory_flags
+            .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+        {
+            properties |= BufferProperties::DEVICE_LOCAL;
+        }
+        let info = BufferInfo::new(
+            desc,
+            raw.allocation_bytes,
+            raw.measured_alignment,
+            properties,
+        )?;
+        let (buffer, device_memory, _) = raw.into_parts();
+        increment(&shared.counters.buffers, 1);
+        Ok(AllocatedBuffer::new(
+            VulkanBuffer {
+                context: Rc::clone(&context.inner),
+                desc,
+                buffer,
+                memory: device_memory,
+                mapped: Some(memory),
+                imported: true,
+                state: Rc::new(BufferState::default()),
+            },
+            info,
+        ))
     }
 
     /// Cumulative count of buffers admitted as direct bindings.
@@ -1844,6 +2252,188 @@ impl VulkanAccelerator {
         Ok(())
     }
 
+    /// `Accelerator::submit`, the batch first waiting for `wait`'s semaphore to reach its value
+    /// when one is given (ADR 0013).
+    // The result type is `Accelerator::submit`'s, whose event travels in the failure.
+    #[allow(clippy::result_large_err)]
+    fn submit_waiting(
+        &self,
+        queue: &VulkanQueue,
+        program: &VulkanProgram,
+        bindings: &[BindingRef<'_, VulkanBuffer>],
+        timeout: Timeout,
+        wait: Option<(vk::Semaphore, u64)>,
+    ) -> Result<VulkanEvent, SubmitFailure<VulkanEvent>> {
+        let shared = &self.shared;
+        let reject = SubmitFailure::Rejected;
+        shared.check_live().map_err(reject)?;
+        // Vulkan has no cancel primitive, so a finite deadline is refused before admission rather
+        // than latched against retained resources (ADR 0006).
+        if let Timeout::AfterNs(_) = timeout {
+            return Err(reject(BackendError::DeadlineExpired));
+        }
+        if bindings.is_empty() || bindings.len() > shared.physical.tuning.max_bindings() as usize {
+            return Err(reject(BackendError::ResourceLimit));
+        }
+        if !Rc::ptr_eq(&queue.context, &program.context) {
+            return Err(reject(BackendError::InvalidArgument));
+        }
+        let context = &queue.context;
+        let plan = &program.plan;
+
+        // Per-binding reasons (bounds, access, slot) are reported before the aggregate count
+        // check so a host learns the most specific rejection first.
+        let offset_alignment = shared
+            .physical
+            .limits
+            .min_storage_buffer_offset_alignment
+            .max(WORD_BYTES);
+        let tuning = shared.physical.tuning;
+        let mut descriptors = vec![vk::DescriptorBufferInfo::default(); tuning.buffers as usize];
+        let mut seen = 0_u32;
+        for binding in bindings {
+            if !Rc::ptr_eq(&binding.buffer.context, context) {
+                return Err(reject(BackendError::InvalidArgument));
+            }
+            if !binding.buffer.desc.allows_access(binding.access) {
+                return Err(reject(BackendError::PermissionDenied));
+            }
+            let (start, _) =
+                Self::checked_range(binding.buffer, binding.range.offset, binding.range.bytes())
+                    .map_err(reject)?;
+            let index = plan
+                .slots
+                .iter()
+                .position(|slot| slot.slot == binding.slot)
+                .ok_or(reject(BackendError::Incompatible))?;
+            if seen & (1 << index) != 0 {
+                return Err(reject(BackendError::InvalidArgument));
+            }
+            seen |= 1 << index;
+            let slot_plan = &plan.slots[index];
+            let expected_access = match slot_plan.role {
+                SlotRole::Input => AccessMode::Read,
+                SlotRole::Output => AccessMode::Write,
+            };
+            if binding.access != expected_access {
+                return Err(reject(BackendError::Incompatible));
+            }
+            // The descriptor covers the range directly: exact tensor bytes, word- and
+            // `minStorageBufferOffsetAlignment`-aligned start. Byte-storage tensors are
+            // addressed by whole words, so their descriptor range extends to the containing
+            // word; the allocation behind every buffer is word-sized so that word exists.
+            if binding.range.bytes() != slot_plan.byte_len || (start as u64) % offset_alignment != 0
+            {
+                return Err(reject(BackendError::Incompatible));
+            }
+            descriptors[index] = vk::DescriptorBufferInfo {
+                buffer: binding.buffer.buffer,
+                offset: start as u64,
+                range: binding.range.bytes().div_ceil(WORD_BYTES) * WORD_BYTES,
+            };
+        }
+        if bindings.len() != plan.slots.len() {
+            return Err(reject(BackendError::Incompatible));
+        }
+        // The arena follows the slots; every element the program never addresses is filled
+        // with the first bound buffer so the whole array is valid.
+        if let Some(arena) = &program.arena {
+            descriptors[plan.arena_buffer_index() as usize] = vk::DescriptorBufferInfo {
+                buffer: arena.buffer,
+                offset: 0,
+                range: arena.bytes,
+            };
+        }
+        let filler = descriptors[0];
+        for descriptor in &mut descriptors[plan.buffer_count() as usize..] {
+            *descriptor = filler;
+        }
+        // A TOSA graph's inputs and outputs are distinct tensors, so one allocation may back
+        // several read-only slots but never a written slot together with any other slot: that
+        // aliasing is a program incompatibility, reported here rather than as a transient `Busy`
+        // from the in-flight gates below.
+        for (index, binding) in bindings.iter().enumerate() {
+            let aliased = bindings[..index].iter().any(|prior| {
+                Rc::ptr_eq(&prior.buffer.state, &binding.buffer.state)
+                    && (prior.access != AccessMode::Read || binding.access != AccessMode::Read)
+            });
+            if aliased {
+                return Err(reject(BackendError::Incompatible));
+            }
+        }
+
+        let slot_index = context
+            .claim_slot()
+            .ok_or(reject(BackendError::ResourceLimit))?;
+        let mut guards: [Option<Guard>; MAX_BINDINGS_PER_SUBMISSION as usize] =
+            [const { None }; MAX_BINDINGS_PER_SUBMISSION as usize];
+        for (index, binding) in bindings.iter().enumerate() {
+            let exclusive = binding.access != AccessMode::Read;
+            // Aliasing with a written slot was rejected above, so a conflict here can only come
+            // from another in-flight submission: a transient `Busy`.
+            match Guard::acquire(&binding.buffer.state, exclusive) {
+                Ok(guard) => guards[index] = Some(guard),
+                Err(error) => {
+                    drop(guards);
+                    context.release_slot(slot_index);
+                    return Err(reject(error));
+                }
+            }
+        }
+
+        let slot = &context.slots[slot_index as usize];
+        match self.record_and_submit(slot, program, &descriptors, wait) {
+            Ok(()) => {}
+            Err(vk::Result::ERROR_DEVICE_LOST) => {
+                // Past the admission boundary with an ambiguous outcome: the event owns the slot
+                // and latches the loss; the instance is poisoned (ADR 0006).
+                shared.poisoned.set(true);
+                program
+                    .state
+                    .in_flight
+                    .set(program.state.in_flight.get() + 1);
+                increment(&shared.counters.events, 1);
+                let event = VulkanEvent {
+                    context: Rc::clone(context),
+                    slot: slot_index,
+                    program: Rc::clone(&program.state),
+                    guards: RefCell::new(guards),
+                    latched: Cell::new(None),
+                    released: Cell::new(false),
+                };
+                event.latch(EventState::Failed(BackendError::DeviceLost));
+                return Err(SubmitFailure::Indeterminate {
+                    error: BackendError::DeviceLost,
+                    event,
+                });
+            }
+            Err(result) => {
+                // Recording and submission failures before the queue accepted the work leave
+                // every resource untouched (Vulkan guarantees this for out-of-memory results).
+                drop(guards);
+                context.release_slot(slot_index);
+                return Err(reject(shared.fail(result)));
+            }
+        }
+        program
+            .state
+            .in_flight
+            .set(program.state.in_flight.get() + 1);
+        increment(
+            &shared.counters.direct_binding_admissions,
+            bindings.len() as u64,
+        );
+        increment(&shared.counters.events, 1);
+        Ok(VulkanEvent {
+            context: Rc::clone(context),
+            slot: slot_index,
+            program: Rc::clone(&program.state),
+            guards: RefCell::new(guards),
+            latched: Cell::new(None),
+            released: Cell::new(false),
+        })
+    }
+
     /// Record every dispatch of `program` for one claimed slot and submit it with the slot's
     /// fence.
     fn record_and_submit(
@@ -1851,6 +2441,7 @@ impl VulkanAccelerator {
         slot: &Slot,
         program: &VulkanProgram,
         descriptors: &[vk::DescriptorBufferInfo],
+        wait: Option<(vk::Semaphore, u64)>,
     ) -> Result<(), vk::Result> {
         let shared = &self.shared;
         let device = &shared.device;
@@ -1893,7 +2484,21 @@ impl VulkanAccelerator {
         let host_dependency = vk::DependencyInfo::default().memory_barriers(&host_barrier);
         let submit_buffers =
             [vk::CommandBufferSubmitInfo::default().command_buffer(slot.command_buffer)];
-        let submits = [vk::SubmitInfo2::default().command_buffer_infos(&submit_buffers)];
+        // A gated submission's first dispatch waits for the gate's value; everything the host
+        // wrote before signalling it is then visible to the device (the semaphore signal operation
+        // is a host-to-device memory dependency).
+        let waits: Vec<vk::SemaphoreSubmitInfo> = wait
+            .map(|(semaphore, value)| {
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(semaphore)
+                    .value(value)
+                    .stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            })
+            .into_iter()
+            .collect();
+        let submits = [vk::SubmitInfo2::default()
+            .wait_semaphore_infos(&waits)
+            .command_buffer_infos(&submit_buffers)];
         // SAFETY: the slot is free (no submission references its command buffer, fence, or
         // descriptor set), the descriptor infos name live buffers whose ranges were validated,
         // every pipeline is live and in-flight-counted by the caller, and the pool flag lets
@@ -2101,6 +2706,7 @@ impl Accelerator for VulkanAccelerator {
                 buffer,
                 memory,
                 mapped,
+                imported: false,
                 state: Rc::new(BufferState::default()),
             },
             info,
@@ -2444,174 +3050,7 @@ impl Accelerator for VulkanAccelerator {
         bindings: &[BindingRef<'_, Self::Buffer>],
         timeout: Timeout,
     ) -> Result<Self::Event, SubmitFailure<Self::Event>> {
-        let shared = &self.shared;
-        let reject = SubmitFailure::Rejected;
-        shared.check_live().map_err(reject)?;
-        // Vulkan has no cancel primitive, so a finite deadline is refused before admission rather
-        // than latched against retained resources (ADR 0006).
-        if let Timeout::AfterNs(_) = timeout {
-            return Err(reject(BackendError::DeadlineExpired));
-        }
-        if bindings.is_empty() || bindings.len() > shared.physical.tuning.max_bindings() as usize {
-            return Err(reject(BackendError::ResourceLimit));
-        }
-        if !Rc::ptr_eq(&queue.context, &program.context) {
-            return Err(reject(BackendError::InvalidArgument));
-        }
-        let context = &queue.context;
-        let plan = &program.plan;
-
-        // Per-binding reasons (bounds, access, slot) are reported before the aggregate count
-        // check so a host learns the most specific rejection first.
-        let offset_alignment = shared
-            .physical
-            .limits
-            .min_storage_buffer_offset_alignment
-            .max(WORD_BYTES);
-        let tuning = shared.physical.tuning;
-        let mut descriptors = vec![vk::DescriptorBufferInfo::default(); tuning.buffers as usize];
-        let mut seen = 0_u32;
-        for binding in bindings {
-            if !Rc::ptr_eq(&binding.buffer.context, context) {
-                return Err(reject(BackendError::InvalidArgument));
-            }
-            if !binding.buffer.desc.allows_access(binding.access) {
-                return Err(reject(BackendError::PermissionDenied));
-            }
-            let (start, _) =
-                Self::checked_range(binding.buffer, binding.range.offset, binding.range.bytes())
-                    .map_err(reject)?;
-            let index = plan
-                .slots
-                .iter()
-                .position(|slot| slot.slot == binding.slot)
-                .ok_or(reject(BackendError::Incompatible))?;
-            if seen & (1 << index) != 0 {
-                return Err(reject(BackendError::InvalidArgument));
-            }
-            seen |= 1 << index;
-            let slot_plan = &plan.slots[index];
-            let expected_access = match slot_plan.role {
-                SlotRole::Input => AccessMode::Read,
-                SlotRole::Output => AccessMode::Write,
-            };
-            if binding.access != expected_access {
-                return Err(reject(BackendError::Incompatible));
-            }
-            // The descriptor covers the range directly: exact tensor bytes, word- and
-            // `minStorageBufferOffsetAlignment`-aligned start. Byte-storage tensors are
-            // addressed by whole words, so their descriptor range extends to the containing
-            // word; the allocation behind every buffer is word-sized so that word exists.
-            if binding.range.bytes() != slot_plan.byte_len || (start as u64) % offset_alignment != 0
-            {
-                return Err(reject(BackendError::Incompatible));
-            }
-            descriptors[index] = vk::DescriptorBufferInfo {
-                buffer: binding.buffer.buffer,
-                offset: start as u64,
-                range: binding.range.bytes().div_ceil(WORD_BYTES) * WORD_BYTES,
-            };
-        }
-        if bindings.len() != plan.slots.len() {
-            return Err(reject(BackendError::Incompatible));
-        }
-        // The arena follows the slots; every element the program never addresses is filled
-        // with the first bound buffer so the whole array is valid.
-        if let Some(arena) = &program.arena {
-            descriptors[plan.arena_buffer_index() as usize] = vk::DescriptorBufferInfo {
-                buffer: arena.buffer,
-                offset: 0,
-                range: arena.bytes,
-            };
-        }
-        let filler = descriptors[0];
-        for descriptor in &mut descriptors[plan.buffer_count() as usize..] {
-            *descriptor = filler;
-        }
-        // A TOSA graph's inputs and outputs are distinct tensors, so one allocation may back
-        // several read-only slots but never a written slot together with any other slot: that
-        // aliasing is a program incompatibility, reported here rather than as a transient `Busy`
-        // from the in-flight gates below.
-        for (index, binding) in bindings.iter().enumerate() {
-            let aliased = bindings[..index].iter().any(|prior| {
-                Rc::ptr_eq(&prior.buffer.state, &binding.buffer.state)
-                    && (prior.access != AccessMode::Read || binding.access != AccessMode::Read)
-            });
-            if aliased {
-                return Err(reject(BackendError::Incompatible));
-            }
-        }
-
-        let slot_index = context
-            .claim_slot()
-            .ok_or(reject(BackendError::ResourceLimit))?;
-        let mut guards: [Option<Guard>; MAX_BINDINGS_PER_SUBMISSION as usize] =
-            [const { None }; MAX_BINDINGS_PER_SUBMISSION as usize];
-        for (index, binding) in bindings.iter().enumerate() {
-            let exclusive = binding.access != AccessMode::Read;
-            // Aliasing with a written slot was rejected above, so a conflict here can only come
-            // from another in-flight submission: a transient `Busy`.
-            match Guard::acquire(&binding.buffer.state, exclusive) {
-                Ok(guard) => guards[index] = Some(guard),
-                Err(error) => {
-                    drop(guards);
-                    context.release_slot(slot_index);
-                    return Err(reject(error));
-                }
-            }
-        }
-
-        let slot = &context.slots[slot_index as usize];
-        match self.record_and_submit(slot, program, &descriptors) {
-            Ok(()) => {}
-            Err(vk::Result::ERROR_DEVICE_LOST) => {
-                // Past the admission boundary with an ambiguous outcome: the event owns the slot
-                // and latches the loss; the instance is poisoned (ADR 0006).
-                shared.poisoned.set(true);
-                program
-                    .state
-                    .in_flight
-                    .set(program.state.in_flight.get() + 1);
-                increment(&shared.counters.events, 1);
-                let event = VulkanEvent {
-                    context: Rc::clone(context),
-                    slot: slot_index,
-                    program: Rc::clone(&program.state),
-                    guards: RefCell::new(guards),
-                    latched: Cell::new(None),
-                    released: Cell::new(false),
-                };
-                event.latch(EventState::Failed(BackendError::DeviceLost));
-                return Err(SubmitFailure::Indeterminate {
-                    error: BackendError::DeviceLost,
-                    event,
-                });
-            }
-            Err(result) => {
-                // Recording and submission failures before the queue accepted the work leave
-                // every resource untouched (Vulkan guarantees this for out-of-memory results).
-                drop(guards);
-                context.release_slot(slot_index);
-                return Err(reject(shared.fail(result)));
-            }
-        }
-        program
-            .state
-            .in_flight
-            .set(program.state.in_flight.get() + 1);
-        increment(
-            &shared.counters.direct_binding_admissions,
-            bindings.len() as u64,
-        );
-        increment(&shared.counters.events, 1);
-        Ok(VulkanEvent {
-            context: Rc::clone(context),
-            slot: slot_index,
-            program: Rc::clone(&program.state),
-            guards: RefCell::new(guards),
-            latched: Cell::new(None),
-            released: Cell::new(false),
-        })
+        self.submit_waiting(queue, program, bindings, timeout, None)
     }
 
     fn poll_event(&self, event: &Self::Event) -> Result<EventState, BackendError> {

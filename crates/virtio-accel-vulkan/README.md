@@ -87,6 +87,12 @@ build time (ADR 0002 in `docs/adr/`).
   anyway). `Shared` and `Device` are advertised only when the device exposes a matching memory
   type. Every buffer is a dedicated allocation bound directly as a storage
   buffer; alignment is measured, never assumed.
+- **Imported host memory and host gates** (ADR 0013, host-side API, not a protocol feature):
+  where the device offers `VK_EXT_external_memory_host`, `import_host_buffer` wraps a caller's
+  page-aligned host memory (huge pages included) as a buffer the device addresses in place, so
+  bytes placed there by the host or by a drive's DMA need no `write_buffer`. `host_gate` and
+  `submit_after` queue work behind a timeline semaphore that any thread raises through a
+  `VulkanGateSignal`, so the thread that sees a read complete starts the device's work directly.
 - **Execution** (ADR 0006): a bounded per-context ring of (command buffer, fence, descriptor set)
   triples; `vkQueueSubmit2` success is the admission boundary; `poll_event` is one
   `vkGetFenceStatus` read with no worker thread; finite timeouts are rejected before admission;

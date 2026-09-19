@@ -30,10 +30,16 @@ carries a local `SAFETY:` comment. The entry points this crate calls, and nothin
 | Contexts | `vkCreateCommandPool`, `vkDestroyCommandPool`, `vkAllocateCommandBuffers`, `vkCreateDescriptorPool`, `vkDestroyDescriptorPool`, `vkAllocateDescriptorSets`, `vkCreateFence`, `vkDestroyFence` |
 | Submission | `vkUpdateDescriptorSets`, `vkResetFences`, `vkBeginCommandBuffer`, `vkCmdBindPipeline`, `vkCmdBindDescriptorSets`, `vkCmdDispatch`, `vkCmdCopyBuffer`, `vkCmdPipelineBarrier2`, `vkEndCommandBuffer`, `vkQueueSubmit2` |
 | Completion | `vkGetFenceStatus`, `vkWaitForFences` |
+| Host import and gates (ADR 0013) | `vkEnumerateDeviceExtensionProperties`, `vkGetMemoryHostPointerPropertiesEXT`, `vkCreateSemaphore`, `vkDestroySemaphore`, `vkSignalSemaphore` |
 
-All are Vulkan 1.0–1.3 core; no extension is enabled (ADR 0005). Two optional features are enabled
+All are Vulkan 1.0–1.3 core except `vkGetMemoryHostPointerPropertiesEXT`, from
+`VK_EXT_external_memory_host`: the one device extension this crate enables, only when the probe
+reports it and only for importing caller memory (ADR 0013). `ash` 0.38 has no wrapper for that
+command, so its loaded function pointer is called directly and its `VkResult` checked like every
+other. Otherwise no extension is enabled (ADR 0005). Three optional features are enabled
 at device creation when the probe reports them: `synchronization2` (mandatory; a device without it
-is not enumerated) and `bufferDeviceAddress` (used only to measure allocation alignment).
+is not enumerated), `bufferDeviceAddress` (used only to measure allocation alignment), and
+`timelineSemaphore` (only for host gates, ADR 0013).
 
 Every `VkResult` is checked before an out-value is trusted: `ash` returns `Result<T, vk::Result>`,
 and the crate never reads a handle or pointer from an `Err`. Unmapped result codes surface as
@@ -170,3 +176,33 @@ advertised domain. On 2026-09-03 the IDENTITY + MATMUL suite passed on an Intel 
 Lake, Mesa 26.0.8 ANV, Vulkan 1.4.335) and on the same host's llvmpipe; on 2026-09-06 the full
 suite for the broadened FP32 tier (ADR 0007) passed on the same Arc 140V and its llvmpipe (LLVM
 21.1.8), and on Mesa lavapipe (25.2.8, LLVM 20.1.2) in CI.
+
+## Imported host memory (ADR 0013)
+
+`VulkanAccelerator::import_host_buffer` is `unsafe`: the caller vouches that the range is live
+host memory (anonymous or huge-page mappings, not a device mapping) that stays allocated and
+mapped until the buffer is released and no submission that bound it is still executing. Inside,
+the crate checks what it can before any Vulkan call: the extension is enabled, the domain is
+`Host` or `Shared`, the pointer and length are multiples of `minImportedHostPointerAlignment`, and
+the descriptor fits the range. The memory type is one the driver reports for that pointer
+(`vkGetMemoryHostPointerPropertiesEXT`) and the buffer's requirements allow, and must be
+`HOST_VISIBLE | HOST_COHERENT`, so no flush or invalidate is needed. The buffer covers the whole
+imported range; transfers are still range-checked against the descriptor's size. An imported
+buffer's `mapped` pointer is the caller's pointer: `Drop` never unmaps it, and freeing the
+`VkDeviceMemory` releases the device's claim on the pages, not the pages. Every other rule of
+"Buffers and mappings" applies unchanged, including the in-flight gate and the wait-idle fallback
+on a contract-violating drop.
+
+## Host gates (ADR 0013)
+
+A `VulkanHostGate` owns one timeline semaphore and holds an `Rc<Shared>`, so the device outlives
+it. Its raising half, `VulkanGateSignal`, is `Send + Sync` and may be used from any thread: it
+shares an `Arc` with the gate holding a clone of the `ash::Device` function table, the semaphore
+handle, and a mutex guarding `open` and the last raised value. A raise signals only while `open`
+is set and only a value above the last one, so every `vkSignalSemaphore` targets a live semaphore
+with a strictly increasing value. The gate's `Drop` takes the same lock, raises the semaphore to
+the highest value any `submit_after` queued a wait for (releasing every waiter), clears `open`,
+releases the lock, waits for the device to idle, and only then destroys the semaphore: no
+submission references it and no raise can reach it. `vkSignalSemaphore` and `vkQueueSubmit2`
+have no external-synchronization requirement on the semaphore, so a raise on another thread needs
+no coordination with the thread that submits.
