@@ -114,7 +114,9 @@ barriers between dependent dispatches. Buffers are dedicated directly bound stor
 - **Numerics:** every float operation is `NoContraction`; `SIN`, `COS`, `TANH`, and `ERF` are
   crate-authored range reductions and polynomials (Payne–Hanek beyond |x| = 8192) rather than the
   driver's loosely specified built-ins; NaN modes follow the TOSA pseudocode literally. `MATMUL`
-  is a shared-memory tiled kernel that is bit-identical to the sequential ascending-k sum.
+  is a register-tiled shared-memory kernel, or a split-k streaming kernel for eight rows or fewer,
+  accumulating in binary32 with fused multiply-add — within a stated bound of the exact sum and
+  deterministic per device (ADR 0011).
 - **FP16 tier (ADR 0008):** the same 42 operators over binary16 tensors, advertised on every
   device the backend opens — the tier needs no device feature. Packed binary16 tensors are
   unpacked and widened to binary32 by crate-owned integer code, the float lanes evaluate in
@@ -123,7 +125,8 @@ barriers between dependent dispatches. Buffers are dedicated directly bound stor
   round-to-nearest-even code that produces subnormals on every device. `NEGATE`/`ABS` are
   integer sign operations and data movement copies lanes as integers, both exact for every bit
   pattern; MATMUL and reductions accumulate in binary32 (the accumulator width TOSA assigns
-  FP16). Numerics are bit-identical across devices by construction.
+  FP16). Numerics are bit-identical across devices by construction for every operator but
+  `MATMUL`, whose fused multiply-add is deterministic per device.
 - **FP8 tier (ADR 0009):** a separate target, because TOSA gates FP8 on the `FP8E4M3` and
   `FP8E5M2` extensions rather than the base floating-point profile, carrying eleven operators:
   TOSA's `(FP8, FP8) -> FP16` `MATMUL` over either encoding, `CAST` in both directions,

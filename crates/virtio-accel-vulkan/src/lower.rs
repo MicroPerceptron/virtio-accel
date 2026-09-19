@@ -284,6 +284,12 @@ pub(crate) enum KernelSpec {
         input: Storage,
         output: Storage,
     },
+    /// The streaming split-`k` MATMUL, selected when `m ≤ shader::STREAM_ROWS`; its lhs is
+    /// always binary32 words (widened by an inserted `Cast` when the tensor is narrower).
+    MatmulStream {
+        rhs: Storage,
+        output: Storage,
+    },
     Cast {
         input: Storage,
         output: Storage,
@@ -305,6 +311,8 @@ pub(crate) enum Work {
     Linear(u32),
     /// A tiled MATMUL over `m × n` outputs per batch.
     Matmul { m: u32, n: u32, batch: u32 },
+    /// A streaming MATMUL over `n` columns per batch.
+    MatmulStream { n: u32, batch: u32 },
 }
 
 /// One recorded `vkCmdDispatch`.
@@ -596,7 +604,8 @@ impl<'a, 'b> Lowering<'a, 'b> {
             self.locations.insert(*value, Location::Slot(slot));
         }
 
-        // Liveness: the last live consumer of every value.
+        // Liveness: the last live consumer of every value, and how many consumers it has.
+        let mut consumers: HashMap<ValueId, u32> = HashMap::new();
         for (position, operator_id) in self.order.iter().enumerate() {
             let operator = self.analysis.operator(*operator_id);
             if self.skipped(operator) {
@@ -604,8 +613,10 @@ impl<'a, 'b> Lowering<'a, 'b> {
             }
             for input in self.analysis.operator_inputs(*operator_id) {
                 self.last_use.insert(*input, position as u32);
+                *consumers.entry(*input).or_default() += 1;
             }
         }
+        self.alias_outputs(&consumers)?;
 
         for (position, operator_id) in self.order.iter().enumerate() {
             self.position = position as u32;
@@ -798,6 +809,39 @@ impl<'a, 'b> Lowering<'a, 'b> {
         Ok(self.regions.len() - 1)
     }
 
+    /// A program output produced by `IDENTITY` or `RESHAPE` from an intermediate that nothing
+    /// else reads is the intermediate under another shape: its producer writes the output slot
+    /// directly and the copy operator becomes a no-op (ADR 0012). Inputs, outputs and constants
+    /// already have their bytes elsewhere and are left alone; a second consumer would need the
+    /// intermediate to outlive the output slot's binding contract, so it is left alone too.
+    fn alias_outputs(&mut self, consumers: &HashMap<ValueId, u32>) -> Result<(), LoweringError> {
+        for output in self.outputs {
+            let Some(producer) = self.analysis.value(*output).producer() else {
+                continue;
+            };
+            let operator = self.analysis.operator(producer);
+            if self.skipped(operator) || !matches!(operator.op(), Op::IDENTITY | Op::RESHAPE) {
+                continue;
+            }
+            let Some(source) = self.analysis.operator_inputs(producer).first().copied() else {
+                continue;
+            };
+            if self.locations.contains_key(&source)
+                || self.analysis.serialized_constant(source).is_some()
+                || consumers.get(&source) != Some(&1)
+            {
+                continue;
+            }
+            let (from, to) = (self.shape(source)?, self.shape(*output)?);
+            if from.dtype != to.dtype || from.elements != to.elements {
+                continue;
+            }
+            let slot = self.locations[output];
+            self.locations.insert(source, slot);
+        }
+        Ok(())
+    }
+
     fn value_last_use(&self, value: ValueId) -> u32 {
         self.last_use.get(&value).copied().unwrap_or(self.position)
     }
@@ -912,7 +956,9 @@ impl<'a, 'b> Lowering<'a, 'b> {
     // -- operators ----------------------------------------------------------------------------
 
     /// `IDENTITY` (and any copy of `expected_inputs` operands whose first is the source): a
-    /// view when both ends live in the arena, otherwise a contiguous copy.
+    /// view whenever the result is an intermediate — over an arena region, whose lifetime the
+    /// view extends, or directly over a bound input slot — and a contiguous copy only when the
+    /// result is a program output that no producer could write directly (ADR 0012).
     fn lower_copy(
         &mut self,
         inputs: &[ValueId],
@@ -928,16 +974,22 @@ impl<'a, 'b> Lowering<'a, 'b> {
             return Err(LoweringError::UnsupportedGraph);
         }
         let from = self.input_location(inputs[0])?;
-        if let Location::Region(region) = from {
-            if !self.locations.contains_key(&output) {
-                // Arena to arena: alias the region and extend its lifetime over the view.
+        if !self.locations.contains_key(&output) {
+            // An intermediate: alias the source's bytes. An arena region's lifetime extends
+            // over the view; a bound input slot is read-only for the whole submission.
+            if let Location::Region(region) = from {
                 let live_end = self.value_last_use(output);
                 self.regions[region].live_end = self.regions[region].live_end.max(live_end);
-                self.locations.insert(output, from);
-                return Ok(());
             }
+            self.locations.insert(output, from);
+            return Ok(());
         }
         let to = self.output_location(output)?;
+        if to == from {
+            // The source was aliased to this output slot ahead of time (`alias_outputs`) and
+            // its producer has already written the bytes where they belong.
+            return Ok(());
+        }
         let storage = source.storage();
         let geometry = MoveGeometry {
             count: source.elements,
@@ -948,13 +1000,15 @@ impl<'a, 'b> Lowering<'a, 'b> {
             out_offset: 0,
         };
         let spec = move_spec(self.operand(from), self.operand(to), geometry, true);
+        // A contiguous copy runs one invocation per destination word (`shader`), so the work
+        // item count is words, not elements.
         self.dispatch(
             KernelSpec::Move {
                 storage,
                 contiguous: true,
             },
             spec,
-            Work::Linear(source.elements),
+            Work::Linear(source.elements.div_ceil(storage.lanes())),
             &[from],
             to,
             output,
@@ -1187,13 +1241,14 @@ impl<'a, 'b> Lowering<'a, 'b> {
             out_offset: 0,
         };
         let spec = move_spec(self.operand(from), self.operand(to), geometry, true);
+        // One invocation per destination word (`shader::assemble_contiguous_lanes`).
         self.dispatch(
             KernelSpec::Cast {
                 input: source.storage(),
                 output: destination.storage(),
             },
             spec,
-            Work::Linear(source.elements),
+            Work::Linear(source.elements.div_ceil(destination.storage().lanes())),
             &[from],
             to,
             output,
@@ -1233,26 +1288,90 @@ impl<'a, 'b> Lowering<'a, 'b> {
         let from_lhs = self.input_location(*lhs)?;
         let from_rhs = self.input_location(*rhs)?;
         let to = self.output_location(output)?;
-        let spec = matmul_spec(
-            self.operand(from_lhs),
-            self.operand(from_rhs),
-            self.operand(to),
-            m,
-            n,
-            k,
-            batch,
-        );
-        self.dispatch(
-            KernelSpec::Matmul {
-                input: lhs_shape.storage(),
-                output: out_shape.storage(),
-            },
-            spec,
-            Work::Matmul { m, n, batch },
-            &[from_lhs, from_rhs],
-            to,
-            output,
-        );
+        let (input, output_storage) = (lhs_shape.storage(), out_shape.storage());
+        if m <= crate::shader::STREAM_ROWS {
+            // A few rows against a wide matrix is bandwidth-bound and gets the streaming kernel,
+            // which reads the lhs as binary32 words: a narrower lhs is widened first into an
+            // arena intermediate that lives only for this operator (`batch · m · k` words, small
+            // next to the weights it saves the kernel from widening in every lane).
+            let lhs_words = if input == Storage::Word {
+                from_lhs
+            } else {
+                let count = batch
+                    .checked_mul(m)
+                    .and_then(|rows| rows.checked_mul(k))
+                    .ok_or(LoweringError::ResourceLimit)?;
+                let region = self.allocate_region(u64::from(count) * 4, self.position)?;
+                let widened = Location::Region(region);
+                let geometry = MoveGeometry {
+                    count,
+                    dims: [1; MAX_RANK],
+                    in_strides: [0; MAX_RANK],
+                    in_offset: 0,
+                    out_strides: [0; MAX_RANK],
+                    out_offset: 0,
+                };
+                let spec = move_spec(
+                    self.operand(from_lhs),
+                    self.operand(widened),
+                    geometry,
+                    true,
+                );
+                self.dispatch(
+                    KernelSpec::Cast {
+                        input,
+                        output: Storage::Word,
+                    },
+                    spec,
+                    Work::Linear(count),
+                    &[from_lhs],
+                    widened,
+                    output,
+                );
+                widened
+            };
+            let spec = matmul_spec(
+                self.operand(lhs_words),
+                self.operand(from_rhs),
+                self.operand(to),
+                m,
+                n,
+                k,
+                batch,
+            );
+            self.dispatch(
+                KernelSpec::MatmulStream {
+                    rhs: input,
+                    output: output_storage,
+                },
+                spec,
+                Work::MatmulStream { n, batch },
+                &[lhs_words, from_rhs],
+                to,
+                output,
+            );
+        } else {
+            let spec = matmul_spec(
+                self.operand(from_lhs),
+                self.operand(from_rhs),
+                self.operand(to),
+                m,
+                n,
+                k,
+                batch,
+            );
+            self.dispatch(
+                KernelSpec::Matmul {
+                    input,
+                    output: output_storage,
+                },
+                spec,
+                Work::Matmul { m, n, batch },
+                &[from_lhs, from_rhs],
+                to,
+                output,
+            );
+        }
         Ok(())
     }
 
@@ -1832,19 +1951,31 @@ mod tests {
                 contiguous: true
             }
         );
-        assert_eq!(plan.dispatches[0].work, Work::Linear(expected));
+        // Two binary16 lanes per destination word, one invocation per word.
+        assert_eq!(plan.dispatches[0].work, Work::Linear(expected.div_ceil(2)));
 
+        // Two rows: the streaming kernel, its FP16 lhs widened first into the arena.
         let plan = lower_tosa(MATMUL_FP16.artifact, VULKAN_TOSA_TARGET).unwrap();
+        assert_eq!(plan.dispatches.len(), 2);
         assert_eq!(
             plan.dispatches[0].kernel,
-            KernelSpec::Matmul {
+            KernelSpec::Cast {
                 input: Storage::Half,
+                output: Storage::Word
+            }
+        );
+        assert_eq!(plan.dispatches[0].work, Work::Linear(6));
+        assert_eq!(
+            plan.dispatches[1].kernel,
+            KernelSpec::MatmulStream {
+                rhs: Storage::Half,
                 output: Storage::Half
             }
         );
+        assert!(plan.dispatches[1].barrier_before, "reads the widened lhs");
+        assert_eq!(plan.arena_bytes, ARENA_ALIGNMENT);
         assert_eq!(plan.slot(0).unwrap().byte_len, 6 * 2);
         assert_eq!(plan.slot(2).unwrap().byte_len, 4 * 2);
-        assert_eq!(plan.arena_bytes, 0);
 
         let plan = lower_tosa(MAX_POOL2D_FP16.artifact, VULKAN_TOSA_TARGET).unwrap();
         assert_eq!(
@@ -1907,21 +2038,15 @@ mod tests {
         assert_eq!(plan.slot(2).unwrap().byte_len, 4 * 4);
         assert_eq!(plan.dispatches.len(), 1);
         let dispatch = &plan.dispatches[0];
+        // Two rows: the streaming kernel, reading the FP32 lhs directly.
         assert_eq!(
             dispatch.kernel,
-            KernelSpec::Matmul {
-                input: Storage::Word,
+            KernelSpec::MatmulStream {
+                rhs: Storage::Word,
                 output: Storage::Word
             }
         );
-        assert_eq!(
-            dispatch.work,
-            Work::Matmul {
-                m: 2,
-                n: 2,
-                batch: 1
-            }
-        );
+        assert_eq!(dispatch.work, Work::MatmulStream { n: 2, batch: 1 });
         // lhs, rhs, out operands then m, n, k, batch.
         assert_eq!(dispatch.spec, vec![0, 0, 1, 0, 2, 0, 2, 2, 3, 1]);
         // The zero-point constants are consumed at admission, never uploaded.

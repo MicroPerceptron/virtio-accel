@@ -198,6 +198,7 @@ const GLSL_EXP: u32 = 27;
 const GLSL_LOG: u32 = 28;
 const GLSL_INVERSE_SQRT: u32 = 32;
 const GLSL_UMIN: u32 = 38;
+const GLSL_FMA: u32 = 50;
 const GLSL_FIND_U_MSB: u32 = 75;
 
 /// A SPIR-V result id.
@@ -228,6 +229,17 @@ pub enum Storage {
     /// repacked with `OpAtomicAnd`/`OpAtomicOr` on store, so a kernel never modifies the
     /// neighbouring element of its word.
     Half,
+}
+
+impl Storage {
+    /// Elements packed into one 32-bit storage word.
+    pub const fn lanes(self) -> u32 {
+        match self {
+            Self::Word => 1,
+            Self::Half => 2,
+            Self::Byte | Self::Quarter(_) => 4,
+        }
+    }
 }
 
 /// TOSA NaN-propagation attribute value a kernel is specialized for.
@@ -373,7 +385,8 @@ pub enum KernelKey {
         workgroup: u32,
         buffers: u32,
     },
-    /// Batched matrix multiplication over `tile × tile` workgroup-shared binary32 tiles. Both
+    /// Batched, register-tiled matrix multiplication: a `tile × tile` workgroup computes a
+    /// [`matmul_block`]-sided output square from workgroup-shared binary32 slabs. Both
     /// operands are read at `input` storage and accumulate in binary32 — the accumulator width
     /// TOSA assigns FP16 and FP8 MATMUL — and the result is stored at `output` storage. The two
     /// differ only for the FP8 tier, where TOSA defines MATMUL as `(FP8, FP8) -> FP16`.
@@ -381,6 +394,16 @@ pub enum KernelKey {
         input: Storage,
         output: Storage,
         tile: u32,
+        buffers: u32,
+    },
+    /// Split-`k` streaming MATMUL for `m ≤` [`STREAM_ROWS`] rows ([`assemble_matmul_stream`]):
+    /// a 1-D workgroup of [`STREAM_WORKGROUP`] invocations over [`STREAM_COLUMNS`] columns of
+    /// `rhs` (read at `rhs` storage, a word per invocation), the lhs read as binary32 words —
+    /// lowering widens a narrower lhs beforehand — and one fixed-order reduction of the `k`
+    /// slices at the end. Same accumulator width as [`Self::Matmul`].
+    MatmulStream {
+        rhs: Storage,
+        output: Storage,
         buffers: u32,
     },
     /// NHWC max pooling with padding excluded from the window, at `float` storage.
@@ -430,7 +453,12 @@ impl KernelKey {
                 output,
                 tile,
                 buffers,
-            } => assemble_matmul(input, output, tile, buffers),
+            } => assemble_matmul(input, output, MatmulGeometry::wide(tile), buffers),
+            Self::MatmulStream {
+                rhs,
+                output,
+                buffers,
+            } => assemble_matmul_stream(rhs, output, buffers),
             Self::MaxPool {
                 nan_mode,
                 float,
@@ -533,8 +561,33 @@ impl KernelKey {
                 buffers: 5,
             });
         }
+        for float in [Storage::Word, Storage::Half] {
+            keys.push(KernelKey::MatmulStream {
+                rhs: float,
+                output: float,
+                buffers: 17,
+            });
+        }
+        // The lhs widening lowering inserts ahead of a skinny FP16 MATMUL.
+        keys.push(KernelKey::Cast {
+            input: Storage::Half,
+            output: Storage::Word,
+            workgroup: 64,
+            buffers: 17,
+        });
+        keys.push(KernelKey::Cast {
+            input: Storage::Word,
+            output: Storage::Half,
+            workgroup: 64,
+            buffers: 17,
+        });
         // The FP8 tier: TOSA's `(FP8, FP8) -> FP16` MATMUL, and exact FP8 data movement.
         for format in [Fp8Format::E4M3, Fp8Format::E5M2] {
+            keys.push(KernelKey::MatmulStream {
+                rhs: Storage::Quarter(format),
+                output: Storage::Half,
+                buffers: 17,
+            });
             keys.push(KernelKey::Matmul {
                 input: Storage::Quarter(format),
                 output: Storage::Half,
@@ -626,7 +679,7 @@ impl KernelKey {
                 base + shape + op.extra_spec_constants()
             }
             Self::Reduce { .. } => 2 + 2 + 3,
-            Self::Matmul { .. } => 3 * 2 + 4,
+            Self::Matmul { .. } | Self::MatmulStream { .. } => 3 * 2 + 4,
             Self::MaxPool { .. } => 2 + 2 + 12,
             Self::Move { contiguous, .. } => {
                 if contiguous {
@@ -647,7 +700,8 @@ impl KernelKey {
             | Self::MaxPool { workgroup, .. }
             | Self::Move { workgroup, .. }
             | Self::Cast { workgroup, .. } => [workgroup, 1, 1],
-            Self::Matmul { tile, .. } => [tile, tile, 1],
+            Self::Matmul { tile, .. } => MatmulGeometry::wide(tile).local_size(),
+            Self::MatmulStream { .. } => [STREAM_WORKGROUP, 1, 1],
         }
     }
 }
@@ -814,9 +868,97 @@ pub const fn linear_workgroups(count: u32, workgroup: u32, limit: u32) -> u32 {
     }
 }
 
+/// Outputs per invocation per side of the register-tiled MATMUL: each invocation of a
+/// `tile × tile` workgroup accumulates a `MATMUL_MICRO × MATMUL_MICRO` block, so the workgroup
+/// covers a [`matmul_block`]-sided square of the result.
+pub const MATMUL_MICRO: u32 = 4;
+
+/// Rows the streaming MATMUL kernel carries per invocation, and the row count at or below which
+/// lowering selects it over the register-tiled kernel.
+pub const STREAM_ROWS: u32 = 8;
+
+/// Output columns one streaming MATMUL workgroup covers.
+pub const STREAM_COLUMNS: u32 = 16;
+
+/// Invocations of a streaming MATMUL workgroup: `STREAM_COLUMNS / lanes` weight words times
+/// `STREAM_WORKGROUP / that` slices of `k`.
+pub const STREAM_WORKGROUP: u32 = 64;
+
+/// Bytes of workgroup-shared memory the streaming kernel declares for its final reduction:
+/// every invocation's `STREAM_ROWS × lanes` partial sums, at the widest lane count.
+pub const fn stream_matmul_shared_bytes() -> u32 {
+    STREAM_WORKGROUP * STREAM_ROWS * 4 * 4
+}
+
+/// Workgroup counts of a streaming MATMUL over `n` columns and `batch` batches.
+pub const fn stream_matmul_workgroups(n: u32, batch: u32) -> [u32; 3] {
+    [n.div_ceil(STREAM_COLUMNS), 1, batch]
+}
+
+/// Side of the output square one MATMUL workgroup of `tile × tile` invocations computes.
+pub const fn matmul_block(tile: u32) -> u32 {
+    tile * MATMUL_MICRO
+}
+
+/// Bytes of workgroup-shared memory the MATMUL kernels at `tile` declare, whichever kernel
+/// needs more.
+pub const fn matmul_shared_bytes(tile: u32) -> u32 {
+    let wide = MatmulGeometry::wide(tile).shared_bytes();
+    let stream = stream_matmul_shared_bytes();
+    if wide > stream { wide } else { stream }
+}
+
 /// Workgroup counts of a tiled MATMUL over `m` rows, `n` columns, and `batch` batches.
 pub const fn matmul_workgroups(m: u32, n: u32, batch: u32, tile: u32) -> [u32; 3] {
-    [n.div_ceil(tile), m.div_ceil(tile), batch]
+    let block = matmul_block(tile);
+    [n.div_ceil(block), m.div_ceil(block), batch]
+}
+
+/// Shape of one MATMUL workgroup: `tile_x × tile_y` invocations, each accumulating a
+/// `micro_m × micro_n` register block, over shared-memory slabs `depth` deep in `k`. Every
+/// dimension is a power of two and the two slabs stage evenly over the invocations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MatmulGeometry {
+    pub tile_x: u32,
+    pub tile_y: u32,
+    pub micro_m: u32,
+    pub micro_n: u32,
+    pub depth: u32,
+}
+
+impl MatmulGeometry {
+    /// The square register-tiled geometry: `tile × tile` invocations, [`MATMUL_MICRO`]² each,
+    /// `tile` deep — a 64 × 64 block at the preferred tile.
+    pub const fn wide(tile: u32) -> Self {
+        Self {
+            tile_x: tile,
+            tile_y: tile,
+            micro_m: MATMUL_MICRO,
+            micro_n: MATMUL_MICRO,
+            depth: tile,
+        }
+    }
+
+    pub const fn invocations(self) -> u32 {
+        self.tile_x * self.tile_y
+    }
+
+    pub const fn block_m(self) -> u32 {
+        self.tile_y * self.micro_m
+    }
+
+    pub const fn block_n(self) -> u32 {
+        self.tile_x * self.micro_n
+    }
+
+    pub const fn local_size(self) -> [u32; 3] {
+        [self.tile_x, self.tile_y, 1]
+    }
+
+    /// Two binary32 slabs: lhs `block_m × depth` (stored transposed) and rhs `depth × block_n`.
+    pub const fn shared_bytes(self) -> u32 {
+        (self.block_m() + self.block_n()) * self.depth * 4
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1521,123 +1663,134 @@ impl Builder {
         let ty = self.f32_ty();
         self.value(OP_F_NEGATE, ty, &[a])
     }
+    /// `a · b + c` as two separately rounded operations, never contracted: the polynomial
+    /// lanes were tuned against binary64 references with exactly this rounding.
     fn fma_free(&mut self, a: Id, b: Id, c: Id) -> Id {
-        // `a * b + c` as two separately rounded operations (never contracted).
         let product = self.fmul(a, b);
         self.fadd(product, c)
+    }
+    /// `a · b + c` as one fused multiply-add: the GLSL `Fma` instruction decorated
+    /// `NoContraction`, which Vulkan defines as a single correctly rounded operation rather than
+    /// a multiply the driver may or may not fuse with the add (ADR 0011).
+    fn fma(&mut self, a: Id, b: Id, c: Id) -> Id {
+        let ty = self.f32_ty();
+        let glsl = self.glsl;
+        let id = self.value(OP_EXT_INST, ty, &[glsl, GLSL_FMA, a, b, c]);
+        instruction(
+            &mut self.annotations,
+            OP_DECORATE,
+            &[id, DECORATION_NO_CONTRACTION],
+        );
+        id
     }
 
     // -- crate-owned binary16 conversions (ADR 0008) --------------------------------------------
 
     /// Widen packed FP8 bits (a `u32` in `0..=0xff`) to binary32, exactly. The kernel twin of
-    /// [`virtio_accel_tosa::fp8e4m3_to_f32`] / [`virtio_accel_tosa::fp8e5m2_to_f32`]: integer
-    /// expansion for normals and specials, one exact multiply for subnormals. Every FP8 value
-    /// is representable in binary32, so all 256 patterns of each format widen exactly on every
-    /// device, and no `OpFConvert` appears that a driver could demote.
+    /// [`virtio_accel_tosa::fp8e4m3_to_f32`] / [`virtio_accel_tosa::fp8e5m2_to_f32`]; every FP8
+    /// value is representable in binary32, so all 256 patterns of each format widen exactly on
+    /// every device, and no `OpFConvert` appears that a driver could demote.
+    ///
+    /// The exponent-offset construction (shared with [`Self::widen_f16`]): place the magnitude
+    /// bits at the top of a binary32 significand under a fixed exponent `K` chosen so that a
+    /// *normal* encoding reads off directly as `1.m · 2^(e - bias)`. A subnormal encoding then
+    /// reads as `1.m · 2^(1 - bias)` and the value wanted is `0.m · 2^(1 - bias)`, which is
+    /// `(x - 2^(1 - bias)) · 2` — two exact binary32 operations, since `x` and the constant
+    /// share a binade. Nothing here produces a binary32 denormal (the smallest result is the
+    /// format's smallest subnormal, `2^-9` or `2^-16`), so a device that flushes denormals
+    /// computes the same bits. Specials are one compare and one select. About half the
+    /// instructions of the integer-only expansion it replaced, which matters because the
+    /// MATMUL kernels widen every staged element.
     fn widen_fp8(&mut self, format: Fp8Format, bits: Id) -> Id {
-        let (exponent_shift, exponent_mask, fraction_mask, rebias, mantissa_shift, scale) =
-            match format {
-                // Subnormal E4M3 is `fraction · 2^-9`; E5M2 is `fraction · 2^-16`.
-                Fp8Format::E4M3 => (3_u32, 0x0f_u32, 0x07_u32, 120_u32, 20_u32, 1.0_f32 / 512.0),
-                Fp8Format::E5M2 => (2, 0x1f, 0x03, 112, 21, 1.0_f32 / 65_536.0),
-            };
+        // Mantissa width, the fixed exponent `K = 127 - bias`, and the top exponent field.
+        let (mantissa_bits, k, top_exponent) = match format {
+            Fp8Format::E4M3 => (3_u32, 120_u32, 15_u32),
+            Fp8Format::E5M2 => (2, 112, 31),
+        };
+        let magnitude_mask = self.c_u32(0x7f);
+        let shift = self.c_u32(23 - mantissa_bits);
+        let k_bits = self.c_u32(k << 23);
+        let mantissa_shift = self.c_u32(mantissa_bits);
         let zero = self.c_u32(0);
+        let implicit_one = self.c_f32(f32::from_bits(k << 23));
         let sign_mask = self.c_u32(0x80);
         let twenty_four = self.c_u32(24);
-        let twenty_three = self.c_u32(23);
-        let sign = self.band(bits, sign_mask);
-        let sign = self.shl(sign, twenty_four);
-        let exponent_shift = self.c_u32(exponent_shift);
-        let exponent_mask_c = self.c_u32(exponent_mask);
-        let fraction_mask_c = self.c_u32(fraction_mask);
-        let exponent = self.shr(bits, exponent_shift);
-        let exponent = self.band(exponent, exponent_mask_c);
-        let fraction = self.band(bits, fraction_mask_c);
-        // Normal: rebias the exponent into binary32 and shift the fraction up.
-        let rebias = self.c_u32(rebias);
-        let biased = self.iadd(exponent, rebias);
-        let normal = self.shl(biased, twenty_three);
-        let mantissa_shift = self.c_u32(mantissa_shift);
-        let shifted = self.shl(fraction, mantissa_shift);
-        let normal = self.bor(normal, shifted);
-        let normal = self.bor(normal, sign);
-        // Subnormal or zero: an exact multiply; a zero fraction keeps the sign, so signed zero
-        // survives.
-        let scale = self.c_f32(scale);
-        let scaled = self.u_to_f(fraction);
-        let subnormal = self.fmul(scaled, scale);
-        let subnormal = self.bitcast_u32(subnormal);
-        let subnormal = self.bor(subnormal, sign);
+        let magnitude = self.band(bits, magnitude_mask);
+        let placed = self.shl(magnitude, shift);
+        // An add, not an or: the encoding's exponent field and `K` overlap in the binary32
+        // exponent bits, and the construction is `e + K`.
+        let x_bits = self.iadd(placed, k_bits);
+        let x = self.bitcast_f32(x_bits);
+        let exponent = self.shr(magnitude, mantissa_shift);
         let is_subnormal = self.ieq(exponent, zero);
-        let value = self.select_u32(is_subnormal, subnormal, normal);
+        let difference = self.fsub(x, implicit_one);
+        let subnormal = self.fadd(difference, difference);
+        let value = self.select_f32(is_subnormal, subnormal, x);
+        let value = self.bitcast_u32(value);
         // Specials differ: E4M3's top exponent stays finite except for the all-ones fraction,
-        // which is its only NaN; E5M2's top exponent is infinity or NaN as usual.
-        match format {
+        // which is its only NaN; E5M2's top exponent is infinity or NaN as usual, payload kept.
+        let value = match format {
             Fp8Format::E4M3 => {
+                let nan_pattern = self.c_u32(0x7f);
                 let quiet_nan = self.c_u32(0x7fc0_0000);
-                let top_exponent = self.c_u32(exponent_mask);
-                let top_fraction = self.c_u32(fraction_mask);
-                let exponent_is_top = self.ieq(exponent, top_exponent);
-                let fraction_is_top = self.ieq(fraction, top_fraction);
-                let is_nan = self.land(exponent_is_top, fraction_is_top);
-                let nan = self.bor(sign, quiet_nan);
-                let value = self.select_u32(is_nan, nan, value);
-                self.bitcast_f32(value)
+                let is_nan = self.ieq(magnitude, nan_pattern);
+                self.select_u32(is_nan, quiet_nan, value)
             }
             Fp8Format::E5M2 => {
+                let top = self.c_u32(top_exponent);
                 let inf_bits = self.c_u32(0x7f80_0000);
-                let top_exponent = self.c_u32(exponent_mask);
-                let is_infnan = self.ieq(exponent, top_exponent);
-                let infnan = self.bor(sign, inf_bits);
-                let payload = self.shl(fraction, mantissa_shift);
-                let infnan = self.bor(infnan, payload);
-                let value = self.select_u32(is_infnan, infnan, value);
-                self.bitcast_f32(value)
+                let fraction_mask = self.c_u32((1 << mantissa_bits) - 1);
+                let is_infnan = self.ieq(exponent, top);
+                let fraction = self.band(magnitude, fraction_mask);
+                let payload = self.shl(fraction, shift);
+                let infnan = self.bor(inf_bits, payload);
+                self.select_u32(is_infnan, infnan, value)
             }
-        }
+        };
+        let sign = self.band(bits, sign_mask);
+        let sign = self.shl(sign, twenty_four);
+        let value = self.bor(value, sign);
+        self.bitcast_f32(value)
     }
 
     /// Widen packed binary16 bits (a `u32` in `0..=0xffff`) to binary32, exactly. This is the
-    /// kernel twin of the host [`f16_to_f32`]: integer expansion only, so every value —
-    /// subnormals included — is exact on every device, and there is no `OpFConvert` pattern a
-    /// driver can demote back to f16 (ADR 0008: ANV, RADV, and Apple all demote them).
+    /// kernel twin of the host [`f16_to_f32`], by the exponent-offset construction described at
+    /// [`Self::widen_fp8`] (`K = 112`, subnormals as `(x - 2^-15) · 2`): every value —
+    /// subnormals included — is exact on every device, no binary32 denormal is ever formed, and
+    /// there is no `OpFConvert` pattern a driver can demote back to f16 (ADR 0008).
     fn widen_f16(&mut self, bits: Id) -> Id {
-        let sixteen = self.c_u32(16);
-        let ten = self.c_u32(10);
+        let magnitude_mask = self.c_u32(0x7fff);
         let thirteen = self.c_u32(13);
-        let twenty_three = self.c_u32(23);
+        let ten = self.c_u32(10);
+        let sixteen = self.c_u32(16);
+        let k_bits = self.c_u32(112 << 23);
+        let implicit_one = self.c_f32(f32::from_bits(112 << 23));
         let zero = self.c_u32(0);
-        let sign_mask = self.c_u32(0x8000);
-        let exponent_mask = self.c_u32(0x1f);
-        let mantissa_mask = self.c_u32(0x3ff);
-        let rebias = self.c_u32(112);
-        let inf_bits = self.c_u32(0x7f80_0000);
         let thirty_one = self.c_u32(31);
-        let scale = self.c_f32(1.0 / 16_777_216.0);
+        let inf_bits = self.c_u32(0x7f80_0000);
+        let mantissa_mask = self.c_u32(0x3ff);
+        let sign_mask = self.c_u32(0x8000);
+        let magnitude = self.band(bits, magnitude_mask);
+        let placed = self.shl(magnitude, thirteen);
+        // An add, not an or: the encoding's exponent field and `K` overlap in the binary32
+        // exponent bits, and the construction is `e + K`.
+        let x_bits = self.iadd(placed, k_bits);
+        let x = self.bitcast_f32(x_bits);
+        let exponent = self.shr(magnitude, ten);
+        let is_subnormal = self.ieq(exponent, zero);
+        let difference = self.fsub(x, implicit_one);
+        let subnormal = self.fadd(difference, difference);
+        let value = self.select_f32(is_subnormal, subnormal, x);
+        let value = self.bitcast_u32(value);
+        // Infinity or NaN: exponent all ones, payload preserved.
+        let is_infnan = self.ieq(exponent, thirty_one);
+        let mantissa = self.band(magnitude, mantissa_mask);
+        let payload = self.shl(mantissa, thirteen);
+        let infnan = self.bor(inf_bits, payload);
+        let value = self.select_u32(is_infnan, infnan, value);
         let sign = self.band(bits, sign_mask);
         let sign = self.shl(sign, sixteen);
-        let exponent = self.shr(bits, ten);
-        let exponent = self.band(exponent, exponent_mask);
-        let mantissa = self.band(bits, mantissa_mask);
-        // Normal: rebias the exponent (+112) and shift the mantissa up.
-        let biased = self.iadd(exponent, rebias);
-        let normal = self.shl(biased, twenty_three);
-        let shifted = self.shl(mantissa, thirteen);
-        let normal = self.bor(normal, shifted);
-        let normal = self.bor(normal, sign);
-        // Subnormal or zero: `mantissa · 2^-24`, exact for every 10-bit mantissa.
-        let scaled = self.u_to_f(mantissa);
-        let subnormal = self.fmul(scaled, scale);
-        let subnormal = self.bitcast_u32(subnormal);
-        let subnormal = self.bor(subnormal, sign);
-        // Infinity or NaN: exponent all ones, payload preserved.
-        let infnan = self.bor(sign, inf_bits);
-        let shifted = self.shl(mantissa, thirteen);
-        let infnan = self.bor(infnan, shifted);
-        let is_subnormal = self.ieq(exponent, zero);
-        let is_infnan = self.ieq(exponent, thirty_one);
-        let value = self.select_u32(is_subnormal, subnormal, normal);
-        let value = self.select_u32(is_infnan, infnan, value);
+        let value = self.bor(value, sign);
         self.bitcast_f32(value)
     }
 
@@ -2057,6 +2210,115 @@ impl Builder {
                 self.widen_f16(bits)
             }
             Storage::Byte => unreachable!("byte storage is not a float lane"),
+        }
+    }
+
+    /// The raw bits of the `lanes` consecutive elements `base..base + lanes` of a `storage`
+    /// operand, one `u32` per element (`0..=0xff` at byte storage, `0..=0xffff` at half storage,
+    /// the whole word otherwise), loading every storage word the group touches exactly once.
+    ///
+    /// `base` must be a multiple of `lanes`. When the source packs no more elements per word
+    /// than the group holds, the group starts on a word boundary and each lane's word and shift
+    /// are compile-time constants; when it packs more (FP8 bytes feeding an FP16 pair), the group
+    /// is a sub-span of one word at a run-time byte offset, and still one load.
+    fn load_lane_group(
+        &mut self,
+        storage: Storage,
+        buffers: Id,
+        operand: (Id, Id),
+        base: Id,
+        lanes: u32,
+    ) -> Vec<Id> {
+        let source_lanes = storage.lanes();
+        let lane_bits = 32 / source_lanes;
+        let first = match source_lanes.trailing_zeros() {
+            0 => base,
+            shift => {
+                let shift = self.c_u32(shift);
+                self.shr(base, shift)
+            }
+        };
+        let words: Vec<Id> = (0..lanes.div_ceil(source_lanes))
+            .map(|word| {
+                let word = self.c_u32(word);
+                let index = self.iadd(first, word);
+                self.load_word(buffers, operand, index)
+            })
+            .collect();
+        if lane_bits == 32 {
+            return words;
+        }
+        let mask = self.c_u32((1 << lane_bits) - 1);
+        let offset = (source_lanes > lanes).then(|| {
+            let modulus = self.c_u32(source_lanes - 1);
+            self.band(base, modulus)
+        });
+        (0..lanes)
+            .map(|lane| {
+                let word = words[(lane / source_lanes) as usize];
+                let shift = match offset {
+                    None => self.c_u32((lane % source_lanes) * lane_bits),
+                    Some(offset) => {
+                        let lane = self.c_u32(lane % source_lanes);
+                        let position = self.iadd(offset, lane);
+                        let bits = self.c_u32(lane_bits);
+                        self.imul(position, bits)
+                    }
+                };
+                let shifted = self.shr(word, shift);
+                self.band(shifted, mask)
+            })
+            .collect()
+    }
+
+    /// Pack lane values — each already within `32 / values.len()` bits — into one storage word,
+    /// lane 0 lowest.
+    fn pack_lanes(&mut self, values: &[Id]) -> Id {
+        let lane_bits = 32 / values.len() as u32;
+        let mut word = values[0];
+        for (lane, value) in values.iter().enumerate().skip(1) {
+            let shift = self.c_u32(lane as u32 * lane_bits);
+            let shifted = self.shl(*value, shift);
+            word = self.bor(word, shifted);
+        }
+        word
+    }
+
+    /// Store raw bits into one element of `storage` without touching its word neighbours.
+    fn store_lane_bits(
+        &mut self,
+        storage: Storage,
+        buffers: Id,
+        operand: (Id, Id),
+        element: Id,
+        bits: Id,
+    ) {
+        match storage {
+            Storage::Word => self.store_word(buffers, operand, element, bits),
+            Storage::Half => self.store_half_bits(buffers, operand, element, bits),
+            Storage::Byte | Storage::Quarter(_) => {
+                self.store_byte_bits(buffers, operand, element, bits)
+            }
+        }
+    }
+
+    /// Widen one element's raw storage bits to binary32.
+    fn widen_bits(&mut self, storage: Storage, bits: Id) -> Id {
+        match storage {
+            Storage::Word => self.bitcast_f32(bits),
+            Storage::Half => self.widen_f16(bits),
+            Storage::Quarter(format) => self.widen_fp8(format, bits),
+            Storage::Byte => unreachable!("byte storage is not a float lane"),
+        }
+    }
+
+    /// Narrow binary32 to the raw storage bits of `storage`, crate-owned rounding throughout.
+    fn narrow_bits(&mut self, storage: Storage, value: Id) -> Id {
+        match storage {
+            Storage::Word => self.bitcast_u32(value),
+            Storage::Half => self.narrow_f16(value),
+            Storage::Quarter(format) => self.narrow_fp8(format, value),
+            Storage::Byte => unreachable!("BOOL is not a float storage"),
         }
     }
 
@@ -2804,17 +3066,178 @@ fn assemble_reduce(op: ReduceOp, float: Storage, workgroup: u32, buffers: u32) -
     b.finish([workgroup, 1, 1])
 }
 
-/// Batched MATMUL over `tile × tile` workgroup tiles of both operands, reading `float` storage
-/// (FP32 words or packed FP16) and accumulating in binary32 — the accumulator width TOSA
-/// assigns FP16 MATMUL, and the FP32 tier's own width.
+/// One operand slab of the MATMUL kernel: `rows × cols` elements whose element `(r, c)` lives at
+/// `base + (row0 + r) · stride + (col0 + c)` and is in range when `row0 + r < row_limit` and
+/// `col0 + c < col_limit`; staged to `tile` at slot `c · rows + r` when `transposed`, else
+/// `r · cols + c`.
+struct Slab {
+    operand: (Id, Id),
+    rows: u32,
+    cols: u32,
+    row0: Id,
+    col0: Id,
+    stride: Id,
+    base: Id,
+    row_limit: Id,
+    col_limit: Id,
+    transposed: bool,
+    tile: Id,
+}
+
+/// Stage a slab cooperatively: the `invocations` of the workgroup take slab elements (or, for
+/// sub-word storage, slab *words*) `q · invocations + lid` in turn, so consecutive invocations
+/// read consecutive addresses. Out-of-range elements read element zero and stage `0.0`.
+///
+/// Sub-word storage is staged a storage word per invocation — four FP8 or two FP16 elements
+/// from one `OpLoad` — whenever `stride` is a multiple of the lanes per word, which makes every
+/// slab row word-aligned (`col0` and `base` are multiples of the row length or of `stride`).
+/// The check is on a specialization constant, so the driver folds it and only one path
+/// survives pipeline creation. This is what makes FP8 cheaper than FP32 rather than merely
+/// smaller: on Intel Xe3 the per-element path issued one load instruction per element whatever
+/// the width, and a GEMV over 16 MiB of FP8 weights ran no faster than one over 64 MiB of FP32,
+/// because the memory pipeline was bound by load instructions rather than bytes.
+fn stage_slab(b: &mut Builder, input: Storage, array: Id, invocations: u32, lid: Id, slab: &Slab) {
+    let f32_ty = b.f32_ty();
+    let workgroup_ptr = b.pointer(STORAGE_CLASS_WORKGROUP, f32_ty);
+    let zero = b.c_u32(0);
+    let zero_f = b.c_f32(0.0);
+    let rows_c = b.c_u32(slab.rows);
+    let cols_c = b.c_u32(slab.cols);
+    let elements = slab.rows * slab.cols;
+    let slot = |b: &mut Builder, r: Id, c: Id| {
+        if slab.transposed {
+            let slot = b.imul(c, rows_c);
+            b.iadd(slot, r)
+        } else {
+            let slot = b.imul(r, cols_c);
+            b.iadd(slot, c)
+        }
+    };
+    // Element `(r, c)`'s global index and validity.
+    let locate = |b: &mut Builder, r: Id, c: Id| {
+        let global_row = b.iadd(slab.row0, r);
+        let global_col = b.iadd(slab.col0, c);
+        let row_ok = b.ult(global_row, slab.row_limit);
+        let col_ok = b.ult(global_col, slab.col_limit);
+        let ok = b.land(row_ok, col_ok);
+        let element = b.imul(global_row, slab.stride);
+        let element = b.iadd(element, slab.base);
+        let element = b.iadd(element, global_col);
+        let element = b.select_u32(ok, element, zero);
+        (element, ok)
+    };
+    // `q · invocations + lid` over `count` items, guarded only when the count does not divide.
+    let each = |b: &mut Builder, count: u32, body: &dyn Fn(&mut Builder, Id)| {
+        for q in 0..count.div_ceil(invocations) {
+            let offset = b.c_u32(q * invocations);
+            let index = b.iadd(offset, lid);
+            if count % invocations == 0 {
+                body(b, index);
+            } else {
+                let limit = b.c_u32(count);
+                let in_range = b.ult(index, limit);
+                b.if_then(in_range, |b| body(b, index));
+            }
+        }
+    };
+    let scalar = |b: &mut Builder| {
+        each(b, elements, &|b, index| {
+            let r = b.udiv(index, cols_c);
+            let c = b.umod(index, cols_c);
+            let (element, ok) = locate(b, r, c);
+            let loaded = b.load_float(input, array, slab.operand, element);
+            let value = b.select_f32(ok, loaded, zero_f);
+            let slot = slot(b, r, c);
+            let pointer = b.access_chain(workgroup_ptr, slab.tile, &[slot]);
+            b.store(pointer, value);
+        });
+    };
+    let lanes = input.lanes();
+    if lanes == 1 || slab.cols % lanes != 0 {
+        scalar(b);
+        return;
+    }
+    let lanes_c = b.c_u32(lanes);
+    let words_per_row = slab.cols / lanes;
+    let words_per_row_c = b.c_u32(words_per_row);
+    let remainder = b.umod(slab.stride, lanes_c);
+    let aligned = b.ieq(remainder, zero);
+    b.if_then(aligned, |b| {
+        each(b, elements / lanes, &|b, word| {
+            let r = b.udiv(word, words_per_row_c);
+            let word_in_row = b.umod(word, words_per_row_c);
+            let c = b.imul(word_in_row, lanes_c);
+            // `stride`, `base` and `col0` are all multiples of `lanes` here and `col_limit`
+            // need not be, but a word is either wholly inside the tensor or wholly past it
+            // only when `col_limit` is a multiple of `lanes`; check the last lane too.
+            let (element, ok) = locate(b, r, c);
+            let last = b.c_u32(lanes - 1);
+            let last_col = b.iadd(c, last);
+            let (_, last_ok) = locate(b, r, last_col);
+            let ok = b.land(ok, last_ok);
+            let element = b.select_u32(ok, element, zero);
+            let bits = b.load_lane_group(input, array, slab.operand, element, lanes);
+            for (lane, bits) in bits.into_iter().enumerate() {
+                let widened = b.widen_bits(input, bits);
+                let value = b.select_f32(ok, widened, zero_f);
+                let lane_c = b.c_u32(lane as u32);
+                let col = b.iadd(c, lane_c);
+                let slot = slot(b, r, col);
+                let pointer = b.access_chain(workgroup_ptr, slab.tile, &[slot]);
+                b.store(pointer, value);
+            }
+        });
+    });
+    let unaligned = b.lnot(aligned);
+    b.if_then(unaligned, scalar);
+}
+
+/// Batched, register-tiled MATMUL reading `input` storage (FP32 words, packed FP16, or packed
+/// FP8) and accumulating in binary32 — the accumulator width TOSA assigns FP16 and FP8 MATMUL,
+/// and the FP32 tier's own width.
 ///
 /// `out[b, m, n] = Σ_k lhs[b, m, k] · rhs[b, k, n]`, accumulated in ascending `k` with separately
-/// rounded multiply and add, so the result is bit-identical to the untiled loop. Out-of-range
-/// tile loads read element zero and contribute nothing: the inner loop bound is `min(tile,
-/// k - k0)`, never a padded zero product, so signed zeros survive.
+/// rounded multiply and add, so every element is bit-identical to the untiled sequential loop.
+///
+/// Geometry ([`MatmulGeometry`]): a `tile_x × tile_y` workgroup computes a `block_m × block_n`
+/// output block, each invocation a `micro_m × micro_n` register block whose rows are
+/// `i · tile_y + ty` and columns `j · tile_x + tx` — interleaved rather than contiguous, so the
+/// invocations of a row of the workgroup read consecutive columns and write consecutive
+/// outputs. Per `depth`-deep step of `k` the workgroup stages a slab of each operand in shared
+/// memory cooperatively (consecutive invocations loading consecutive addresses, the lhs slab
+/// stored transposed so its inner-loop reads are conflict-free), then every invocation issues
+/// `micro_m + micro_n` shared loads for `micro_m · micro_n` multiply-adds. The
+/// one-output-per-invocation kernel this replaces issued two shared loads per multiply-add and
+/// staged one element per invocation; on Intel Xe3 it ran a 1024³ FP8 MATMUL at 570 GFLOP/s,
+/// below its own FP32 rate, because the per-element FP8 widening was paid once per multiply-add
+/// rather than once per `MATMUL_MICRO` of them. (A 256-entry shared-memory widening table,
+/// built per workgroup, was measured against the inline integer expansion on Intel Xe3 and made
+/// no difference within noise; the expansion stays, having no table to build or barrier to wait
+/// on.)
+///
+/// Out-of-range slab loads read element zero and contribute nothing: the inner loop bound is
+/// `min(depth, k - k0)`, never a padded zero product, so signed zeros survive. Out-of-range
+/// outputs are computed and discarded.
 ///
 /// Specialization order: `lhs`, `rhs`, output `(buffer, base)`; `m`, `n`, `k`, `batch`.
-fn assemble_matmul(input: Storage, output_storage: Storage, tile: u32, buffers: u32) -> Vec<u32> {
+fn assemble_matmul(
+    input: Storage,
+    output_storage: Storage,
+    geometry: MatmulGeometry,
+    buffers: u32,
+) -> Vec<u32> {
+    let MatmulGeometry {
+        tile_x,
+        tile_y,
+        micro_m,
+        micro_n,
+        depth,
+    } = geometry;
+    let invocations = geometry.invocations();
+    let block_m = geometry.block_m();
+    let block_n = geometry.block_n();
+    debug_assert_eq!((block_m * depth) % invocations, 0, "lhs slab stages evenly");
+    debug_assert_eq!((block_n * depth) % invocations, 0, "rhs slab stages evenly");
     let mut b = Builder::new();
     let array = b.buffer_array(buffers);
     let lhs = b.spec_operand();
@@ -2824,15 +3247,17 @@ fn assemble_matmul(input: Storage, output_storage: Storage, tile: u32, buffers: 
     let n = b.spec_u32(1);
     let k = b.spec_u32(1);
     let _batch = b.spec_u32(1);
-    let lhs_tile = b.shared_f32_array(tile * tile);
-    let rhs_tile = b.shared_f32_array(tile * tile);
+    // lhs slab transposed: `[kk][row]`, `depth × block_m`; rhs slab as is: `[kk][col]`,
+    // `depth × block_n`.
+    let lhs_tile = b.shared_f32_array(block_m * depth);
+    let rhs_tile = b.shared_f32_array(block_n * depth);
     let local_id = b.builtin_uvec3(BUILT_IN_LOCAL_INVOCATION_ID);
     let group_id = b.builtin_uvec3(BUILT_IN_WORKGROUP_ID);
 
     b.begin_main();
     let u32_ty = b.u32_ty();
     let f32_ty = b.f32_ty();
-    let acc_var = b.local(f32_ty);
+    let accumulators: Vec<Id> = (0..micro_m * micro_n).map(|_| b.local(f32_ty)).collect();
     let t_var = b.local(u32_ty);
     let kk_var = b.local(u32_ty);
     let tx = b.builtin_component(local_id, 0);
@@ -2840,98 +3265,360 @@ fn assemble_matmul(input: Storage, output_storage: Storage, tile: u32, buffers: 
     let gx = b.builtin_component(group_id, 0);
     let gy = b.builtin_component(group_id, 1);
     let z = b.builtin_component(group_id, 2);
-    let tile_c = b.c_u32(tile);
-    let row = b.imul(gy, tile_c);
-    let row = b.iadd(row, ty);
-    let col = b.imul(gx, tile_c);
-    let col = b.iadd(col, tx);
-    let row_ok = b.ult(row, m);
-    let col_ok = b.ult(col, n);
+    let tile_x_c = b.c_u32(tile_x);
+    let depth_c = b.c_u32(depth);
+    let block_m_c = b.c_u32(block_m);
+    let block_n_c = b.c_u32(block_n);
     let zero = b.c_u32(0);
     let one = b.c_u32(1);
     let zero_f = b.c_f32(0.0);
-    b.store(acc_var, zero_f);
+    for accumulator in &accumulators {
+        b.store(*accumulator, zero_f);
+    }
     b.store(t_var, zero);
+    let row0 = b.imul(gy, block_m_c);
+    let col0 = b.imul(gx, block_n_c);
+    let lid = b.imul(ty, tile_x_c);
+    let lid = b.iadd(lid, tx);
     // lhs batch base: z * m * k; rhs batch base: z * k * n.
     let lhs_batch = b.imul(z, m);
     let lhs_batch = b.imul(lhs_batch, k);
     let rhs_batch = b.imul(z, k);
     let rhs_batch = b.imul(rhs_batch, n);
-    let lhs_row = b.imul(row, k);
-    let lhs_row = b.iadd(lhs_batch, lhs_row);
-    let rhs_col = b.iadd(rhs_batch, col);
-    let local_index = b.imul(ty, tile_c);
-    let local_index = b.iadd(local_index, tx);
-    let workgroup_ptr = {
-        let f32_ty = b.f32_ty();
-        b.pointer(STORAGE_CLASS_WORKGROUP, f32_ty)
-    };
-    let tiles = {
-        let k_plus = b.iadd(k, tile_c);
+    let workgroup_ptr = b.pointer(STORAGE_CLASS_WORKGROUP, f32_ty);
+    let steps = {
+        let k_plus = b.iadd(k, depth_c);
         let k_plus = b.isub(k_plus, one);
-        b.udiv(k_plus, tile_c)
+        b.udiv(k_plus, depth_c)
     };
-    let (outer, t) = b.begin_loop(t_var, tiles);
-    let k0 = b.imul(t, tile_c);
-    // Load lhs[row, k0 + tx] and rhs[k0 + ty, col], zero when out of range.
-    let ka = b.iadd(k0, tx);
-    let ka_ok = b.ult(ka, k);
-    let lhs_ok = b.land(row_ok, ka_ok);
-    let lhs_index = b.iadd(lhs_row, ka);
-    let lhs_index = b.select_u32(lhs_ok, lhs_index, zero);
-    let lhs_loaded = b.load_float(input, array, lhs, lhs_index);
-    let lhs_value = b.select_f32(lhs_ok, lhs_loaded, zero_f);
-    let kb = b.iadd(k0, ty);
-    let kb_ok = b.ult(kb, k);
-    let rhs_ok = b.land(kb_ok, col_ok);
-    let rhs_index = b.imul(kb, n);
-    let rhs_index = b.iadd(rhs_index, rhs_col);
-    let rhs_index = b.select_u32(rhs_ok, rhs_index, zero);
-    let rhs_loaded = b.load_float(input, array, rhs, rhs_index);
-    let rhs_value = b.select_f32(rhs_ok, rhs_loaded, zero_f);
-    let lhs_slot = b.access_chain(workgroup_ptr, lhs_tile, &[local_index]);
-    b.store(lhs_slot, lhs_value);
-    let rhs_slot = b.access_chain(workgroup_ptr, rhs_tile, &[local_index]);
-    b.store(rhs_slot, rhs_value);
+    let (outer, t) = b.begin_loop(t_var, steps);
+    let k0 = b.imul(t, depth_c);
+    // Stage both slabs. lhs: `block_m` rows of `depth` consecutive `k`, stored transposed;
+    // rhs: `depth` rows of `block_n` consecutive `n`.
+    stage_slab(
+        &mut b,
+        input,
+        array,
+        invocations,
+        lid,
+        &Slab {
+            operand: lhs,
+            rows: block_m,
+            cols: depth,
+            row0,
+            col0: k0,
+            stride: k,
+            base: lhs_batch,
+            row_limit: m,
+            col_limit: k,
+            transposed: true,
+            tile: lhs_tile,
+        },
+    );
+    stage_slab(
+        &mut b,
+        input,
+        array,
+        invocations,
+        lid,
+        &Slab {
+            operand: rhs,
+            rows: depth,
+            cols: block_n,
+            row0: k0,
+            col0,
+            stride: n,
+            base: rhs_batch,
+            row_limit: k,
+            col_limit: n,
+            transposed: false,
+            tile: rhs_tile,
+        },
+    );
     b.workgroup_barrier();
     let remaining = b.isub(k, k0);
-    let k_max = b.umin(remaining, tile_c);
+    let k_max = b.umin(remaining, depth_c);
+    // One `kk` of the inner product for every register-block element.
+    let step = |b: &mut Builder, kk: Id| {
+        let lhs_row = b.imul(kk, block_m_c);
+        let rhs_row = b.imul(kk, block_n_c);
+        let a: Vec<Id> = (0..micro_m)
+            .map(|i| {
+                let offset = b.c_u32(i * tile_y);
+                let local_row = b.iadd(offset, ty);
+                let slot = b.iadd(lhs_row, local_row);
+                let pointer = b.access_chain(workgroup_ptr, lhs_tile, &[slot]);
+                b.load(f32_ty, pointer)
+            })
+            .collect();
+        let bv: Vec<Id> = (0..micro_n)
+            .map(|j| {
+                let offset = b.c_u32(j * tile_x);
+                let local_col = b.iadd(offset, tx);
+                let slot = b.iadd(rhs_row, local_col);
+                let pointer = b.access_chain(workgroup_ptr, rhs_tile, &[slot]);
+                b.load(f32_ty, pointer)
+            })
+            .collect();
+        for i in 0..micro_m {
+            for j in 0..micro_n {
+                let accumulator = accumulators[(i * micro_n + j) as usize];
+                let acc = b.load(f32_ty, accumulator);
+                let next = b.fma(a[i as usize], bv[j as usize], acc);
+                b.store(accumulator, next);
+            }
+        }
+    };
     b.store(kk_var, zero);
     let (inner, kk) = b.begin_loop(kk_var, k_max);
-    let a_index = b.imul(ty, tile_c);
-    let a_index = b.iadd(a_index, kk);
-    let a_ptr = b.access_chain(workgroup_ptr, lhs_tile, &[a_index]);
-    let a = b.load(f32_ty, a_ptr);
-    let b_index = b.imul(kk, tile_c);
-    let b_index = b.iadd(b_index, tx);
-    let b_ptr = b.access_chain(workgroup_ptr, rhs_tile, &[b_index]);
-    let bv = b.load(f32_ty, b_ptr);
-    let acc = b.load(f32_ty, acc_var);
-    let next = b.fma_free(a, bv, acc);
-    b.store(acc_var, next);
+    step(&mut b, kk);
     b.end_loop(inner, kk_var, one);
     b.workgroup_barrier();
     b.end_loop(outer, t_var, one);
-    let in_range = b.land(row_ok, col_ok);
-    b.if_then(in_range, |b| {
-        let out_batch = b.imul(z, m);
-        let out_batch = b.imul(out_batch, n);
+    let out_batch = b.imul(z, m);
+    let out_batch = b.imul(out_batch, n);
+    for i in 0..micro_m {
+        let offset = b.c_u32(i * tile_y);
+        let row = b.iadd(row0, offset);
+        let row = b.iadd(row, ty);
+        let row_ok = b.ult(row, m);
         let out_row = b.imul(row, n);
-        let out_index = b.iadd(out_batch, out_row);
-        let out_index = b.iadd(out_index, col);
-        let acc = b.load(f32_ty, acc_var);
-        match output_storage {
-            Storage::Half => {
-                let bits = b.narrow_f16(acc);
-                b.store_half_bits(array, output, out_index, bits);
-            }
-            // TOSA defines no MATMUL whose result is FP8 or BOOL; the tier never selects one.
-            Storage::Byte | Storage::Quarter(_) => unreachable!("MATMUL result storage"),
-            Storage::Word => b.store_f32(array, output, out_index, acc),
+        let out_row = b.iadd(out_batch, out_row);
+        for j in 0..micro_n {
+            let offset = b.c_u32(j * tile_x);
+            let col = b.iadd(col0, offset);
+            let col = b.iadd(col, tx);
+            let col_ok = b.ult(col, n);
+            let in_range = b.land(row_ok, col_ok);
+            let accumulator = accumulators[(i * micro_n + j) as usize];
+            b.if_then(in_range, |b| {
+                let out_index = b.iadd(out_row, col);
+                let acc = b.load(f32_ty, accumulator);
+                match output_storage {
+                    Storage::Half => {
+                        let bits = b.narrow_f16(acc);
+                        b.store_half_bits(array, output, out_index, bits);
+                    }
+                    // TOSA defines no MATMUL whose result is FP8 or BOOL; the tier never
+                    // selects one.
+                    Storage::Byte | Storage::Quarter(_) => unreachable!("MATMUL result storage"),
+                    Storage::Word => b.store_f32(array, output, out_index, acc),
+                }
+            });
         }
-    });
+    }
     b.end_main();
-    b.finish([tile, tile, 1])
+    b.finish(geometry.local_size())
+}
+
+/// Split-`k` streaming MATMUL for `m ≤` [`STREAM_ROWS`]: the decode shape, a few activation rows
+/// against a wide weight matrix, where the kernel's only job is to stream `rhs` once at the
+/// memory system's rate.
+///
+/// A 1-D workgroup of [`STREAM_WORKGROUP`] invocations covers [`STREAM_COLUMNS`] columns.
+/// Invocation `lid` owns weight word `lid % words` — `lanes` adjacent columns, four FP8, two
+/// FP16 or one FP32 — and `k` slice `lid / words` of `splits = STREAM_WORKGROUP / words` equal
+/// slices, and carries all [`STREAM_ROWS`] rows of those columns in registers. Its loop is one
+/// `rhs` word load, one uniform binary32 lhs load per row, and `rows · lanes` fused
+/// multiply-adds — no shared memory, no barrier, and no widening of the lhs, which lowering
+/// pre-widens to binary32 (an `m × k` intermediate, negligible next to `rhs`) when the tier's
+/// lhs is narrower. Rows at or past `m` are compiled out: the row test is on a specialization
+/// constant. At the end every invocation writes its partials to shared memory and each
+/// invocation reduces two outputs over the `splits` slices in ascending order, then stores.
+///
+/// Numerics (ADR 0011): binary32 accumulation with fused multiply-add, `k` split into `splits`
+/// contiguous ascending slices summed in fixed order. Not bit-identical to the sequential sum,
+/// but deterministic: the same device always produces the same bits, and every device whose
+/// `Fma` is correctly rounded produces the same bits as every other.
+///
+/// The `rhs` word path needs every row of `rhs` word-aligned, i.e. `n` a multiple of `lanes`;
+/// the check is on the specialization constant `n`, so only one path survives pipeline
+/// creation, and an unaligned `n` falls back to per-element loads.
+///
+/// Specialization order: `lhs`, `rhs`, output `(buffer, base)`; `m`, `n`, `k`, `batch` — the
+/// same payload as [`assemble_matmul`].
+fn assemble_matmul_stream(rhs_storage: Storage, output_storage: Storage, buffers: u32) -> Vec<u32> {
+    let lanes = rhs_storage.lanes();
+    let words = STREAM_COLUMNS / lanes;
+    let splits = STREAM_WORKGROUP / words;
+    let rows = STREAM_ROWS;
+    let mut b = Builder::new();
+    let array = b.buffer_array(buffers);
+    let lhs = b.spec_operand();
+    let rhs = b.spec_operand();
+    let output = b.spec_operand();
+    let m = b.spec_u32(1);
+    let n = b.spec_u32(1);
+    let k = b.spec_u32(1);
+    let _batch = b.spec_u32(1);
+    let partials = b.shared_f32_array(STREAM_WORKGROUP * rows * lanes);
+    let local_id = b.builtin_uvec3(BUILT_IN_LOCAL_INVOCATION_ID);
+    let group_id = b.builtin_uvec3(BUILT_IN_WORKGROUP_ID);
+
+    b.begin_main();
+    let u32_ty = b.u32_ty();
+    let f32_ty = b.f32_ty();
+    let accumulators: Vec<Id> = (0..rows * lanes).map(|_| b.local(f32_ty)).collect();
+    let kk_var = b.local(u32_ty);
+    let lid = b.builtin_component(local_id, 0);
+    let gx = b.builtin_component(group_id, 0);
+    let z = b.builtin_component(group_id, 2);
+    let zero = b.c_u32(0);
+    let one = b.c_u32(1);
+    let zero_f = b.c_f32(0.0);
+    let words_c = b.c_u32(words);
+    let lanes_c = b.c_u32(lanes);
+    let splits_c = b.c_u32(splits);
+    let columns_c = b.c_u32(STREAM_COLUMNS);
+    for accumulator in &accumulators {
+        b.store(*accumulator, zero_f);
+    }
+    let w = b.umod(lid, words_c);
+    let slice = b.udiv(lid, words_c);
+    let col0 = b.imul(gx, columns_c);
+    let word_col = b.imul(w, lanes_c);
+    let col_base = b.iadd(col0, word_col);
+    // This invocation's `k` slice: `[slice · chunk, min(k, (slice + 1) · chunk))`.
+    let splits_less_one = b.c_u32(splits - 1);
+    let k_plus = b.iadd(k, splits_less_one);
+    let chunk = b.udiv(k_plus, splits_c);
+    let k_begin = b.imul(slice, chunk);
+    let k_end = b.iadd(k_begin, chunk);
+    let k_end = b.umin(k_end, k);
+    let lhs_batch = b.imul(z, m);
+    let lhs_batch = b.imul(lhs_batch, k);
+    let rhs_batch = b.imul(z, k);
+    let rhs_batch = b.imul(rhs_batch, n);
+    let rhs_col = b.iadd(rhs_batch, col_base);
+    let row_ok: Vec<Id> = (0..rows)
+        .map(|i| {
+            let row = b.c_u32(i);
+            b.ult(row, m)
+        })
+        .collect();
+    let lhs_rows: Vec<Id> = (0..rows)
+        .map(|i| {
+            let row = b.c_u32(i);
+            let offset = b.imul(row, k);
+            b.iadd(lhs_batch, offset)
+        })
+        .collect();
+    // Element index of `rhs[kk, col_base]`, clamped to zero when the word lies past `n`.
+    let rhs_word_element = |b: &mut Builder, kk: Id| {
+        let col_ok = b.ult(col_base, n);
+        let element = b.imul(kk, n);
+        let element = b.iadd(element, rhs_col);
+        b.select_u32(col_ok, element, zero)
+    };
+    // The inner product over the slice, `load_rhs` yielding the `lanes` weights at `kk`.
+    let accumulate = |b: &mut Builder, load_rhs: &dyn Fn(&mut Builder, Id) -> Vec<Id>| {
+        b.store(kk_var, k_begin);
+        let (scope, kk) = b.begin_loop(kk_var, k_end);
+        let weights = load_rhs(b, kk);
+        for i in 0..rows as usize {
+            b.if_then(row_ok[i], |b| {
+                let element = b.iadd(lhs_rows[i], kk);
+                let a = b.load_f32(array, lhs, element);
+                for (l, weight) in weights.iter().enumerate() {
+                    let accumulator = accumulators[i * lanes as usize + l];
+                    let acc = b.load(f32_ty, accumulator);
+                    let next = b.fma(a, *weight, acc);
+                    b.store(accumulator, next);
+                }
+            });
+        }
+        b.end_loop(scope, kk_var, one);
+    };
+    if lanes == 1 {
+        accumulate(&mut b, &|b, kk| {
+            let element = rhs_word_element(b, kk);
+            vec![b.load_f32(array, rhs, element)]
+        });
+    } else {
+        let remainder = b.umod(n, lanes_c);
+        let aligned = b.ieq(remainder, zero);
+        b.if_then(aligned, |b| {
+            accumulate(b, &|b, kk| {
+                let element = rhs_word_element(b, kk);
+                let bits = b.load_lane_group(rhs_storage, array, rhs, element, lanes);
+                bits.into_iter()
+                    .map(|bits| b.widen_bits(rhs_storage, bits))
+                    .collect()
+            });
+        });
+        let unaligned = b.lnot(aligned);
+        b.if_then(unaligned, |b| {
+            accumulate(b, &|b, kk| {
+                (0..lanes)
+                    .map(|l| {
+                        let l = b.c_u32(l);
+                        let col = b.iadd(col_base, l);
+                        let col_ok = b.ult(col, n);
+                        let element = b.imul(kk, n);
+                        let element = b.iadd(element, rhs_batch);
+                        let element = b.iadd(element, col);
+                        let element = b.select_u32(col_ok, element, zero);
+                        b.load_float(rhs_storage, array, rhs, element)
+                    })
+                    .collect()
+            });
+        });
+    }
+    // Partials to shared memory: invocation `lid`'s block of `rows · lanes` values.
+    let workgroup_ptr = b.pointer(STORAGE_CLASS_WORKGROUP, f32_ty);
+    let block = b.c_u32(rows * lanes);
+    let base = b.imul(lid, block);
+    for (index, accumulator) in accumulators.iter().enumerate() {
+        let offset = b.c_u32(index as u32);
+        let slot = b.iadd(base, offset);
+        let value = b.load(f32_ty, *accumulator);
+        let pointer = b.access_chain(workgroup_ptr, partials, &[slot]);
+        b.store(pointer, value);
+    }
+    b.workgroup_barrier();
+    // Reduce: output `o = lid · per_invocation + j` is row `o / STREAM_COLUMNS`, column
+    // `o % STREAM_COLUMNS`, summed over the slices in ascending order from slice zero.
+    let per_invocation = rows * STREAM_COLUMNS / STREAM_WORKGROUP;
+    let per_invocation_c = b.c_u32(per_invocation);
+    let first = b.imul(lid, per_invocation_c);
+    let out_batch = b.imul(z, m);
+    let out_batch = b.imul(out_batch, n);
+    for j in 0..per_invocation {
+        let j = b.c_u32(j);
+        let o = b.iadd(first, j);
+        let row = b.udiv(o, columns_c);
+        let col = b.umod(o, columns_c);
+        let word = b.udiv(col, lanes_c);
+        let lane = b.umod(col, lanes_c);
+        let within = b.imul(row, lanes_c);
+        let within = b.iadd(within, lane);
+        let mut sum = None;
+        for split in 0..splits {
+            let offset = b.c_u32(split * words);
+            let owner = b.iadd(offset, word);
+            let slot = b.imul(owner, block);
+            let slot = b.iadd(slot, within);
+            let pointer = b.access_chain(workgroup_ptr, partials, &[slot]);
+            let partial = b.load(f32_ty, pointer);
+            sum = Some(match sum {
+                None => partial,
+                Some(sum) => b.fadd(sum, partial),
+            });
+        }
+        let sum = sum.expect("at least one slice");
+        let global_col = b.iadd(col0, col);
+        let row_in = b.ult(row, m);
+        let col_in = b.ult(global_col, n);
+        let in_range = b.land(row_in, col_in);
+        b.if_then(in_range, |b| {
+            let out = b.imul(row, n);
+            let out = b.iadd(out, out_batch);
+            let out = b.iadd(out, global_col);
+            b.store_float(output_storage, array, output, out, sum);
+        });
+    }
+    b.end_main();
+    b.finish([STREAM_WORKGROUP, 1, 1])
 }
 
 /// NHWC MAX_POOL2D at `float` storage: one invocation per output element folds its window with
@@ -3018,19 +3705,44 @@ fn assemble_max_pool(nan_mode: NanMode, float: Storage, workgroup: u32, buffers:
     b.finish([workgroup, 1, 1])
 }
 
-/// Strided copy: `out[out_offset + Σ c_d · out_stride_d] = in[in_offset + Σ c_d · in_stride_d]`
-/// over the iteration space `dims`; `contiguous` degenerates to `out[i] = in[i]`.
-///
-/// Specialization order: input, output `(buffer, base)`; `count`; then (strided only)
-/// `dims[MAX_RANK]`, `in_strides[MAX_RANK]`, `in_offset`, `out_strides[MAX_RANK]`, `out_offset`.
 /// Elementwise float conversion over `count` elements: load at `input` storage as binary32,
 /// store at `output` storage. Every narrowing is crate-owned integer code, so a `CAST` produces
-/// the same bits on every device.
+/// the same bits on every device. Sub-word outputs are written a whole word per invocation
+/// ([`assemble_contiguous_lanes`]).
+///
+/// Specialization order: input, output `(buffer, base)`; `count`.
 fn assemble_cast(
     input: Storage,
     output_storage: Storage,
     workgroup: u32,
     buffers: u32,
+) -> Vec<u32> {
+    assemble_contiguous_lanes(input, output_storage, workgroup, buffers, |b, bits| {
+        let value = b.widen_bits(input, bits);
+        b.narrow_bits(output_storage, value)
+    })
+}
+
+/// A contiguous lane kernel: `out[i] = convert(in[i])` over `count` elements, where `convert`
+/// maps one element's raw source bits to its raw destination bits.
+///
+/// Word-storage outputs run one element per invocation. Sub-word outputs (`Half`, `Byte`, FP8
+/// `Quarter`) run one *destination word* per invocation: the invocation loads the source lanes
+/// of that word's elements (each source word once), converts them, packs them, and stores the
+/// word with a plain `OpStore`. That is the difference between a copy and a read-modify-write:
+/// the per-element path clears and sets every lane through two device-scope atomics on a word
+/// three other invocations are also atomically updating, which on Intel Xe3 ran FP8 `IDENTITY`
+/// at 6 GB/s against 109 GB/s for FP32. Only a tensor's final partial word — whose remaining
+/// bytes are not the tensor's to write — still goes through the neighbour-safe atomic sequence,
+/// lane by lane, so the documented guarantee holds unchanged.
+///
+/// Specialization order: input, output `(buffer, base)`; `count` (elements).
+fn assemble_contiguous_lanes(
+    input: Storage,
+    output: Storage,
+    workgroup: u32,
+    buffers: u32,
+    convert: impl Fn(&mut Builder, Id) -> Id,
 ) -> Vec<u32> {
     let mut b = Builder::new();
     let array = b.buffer_array(buffers);
@@ -3038,40 +3750,86 @@ fn assemble_cast(
     let destination = b.spec_operand();
     let count = b.spec_u32(1);
     let (counter, stride) = b.grid_stride(workgroup);
-    let (scope, i) = b.begin_loop(counter, count);
-    let value = b.load_float(input, array, source, i);
-    b.store_float(output_storage, array, destination, i, value);
-    b.end_loop(scope, counter, stride);
+    let lanes = output.lanes();
+    if lanes == 1 {
+        let (scope, i) = b.begin_loop(counter, count);
+        let bits = b.load_lane_group(input, array, source, i, 1)[0];
+        let word = convert(&mut b, bits);
+        b.store_word(array, destination, i, word);
+        b.end_loop(scope, counter, stride);
+    } else {
+        let lanes_c = b.c_u32(lanes);
+        let lanes_less_one = b.c_u32(lanes - 1);
+        let words = b.iadd(count, lanes_less_one);
+        let words = b.udiv(words, lanes_c);
+        let (scope, w) = b.begin_loop(counter, words);
+        let base = b.imul(w, lanes_c);
+        let sources = b.load_lane_group(input, array, source, base, lanes);
+        let bits: Vec<Id> = sources
+            .iter()
+            .map(|source_bits| convert(&mut b, *source_bits))
+            .collect();
+        let packed = b.pack_lanes(&bits);
+        let end = b.iadd(base, lanes_c);
+        let full = b.uge(count, end);
+        b.if_then(full, |b| b.store_word(array, destination, w, packed));
+        let partial = b.lnot(full);
+        b.if_then(partial, |b| {
+            for (lane, bits) in bits.iter().enumerate() {
+                let lane = b.c_u32(lane as u32);
+                let element = b.iadd(base, lane);
+                let in_range = b.ult(element, count);
+                b.if_then(in_range, |b| {
+                    b.store_lane_bits(output, array, destination, element, *bits);
+                });
+            }
+        });
+        b.end_loop(scope, counter, stride);
+    }
     b.end_main();
     b.finish([workgroup, 1, 1])
 }
 
+/// Strided copy: `out[out_offset + Σ c_d · out_stride_d] = in[in_offset + Σ c_d · in_stride_d]`
+/// over the iteration space `dims`; `contiguous` degenerates to `out[i] = in[i]`, which runs
+/// through [`assemble_contiguous_lanes`] — a whole-word copy for sub-word storage, with `BOOL`
+/// canonicalized to `0`/`1` lane by lane and FP8/FP16 bit patterns moved untouched.
+///
+/// Specialization order: input, output `(buffer, base)`; `count`; then (strided only)
+/// `dims[MAX_RANK]`, `in_strides[MAX_RANK]`, `in_offset`, `out_strides[MAX_RANK]`, `out_offset`.
 fn assemble_move(storage: Storage, contiguous: bool, workgroup: u32, buffers: u32) -> Vec<u32> {
+    if contiguous {
+        return assemble_contiguous_lanes(storage, storage, workgroup, buffers, |b, bits| {
+            match storage {
+                // Canonical `0`/`1`: any nonzero byte is true.
+                Storage::Byte => {
+                    let zero = b.c_u32(0);
+                    let one = b.c_u32(1);
+                    let set = b.ine(bits, zero);
+                    b.select_u32(set, one, zero)
+                }
+                // Raw lanes: an FP8 or binary16 pattern — NaN payload, subnormal, signed
+                // zero — moves exactly. The `Byte` arm above must not be reused for these.
+                Storage::Word | Storage::Half | Storage::Quarter(_) => bits,
+            }
+        });
+    }
     let mut b = Builder::new();
     let array = b.buffer_array(buffers);
     let input = b.spec_operand();
     let output = b.spec_operand();
     let count = b.spec_u32(1);
-    let geometry = (!contiguous).then(|| {
-        let dims = b.spec_dims();
-        let in_strides = b.spec_strides();
-        let in_offset = b.spec_u32(0);
-        let out_strides = b.spec_strides();
-        let out_offset = b.spec_u32(0);
-        (dims, in_strides, in_offset, out_strides, out_offset)
-    });
+    let dims = b.spec_dims();
+    let in_strides = b.spec_strides();
+    let in_offset = b.spec_u32(0);
+    let out_strides = b.spec_strides();
+    let out_offset = b.spec_u32(0);
 
     let (counter, stride) = b.grid_stride(workgroup);
     let (scope, i) = b.begin_loop(counter, count);
-    let (source, destination) = match &geometry {
-        Some((dims, in_strides, in_offset, out_strides, out_offset)) => {
-            let indices = b.strided_indices(i, dims, &[*in_strides, *out_strides]);
-            let source = b.iadd(indices[0], *in_offset);
-            let destination = b.iadd(indices[1], *out_offset);
-            (source, destination)
-        }
-        None => (i, i),
-    };
+    let indices = b.strided_indices(i, &dims, &[in_strides, out_strides]);
+    let source = b.iadd(indices[0], in_offset);
+    let destination = b.iadd(indices[1], out_offset);
     match storage {
         Storage::Word => {
             let word = b.load_word(array, input, source);
@@ -3226,7 +3984,9 @@ mod tests {
                 }
                 .words(broadcast),
                 KernelKey::Reduce { .. } => reduce_spec(operand, operand, 2, 3, 1),
-                KernelKey::Matmul { .. } => matmul_spec(operand, operand, operand, 1, 2, 3, 1),
+                KernelKey::Matmul { .. } | KernelKey::MatmulStream { .. } => {
+                    matmul_spec(operand, operand, operand, 1, 2, 3, 1)
+                }
                 KernelKey::MaxPool { .. } => max_pool_spec(
                     operand,
                     operand,
@@ -3297,11 +4057,39 @@ mod tests {
 
     #[test]
     fn matmul_workgroups_cover_all_dimensions() {
+        assert_eq!(matmul_block(16), 64);
+        assert_eq!(matmul_block(8), 32);
+        assert_eq!(MatmulGeometry::wide(16).shared_bytes(), 8192);
+        assert_eq!(stream_matmul_shared_bytes(), 8192);
+        assert_eq!(matmul_shared_bytes(8), 8192);
+        for tile in [8, 16] {
+            let geometry = MatmulGeometry::wide(tile);
+            assert_eq!(geometry.invocations(), tile * tile, "{geometry:?}");
+            assert_eq!(
+                (geometry.block_m() * geometry.depth) % geometry.invocations(),
+                0,
+                "{geometry:?}"
+            );
+            assert_eq!(
+                (geometry.block_n() * geometry.depth) % geometry.invocations(),
+                0,
+                "{geometry:?}"
+            );
+        }
+        // Every storage's word count divides the workgroup, and the outputs divide evenly.
+        for lanes in [1, 2, 4] {
+            let words = STREAM_COLUMNS / lanes;
+            assert_eq!(STREAM_WORKGROUP % words, 0);
+            assert_eq!((STREAM_ROWS * STREAM_COLUMNS) % STREAM_WORKGROUP, 0);
+        }
+        assert_eq!(stream_matmul_workgroups(4096, 2), [256, 1, 2]);
+        assert_eq!(stream_matmul_workgroups(17, 1), [2, 1, 1]);
         assert_eq!(matmul_workgroups(1, 1, 1, 16), [1, 1, 1]);
-        assert_eq!(matmul_workgroups(16, 16, 1, 16), [1, 1, 1]);
-        assert_eq!(matmul_workgroups(17, 16, 1, 16), [1, 2, 1]);
-        assert_eq!(matmul_workgroups(16, 17, 1, 16), [2, 1, 1]);
-        assert_eq!(matmul_workgroups(8, 8, 3, 8), [1, 1, 3]);
+        assert_eq!(matmul_workgroups(64, 64, 1, 16), [1, 1, 1]);
+        assert_eq!(matmul_workgroups(65, 64, 1, 16), [1, 2, 1]);
+        assert_eq!(matmul_workgroups(64, 65, 1, 16), [2, 1, 1]);
+        assert_eq!(matmul_workgroups(32, 32, 3, 8), [1, 1, 3]);
+        assert_eq!(matmul_workgroups(33, 8, 3, 8), [1, 2, 3]);
     }
 
     #[test]

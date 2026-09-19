@@ -158,8 +158,8 @@ variant for structural well-formedness, and every variant executes on lavapipe i
 domain, every case of the shared FP32 operator corpus in every advertised memory domain, the
 three-operator arena graph as one submission, byte-storage outputs bound inside a larger buffer
 with every neighbouring byte untouched, transcendental kernels within one ulp of binary64
-references across the full finite range, tiled MATMUL bit-identical to the sequential reference at
-ragged sizes, rank-4 broadcasting, the shared `IDENTITY_EDGES_FP32` corpus (bit-exact, including
+references across the full finite range, both MATMUL kernels within their error bound of the
+sequential binary64 reference at ragged sizes and deterministic across submissions, rank-4 broadcasting, the shared `IDENTITY_EDGES_FP32` corpus (bit-exact, including
 NaN payloads and the subnormal), offset bindings inside larger buffers with untouched neighbors,
 segmented staging
 transfers to device-local memory, binding validation and finite-timeout rejection, overlapping
