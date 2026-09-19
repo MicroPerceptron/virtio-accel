@@ -396,7 +396,7 @@ pub enum KernelKey {
         tile: u32,
         buffers: u32,
     },
-    /// Split-`k` streaming MATMUL for `m ≤` [`STREAM_ROWS`] rows ([`assemble_matmul_stream`]):
+    /// Split-`k` streaming MATMUL for `m ≤` [`STREAM_ROWS`] rows:
     /// a 1-D workgroup of [`STREAM_WORKGROUP`] invocations over [`STREAM_COLUMNS`] columns of
     /// `rhs` (read at `rhs` storage, a word per invocation), the lhs read as binary32 words —
     /// lowering widens a narrower lhs beforehand — and one fixed-order reduction of the `k`
