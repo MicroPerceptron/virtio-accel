@@ -16,7 +16,9 @@
 //! The native module compiles on the host operating systems enumerated by `build.rs` (`va_vulkan`).
 //! Loader absence is a run-time fact reported as [`InitError::RuntimeUnavailable`], never a build
 //! probe. `VIRTIO_ACCEL_VULKAN=0` forces the placeholder, `=1` makes an unsupported target a loud
-//! build failure. The design decisions live in [`docs/adr/`](../../../docs/adr/) (ADRs 0001–0008).
+//! build failure. The design decisions live in [`docs/adr/`](../../../docs/adr/) (ADRs 0001–0010);
+//! ADR 0010 records the kernel geometries and the benchmark (`cargo bench -p virtio-accel-vulkan`)
+//! that measures them.
 
 #![cfg_attr(not(va_vulkan), forbid(unsafe_code))]
 
