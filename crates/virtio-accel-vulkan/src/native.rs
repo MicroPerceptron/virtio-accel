@@ -70,8 +70,9 @@ const _: () = assert!(
 /// `maxComputeWorkGroupInvocations` is only the specification minimum (128).
 const PREFERRED_WORKGROUP: u32 = 256;
 const FALLBACK_WORKGROUP: u32 = 128;
-/// Preferred MATMUL tile (256 invocations: a 64 × 64 block over 8 KiB of shared slabs, or the
-/// skinny 8 × 64 block over 9 KiB), and the fallback tile (64 invocations: 32 × 32 or 8 × 32).
+/// Preferred register-tiled MATMUL tile (256 invocations, a 64 × 64 block over 8 KiB of shared
+/// slabs) and the fallback tile (64 invocations, 32 × 32). The streaming kernel for eight rows or
+/// fewer is a fixed 64-invocation 1-D workgroup with an 8 KiB reduction buffer.
 const PREFERRED_MATMUL_TILE: u32 = 16;
 const FALLBACK_MATMUL_TILE: u32 = 8;
 /// Bytes every `VkBuffer` size is rounded up to so byte-storage tensors can be addressed by
@@ -101,13 +102,12 @@ impl Tuning {
         } else {
             return None;
         };
-        // Both MATMUL geometries at `tile` must fit: the square one is `tile × tile`
-        // invocations, the skinny one `4·tile × tile / 4`.
+        // Both MATMUL kernels must fit: the square one is `tile × tile` invocations, the
+        // streaming one a 1-D `STREAM_WORKGROUP`, and each declares its shared slabs.
         let tile_fits = |tile: u32| {
-            let skinny = shader::MatmulGeometry::skinny(tile).local_size();
             invocations >= tile * tile
-                && size[0] >= tile.max(skinny[0])
-                && size[1] >= tile.max(skinny[1])
+                && size[0] >= tile.max(shader::STREAM_WORKGROUP)
+                && size[1] >= tile
                 && limits.max_compute_shared_memory_size >= shader::matmul_shared_bytes(tile)
         };
         let matmul_tile = if tile_fits(PREFERRED_MATMUL_TILE) {
@@ -163,10 +163,9 @@ impl Tuning {
                 tile: self.matmul_tile,
                 buffers: self.buffers,
             },
-            KernelSpec::MatmulSkinny { input, output } => KernelKey::MatmulSkinny {
-                input,
+            KernelSpec::MatmulStream { rhs, output } => KernelKey::MatmulStream {
+                rhs,
                 output,
-                tile: self.matmul_tile,
                 buffers: self.buffers,
             },
             KernelSpec::MaxPool { nan_mode, float } => KernelKey::MaxPool {
@@ -207,8 +206,8 @@ impl Tuning {
                 (groups[0] <= max[0] && groups[1] <= max[1] && groups[2] <= max[2])
                     .then_some(groups)
             }
-            Work::MatmulSkinny { n, batch } => {
-                let groups = shader::skinny_matmul_workgroups(n, batch, self.matmul_tile);
+            Work::MatmulStream { n, batch } => {
+                let groups = shader::stream_matmul_workgroups(n, batch);
                 (groups[0] <= max[0] && groups[2] <= max[2]).then_some(groups)
             }
         }

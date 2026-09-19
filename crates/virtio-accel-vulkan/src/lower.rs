@@ -284,9 +284,10 @@ pub(crate) enum KernelSpec {
         input: Storage,
         output: Storage,
     },
-    /// The skinny MATMUL kernel, selected when `m ≤ shader::SKINNY_ROWS`.
-    MatmulSkinny {
-        input: Storage,
+    /// The streaming split-`k` MATMUL, selected when `m ≤ shader::STREAM_ROWS`; its lhs is
+    /// always binary32 words (widened by an inserted `Cast` when the tensor is narrower).
+    MatmulStream {
+        rhs: Storage,
         output: Storage,
     },
     Cast {
@@ -310,8 +311,8 @@ pub(crate) enum Work {
     Linear(u32),
     /// A tiled MATMUL over `m × n` outputs per batch.
     Matmul { m: u32, n: u32, batch: u32 },
-    /// A skinny MATMUL over `n` columns per batch.
-    MatmulSkinny { n: u32, batch: u32 },
+    /// A streaming MATMUL over `n` columns per batch.
+    MatmulStream { n: u32, batch: u32 },
 }
 
 /// One recorded `vkCmdDispatch`.
@@ -1243,36 +1244,90 @@ impl<'a, 'b> Lowering<'a, 'b> {
         let from_lhs = self.input_location(*lhs)?;
         let from_rhs = self.input_location(*rhs)?;
         let to = self.output_location(output)?;
-        let spec = matmul_spec(
-            self.operand(from_lhs),
-            self.operand(from_rhs),
-            self.operand(to),
-            m,
-            n,
-            k,
-            batch,
-        );
-        // A few rows against a wide matrix is bandwidth-bound and gets the skinny kernel; the
-        // register-tiled kernel takes everything else. Both accumulate identically.
         let (input, output_storage) = (lhs_shape.storage(), out_shape.storage());
-        let (kernel, work) = if m <= crate::shader::SKINNY_ROWS {
-            (
-                KernelSpec::MatmulSkinny {
-                    input,
+        if m <= crate::shader::STREAM_ROWS {
+            // A few rows against a wide matrix is bandwidth-bound and gets the streaming kernel,
+            // which reads the lhs as binary32 words: a narrower lhs is widened first into an
+            // arena intermediate that lives only for this operator (`batch · m · k` words, small
+            // next to the weights it saves the kernel from widening in every lane).
+            let lhs_words = if input == Storage::Word {
+                from_lhs
+            } else {
+                let count = batch
+                    .checked_mul(m)
+                    .and_then(|rows| rows.checked_mul(k))
+                    .ok_or(LoweringError::ResourceLimit)?;
+                let region = self.allocate_region(u64::from(count) * 4, self.position)?;
+                let widened = Location::Region(region);
+                let geometry = MoveGeometry {
+                    count,
+                    dims: [1; MAX_RANK],
+                    in_strides: [0; MAX_RANK],
+                    in_offset: 0,
+                    out_strides: [0; MAX_RANK],
+                    out_offset: 0,
+                };
+                let spec = move_spec(
+                    self.operand(from_lhs),
+                    self.operand(widened),
+                    geometry,
+                    true,
+                );
+                self.dispatch(
+                    KernelSpec::Cast {
+                        input,
+                        output: Storage::Word,
+                    },
+                    spec,
+                    Work::Linear(count),
+                    &[from_lhs],
+                    widened,
+                    output,
+                );
+                widened
+            };
+            let spec = matmul_spec(
+                self.operand(lhs_words),
+                self.operand(from_rhs),
+                self.operand(to),
+                m,
+                n,
+                k,
+                batch,
+            );
+            self.dispatch(
+                KernelSpec::MatmulStream {
+                    rhs: input,
                     output: output_storage,
                 },
-                Work::MatmulSkinny { n, batch },
-            )
+                spec,
+                Work::MatmulStream { n, batch },
+                &[lhs_words, from_rhs],
+                to,
+                output,
+            );
         } else {
-            (
+            let spec = matmul_spec(
+                self.operand(from_lhs),
+                self.operand(from_rhs),
+                self.operand(to),
+                m,
+                n,
+                k,
+                batch,
+            );
+            self.dispatch(
                 KernelSpec::Matmul {
                     input,
                     output: output_storage,
                 },
+                spec,
                 Work::Matmul { m, n, batch },
-            )
-        };
-        self.dispatch(kernel, spec, work, &[from_lhs, from_rhs], to, output);
+                &[from_lhs, from_rhs],
+                to,
+                output,
+            );
+        }
         Ok(())
     }
 
@@ -1855,17 +1910,28 @@ mod tests {
         // Two binary16 lanes per destination word, one invocation per word.
         assert_eq!(plan.dispatches[0].work, Work::Linear(expected.div_ceil(2)));
 
+        // Two rows: the streaming kernel, its FP16 lhs widened first into the arena.
         let plan = lower_tosa(MATMUL_FP16.artifact, VULKAN_TOSA_TARGET).unwrap();
+        assert_eq!(plan.dispatches.len(), 2);
         assert_eq!(
             plan.dispatches[0].kernel,
-            KernelSpec::MatmulSkinny {
+            KernelSpec::Cast {
                 input: Storage::Half,
+                output: Storage::Word
+            }
+        );
+        assert_eq!(plan.dispatches[0].work, Work::Linear(6));
+        assert_eq!(
+            plan.dispatches[1].kernel,
+            KernelSpec::MatmulStream {
+                rhs: Storage::Half,
                 output: Storage::Half
             }
         );
+        assert!(plan.dispatches[1].barrier_before, "reads the widened lhs");
+        assert_eq!(plan.arena_bytes, ARENA_ALIGNMENT);
         assert_eq!(plan.slot(0).unwrap().byte_len, 6 * 2);
         assert_eq!(plan.slot(2).unwrap().byte_len, 4 * 2);
-        assert_eq!(plan.arena_bytes, 0);
 
         let plan = lower_tosa(MAX_POOL2D_FP16.artifact, VULKAN_TOSA_TARGET).unwrap();
         assert_eq!(
@@ -1928,15 +1994,15 @@ mod tests {
         assert_eq!(plan.slot(2).unwrap().byte_len, 4 * 4);
         assert_eq!(plan.dispatches.len(), 1);
         let dispatch = &plan.dispatches[0];
-        // Two rows: the skinny kernel.
+        // Two rows: the streaming kernel, reading the FP32 lhs directly.
         assert_eq!(
             dispatch.kernel,
-            KernelSpec::MatmulSkinny {
-                input: Storage::Word,
+            KernelSpec::MatmulStream {
+                rhs: Storage::Word,
                 output: Storage::Word
             }
         );
-        assert_eq!(dispatch.work, Work::MatmulSkinny { n: 2, batch: 1 });
+        assert_eq!(dispatch.work, Work::MatmulStream { n: 2, batch: 1 });
         // lhs, rhs, out operands then m, n, k, batch.
         assert_eq!(dispatch.spec, vec![0, 0, 1, 0, 2, 0, 2, 2, 3, 1]);
         // The zero-point constants are consumed at admission, never uploaded.
