@@ -58,8 +58,10 @@ build time (ADR 0002 in `docs/adr/`).
 - **Whole-graph execution** (ADR 0007): the graph's execution order becomes one command buffer of
   compute dispatches with `COMPUTE → COMPUTE` memory barriers between dependent dispatches.
   `CONST` tensors and intermediates live in one per-program arena allocation (lifetime-packed;
-  `RESHAPE`/`IDENTITY` of arena tensors are views, not copies; operators the analysis proves dead
-  are never dispatched). Kernels address tensors through one descriptor — an array of storage
+  `RESHAPE`/`IDENTITY` are views wherever the result is an intermediate, and a single-use
+  intermediate reshaped into a program output is written to the output slot by its producer —
+  ADR 0012 — so the copy dispatch remains only for an input reshaped straight into an output;
+  operators the analysis proves dead are never dispatched). Kernels address tensors through one descriptor — an array of storage
   buffers holding the bound slots plus the arena — selected by specialization constants, so one
   crate-authored module per kernel serves every binding layout and `CONCAT` with any input count.
   Guest bytes never reach the driver's shader compiler (ADR 0003).
@@ -77,10 +79,13 @@ build time (ADR 0002 in `docs/adr/`).
   output never modifies a neighbouring byte, even at an unaligned tail; contiguous FP8, FP16 and
   `BOOL` copies and casts write whole words per invocation and take that atomic path only for a
   tensor's final partial word.
-- **Memory domains** (ADR 0005): `Host` and `Shared` are persistently mapped host-coherent
-  allocations; `Device` is device-local memory reached only through bounded staging inside
-  `write_buffer`/`read_buffer`. `Shared` and `Device` are advertised only when the device exposes
-  a matching memory type. Every buffer is a dedicated allocation bound directly as a storage
+- **Memory domains** (ADR 0005, ADR 0012): `Host` and `Shared` are persistently mapped
+  host-coherent allocations; `Device` is device-local memory — reached through bounded staging
+  inside `write_buffer`/`read_buffer` on a device with more than one memory heap, and
+  persistently mapped like the others on a single-heap (unified-memory) device, where staging
+  would only add a copy (`VulkanOptions::map_unified_device_memory` selects the staged plan
+  anyway). `Shared` and `Device` are advertised only when the device exposes a matching memory
+  type. Every buffer is a dedicated allocation bound directly as a storage
   buffer; alignment is measured, never assumed.
 - **Execution** (ADR 0006): a bounded per-context ring of (command buffer, fence, descriptor set)
   triples; `vkQueueSubmit2` success is the admission boundary; `poll_event` is one
