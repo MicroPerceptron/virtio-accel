@@ -17,7 +17,7 @@
 //! The native module compiles on the host operating systems enumerated by `build.rs` (`va_vulkan`).
 //! Loader absence is a run-time fact reported as [`InitError::RuntimeUnavailable`], never a build
 //! probe. `VIRTIO_ACCEL_VULKAN=0` forces the placeholder, `=1` makes an unsupported target a loud
-//! build failure. The design decisions live in [`docs/adr/`](../../../docs/adr/) (ADRs 0001–0012);
+//! build failure. The design decisions live in [`docs/adr/`](../../../docs/adr/) (ADRs 0001–0013);
 //! ADR 0010 records the kernel geometries and the benchmark (`cargo bench -p virtio-accel-vulkan`)
 //! that measures them, ADR 0011 the MATMUL numerics (fused multiply-add, split-`k`), and
 //! ADR 0012 the mapped `Device` domain on unified-memory devices and the boundary views.
@@ -82,8 +82,8 @@ impl std::error::Error for InitError {}
 mod native;
 #[cfg(va_vulkan)]
 pub use native::{
-    LiveResources, VulkanAccelerator, VulkanBuffer, VulkanContext, VulkanEvent, VulkanOptions,
-    VulkanProgram, VulkanQueue,
+    LiveResources, VulkanAccelerator, VulkanBuffer, VulkanContext, VulkanEvent, VulkanGateSignal,
+    VulkanHostGate, VulkanOptions, VulkanProgram, VulkanQueue,
 };
 
 /// Placeholder that keeps workspace consumers portable where no Vulkan loader host exists.

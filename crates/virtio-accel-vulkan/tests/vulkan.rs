@@ -412,6 +412,273 @@ fn executes_the_fp32_identity_in_every_advertised_domain() {
     }
 }
 
+/// Page-aligned host memory the test owns, as a caller importing its own pages would.
+struct HostPages {
+    pointer: std::ptr::NonNull<u8>,
+    layout: std::alloc::Layout,
+}
+
+impl HostPages {
+    fn new(len: usize, alignment: usize) -> Self {
+        let layout = std::alloc::Layout::from_size_align(len, alignment).unwrap();
+        // SAFETY: `layout` has a nonzero size.
+        let pointer = std::ptr::NonNull::new(unsafe { std::alloc::alloc_zeroed(layout) }).unwrap();
+        Self { pointer, layout }
+    }
+
+    fn bytes(&mut self) -> &mut [u8] {
+        // SAFETY: the allocation is `layout.size()` bytes, owned by `self`.
+        unsafe { std::slice::from_raw_parts_mut(self.pointer.as_ptr(), self.layout.size()) }
+    }
+}
+
+impl Drop for HostPages {
+    fn drop(&mut self) {
+        // SAFETY: allocated in `new` with this layout, freed once.
+        unsafe { std::alloc::dealloc(self.pointer.as_ptr(), self.layout) };
+    }
+}
+
+/// ADR 0013: a buffer over imported host pages is read and written in place. The input is placed
+/// by plain host stores and the output is read the same way, with no explicit transfer at all.
+#[test]
+fn executes_over_imported_host_memory_without_a_transfer() {
+    for device in devices() {
+        let backend = open(&device);
+        let Some(alignment) = backend.host_import_alignment() else {
+            continue;
+        };
+        let page = alignment as usize;
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        let program = load(&backend, &context, IDENTITY_FP32_LOCAL, VULKAN_TOSA_TARGET).unwrap();
+        let (mut input_pages, mut output_pages) =
+            (HostPages::new(page, page), HostPages::new(page, page));
+        let payload = float_bytes([42.5]);
+        input_pages.bytes()[..4].copy_from_slice(&payload);
+        let desc = |usage| BufferDesc::new(4, BUFFER_ALIGNMENT, MemoryDomain::Host, usage).unwrap();
+        // SAFETY: both page runs outlive the buffers (freed below, after the event completes),
+        // and neither is touched by the host while the submission is in flight.
+        let (input, output) = unsafe {
+            (
+                backend
+                    .import_host_buffer(
+                        &context,
+                        desc(BufferUsage::PROGRAM_INPUT),
+                        input_pages.pointer,
+                        alignment,
+                    )
+                    .unwrap_or_else(|error| panic!("{device}: import failed: {error:?}"))
+                    .into_parts()
+                    .0,
+                backend
+                    .import_host_buffer(
+                        &context,
+                        desc(BufferUsage::PROGRAM_OUTPUT),
+                        output_pages.pointer,
+                        alignment,
+                    )
+                    .unwrap()
+                    .into_parts()
+                    .0,
+            )
+        };
+        let transferred = backend.explicit_transfer_bytes();
+        let queue = backend
+            .create_queue(&context, QueueDesc::default())
+            .unwrap();
+        let bindings = [
+            BindingRef {
+                slot: 0,
+                buffer: &input,
+                range: BufferRange::new(0, 4).unwrap(),
+                access: AccessMode::Read,
+            },
+            BindingRef {
+                slot: 1,
+                buffer: &output,
+                range: BufferRange::new(0, 4).unwrap(),
+                access: AccessMode::Write,
+            },
+        ];
+        let event = backend
+            .submit(&queue, &program, &bindings, Timeout::Infinite)
+            .unwrap_or_else(|_| panic!("{device}: submission failed"));
+        assert_eq!(
+            wait_for_terminal(&backend, &event),
+            EventState::Complete,
+            "{device}"
+        );
+        release(backend.destroy_event(event));
+        assert_eq!(
+            output_pages.bytes()[..4],
+            payload[..],
+            "{device}: output read in place"
+        );
+        assert_eq!(
+            backend.explicit_transfer_bytes(),
+            transferred,
+            "{device}: no transfer"
+        );
+        release(backend.destroy_queue(queue));
+        release(backend.unload_program(program));
+        release(backend.free_buffer(output));
+        release(backend.free_buffer(input));
+
+        // Misaligned or short ranges, and the device-local domain, are refused.
+        let shifted =
+            std::ptr::NonNull::new(input_pages.pointer.as_ptr().wrapping_add(64)).unwrap();
+        // SAFETY: refused before any Vulkan call; the pages are live regardless.
+        unsafe {
+            assert_eq!(
+                backend
+                    .import_host_buffer(
+                        &context,
+                        desc(BufferUsage::PROGRAM_INPUT),
+                        shifted,
+                        alignment
+                    )
+                    .err(),
+                Some(BackendError::InvalidArgument),
+                "{device}: misaligned pointer"
+            );
+            let device_desc = BufferDesc::new(
+                4,
+                BUFFER_ALIGNMENT,
+                MemoryDomain::Device,
+                BufferUsage::PROGRAM_INPUT,
+            )
+            .unwrap();
+            assert_eq!(
+                backend
+                    .import_host_buffer(&context, device_desc, input_pages.pointer, alignment)
+                    .err(),
+                Some(BackendError::Unsupported),
+                "{device}: device domain"
+            );
+        }
+        release(backend.destroy_context(context));
+        assert_eq!(backend.live_resources(), Default::default(), "{device}");
+    }
+}
+
+/// ADR 0013: a gated submission runs only once its gate is raised, the input written in between
+/// (by another thread, as a storage-read completion would), and a dropped gate releases waiters.
+#[test]
+fn gated_submissions_wait_for_the_host_to_raise_the_gate() {
+    for device in devices() {
+        let backend = open(&device);
+        let (Some(alignment), Ok(gate)) = (backend.host_import_alignment(), backend.host_gate())
+        else {
+            continue;
+        };
+        let page = alignment as usize;
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        let program = load(&backend, &context, IDENTITY_FP32_LOCAL, VULKAN_TOSA_TARGET).unwrap();
+        let queue = backend
+            .create_queue(&context, QueueDesc::default())
+            .unwrap();
+        let (input_pages, mut output_pages) =
+            (HostPages::new(page, page), HostPages::new(page, page));
+        let desc = |usage| BufferDesc::new(4, BUFFER_ALIGNMENT, MemoryDomain::Host, usage).unwrap();
+        // SAFETY: both page runs outlive the buffers, freed below after every event completes.
+        let (input, output) = unsafe {
+            (
+                backend
+                    .import_host_buffer(
+                        &context,
+                        desc(BufferUsage::PROGRAM_INPUT),
+                        input_pages.pointer,
+                        alignment,
+                    )
+                    .unwrap()
+                    .into_parts()
+                    .0,
+                backend
+                    .import_host_buffer(
+                        &context,
+                        desc(BufferUsage::PROGRAM_OUTPUT),
+                        output_pages.pointer,
+                        alignment,
+                    )
+                    .unwrap()
+                    .into_parts()
+                    .0,
+            )
+        };
+        let bindings = [
+            BindingRef {
+                slot: 0,
+                buffer: &input,
+                range: BufferRange::new(0, 4).unwrap(),
+                access: AccessMode::Read,
+            },
+            BindingRef {
+                slot: 1,
+                buffer: &output,
+                range: BufferRange::new(0, 4).unwrap(),
+                access: AccessMode::Write,
+            },
+        ];
+        let event = backend
+            .submit_after(&queue, &program, &bindings, &gate, 1)
+            .unwrap_or_else(|_| panic!("{device}: gated submission failed"));
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            backend.poll_event(&event).unwrap(),
+            EventState::Pending,
+            "{device}: gated"
+        );
+        assert_eq!(output_pages.bytes()[..4], [0; 4], "{device}: nothing ran");
+
+        // Fill the input and raise the gate from another thread.
+        let payload = float_bytes([-7.25]);
+        let (address, signal) = (input_pages.pointer.as_ptr() as usize, gate.signal());
+        std::thread::spawn(move || {
+            // SAFETY: the input page is live until the event completes, and the device does not
+            // read it before the raise below.
+            unsafe { std::ptr::copy_nonoverlapping(payload.as_ptr(), address as *mut u8, 4) };
+            assert!(signal.raise(1).unwrap());
+            assert!(signal.raise(1).unwrap(), "a repeated raise changes nothing");
+        })
+        .join()
+        .unwrap();
+        assert_eq!(
+            wait_for_terminal(&backend, &event),
+            EventState::Complete,
+            "{device}"
+        );
+        release(backend.destroy_event(event));
+        assert_eq!(
+            output_pages.bytes()[..4],
+            float_bytes([-7.25])[..],
+            "{device}"
+        );
+
+        // A gate dropped with a waiter still queued releases it rather than hanging.
+        let event = backend
+            .submit_after(&queue, &program, &bindings, &gate, 9)
+            .unwrap_or_else(|_| panic!("{device}: gated submission failed"));
+        let signal = gate.signal();
+        drop(gate);
+        assert_eq!(
+            wait_for_terminal(&backend, &event),
+            EventState::Complete,
+            "{device}"
+        );
+        assert!(
+            !signal.raise(10).unwrap(),
+            "{device}: a closed gate raises nothing"
+        );
+        release(backend.destroy_event(event));
+        release(backend.destroy_queue(queue));
+        release(backend.unload_program(program));
+        release(backend.free_buffer(output));
+        release(backend.free_buffer(input));
+        release(backend.destroy_context(context));
+        assert_eq!(backend.live_resources(), Default::default(), "{device}");
+    }
+}
+
 #[test]
 fn preserves_fp32_edge_values_bit_exactly_on_every_device() {
     for device in devices() {
