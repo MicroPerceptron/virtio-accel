@@ -68,7 +68,8 @@ build time (ADR 0002 in `docs/adr/`).
   tests) instead of the driver's built-ins, whose precision Vulkan specifies loosely or not at
   all; NaN modes (`PROPAGATE`/`IGNORE`) follow the TOSA pseudocode literally; `MATMUL` is a
   register-tiled shared-memory kernel (a 64 × 64 output block per workgroup, or a flat 8 × 64
-  block for eight rows or fewer — ADR 0010) bit-identical to the sequential ascending-k sum.
+  block for eight rows or fewer, with FP8 and FP16 operands staged a storage word per invocation
+  — ADR 0010) bit-identical to the sequential ascending-k sum.
   `BOOL` tensors are read by word and written with `OpAtomicAnd`/`OpAtomicOr`, so a predicate
   output never modifies a neighbouring byte, even at an unaligned tail; contiguous FP8, FP16 and
   `BOOL` copies and casts write whole words per invocation and take that atomic path only for a

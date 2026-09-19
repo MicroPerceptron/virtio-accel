@@ -1,8 +1,9 @@
 # 10. Vulkan kernel throughput: whole-word lane stores, register-tiled MATMUL, a skinny geometry, and a benchmark
 
-- Status: accepted (implemented; measured on Intel Arc (Panther Lake, Mesa 26.0.8 ANV, Vulkan
-  1.4.335) on 2026-09-18, with the full device suite passing on ANV and llvmpipe and every kernel
-  variant passing `spirv-val`)
+- Status: accepted (implemented in two rounds; measured on Intel Arc (Panther Lake, Mesa 26.0.8
+  ANV, Vulkan 1.4.335) on 2026-09-18, with the full device suite passing on ANV and llvmpipe,
+  every kernel variant passing `spirv-val`, and the suite clean under the Khronos validation
+  layer)
 - Extends: ADR 0007 (kernel mechanics and the MATMUL bit-identity property), ADR 0008 and
   ADR 0009 (whose packed FP16 and FP8 lanes this makes fast)
 - Resolves: the first performance pass over the FP8 tier — the paths ADR 0009 made correct
@@ -75,40 +76,74 @@ partial word.
    each, 32 deep — an 8 × 64 block where every invocation stages eight weight elements per step.
    A 4096-wide layer gets 64 workgroups of 256 invocations all streaming the weight slab.
 
-5. **Two rejected alternatives, recorded because they were measured.** A one-column-per-
-   invocation 1-D GEMV kernel streams FP32 weights at 84 GB/s but leaves only 4096 lanes to
-   widen FP8 and FP16 operands, and those ran three times *slower* than the square block; the
-   widening must be spread over the whole workgroup, which the flat geometry does. A 256-entry
-   shared-memory FP8 widening table, built per workgroup, was within noise of the inline integer
-   expansion on Xe3 (1495 vs 1409 GFLOP/s at 1024³, GEMV unchanged) and was dropped: nothing to
-   build, no barrier to wait on. A 64-deep skinny slab was slower than 32 (0.84 vs 0.73 ms).
+5. **Sub-word slabs are staged a storage word per invocation.** After the geometry work, FP8,
+   FP16 and FP32 GEMV still took the same wall time, and a diagnostic run with the inner loop
+   removed showed why: the FP8 kernel spent 0.41 ms above the floor on staging alone while FP32
+   hit memory speed with the identical instruction structure. The memory pipeline was bound by
+   *load instructions*, not bytes, and every FP8 lane issued one load per element to use one
+   byte of the word it fetched. Staging is now a shared routine over a slab description that,
+   for sub-word storage, loads one word per invocation — four FP8 or two FP16 elements from one
+   `OpLoad` — whenever the operand's row stride is a multiple of the lanes per word. The check
+   is on a specialization constant, so the driver folds it and only one path survives pipeline
+   creation; the per-element path remains for unaligned strides and for FP32. This is the step
+   that made FP8 *faster* than the wider storages rather than merely smaller.
+
+6. **Widening by exponent offset.** `widen_fp8` and `widen_f16` place the encoding's magnitude
+   bits under a fixed binary32 exponent `K = 127 − bias`, so a normal reads off directly and a
+   subnormal is `(x − 2^(1 − bias)) · 2`, two exact operations in one binade; specials are one
+   compare and one select. Half the instructions of the integer-only expansion, still no
+   `OpFConvert`, and no binary32 denormal is ever formed. It measured no change on Xe3 (the
+   staging ALU was never the bound) and is kept for being smaller. The exhaustive 256-pattern
+   `CAST` test caught the one bug in it — the exponent field and `K` overlap, so the placement
+   is an add, not an or — at pattern `0x40`.
+
+7. **The skinny inner loop is unrolled; the wide one is not.** A full 32-deep step of the
+   skinny geometry runs unrolled (0.47 → 0.42 ms on the decode GEMV); the same treatment of the
+   wide geometry's sixteen multiply-adds per iteration slowed 1024³ by a quarter from register
+   pressure, so unrolling is a `MatmulGeometry` property.
+
+8. **Rejected alternatives, recorded because they were measured.** A one-column-per-invocation
+   1-D GEMV kernel streams FP32 weights at 84 GB/s but leaves only 4096 lanes to widen FP8 and
+   FP16 operands, and those ran three times *slower* than the square block; the widening must
+   be spread over the whole workgroup, which the flat geometry does. A 256-entry shared-memory
+   FP8 widening table, built per workgroup, was within noise of the inline expansion (1495 vs
+   1409 GFLOP/s at 1024³, GEMV unchanged) and was dropped: nothing to build, no barrier to wait
+   on. A 64-deep skinny slab was slower than 32 (0.84 vs 0.73 ms). Register prefetch of the
+   next step's slab (software pipelining) left GEMV unchanged and slowed the square MATMUL by
+   a tenth from the extra live registers; the kernel was not latency-bound in that way.
 
 ## Evidence
 
-Intel Arc (Panther Lake), `Device` domain, median of 10 timed submissions after warm-up, 16 Mi
+Intel Arc (Panther Lake), `Device` domain, median of 30 timed submissions after warm-up, 16 Mi
 elements for the elementwise cases. "Before" is the kernels as of ADR 0009 under the same
 harness on the same day.
 
 | Case | Before | After |
 |---|---:|---:|
 | `IDENTITY` FP8 | 4.60 ms, 7.3 GB/s | 0.37 ms, 92 GB/s |
-| `IDENTITY` FP16 | 1.70 ms, 39 GB/s | 0.66 ms, 102 GB/s |
+| `IDENTITY` FP16 | 1.70 ms, 39 GB/s | 0.65 ms, 103 GB/s |
 | `IDENTITY` FP32 (unchanged path) | 1.22 ms, 110 GB/s | 1.23 ms, 109 GB/s |
-| `CAST` FP8 → FP16 | 1.67 ms, 30 GB/s | 0.57 ms, 88 GB/s |
-| `CAST` FP16 → FP8 | 3.27 ms, 15 GB/s | 0.50 ms, 100 GB/s |
-| `CAST` FP32 → FP8 | 3.27 ms, 26 GB/s | 0.80 ms, 105 GB/s |
-| `CAST` FP32 → FP16 | 1.88 ms, 54 GB/s | 0.93 ms, 108 GB/s |
-| `MATMUL` FP8 1024³ | 3.76 ms, 572 GFLOP/s | 1.46 ms, 1475 GFLOP/s |
-| `MATMUL` FP16 1024³ | 2.86 ms, 751 GFLOP/s | 1.19 ms, 1798 GFLOP/s |
-| `MATMUL` FP32 1024³ | 2.74 ms, 785 GFLOP/s | 1.12 ms, 1921 GFLOP/s |
-| `CAST` FP8 → FP16 + `MATMUL` FP16 1024³ | 3.24 ms | 1.33 ms |
-| GEMV FP8 1 × 4096 × 4096 | 0.98 ms, 17 GB/s weights | 0.75 ms, 22 GB/s weights |
-| GEMV FP16 1 × 4096 × 4096 | 1.06 ms, 32 GB/s weights | 0.70 ms, 48 GB/s weights |
-| GEMV FP32 1 × 4096 × 4096 | 1.06 ms, 63 GB/s weights | 0.74 ms, 91 GB/s weights |
-| `CAST` FP8 → FP16 + GEMV FP16 1 × 4096 × 4096 | 2.73 ms | 1.11 ms |
+| `CAST` FP8 → FP16 | 1.67 ms, 30 GB/s | 0.55 ms, 91 GB/s |
+| `CAST` FP16 → FP8 | 3.27 ms, 15 GB/s | 0.52 ms, 97 GB/s |
+| `CAST` FP32 → FP8 | 3.27 ms, 26 GB/s | 0.80 ms, 104 GB/s |
+| `CAST` FP32 → FP16 | 1.88 ms, 54 GB/s | 0.95 ms, 106 GB/s |
+| `MATMUL` FP8 512³ | 0.66 ms, 408 GFLOP/s | 0.43 ms, 625 GFLOP/s |
+| `MATMUL` FP8 1024³ | 3.76 ms, 572 GFLOP/s | 1.43 ms, 1503 GFLOP/s |
+| `MATMUL` FP16 1024³ | 2.86 ms, 751 GFLOP/s | 1.14 ms, 1882 GFLOP/s |
+| `MATMUL` FP32 1024³ | 2.74 ms, 785 GFLOP/s | 1.11 ms, 1928 GFLOP/s |
+| `CAST` FP8 → FP16 + `MATMUL` FP16 1024³ | 3.24 ms | 1.28 ms |
+| GEMV FP8 1 × 4096 × 4096 | 0.98 ms, 17 GB/s weights | 0.44 ms, 39 GB/s weights |
+| GEMV FP16 1 × 4096 × 4096 | 1.06 ms, 32 GB/s weights | 0.53 ms, 63 GB/s weights |
+| GEMV FP32 1 × 4096 × 4096 | 1.06 ms, 63 GB/s weights | 0.72 ms, 93 GB/s weights |
+| GEMV FP8 8 × 4096 × 4096 | 1.01 ms | 0.46 ms |
+| `CAST` FP8 → FP16 + GEMV FP16 1 × 4096 × 4096 | 2.73 ms | 0.95 ms |
 
 The GB/s figures count bytes read plus written; GEMV "weights" figures count the weight matrix
-alone. Every number includes the submission floor, measured at 100–170 µs across runs.
+alone. Every number includes the submission floor, measured at 100–170 µs across runs, which
+is why the GEMV weight rates understate the kernels: net of a 170 µs floor the FP8 GEMV
+streams its 16 MiB at about 63 GB/s and the FP32 one its 64 MiB at about 120 GB/s. The 1024³
+cases vary by about ±15% run to run on this device even at 30 samples; the elementwise and
+GEMV cases are stable to a few percent.
 
 The exhaustive 256-pattern FP8 identity, the FP8 `CAST` round trips, the `BOOL` neighbour-safety
 tests, the MATMUL bit-identity test over nine shapes (including 65 × 70 × 130, 1 × 300 × 257
@@ -120,11 +155,11 @@ vulkan1.3`; the device suite runs clean under `VK_LAYER_KHRONOS_validation`.
 
 - The FP8 tier's bandwidth claim now holds for data movement: FP8 copies and casts run at the
   device's copy rate, which is what a quarter-width storage format is for.
-- It does not yet hold for GEMV. FP8, FP16 and FP32 GEMV take the same wall time, so the FP8
-  kernel is bound by staging instructions rather than by the bytes it streams: 22 GB/s of
-  weights against the 91 GB/s the FP32 kernel demonstrates the memory system can deliver. The
-  ceiling is roughly 4× away and is the next narrow objective; the constraint that closes most
-  doors (no split-`k`) is ADR 0007's, and reopening it would be a numerics decision, not a
+- For GEMV the order is now the right one — FP8 0.44 ms, FP16 0.53, FP32 0.72 — but FP8 is
+  not yet at the memory bound: net of the floor it streams weights at about half the rate the
+  FP32 kernel demonstrates. What remains is per-step fixed cost (two barriers and a shared
+  round trip per 32 `k`) that bytes do not amortize; the constraint that closes the obvious
+  door (no split-`k`) is ADR 0007's, and reopening it would be a numerics decision, not a
   performance one.
 - The square MATMUL runs at about 1.5–1.9 TFLOP/s against an arithmetic ceiling near half the
   device's fused-multiply-add peak (every multiply-add is two separately rounded instructions

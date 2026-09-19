@@ -285,33 +285,35 @@ each case, and the broadened tier still owes a MoltenVK run (the same commands a
 `cargo bench -p virtio-accel-vulkan` times whole TOSA graphs submit-to-fence through the public
 `Accelerator` surface, per enumerated device, after a warm-up of at least 300 ms per case so a
 frequency-scaling GPU is at clock. On 2026-09-18, Intel Arc (Panther Lake, Mesa 26.0.8 ANV,
-Vulkan 1.4.335), `Device` memory domain, median of 10 timed submissions, 16 Mi elements for the
+Vulkan 1.4.335), `Device` memory domain, median of 30 timed submissions, 16 Mi elements for the
 elementwise cases; "before" is the kernels as shipped by ADR 0009 under the same harness:
 
 | Case | Before | After |
 |---|---:|---:|
 | `IDENTITY` FP8 | 4.60 ms, 7.3 GB/s | 0.37 ms, 92 GB/s |
-| `IDENTITY` FP16 | 1.70 ms, 39 GB/s | 0.66 ms, 102 GB/s |
+| `IDENTITY` FP16 | 1.70 ms, 39 GB/s | 0.65 ms, 103 GB/s |
 | `IDENTITY` FP32 | 1.22 ms, 110 GB/s | 1.23 ms, 109 GB/s |
-| `CAST` FP8 → FP16 | 1.67 ms, 30 GB/s | 0.57 ms, 88 GB/s |
-| `CAST` FP16 → FP8 | 3.27 ms, 15 GB/s | 0.50 ms, 100 GB/s |
-| `CAST` FP32 → FP8 | 3.27 ms, 26 GB/s | 0.80 ms, 105 GB/s |
-| `CAST` FP32 → FP16 | 1.88 ms, 54 GB/s | 0.93 ms, 108 GB/s |
-| `MATMUL` FP8 → FP16, 1024³ | 3.76 ms, 572 GFLOP/s | 1.46 ms, 1475 GFLOP/s |
-| `MATMUL` FP16, 1024³ | 2.86 ms, 751 GFLOP/s | 1.19 ms, 1798 GFLOP/s |
-| `MATMUL` FP32, 1024³ | 2.74 ms, 785 GFLOP/s | 1.12 ms, 1921 GFLOP/s |
-| `CAST` FP8 → FP16 + `MATMUL` FP16, 1024³ | 3.24 ms | 1.33 ms |
-| GEMV FP8 → FP16, 1 × 4096 × 4096 | 0.98 ms, 17 GB/s of weights | 0.75 ms, 22 GB/s of weights |
-| GEMV FP16, 1 × 4096 × 4096 | 1.06 ms, 32 GB/s of weights | 0.70 ms, 48 GB/s of weights |
-| GEMV FP32, 1 × 4096 × 4096 | 1.06 ms, 63 GB/s of weights | 0.74 ms, 91 GB/s of weights |
-| `CAST` FP8 → FP16 + GEMV FP16, 1 × 4096 × 4096 | 2.73 ms | 1.11 ms |
+| `CAST` FP8 → FP16 | 1.67 ms, 30 GB/s | 0.55 ms, 91 GB/s |
+| `CAST` FP16 → FP8 | 3.27 ms, 15 GB/s | 0.52 ms, 97 GB/s |
+| `CAST` FP32 → FP8 | 3.27 ms, 26 GB/s | 0.80 ms, 104 GB/s |
+| `CAST` FP32 → FP16 | 1.88 ms, 54 GB/s | 0.95 ms, 106 GB/s |
+| `MATMUL` FP8 → FP16, 1024³ | 3.76 ms, 572 GFLOP/s | 1.43 ms, 1503 GFLOP/s |
+| `MATMUL` FP16, 1024³ | 2.86 ms, 751 GFLOP/s | 1.14 ms, 1882 GFLOP/s |
+| `MATMUL` FP32, 1024³ | 2.74 ms, 785 GFLOP/s | 1.11 ms, 1928 GFLOP/s |
+| `CAST` FP8 → FP16 + `MATMUL` FP16, 1024³ | 3.24 ms | 1.28 ms |
+| GEMV FP8 → FP16, 1 × 4096 × 4096 | 0.98 ms, 17 GB/s of weights | 0.44 ms, 39 GB/s of weights |
+| GEMV FP16, 1 × 4096 × 4096 | 1.06 ms, 32 GB/s of weights | 0.53 ms, 63 GB/s of weights |
+| GEMV FP32, 1 × 4096 × 4096 | 1.06 ms, 63 GB/s of weights | 0.72 ms, 93 GB/s of weights |
+| `CAST` FP8 → FP16 + GEMV FP16, 1 × 4096 × 4096 | 2.73 ms | 0.95 ms |
 
 GB/s counts bytes read plus written; the GEMV weight figures count the weight matrix alone. The
 submission floor (a four-element identity) measured 100–170 µs across runs and is included in
 every number. What the table says about the FP8 tier: data movement now runs at the device's copy
-rate, so the quarter-width storage delivers its bandwidth; GEMV does not yet — FP8, FP16 and FP32
-take the same wall time, so the FP8 kernel is bound by staging instructions rather than by the
-bytes it streams, and the 4× headroom the FP32 rate demonstrates is the next objective.
+rate, so the quarter-width storage delivers its bandwidth, and GEMV now orders the right way
+(FP8 0.44 ms, FP16 0.53, FP32 0.72). Net of the floor the FP8 GEMV streams weights at roughly half
+the rate the FP32 kernel shows the memory system delivers; the remainder is per-step fixed cost,
+recorded in ADR 0010 as the next objective. The 1024³ cases vary about ±15% run to run on this
+device even at 30 samples.
 
 ## Qualcomm Hexagon evidence status
 
