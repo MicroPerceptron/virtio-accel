@@ -116,6 +116,13 @@ re-tried blind. Every number is a 20-sample median against the kernels as decide
   FP8 1.20 → 1.29, FP32 flat. The scalar loads were not the bound, and the contiguous layout
   costs the interleaved layout's coalesced staging stores and output writes.
 
+- **NaN/Inf handling in the widening.** Prompted by a CPU kernel profile that put 9% of its
+  throughput into NaN checks: the special-case compare-and-select in `widen_fp8` and
+  `widen_f16` was stripped (diagnostically, correctness aside) and re-measured at 30 samples.
+  One-row FP8 GEMV 0.33 ms intact vs 0.36 stripped, eight-row 0.41 vs 0.42, FP16 1024³ 0.88 vs
+  0.84, FP8 1024³ 1.18 vs 1.18 — noise in both directions. The GPU kernels are bound by memory
+  and latency, not by the staging ALU, so the checks stay and the finding does not transfer.
+
 ## Consequences
 
 - The FP8 tier's bandwidth claim now holds for GEMV as well as for data movement: the one-row
