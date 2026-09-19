@@ -93,6 +93,29 @@ each shape three times across every memory domain. The shared corpus cases were 
 under any association (small integers, or products whose sums fit a binary32 significand) and
 pass unchanged.
 
+## Measured and rejected after the decision
+
+A final pass tried the remaining ideas on the same device; each is recorded so it is not
+re-tried blind. Every number is a 20-sample median against the kernels as decided above.
+
+- **Host submission path.** The bench now reports `submit` wall time beside completion: it is
+  about 5 µs of the 85–170 µs floor (descriptor update, command recording, `vkQueueSubmit2`).
+  The rest is GPU-side scheduling and fence latency, which no change to the backend's
+  submission code can remove; the ring, the per-submit recording and the descriptor update
+  stay as ADR 0006 has them.
+- **A shared-memory FP8 widening table**, retried now that staging is word-granular: the
+  square FP8 MATMUL was unchanged within noise (1.20 → 1.26 ms) and the streaming kernel
+  regressed badly (one-row GEMV 0.34 → 0.55 ms) — 64 invocations indexing 256 entries at
+  random conflict in shared memory far more than the fourteen-instruction expansion costs.
+- **Unrolling the streaming kernel's `k` loop four wide** so several weight loads are in
+  flight per invocation: one-row GEMV unchanged (0.34 ms), eight-row 0.41 → 0.58 ms from the
+  register pressure of four steps' operands beside 32 accumulators. The device already hides
+  the load latency by interleaving the ~10 threads per execution unit the geometry gives it.
+- **`vec4` shared loads in the register-tiled kernel** (contiguous rows and columns per
+  invocation, two vector loads per `kk` instead of eight scalars): FP16 1024³ 0.87 → 0.98 ms,
+  FP8 1.20 → 1.29, FP32 flat. The scalar loads were not the bound, and the contiguous layout
+  costs the interleaved layout's coalesced staging stores and output writes.
+
 ## Consequences
 
 - The FP8 tier's bandwidth claim now holds for GEMV as well as for data movement: the one-row
