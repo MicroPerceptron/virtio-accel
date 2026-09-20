@@ -90,9 +90,21 @@ virtio-accel-proto.workspace = true
 virtio-accel-split-queue.workspace = true
 virtio-accel-transport.workspace = true
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(va_hexagon)",
+    "cfg(va_openvino)",
+    "cfg(va_xdna)",
+] }
+
 [dev-dependencies]
 serde_json.workspace = true
 virtio-accel-cleanroom.workspace = true
 virtio-accel-conformance.workspace = true
+virtio-accel-coreml.workspace = true
+virtio-accel-hexagon.workspace = true
 virtio-accel-mock.workspace = true
+virtio-accel-openvino.workspace = true
+virtio-accel-tosa.workspace = true
+virtio-accel-xdna.workspace = true
 zerocopy.workspace = true

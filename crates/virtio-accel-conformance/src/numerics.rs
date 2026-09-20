@@ -985,6 +985,37 @@ pub const MATMUL_INT8: TosaInt8MatmulCase = TosaInt8MatmulCase {
     outputs: MATMUL_INT8_OUTPUTS,
 };
 
+// Two samples of three INT8 features times a 3x2 feature-classifier weight matrix. Each sample
+// is correctly classifiable by the logits alone (zero point left of the range) and has a clear
+// winning class.
+const CLASSIFIER_SAMPLES_INT8: &[u8] = &[0x4E, 0x08, 0x03, 0x08, 0x4E, 0x03];
+const CLASSIFIER_WEIGHTS_INT8: &[u8] = &[0x07, 0x03, 0x03, 0x07, 0x02, 0x02];
+const CLASSIFIER_INPUTS_INT8: &[PackedTensor] = &[
+    PackedTensor {
+        shape: &[1, 2, 3],
+        bytes: CLASSIFIER_SAMPLES_INT8,
+    },
+    PackedTensor {
+        shape: &[1, 3, 2],
+        bytes: CLASSIFIER_WEIGHTS_INT8,
+    },
+];
+const CLASSIFIER_LOGITS_INT32: &[i32] = &[315, 35, 35, 315];
+const CLASSIFIER_OUTPUTS_INT32: &[Int32Tensor] = &[Int32Tensor {
+    shape: &[1, 2, 2],
+    values: CLASSIFIER_LOGITS_INT32,
+}];
+
+/// Exact INT8 quantized linear classifier: two samples, three features, two classes, INT32
+/// logits with unambiguous per-sample argmax winners.
+pub const QUANTIZED_CLASSIFIER_INT8: TosaInt8MatmulCase = TosaInt8MatmulCase {
+    name: "quantized-classifier-int8",
+    artifact: MATMUL_INT8.artifact,
+    inputs: CLASSIFIER_INPUTS_INT8,
+    zero_points: [-2, 3],
+    outputs: CLASSIFIER_OUTPUTS_INT32,
+};
+
 const RESCALE_INT32_INPUT: &[i32] = &[
     -1000, -251, -250, -249, -3, -2, -1, 0, 1, 2, 3, 249, 250, 251, 260, 1000,
 ];
@@ -1829,6 +1860,35 @@ mod tests {
         assert!(MATMUL_INT8.output_matches(0, &actual));
         assert!(!MATMUL_INT8.output_matches(0, &[538, -544]));
         assert!(!MATMUL_INT8.output_matches(1, &actual));
+    }
+
+    #[test]
+    fn int8_classifier_oracle_is_derived_from_the_shared_exact_dot_product() {
+        use virtio_accel_tosa::dot_i8_i32;
+
+        let left = QUANTIZED_CLASSIFIER_INT8.inputs[0].bytes;
+        let right = QUANTIZED_CLASSIFIER_INT8.inputs[1].bytes;
+        let mut logits = Vec::new();
+        for sample in 0..2 {
+            for class in 0..2 {
+                let features = &left[sample * 3..sample * 3 + 3];
+                let weights = [right[class], right[2 + class], right[4 + class]];
+                logits.push(
+                    dot_i8_i32(
+                        features,
+                        &weights,
+                        QUANTIZED_CLASSIFIER_INT8.zero_points[0],
+                        QUANTIZED_CLASSIFIER_INT8.zero_points[1],
+                        0,
+                    )
+                    .unwrap(),
+                );
+            }
+        }
+        assert!(QUANTIZED_CLASSIFIER_INT8.output_matches(0, &logits));
+        // The per-sample winner must be unambiguous: every row pairs one strong and one weak
+        // logit in opposite order.
+        assert!(logits[0] > logits[1] && logits[3] > logits[2]);
     }
 
     #[test]
