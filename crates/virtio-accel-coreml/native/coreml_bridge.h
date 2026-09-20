@@ -80,6 +80,13 @@ void *va_coreml_submit(void *model,
                        va_coreml_release_context_fn release_context,
                        struct va_coreml_error *error);
 
+void *va_coreml_submit_copy(const void *source,
+                            void *destination,
+                            uint64_t bytes,
+                            void *context,
+                            va_coreml_release_context_fn release_context,
+                            struct va_coreml_error *error);
+
 uint32_t va_coreml_event_poll(void *event, struct va_coreml_error *error);
 
 void va_coreml_event_release(void *event);

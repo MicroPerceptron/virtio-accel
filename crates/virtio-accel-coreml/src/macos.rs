@@ -1,7 +1,9 @@
 //! Audited macOS implementation. See `SAFETY.md`.
 
 use crate::artifact::{DecodeError, FeatureRole, MAX_ARTIFACT_BYTES, decode};
-use crate::lower::{LoweredFeature, LoweredFeatureRole, LoweringError, lower_tosa};
+use crate::lower::{
+    LoweredExecution, LoweredFeature, LoweredFeatureRole, LoweringError, lower_tosa,
+};
 use crate::{ARTIFACT_FORMAT, InitError, REQUIRED_RESIDENT_BYTES, TARGET_IDENTITY};
 use core::ffi::c_void;
 use std::alloc::{Layout, alloc_zeroed, dealloc};
@@ -107,6 +109,14 @@ unsafe extern "C" {
         model: *mut c_void,
         bindings: *const NativeBinding,
         binding_count: usize,
+        context: *mut c_void,
+        release_context: NativeReleaseContext,
+        error: *mut NativeError,
+    ) -> *mut c_void;
+    fn va_coreml_submit_copy(
+        source: *const c_void,
+        destination: *mut c_void,
+        bytes: u64,
         context: *mut c_void,
         release_context: NativeReleaseContext,
         error: *mut NativeError,
@@ -299,8 +309,13 @@ pub struct CoreMlBuffer {
 /// Resident Core ML model handle.
 pub struct CoreMlProgram {
     context_id: u64,
-    native: NonNull<c_void>,
+    execution: ProgramExecution,
     slots: Vec<SlotPlan>,
+}
+
+enum ProgramExecution {
+    Native(NonNull<c_void>),
+    ExactCopy { input_slot: u32, output_slot: u32 },
 }
 
 impl fmt::Debug for CoreMlProgram {
@@ -314,8 +329,10 @@ impl fmt::Debug for CoreMlProgram {
 
 impl Drop for CoreMlProgram {
     fn drop(&mut self) {
-        // SAFETY: `native` owns one bridge retain and is released exactly once here.
-        unsafe { va_coreml_model_release(self.native.as_ptr()) };
+        if let ProgramExecution::Native(native) = self.execution {
+            // SAFETY: `native` owns one bridge retain and is released exactly once here.
+            unsafe { va_coreml_model_release(native.as_ptr()) };
+        }
     }
 }
 
@@ -779,22 +796,36 @@ impl Accelerator for CoreMlAccelerator {
                 })
                 .collect::<Vec<_>>();
             let mut error = NativeError::default();
-            // SAFETY: model and feature-name bytes remain valid for this synchronous call. The
-            // bridge writes the model to a unique temporary source, compiles and loads it, removes
-            // the source, copies retained strings, and returns one owned model reference.
-            let native = unsafe {
-                va_coreml_model_load_memory(
-                    lowered.bytes.as_ptr(),
-                    lowered.bytes.len(),
-                    mappings.as_ptr(),
-                    mappings.len(),
-                    &mut error,
-                )
+            let execution = match lowered.execution {
+                LoweredExecution::CoreMl => {
+                    // SAFETY: model and feature-name bytes remain valid for this synchronous call.
+                    // The bridge writes the model to a unique temporary source, compiles and loads
+                    // it, removes the source, copies retained strings, and returns one owned model
+                    // reference.
+                    let native = unsafe {
+                        va_coreml_model_load_memory(
+                            lowered.bytes.as_ptr(),
+                            lowered.bytes.len(),
+                            mappings.as_ptr(),
+                            mappings.len(),
+                            &mut error,
+                        )
+                    };
+                    ProgramExecution::Native(
+                        NonNull::new(native).ok_or_else(|| Self::native_error(error))?,
+                    )
+                }
+                LoweredExecution::ExactCopy {
+                    input_slot,
+                    output_slot,
+                } => ProgramExecution::ExactCopy {
+                    input_slot,
+                    output_slot,
+                },
             };
-            let native = NonNull::new(native).ok_or_else(|| Self::native_error(error))?;
             return Ok(CoreMlProgram {
                 context_id: context.id,
-                native,
+                execution,
                 slots,
             });
         }
@@ -844,7 +875,7 @@ impl Accelerator for CoreMlAccelerator {
         let native = NonNull::new(native).ok_or_else(|| Self::native_error(error))?;
         Ok(CoreMlProgram {
             context_id: context.id,
-            native,
+            execution: ProgramExecution::Native(native),
             slots,
         })
     }
@@ -939,15 +970,48 @@ impl Accelerator for CoreMlAccelerator {
         // SAFETY: model and binding pointers remain valid through this admission call. The Core ML
         // arrays created by the bridge borrow the allocations. On success the completion block
         // owns `backing_context`; on rejection ownership remains here and is reconstructed below.
-        let native = unsafe {
-            va_coreml_submit(
-                program.native.as_ptr(),
-                native_bindings.as_ptr(),
-                native_bindings.len(),
-                backing_context,
-                release_event_backings,
-                &mut error,
-            )
+        let native = match program.execution {
+            ProgramExecution::Native(native) => unsafe {
+                va_coreml_submit(
+                    native.as_ptr(),
+                    native_bindings.as_ptr(),
+                    native_bindings.len(),
+                    backing_context,
+                    release_event_backings,
+                    &mut error,
+                )
+            },
+            ProgramExecution::ExactCopy {
+                input_slot,
+                output_slot,
+            } => {
+                let input = program
+                    .slots
+                    .binary_search_by_key(&input_slot, |slot| slot.slot)
+                    .expect("exact-copy input slot is present in its plan");
+                let output = program
+                    .slots
+                    .binary_search_by_key(&output_slot, |slot| slot.slot)
+                    .expect("exact-copy output slot is present in its plan");
+                let source = native_bindings[input];
+                let destination = native_bindings[output];
+                if source.bytes != destination.bytes {
+                    drop(unsafe { Box::from_raw(backing_context.cast::<Vec<EventBacking>>()) });
+                    return Err(SubmitFailure::Rejected(BackendError::Incompatible));
+                }
+                // SAFETY: the binding-range and backing guards above keep both allocations live
+                // and exclude conflicting access until the bridge completes the asynchronous copy.
+                unsafe {
+                    va_coreml_submit_copy(
+                        source.data.cast_const(),
+                        destination.data,
+                        source.bytes,
+                        backing_context,
+                        release_event_backings,
+                        &mut error,
+                    )
+                }
+            }
         };
         let native = match NonNull::new(native) {
             Some(native) => native,

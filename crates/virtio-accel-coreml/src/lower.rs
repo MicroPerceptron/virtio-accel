@@ -145,6 +145,17 @@ pub(crate) struct LoweredFeature {
 pub(crate) struct LoweredModel {
     pub bytes: Vec<u8>,
     pub features: Vec<LoweredFeature>,
+    pub execution: LoweredExecution,
+}
+
+/// Backend-local execution choice for a verified TOSA program.
+///
+/// A whole-program identity is data movement rather than arithmetic. Keeping it out of Core ML
+/// preserves the exact byte representation required by TOSA for NaNs, signed zero, and subnormals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LoweredExecution {
+    CoreMl,
+    ExactCopy { input_slot: u32, output_slot: u32 },
 }
 
 /// Whether the initial Core ML lowering tier can lower `op` for supported types and attributes.
@@ -225,6 +236,7 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, L
         });
     }
 
+    let execution = exact_copy_execution(&analysis, block, inputs, outputs)?;
     let mut network = Vec::new();
     for operator in analysis.execution_order(block) {
         encode_operator(&mut network, &analysis, *operator, &names)?;
@@ -239,6 +251,35 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, L
     Ok(LoweredModel {
         bytes: encoded,
         features,
+        execution,
+    })
+}
+
+fn exact_copy_execution(
+    analysis: &TosaAnalysis<'_>,
+    block: virtio_accel_tosa::BlockId,
+    inputs: &[ValueId],
+    outputs: &[ValueId],
+) -> Result<LoweredExecution, LoweringError> {
+    let execution_order = analysis.execution_order(block);
+    if inputs.len() != 1 || outputs.len() != 1 || execution_order.len() != 1 {
+        return Ok(LoweredExecution::CoreMl);
+    }
+    let operator = execution_order[0];
+    if analysis.operator(operator).op() != Op::IDENTITY
+        || analysis.operator_inputs(operator) != inputs
+        || analysis.operator_outputs(operator) != outputs
+    {
+        return Ok(LoweredExecution::CoreMl);
+    }
+    let input = tensor(analysis, inputs[0])?;
+    let output = tensor(analysis, outputs[0])?;
+    if input.dtype() != output.dtype() || static_shape(input)? != static_shape(output)? {
+        return Ok(LoweredExecution::CoreMl);
+    }
+    Ok(LoweredExecution::ExactCopy {
+        input_slot: 0,
+        output_slot: 1,
     })
 }
 
@@ -851,6 +892,13 @@ mod tests {
         assert_eq!(lowered.features[0].role, LoweredFeatureRole::Input);
         assert_eq!(lowered.features[1].slot, 1);
         assert_eq!(lowered.features[1].role, LoweredFeatureRole::Output);
+        assert_eq!(
+            lowered.execution,
+            LoweredExecution::ExactCopy {
+                input_slot: 0,
+                output_slot: 1,
+            }
+        );
     }
 
     #[test]

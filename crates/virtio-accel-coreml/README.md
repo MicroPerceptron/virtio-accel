@@ -24,6 +24,10 @@ only inside the native bridge for that synchronous compile and is removed before
 returns. No Core ML path, protobuf, feature name, or crate dependency crosses into the facade,
 device, guest, transport, or queue crates.
 
+A whole-program `IDENTITY` is the deliberate exception: it is an asynchronous exact backing-to-
+backing copy, not Core ML arithmetic. This preserves TOSA's byte-level identity semantics for NaNs,
+signed zero, and subnormals on Core ML runtimes that canonicalize those values.
+
 The floating-point lowering tier accepts one static region and basic block with static `FP16`/`FP32`
 boundary tensors (`INT32` outputs are also accepted for operators such as `ARGMAX`). It covers
 identity and constants; floating-point unary, binary, comparison, logical, selection, clamp, and

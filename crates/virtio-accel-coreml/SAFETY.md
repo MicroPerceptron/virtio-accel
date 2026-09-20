@@ -10,11 +10,12 @@ rule. Unsafe Rust is confined to `src/macos.rs` and has three responsibilities:
 
 The Objective-C bridge uses ARC for Core ML/Foundation objects. Native model pointers cross the ABI
 with one retained reference. Native event pointers use an atomic two-reference scheme: one reference
-belongs to Rust and one to Core ML's completion block, so dropping a Rust event early cannot free
-memory still used by the callback. The submitted backing guards are boxed and owned by that native
-completion block through a C callback, independently of the Rust event handle; the callback drops
-them exactly once before publishing a terminal state. Completion publishes buffer writes before its
-release-store to the event status; polling uses an acquire-load before Rust reads output bytes.
+belongs to Rust and one to either Core ML's completion block or the bridge's asynchronous exact-copy
+block, so dropping a Rust event early cannot free memory still used by either callback. The submitted
+backing guards are boxed and owned by that native block through a C callback, independently of the
+Rust event handle; the callback drops them exactly once before publishing a terminal state.
+Completion publishes buffer writes before its release-store to the event status; polling uses an
+acquire-load before Rust reads output bytes.
 
 `AlignedAllocation` owns exactly one `std::alloc::Layout`. Its pointer is non-null, is deallocated
 with the same layout, and is kept alive by completion-owned `Arc` clones. `CoreMlBuffer` is

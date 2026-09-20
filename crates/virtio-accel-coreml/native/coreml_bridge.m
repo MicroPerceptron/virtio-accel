@@ -5,6 +5,7 @@
 #import <CoreML/MLModel+MLModelCompilation.h>
 #import <CoreML/MLNeuralEngineComputeDevice.h>
 #import <Foundation/Foundation.h>
+#import <dispatch/dispatch.h>
 #include <stdatomic.h>
 #include <string.h>
 
@@ -616,6 +617,36 @@ void *va_coreml_submit(void *model,
             va_set_error(error, VA_COREML_EXTERNAL, VA_COREML_BRIDGE_DOMAIN, 21);
             return NULL;
         }
+    }
+}
+
+void *va_coreml_submit_copy(const void *source,
+                            void *destination,
+                            uint64_t bytes,
+                            void *context,
+                            va_coreml_release_context_fn release_context,
+                            struct va_coreml_error *error) {
+    @autoreleasepool {
+        va_set_error(error, VA_COREML_OK, 0, 0);
+        if (source == NULL || destination == NULL || bytes == 0 ||
+            bytes > SIZE_MAX || context == NULL || release_context == NULL) {
+            va_set_error(error, VA_COREML_INVALID_ARGUMENT, VA_COREML_BRIDGE_DOMAIN, 28);
+            return NULL;
+        }
+        struct VAEvent *event = va_event_create(error);
+        if (event == NULL) {
+            return NULL;
+        }
+        size_t copyBytes = (size_t)bytes;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            @autoreleasepool {
+                memmove(destination, source, copyBytes);
+                release_context(context);
+                atomic_store_explicit(&event->status, VA_COREML_EVENT_COMPLETE, memory_order_release);
+                va_event_release_inner(event);
+            }
+        });
+        return event;
     }
 }
 

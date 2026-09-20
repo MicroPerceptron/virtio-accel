@@ -9,7 +9,8 @@
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use crate::lower::{
-    LoweredFeature, LoweredFeatureRole, LoweredModel, LoweringError, encode_feature, static_shape,
+    LoweredExecution, LoweredFeature, LoweredFeatureRole, LoweredModel, LoweringError,
+    encode_feature, static_shape,
 };
 use virtio_accel_tosa::{
     AnalyzedValueKind, CapabilityDescriptor, DType, DTypeCapability, ExtensionSet,
@@ -176,6 +177,7 @@ pub(crate) fn lower_integer_tosa(
     Ok(LoweredModel {
         bytes: encoded,
         features,
+        execution: LoweredExecution::CoreMl,
     })
 }
 
