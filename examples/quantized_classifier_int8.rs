@@ -13,6 +13,13 @@ use virtio_accel::core::{
 use virtio_accel_conformance::numerics::{QUANTIZED_CLASSIFIER_INT8, TosaInt8MatmulCase};
 use virtio_accel_tosa::{Model, Target, parse};
 
+// On a host without a detected native backend, every runner reports why it cannot execute; no
+// runner reaches this shared submission path. Keep that portable build lint-clean without hiding
+// a dead path on a host where any native backend is admitted.
+#[cfg_attr(
+    not(any(target_os = "macos", va_openvino, va_hexagon, va_xdna)),
+    allow(dead_code)
+)]
 fn classify<A: Accelerator>(
     backend: &A,
     case: TosaInt8MatmulCase,
