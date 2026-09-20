@@ -14,9 +14,9 @@ backend behind a separate concrete type:
 
 ```toml
 [dependencies]
-virtio-accel = { version = "0.3", path = "...", default-features = false }
-virtio-accel-core = { version = "0.3", path = "...", default-features = false }
-virtio-accel-vaccel = { version = "0.3", path = "..."}
+virtio-accel = { version = "0.4", path = "...", default-features = false }
+virtio-accel-core = { version = "0.4", path = "...", default-features = false }
+virtio-accel-vaccel = { version = "0.4", path = "..."}
 ```
 
 Use this crate to wrap any backend that already implements

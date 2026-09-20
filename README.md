@@ -62,7 +62,7 @@ See the [`virtio-accel-coreml` support boundary](crates/virtio-accel-coreml/READ
   so nothing narrows back; `MAX_POOL2D` widens around the window only. The widening is not a
   preference — the NPU compiler's IE dialect declares `MatMul` operands without the FP8 types, so
   MLIR's verifier rejects a raw FP8 `MatMul` before the hardware is consulted. What is native is the
-  FP8 *boundary*: parameters stay FP8 through compilation, so nothing converts on the host.
+  FP8 _boundary_: parameters stay FP8 through compilation, so nothing converts on the host.
   The tier is **advertised per device, not per backend**: FP8 support turned out to be arch-gated —
   Intel NPU arch 5010 (Panther Lake) compiles FP8 while arch 40XX (Lunar Lake) refuses even an FP8
   `IDENTITY` — so each instance compiles a one-element FP8 graph at open and withholds the
@@ -233,23 +233,23 @@ The transport crate exposes reset-scoped chain identities, flattened direction/l
 
 ```toml
 [dependencies]
-virtio-accel = "0.3"
+virtio-accel = "0.4"
 ```
 
 The facade is `no_std`. Add the reference backend as a dev-dependency to run the example below:
 
 ```toml
 [dev-dependencies]
-virtio-accel-mock = "0.3"
+virtio-accel-mock = "0.4"
 ```
 
 Host backends are separate dependencies and are never re-exported by the portable facade. Add
-`virtio-accel-coreml = "0.3"` on an ANE-capable Mac, `virtio-accel-openvino = "0.3"` on a host
-with OpenVINO 2026.x, or `virtio-accel-vulkan = "0.3"` on a supported host with a Vulkan 1.3
+`virtio-accel-coreml = "0.4"` on an ANE-capable Mac, `virtio-accel-openvino = "0.4"` on a host
+with OpenVINO 2026.x, or `virtio-accel-vulkan = "0.4"` on a supported host with a Vulkan 1.3
 loader and compute device. Each accepts the device-neutral TOSA 1.0 program format and owns its
 provider-specific validation, lowering, and execution path.
 
-For portable adapter-boundary validation while the native vAccel path is wired, add `virtio-accel-vaccel = "0.3"`. The crate exposes a vAccel seam with an in-repo representative conformance recipe and explicit copy-path diagnostics.
+For portable adapter-boundary validation while the native vAccel path is wired, add `virtio-accel-vaccel = "0.4"`. The crate exposes a vAccel seam with an in-repo representative conformance recipe and explicit copy-path diagnostics.
 
 ## Adapter profiles
 
@@ -261,17 +261,17 @@ For portable adapter-boundary validation while the native vAccel path is wired, 
   `virtio-accel-hexagon`, `virtio-accel-xdna`, and/or `virtio-accel-vulkan` instead of any mock
   backend once provider licensing and native runtime availability are in place.
 
-`virtio-accel-hexagon = "0.3"` exposes the separate Qualcomm adapter. A complete QAIRT/QNN SDK on Windows ARM64 enables its HTP backend; SDK-free builds validate its strict FP16 graph planner and constructors return `RuntimeUnavailable`.
+`virtio-accel-hexagon = "0.4"` exposes the separate Qualcomm adapter. A complete QAIRT/QNN SDK on Windows ARM64 enables its HTP backend; SDK-free builds validate its strict FP16 graph planner and constructors return `RuntimeUnavailable`.
 
-`virtio-accel-vulkan = "0.3"` loads the platform Vulkan loader at run time. It admits the shared
+`virtio-accel-vulkan = "0.4"` loads the platform Vulkan loader at run time. It admits the shared
 FP32 and FP16 operator tiers (with `BOOL`/`INT32` auxiliaries) and a separate eleven-operator FP8
 tier. It returns `RuntimeUnavailable` or
 `DeviceUnavailable` when no suitable Vulkan 1.3 compute path exists; it does not silently fall
 back to the mock backend.
 
-Add `virtio-accel-tosa = "0.3"` separately to validate TOSA 1.0 artifacts, inspect safe borrowed graph and typed-attribute views, enforce complete stable-op semantics for a declared target, and construct the device-neutral TOSA artifact envelope. `Model::analyze_for` also produces bounded dense IDs, topological order, liveness, runtime obligations, and specialization keys for Core ML, OpenVINO, or another provider. It is intentionally not re-exported by the facade.
+Add `virtio-accel-tosa = "0.4"` separately to validate TOSA 1.0 artifacts, inspect safe borrowed graph and typed-attribute views, enforce complete stable-op semantics for a declared target, and construct the device-neutral TOSA artifact envelope. `Model::analyze_for` also produces bounded dense IDs, topological order, liveness, runtime obligations, and specialization keys for Core ML, OpenVINO, or another provider. It is intentionally not re-exported by the facade.
 
-Add `virtio-accel-tosa-build = "0.3"` to produce static single-block TOSA artifacts through typed tensor and operator definitions. Borrowed definitions suit graph literals; owned definitions let compiler frontends assemble runtime-discovered metadata without a parallel owned-to-borrowed adapter, while existing constant storage can remain borrowed. Both surfaces pass the same parser and target validator providers use at admission.
+Add `virtio-accel-tosa-build = "0.4"` to produce static single-block TOSA artifacts through typed tensor and operator definitions. Borrowed definitions suit graph literals; owned definitions let compiler frontends assemble runtime-discovered metadata without a parallel owned-to-borrowed adapter, while existing constant storage can remain borrowed. Both surfaces pass the same parser and target validator providers use at admission.
 
 ## Production backend examples
 
