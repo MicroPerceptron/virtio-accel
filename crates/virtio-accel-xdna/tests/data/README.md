@@ -30,3 +30,18 @@ Then package the cached `final.xclbin` + `insts.bin` with `virtio_accel_xdna::ar
 (entry `MLIR_AIE`, input sizes `[16384, 16384]`, output sizes `[16384]`). The artifact is device-
 and toolchain-specific; regenerate it when the pinned toolchain, the target device, or the `XDNP`
 format version changes.
+
+## Checksums
+
+Every committed binary in this directory is pinned by its BLAKE3 hash in `BLAKE3SUMS`, verified
+on every host (CI included) by `tests/fixtures.rs`. After any deliberate rebuild, regenerate
+with `b3sum *.xdnp *.xbfp > BLAKE3SUMS` and let the hash change show up in review beside the
+binary it covers.
+
+## `xbfp-mxint8-matmul-8x512x8-v1.xbfp`
+
+The flavor-1 `XBFP` experiment container (see `src/bfp_experiment.rs`): the two-input K = 512
+block-scaled MATMUL design built by the issue #146 probe pipeline
+(`research/bfp16ebs8/probe_compile.py xbfp`, pinned v2026.08 toolchain) and wrapped by
+`bfp_experiment::encode(8, 512, 8, ...)`. Used by `tests/bfp_experiment.rs` for the on-metal
+vendor-experiment suite.
