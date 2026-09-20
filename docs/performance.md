@@ -268,16 +268,59 @@ The FP32 operator tier (ADR 0007) adds the structural optimizations a real graph
 timing is worth publishing: a whole graph is one command buffer with barriers only between
 dependent dispatches; constants and intermediates live in one device-local arena per program with
 lifetime-packed regions, `RESHAPE`/`IDENTITY` views instead of copies, and dead operators elided;
-`MATMUL` is a shared-memory tiled kernel (16×16, bit-identical to the sequential sum); pipelines
-are created against a per-instance `VkPipelineCache`; every 1-D kernel is a grid-stride loop so
+`MATMUL` is a register-tiled shared-memory kernel (a 64 × 64 block per workgroup, ADR 0010) or,
+for eight rows or fewer, a barrier-free split-k streaming kernel (ADR 0011), both with fused
+multiply-add and a stated error bound rather than bit-identity to the sequential sum; pipelines are
+created against a per-instance `VkPipelineCache`; every 1-D kernel is a grid-stride loop so
 dispatch counts stay inside `maxComputeWorkGroupCount` at any tensor size. Known costs, recorded so
-they are measured rather than assumed: predicate (`BOOL`) outputs are written with two atomics per
-element, and `SIN`/`COS` evaluate both range reductions and select.
+they are measured rather than assumed: predicate (`BOOL`) elementwise outputs, strided sub-word
+moves, and `MATMUL`'s FP16 result are written with two atomics per element, and `SIN`/`COS`
+evaluate both range reductions and select.
 
-Warm-latency numbers are not yet published: the first measurement should follow the XDNA structure
-(load once, warm 20, measure 200) on the Intel ANV reference box before this section claims any
-timing; the broadened tier still owes a MoltenVK run (the same commands above). What is claimed
-today is correctness and copy-path shape, not wall-clock values.
+Warm-latency numbers in the XDNA structure (load once, warm 20, measure 200) are not yet
+published; the throughput benchmark below reports the submission floor it measures alongside
+each case, and the broadened tier still owes a MoltenVK run (the same commands above).
+
+### Vulkan FP8 tier throughput (ADR 0010)
+
+`cargo bench -p virtio-accel-vulkan` times whole TOSA graphs submit-to-fence through the public
+`Accelerator` surface, per enumerated device, after a warm-up of at least 300 ms per case so a
+frequency-scaling GPU is at clock. On 2026-09-18, Intel Arc (Panther Lake, Mesa 26.0.8 ANV,
+Vulkan 1.4.335), `Device` memory domain, median of 30 timed submissions, 16 Mi elements for the
+elementwise cases; "before" is the kernels as shipped by ADR 0009 under the same harness:
+
+| Case | Before | After |
+|---|---:|---:|
+| `IDENTITY` FP8 | 4.60 ms, 7.3 GB/s | 0.37 ms, 92 GB/s |
+| `IDENTITY` FP16 | 1.70 ms, 39 GB/s | 0.65 ms, 103 GB/s |
+| `IDENTITY` FP32 | 1.22 ms, 110 GB/s | 1.23 ms, 109 GB/s |
+| `CAST` FP8 → FP16 | 1.67 ms, 30 GB/s | 0.55 ms, 91 GB/s |
+| `CAST` FP16 → FP8 | 3.27 ms, 15 GB/s | 0.52 ms, 97 GB/s |
+| `CAST` FP32 → FP8 | 3.27 ms, 26 GB/s | 0.80 ms, 104 GB/s |
+| `CAST` FP32 → FP16 | 1.88 ms, 54 GB/s | 0.95 ms, 106 GB/s |
+| `MATMUL` FP8 → FP16, 1024³ | 3.76 ms, 572 GFLOP/s | 1.43 ms, 1503 GFLOP/s |
+| `MATMUL` FP16, 1024³ | 2.86 ms, 751 GFLOP/s | 1.14 ms, 1882 GFLOP/s |
+| `MATMUL` FP32, 1024³ | 2.74 ms, 785 GFLOP/s | 1.11 ms, 1928 GFLOP/s |
+| `CAST` FP8 → FP16 + `MATMUL` FP16, 1024³ | 3.24 ms | 1.28 ms |
+| GEMV FP8 → FP16, 1 × 4096 × 4096 | 0.98 ms, 17 GB/s of weights | 0.44 ms, 39 GB/s of weights |
+| GEMV FP16, 1 × 4096 × 4096 | 1.06 ms, 32 GB/s of weights | 0.53 ms, 63 GB/s of weights |
+| GEMV FP32, 1 × 4096 × 4096 | 1.06 ms, 63 GB/s of weights | 0.72 ms, 93 GB/s of weights |
+| `CAST` FP8 → FP16 + GEMV FP16, 1 × 4096 × 4096 | 2.73 ms | 0.95 ms |
+
+GB/s counts bytes read plus written; the GEMV weight figures count the weight matrix alone. The
+submission floor (a four-element identity) measured 100–170 µs across runs and is included in
+every number. What the table says about the FP8 tier: data movement now runs at the device's copy
+rate, so the quarter-width storage delivers its bandwidth, and GEMV now orders the right way
+(FP8 0.44 ms, FP16 0.53, FP32 0.72). Net of the floor the FP8 GEMV streams weights at roughly half
+the rate the FP32 kernel shows the memory system delivers; the remainder is per-step fixed cost,
+recorded in ADR 0010 as the next objective. The 1024³ cases vary about ±15% run to run on this
+device even at 30 samples.
+
+Transfers (ADR 0012), same device, 64 MiB, median of 10: `write_buffer` into the `Device` domain
+took 32.6 ms (2.1 GB/s) through the staged path and 2.59 ms (25.9 GB/s) once a single-heap
+device maps that domain; `read_buffer` 25.1 → 2.47 ms. `Shared` measures the same 2.59 / 2.48 ms,
+and kernel throughput is identical in all three domains on this unified-memory device. The bench
+takes `VIRTIO_ACCEL_VULKAN_BENCH_DOMAIN=host|shared|device` and times both transfers per run.
 
 ## Qualcomm Hexagon evidence status
 

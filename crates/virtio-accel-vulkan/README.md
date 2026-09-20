@@ -33,7 +33,8 @@ build time (ADR 0002 in `docs/adr/`).
   lanes as integers, so `IDENTITY_EDGES_FP16` — NaN payloads, subnormals, signed zeros — moves
   bit-exactly; MATMUL and reductions accumulate in binary32 (the accumulator width TOSA assigns
   FP16); stores repack with the same neighbour-safe atomics `BOOL` uses. Numerics are
-  bit-identical across devices by construction.
+  bit-identical across devices by construction for every operator but `MATMUL`, whose fused
+  multiply-add is deterministic per device (ADR 0011).
 - **The FP8 operator tier** (`VULKAN_TOSA_FP8_CAPABILITY`, `VULKAN_TOSA_FP8_TARGET`, ADR 0009):
   TOSA's `(FP8, FP8) -> FP16` `MATMUL` over either encoding, plus `CAST`, `MAX_POOL2D`,
   `ARGMAX`, `IDENTITY`, `RESHAPE`, `TRANSPOSE`, `REVERSE`, `CONCAT`, `CONST` and `CONST_SHAPE` — advertised on every device, again
@@ -57,8 +58,10 @@ build time (ADR 0002 in `docs/adr/`).
 - **Whole-graph execution** (ADR 0007): the graph's execution order becomes one command buffer of
   compute dispatches with `COMPUTE → COMPUTE` memory barriers between dependent dispatches.
   `CONST` tensors and intermediates live in one per-program arena allocation (lifetime-packed;
-  `RESHAPE`/`IDENTITY` of arena tensors are views, not copies; operators the analysis proves dead
-  are never dispatched). Kernels address tensors through one descriptor — an array of storage
+  `RESHAPE`/`IDENTITY` are views wherever the result is an intermediate, and a single-use
+  intermediate reshaped into a program output is written to the output slot by its producer —
+  ADR 0012 — so the copy dispatch remains only for an input reshaped straight into an output;
+  operators the analysis proves dead are never dispatched). Kernels address tensors through one descriptor — an array of storage
   buffers holding the bound slots plus the arena — selected by specialization constants, so one
   crate-authored module per kernel serves every binding layout and `CONCAT` with any input count.
   Guest bytes never reach the driver's shader compiler (ADR 0003).
@@ -67,13 +70,22 @@ build time (ADR 0002 in `docs/adr/`).
   |x| = 8192, Payne–Hanek above it, within one ulp of binary64 references in the lavapipe
   tests) instead of the driver's built-ins, whose precision Vulkan specifies loosely or not at
   all; NaN modes (`PROPAGATE`/`IGNORE`) follow the TOSA pseudocode literally; `MATMUL` is a
-  shared-memory tiled kernel bit-identical to the sequential ascending-k sum. `BOOL` tensors are
-  read by word and written with `OpAtomicAnd`/`OpAtomicOr`, so a predicate output never modifies
-  a neighbouring byte, even at an unaligned tail.
-- **Memory domains** (ADR 0005): `Host` and `Shared` are persistently mapped host-coherent
-  allocations; `Device` is device-local memory reached only through bounded staging inside
-  `write_buffer`/`read_buffer`. `Shared` and `Device` are advertised only when the device exposes
-  a matching memory type. Every buffer is a dedicated allocation bound directly as a storage
+  register-tiled shared-memory kernel (a 64 × 64 output block per workgroup, FP8 and FP16
+  operands staged a storage word per invocation — ADR 0010) for more than eight rows and a
+  barrier-free split-k streaming kernel for eight or fewer (ADR 0011), both accumulating in
+  binary32 with fused multiply-add: within `(k + 64) · 2⁻²³ · Σ|aᵢ·bᵢ|` of the exact sum and
+  deterministic per device, no longer bit-identical to the sequential sum.
+  `BOOL` tensors are read by word and written with `OpAtomicAnd`/`OpAtomicOr`, so a predicate
+  output never modifies a neighbouring byte, even at an unaligned tail; contiguous FP8, FP16 and
+  `BOOL` copies and casts write whole words per invocation and take that atomic path only for a
+  tensor's final partial word.
+- **Memory domains** (ADR 0005, ADR 0012): `Host` and `Shared` are persistently mapped
+  host-coherent allocations; `Device` is device-local memory — reached through bounded staging
+  inside `write_buffer`/`read_buffer` on a device with more than one memory heap, and
+  persistently mapped like the others on a single-heap (unified-memory) device, where staging
+  would only add a copy (`VulkanOptions::map_unified_device_memory` selects the staged plan
+  anyway). `Shared` and `Device` are advertised only when the device exposes a matching memory
+  type. Every buffer is a dedicated allocation bound directly as a storage
   buffer; alignment is measured, never assumed.
 - **Execution** (ADR 0006): a bounded per-context ring of (command buffer, fence, descriptor set)
   triples; `vkQueueSubmit2` success is the admission boundary; `poll_event` is one
@@ -108,6 +120,18 @@ Every kernel variant is validated against `spirv-val --target-env vulkan1.3` by
 lose the check by losing the package. The device suite also runs clean under
 `VK_LAYER_KHRONOS_validation` (`apt install vulkan-validationlayers`), which is worth enabling
 when changing resource or submission code.
+
+Throughput is measured by the crate's benchmark (ADR 0010), which times whole TOSA graphs
+submit-to-fence on every enumerated device and prints a Markdown table per device:
+
+```sh
+cargo bench -p virtio-accel-vulkan
+```
+
+`VIRTIO_ACCEL_VULKAN_BENCH_DEVICE=<substring>` pins a device, `VIRTIO_ACCEL_VULKAN_BENCH_CASE`
+a case, `VIRTIO_ACCEL_VULKAN_BENCH_ITERS` the timed submissions per case (default 10), and
+`VIRTIO_ACCEL_VULKAN_BENCH_QUICK=1` runs the small sizes only, for a software ICD. Numbers are
+recorded in `docs/performance.md`.
 
 The example executes the FP32 identity artifact and then the three-operator `tanh(x · w + bias)`
 graph on the preferred device (discrete, integrated, virtual, then CPU) and exits successfully, or
@@ -149,7 +173,7 @@ widening never produces a binary32 denormal (the smallest FP8 value, 2⁻¹⁶, 
 and narrowing rounds every denormal input to zero whether or not the device flushed it first. Covered on each: all 256 patterns of both
 encodings through `IDENTITY` bit-for-bit, `MATMUL` against a widened host reference with input and
 with constant operands, `CAST` round-tripping every encoding in both directions and honouring the
-overflow policy, two FP8 matmuls chained through a `CAST`, and `MAX_POOL2D`/`ARGMAX`. All 170
+overflow policy, two FP8 matmuls chained through a `CAST`, and `MAX_POOL2D`/`ARGMAX`. All 176
 assembled kernel variants pass `spirv-val --target-env vulkan1.3`, and the device suite runs clean
 under `VK_LAYER_KHRONOS_validation`.
 

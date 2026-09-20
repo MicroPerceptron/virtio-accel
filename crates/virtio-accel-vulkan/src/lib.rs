@@ -9,14 +9,18 @@
 //! binary32 code (ADR 0008), so every device that hosts the FP32 tier hosts the FP16 tier with
 //! identical numerics. A whole graph is one submission: constants and intermediates live in a
 //! per-program arena and dependent dispatches are separated by compute barriers. Buffers are
-//! dedicated `VkDeviceMemory` allocations bound directly as storage buffers; completion is a
+//! dedicated `VkDeviceMemory` allocations bound directly as storage buffers, persistently mapped
+//! wherever their memory type allows (ADR 0012); completion is a
 //! nonblocking `vkGetFenceStatus` read over a bounded per-context ring of command buffers,
 //! fences, and descriptor sets (ADR 0006); no worker thread exists.
 //!
 //! The native module compiles on the host operating systems enumerated by `build.rs` (`va_vulkan`).
 //! Loader absence is a run-time fact reported as [`InitError::RuntimeUnavailable`], never a build
 //! probe. `VIRTIO_ACCEL_VULKAN=0` forces the placeholder, `=1` makes an unsupported target a loud
-//! build failure. The design decisions live in [`docs/adr/`](../../../docs/adr/) (ADRs 0001–0008).
+//! build failure. The design decisions live in [`docs/adr/`](../../../docs/adr/) (ADRs 0001–0012);
+//! ADR 0010 records the kernel geometries and the benchmark (`cargo bench -p virtio-accel-vulkan`)
+//! that measures them, ADR 0011 the MATMUL numerics (fused multiply-add, split-`k`), and
+//! ADR 0012 the mapped `Device` domain on unified-memory devices and the boundary views.
 
 #![cfg_attr(not(va_vulkan), forbid(unsafe_code))]
 
@@ -78,8 +82,8 @@ impl std::error::Error for InitError {}
 mod native;
 #[cfg(va_vulkan)]
 pub use native::{
-    LiveResources, VulkanAccelerator, VulkanBuffer, VulkanContext, VulkanEvent, VulkanProgram,
-    VulkanQueue,
+    LiveResources, VulkanAccelerator, VulkanBuffer, VulkanContext, VulkanEvent, VulkanOptions,
+    VulkanProgram, VulkanQueue,
 };
 
 /// Placeholder that keeps workspace consumers portable where no Vulkan loader host exists.

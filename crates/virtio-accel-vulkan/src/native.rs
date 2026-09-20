@@ -70,7 +70,9 @@ const _: () = assert!(
 /// `maxComputeWorkGroupInvocations` is only the specification minimum (128).
 const PREFERRED_WORKGROUP: u32 = 256;
 const FALLBACK_WORKGROUP: u32 = 128;
-/// Preferred MATMUL tile (16 × 16 = 256 invocations, 2 KiB shared), and the fallback tile.
+/// Preferred register-tiled MATMUL tile (256 invocations, a 64 × 64 block over 8 KiB of shared
+/// slabs) and the fallback tile (64 invocations, 32 × 32). The streaming kernel for eight rows or
+/// fewer is a fixed 64-invocation 1-D workgroup with an 8 KiB reduction buffer.
 const PREFERRED_MATMUL_TILE: u32 = 16;
 const FALLBACK_MATMUL_TILE: u32 = 8;
 /// Bytes every `VkBuffer` size is rounded up to so byte-storage tensors can be addressed by
@@ -100,11 +102,13 @@ impl Tuning {
         } else {
             return None;
         };
+        // Both MATMUL kernels must fit: the square one is `tile × tile` invocations, the
+        // streaming one a 1-D `STREAM_WORKGROUP`, and each declares its shared slabs.
         let tile_fits = |tile: u32| {
             invocations >= tile * tile
-                && size[0] >= tile
+                && size[0] >= tile.max(shader::STREAM_WORKGROUP)
                 && size[1] >= tile
-                && limits.max_compute_shared_memory_size >= 2 * tile * tile * 4
+                && limits.max_compute_shared_memory_size >= shader::matmul_shared_bytes(tile)
         };
         let matmul_tile = if tile_fits(PREFERRED_MATMUL_TILE) {
             PREFERRED_MATMUL_TILE
@@ -159,6 +163,11 @@ impl Tuning {
                 tile: self.matmul_tile,
                 buffers: self.buffers,
             },
+            KernelSpec::MatmulStream { rhs, output } => KernelKey::MatmulStream {
+                rhs,
+                output,
+                buffers: self.buffers,
+            },
             KernelSpec::MaxPool { nan_mode, float } => KernelKey::MaxPool {
                 nan_mode,
                 float,
@@ -196,6 +205,10 @@ impl Tuning {
                 let groups = shader::matmul_workgroups(m, n, batch, self.matmul_tile);
                 (groups[0] <= max[0] && groups[1] <= max[1] && groups[2] <= max[2])
                     .then_some(groups)
+            }
+            Work::MatmulStream { n, batch } => {
+                let groups = shader::stream_matmul_workgroups(n, batch);
+                (groups[0] <= max[0] && groups[2] <= max[2]).then_some(groups)
             }
         }
     }
@@ -403,10 +416,36 @@ struct MemoryPlan {
     shared: Option<u32>,
 }
 
+/// Backend options a host may set when opening a device. The defaults are what
+/// [`VulkanAccelerator::new`] and [`VulkanAccelerator::with_device`] use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VulkanOptions {
+    /// On a device with a single memory heap — an integrated GPU, Apple silicon, a software
+    /// ICD — there is no second memory for the `Device` domain to be local to, so its
+    /// allocations take a host-visible device-local type and `write_buffer`/`read_buffer` are a
+    /// mapped copy rather than a staged copy through a transient buffer and a GPU transfer
+    /// (ADR 0012). `false` keeps the discrete-GPU plan (a non-host-visible type, staged
+    /// transfers) on such devices too; the staging path's tests use it.
+    pub map_unified_device_memory: bool,
+}
+
+impl Default for VulkanOptions {
+    fn default() -> Self {
+        Self {
+            map_unified_device_memory: true,
+        }
+    }
+}
+
 impl MemoryPlan {
     /// Choose one type per domain among those `buffer_type_mask` (the `memoryTypeBits` a
-    /// storage buffer of this backend reports) permits.
-    fn select(memory: &vk::PhysicalDeviceMemoryProperties, buffer_type_mask: u32) -> Option<Self> {
+    /// storage buffer of this backend reports) permits. With `unified`, the `Device` domain
+    /// prefers a host-visible type (see [`VulkanOptions::map_unified_device_memory`]).
+    fn select(
+        memory: &vk::PhysicalDeviceMemoryProperties,
+        buffer_type_mask: u32,
+        unified: bool,
+    ) -> Option<Self> {
         let types = &memory.memory_types[..memory.memory_type_count as usize];
         let usable = |index: usize, flags: vk::MemoryPropertyFlags| {
             buffer_type_mask & (1 << index) != 0
@@ -436,13 +475,34 @@ impl MemoryPlan {
                 u8::from(!flags.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)) * 2
                     + u8::from(flags.contains(vk::MemoryPropertyFlags::HOST_CACHED))
             })?,
-            device: pick(vk::MemoryPropertyFlags::DEVICE_LOCAL, |flags| {
-                u8::from(!flags.contains(vk::MemoryPropertyFlags::HOST_VISIBLE))
-            }),
+            device: pick(
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                if unified {
+                    |flags| {
+                        u8::from(flags.contains(
+                            vk::MemoryPropertyFlags::HOST_VISIBLE
+                                | vk::MemoryPropertyFlags::HOST_COHERENT,
+                        )) * 2
+                            + u8::from(flags.contains(vk::MemoryPropertyFlags::HOST_CACHED))
+                    }
+                } else {
+                    |flags| u8::from(!flags.contains(vk::MemoryPropertyFlags::HOST_VISIBLE))
+                },
+            ),
             shared: pick(
                 vk::MemoryPropertyFlags::DEVICE_LOCAL | host_coherent,
                 |flags| u8::from(flags.contains(vk::MemoryPropertyFlags::HOST_CACHED)),
             ),
+        })
+    }
+
+    /// Whether the chosen type for `domain` is host-visible and coherent, i.e. whether its
+    /// allocations are persistently mapped and transfers are a plain copy.
+    fn is_mapped(self, memory: &vk::PhysicalDeviceMemoryProperties, domain: MemoryDomain) -> bool {
+        self.for_domain(domain).is_some_and(|index| {
+            memory.memory_types[index as usize].property_flags.contains(
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
         })
     }
 
@@ -521,7 +581,11 @@ struct Shared {
 }
 
 impl Shared {
-    fn open(instance: Instance, physical: PhysicalDeviceRecord) -> Result<Rc<Self>, InitError> {
+    fn open(
+        instance: Instance,
+        physical: PhysicalDeviceRecord,
+        options: VulkanOptions,
+    ) -> Result<Rc<Self>, InitError> {
         let priorities = [1.0_f32];
         let queue_info = vk::DeviceQueueCreateInfo::default()
             .queue_family_index(physical.queue_family)
@@ -558,7 +622,9 @@ impl Shared {
                 return Err(InitError::DeviceCreationFailed);
             }
         };
-        let Some(memory_plan) = MemoryPlan::select(&physical.memory, buffer_type_mask) else {
+        let unified = options.map_unified_device_memory && physical.memory.memory_heap_count == 1;
+        let Some(memory_plan) = MemoryPlan::select(&physical.memory, buffer_type_mask, unified)
+        else {
             // SAFETY: as above.
             unsafe { device.destroy_device(None) };
             return Err(InitError::DeviceUnavailable);
@@ -1393,6 +1459,9 @@ struct Arena {
     buffer: vk::Buffer,
     memory: vk::DeviceMemory,
     bytes: u64,
+    /// The persistent mapping when the arena's memory type is host-visible (a unified-memory
+    /// device): constants are then written by a plain copy rather than through staging.
+    mapped: Option<NonNull<u8>>,
 }
 
 /// Resident compute pipelines specialized for one admitted TOSA graph.
@@ -1624,17 +1693,22 @@ impl VulkanAccelerator {
             .into_iter()
             .min_by_key(PhysicalDeviceRecord::rank)
             .ok_or(InitError::DeviceUnavailable)?;
-        Self::open(instance, physical)
+        Self::open(instance, physical, VulkanOptions::default())
     }
 
     /// Open the device whose enumerated name (`available_devices`) equals `device`.
     pub fn with_device(device: &str) -> Result<Self, InitError> {
+        Self::with_device_options(device, VulkanOptions::default())
+    }
+
+    /// [`with_device`](Self::with_device) with explicit [`VulkanOptions`].
+    pub fn with_device_options(device: &str, options: VulkanOptions) -> Result<Self, InitError> {
         let instance = Instance::create()?;
         let physical = enumerate(&instance.instance)?
             .into_iter()
             .find(|record| record.name == device)
             .ok_or(InitError::DeviceUnavailable)?;
-        Self::open(instance, physical)
+        Self::open(instance, physical, options)
     }
 
     /// Enumerate the names of every suitable device visible through the loader.
@@ -1646,9 +1720,13 @@ impl VulkanAccelerator {
             .collect())
     }
 
-    fn open(instance: Instance, physical: PhysicalDeviceRecord) -> Result<Self, InitError> {
+    fn open(
+        instance: Instance,
+        physical: PhysicalDeviceRecord,
+        options: VulkanOptions,
+    ) -> Result<Self, InitError> {
         Ok(Self {
-            shared: Shared::open(instance, physical)?,
+            shared: Shared::open(instance, physical, options)?,
             next_id: Cell::new(0),
         })
     }
@@ -1872,6 +1950,24 @@ impl VulkanAccelerator {
         if largest == 0 {
             return Ok(());
         }
+        if let Some(mapped) = arena.mapped {
+            for constant in &plan.constants {
+                let offset =
+                    usize::try_from(constant.offset).map_err(|_| BackendError::OutOfBounds)?;
+                // SAFETY: the arena was just created with `plan.arena_bytes` bytes, every
+                // constant's region lies inside it (lowering placed them), the mapping covers
+                // the whole allocation, and nothing else references the arena yet. Coherent
+                // memory needs no flush.
+                let target = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        mapped.as_ptr().add(offset),
+                        constant.bytes.len(),
+                    )
+                };
+                target.copy_from_slice(&constant.bytes);
+            }
+            return Ok(());
+        }
         let mut staging = Staging::new(shared, largest.min(STAGING_BYTES))?;
         for constant in &plan.constants {
             write_through_staging(
@@ -1972,7 +2068,10 @@ impl Accelerator for VulkanAccelerator {
             .memory_plan
             .for_domain(desc.domain)
             .ok_or(BackendError::Unsupported)?;
-        let map = desc.domain != MemoryDomain::Device;
+        // Mapped whenever the type allows: on a unified-memory device that includes `Device`.
+        let map = shared
+            .memory_plan
+            .is_mapped(&shared.physical.memory, desc.domain);
         let raw = RawAllocation::create(shared, desc.bytes(), memory_type, map)?;
         if raw.measured_alignment < desc.alignment() {
             return Err(BackendError::ResourceLimit);
@@ -2148,13 +2247,22 @@ impl Accelerator for VulkanAccelerator {
         };
         if plan.arena_bytes != 0 {
             // Device-local when the device has such memory: intermediates never leave the GPU.
-            let memory_type = shared.memory_plan.device.unwrap_or(shared.memory_plan.host);
-            let raw = RawAllocation::create(shared, plan.arena_bytes, memory_type, false)?;
-            let (buffer, memory, _) = raw.into_parts();
+            let (memory_type, map) = match shared.memory_plan.device {
+                Some(device) => (
+                    device,
+                    shared
+                        .memory_plan
+                        .is_mapped(&shared.physical.memory, MemoryDomain::Device),
+                ),
+                None => (shared.memory_plan.host, true),
+            };
+            let raw = RawAllocation::create(shared, plan.arena_bytes, memory_type, map)?;
+            let (buffer, memory, mapped) = raw.into_parts();
             partial.arena = Some(Arena {
                 buffer,
                 memory,
                 bytes: plan.arena_bytes,
+                mapped,
             });
             self.upload_constants(
                 &context.inner,
@@ -2572,7 +2680,7 @@ mod tests {
     #[test]
     fn never_selects_memory_that_requires_an_unrequested_feature() {
         let memory = amd_device_coherent_memory();
-        let plan = MemoryPlan::select(&memory, u32::MAX)
+        let plan = MemoryPlan::select(&memory, u32::MAX, false)
             .expect("a host-visible coherent type is present in the fixture");
 
         for (domain, selected) in [
@@ -2598,7 +2706,7 @@ mod tests {
     /// alongside the ordinary ones rather than replacing them, so every domain stays reachable.
     #[test]
     fn excluding_them_strands_no_memory_domain() {
-        let plan = MemoryPlan::select(&amd_device_coherent_memory(), u32::MAX)
+        let plan = MemoryPlan::select(&amd_device_coherent_memory(), u32::MAX, false)
             .expect("a host-visible coherent type is present in the fixture");
         assert!(plan.device.is_some(), "device-local domain lost");
         assert!(plan.shared.is_some(), "shared domain lost");
