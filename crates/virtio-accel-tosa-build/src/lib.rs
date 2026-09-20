@@ -59,6 +59,15 @@ mod slot {
     pub const VERSION_PATCH: u16 = 8;
     pub const VERSION_DRAFT: u16 = 10;
 
+    pub const AXIS: u16 = 4;
+    pub const AXIS_NAN_MODE: u16 = 6;
+
+    pub const CLAMP_MIN_VAL: u16 = 4;
+    pub const CLAMP_MAX_VAL: u16 = 6;
+    pub const CLAMP_NAN_MODE: u16 = 8;
+
+    pub const TRANSPOSE_PERMS: u16 = 4;
+
     pub const NAN_MODE: u16 = 4;
     pub const MAX_POOL_KERNEL: u16 = 4;
     pub const MAX_POOL_STRIDE: u16 = 6;
@@ -129,10 +138,58 @@ impl<'a> Tensor<'a> {
 ///
 /// Variants with no fields still name their exact TOSA attribute table. This
 /// prevents a caller from pairing an opcode with the wrong union member.
+/// Bytes of inline storage for one `CLAMP` bound: enough for every TOSA scalar dtype. The
+/// bounds are one scalar each in the operand's own dtype, so they are carried as serialized
+/// bytes; a wider numeric type could not represent an integer or FP8 bound faithfully.
+pub const MAX_CLAMP_BOUND_BYTES: usize = 8;
+
+/// Permutation entries a `TRANSPOSE` carries inline, one per dimension.
+pub const MAX_TRANSPOSE_RANK: usize = 6;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum OperatorKind {
     MatMul,
+    ArgMax {
+        axis: i32,
+        nan_mode: NanPropagationMode,
+    },
+    Ceil,
+    Floor,
+    /// The bounds are one scalar each in the operand's own dtype, so they are carried as their
+    /// serialized bytes (`bound_bytes` of each array is significant) rather than a wider type
+    /// that would not represent an integer or FP8 bound faithfully.
+    Clamp {
+        min_val: [u8; MAX_CLAMP_BOUND_BYTES],
+        max_val: [u8; MAX_CLAMP_BOUND_BYTES],
+        bound_bytes: u8,
+        nan_mode: NanPropagationMode,
+    },
+    Concat {
+        axis: i32,
+    },
+    Reverse {
+        axis: i32,
+    },
+    /// One permutation entry per dimension; `rank` of `perms` is significant.
+    Transpose {
+        perms: [i32; MAX_TRANSPOSE_RANK],
+        rank: u8,
+    },
+    ReduceMax {
+        axis: i32,
+        nan_mode: NanPropagationMode,
+    },
+    ReduceMin {
+        axis: i32,
+        nan_mode: NanPropagationMode,
+    },
+    ReduceProduct {
+        axis: i32,
+    },
+    ReduceSum {
+        axis: i32,
+    },
     MaxPool2d {
         kernel: [i32; 2],
         stride: [i32; 2],
@@ -167,6 +224,7 @@ pub enum OperatorKind {
     Equal,
     Greater,
     GreaterEqual,
+    Erf,
     Reshape,
     Cast,
     Rescale {
@@ -186,6 +244,17 @@ impl OperatorKind {
     pub const fn op(self) -> Op {
         match self {
             Self::MatMul => Op::MATMUL,
+            Self::ArgMax { .. } => Op::ARGMAX,
+            Self::Ceil => Op::CEIL,
+            Self::Floor => Op::FLOOR,
+            Self::Clamp { .. } => Op::CLAMP,
+            Self::Concat { .. } => Op::CONCAT,
+            Self::Reverse { .. } => Op::REVERSE,
+            Self::Transpose { .. } => Op::TRANSPOSE,
+            Self::ReduceMax { .. } => Op::REDUCE_MAX,
+            Self::ReduceMin { .. } => Op::REDUCE_MIN,
+            Self::ReduceProduct { .. } => Op::REDUCE_PRODUCT,
+            Self::ReduceSum { .. } => Op::REDUCE_SUM,
             Self::MaxPool2d { .. } => Op::MAX_POOL2D,
             Self::Sigmoid => Op::SIGMOID,
             Self::Tanh => Op::TANH,
@@ -211,6 +280,7 @@ impl OperatorKind {
             Self::Equal => Op::EQUAL,
             Self::Greater => Op::GREATER,
             Self::GreaterEqual => Op::GREATER_EQUAL,
+            Self::Erf => Op::ERF,
             Self::Reshape => Op::RESHAPE,
             Self::Cast => Op::CAST,
             Self::Rescale { .. } => Op::RESCALE,
@@ -692,11 +762,55 @@ fn operator_table(builder: &mut FlatBufferBuilder<'_>, operator: Operator<'_>) -
         )),
         _ => None,
     };
+    let clamp = match operator.kind {
+        OperatorKind::Clamp {
+            min_val,
+            max_val,
+            bound_bytes,
+            nan_mode,
+        } => {
+            let bytes = bound_bytes as usize;
+            Some((
+                builder.create_vector(&min_val[..bytes]),
+                builder.create_vector(&max_val[..bytes]),
+                nan_mode,
+            ))
+        }
+        _ => None,
+    };
+    let transpose = match operator.kind {
+        OperatorKind::Transpose { perms, rank } => {
+            Some(builder.create_vector(&perms[..rank as usize]))
+        }
+        _ => None,
+    };
     let attribute = {
         let table = builder.start_table();
         match operator.kind {
             OperatorKind::Maximum { nan_mode } | OperatorKind::Minimum { nan_mode } => {
                 builder.push_slot::<u32>(slot::NAN_MODE, nan_mode.get(), 0);
+            }
+            OperatorKind::ArgMax { axis, nan_mode }
+            | OperatorKind::ReduceMax { axis, nan_mode }
+            | OperatorKind::ReduceMin { axis, nan_mode } => {
+                builder.push_slot::<i32>(slot::AXIS, axis, 0);
+                builder.push_slot::<u32>(slot::AXIS_NAN_MODE, nan_mode.get(), 0);
+            }
+            OperatorKind::Concat { axis }
+            | OperatorKind::Reverse { axis }
+            | OperatorKind::ReduceProduct { axis }
+            | OperatorKind::ReduceSum { axis } => {
+                builder.push_slot::<i32>(slot::AXIS, axis, 0);
+            }
+            OperatorKind::Clamp { .. } => {
+                let (min_val, max_val, nan_mode) = clamp.expect("CLAMP vectors were constructed");
+                builder.push_slot_always(slot::CLAMP_MIN_VAL, min_val);
+                builder.push_slot_always(slot::CLAMP_MAX_VAL, max_val);
+                builder.push_slot::<u32>(slot::CLAMP_NAN_MODE, nan_mode.get(), 0);
+            }
+            OperatorKind::Transpose { .. } => {
+                let perms = transpose.expect("TRANSPOSE perms were constructed");
+                builder.push_slot_always(slot::TRANSPOSE_PERMS, perms);
             }
             OperatorKind::MaxPool2d { .. } => {
                 let (kernel, stride, pad, nan_mode) =
@@ -860,6 +974,133 @@ mod tests {
         assert_eq!(block.operators().len(), 2);
     }
 
+    /// The slot offsets of every newly authorable attribute, checked by parsing the artifact
+    /// back. The opcode/union-tag test above cannot catch a wrong offset: a misplaced axis
+    /// serializes cleanly and reads back as a different number.
+    #[test]
+    fn newly_authorable_attributes_survive_a_parse() {
+        use virtio_accel_tosa::OpAttributes;
+
+        fn attributes_of(
+            tensors: &[Tensor<'_>],
+            operators: &[Operator<'_>],
+            inputs: &[&str],
+            outputs: &[&str],
+        ) -> Vec<u8> {
+            Graph::new("main", tensors, operators, inputs, outputs)
+                .build(FLOAT_TARGET)
+                .expect("graph builds")
+        }
+
+        let f32_shape = &[2, 3][..];
+        let bytes = attributes_of(
+            &[
+                Tensor::new("x", f32_shape, DType::FP32),
+                Tensor::new("y", &[2, 1], DType::FP32),
+            ],
+            &[Operator::new(
+                OperatorKind::ReduceSum { axis: 1 },
+                &["x"],
+                &["y"],
+            )],
+            &["x"],
+            &["y"],
+        );
+        let model = virtio_accel_tosa::parse(&bytes).unwrap();
+        let analysis = model.analyze_for(FLOAT_TARGET).unwrap();
+        let operator = analysis.operators().last().unwrap();
+        assert!(matches!(
+            operator.source().attributes(),
+            OpAttributes::ReduceSum { axis: 1 }
+        ));
+
+        let bytes = attributes_of(
+            &[
+                Tensor::new("x", f32_shape, DType::FP32),
+                Tensor::new("y", &[3, 2], DType::FP32),
+            ],
+            &[Operator::new(
+                OperatorKind::Transpose {
+                    perms: [1, 0, 0, 0, 0, 0],
+                    rank: 2,
+                },
+                &["x"],
+                &["y"],
+            )],
+            &["x"],
+            &["y"],
+        );
+        let model = virtio_accel_tosa::parse(&bytes).unwrap();
+        let analysis = model.analyze_for(FLOAT_TARGET).unwrap();
+        let OpAttributes::Transpose { perms } =
+            analysis.operators().last().unwrap().source().attributes()
+        else {
+            panic!("TRANSPOSE attribute");
+        };
+        assert_eq!(perms.iter().collect::<Vec<_>>(), vec![1, 0]);
+
+        let lo = (-1.0_f32).to_le_bytes();
+        let hi = 1.0_f32.to_le_bytes();
+        let mut min_val = [0; MAX_CLAMP_BOUND_BYTES];
+        let mut max_val = [0; MAX_CLAMP_BOUND_BYTES];
+        min_val[..4].copy_from_slice(&lo);
+        max_val[..4].copy_from_slice(&hi);
+        let bytes = attributes_of(
+            &[
+                Tensor::new("x", f32_shape, DType::FP32),
+                Tensor::new("y", f32_shape, DType::FP32),
+            ],
+            &[Operator::new(
+                OperatorKind::Clamp {
+                    min_val,
+                    max_val,
+                    bound_bytes: 4,
+                    nan_mode: NanPropagationMode::PROPAGATE,
+                },
+                &["x"],
+                &["y"],
+            )],
+            &["x"],
+            &["y"],
+        );
+        let model = virtio_accel_tosa::parse(&bytes).unwrap();
+        let analysis = model.analyze_for(FLOAT_TARGET).unwrap();
+        let OpAttributes::Clamp {
+            min_val, max_val, ..
+        } = analysis.operators().last().unwrap().source().attributes()
+        else {
+            panic!("CLAMP attribute");
+        };
+        assert_eq!(min_val, &lo[..]);
+        assert_eq!(max_val, &hi[..]);
+
+        let bytes = attributes_of(
+            &[
+                Tensor::new("x", f32_shape, DType::FP32),
+                Tensor::new("y", &[2], DType::INT32),
+            ],
+            &[Operator::new(
+                OperatorKind::ArgMax {
+                    axis: 1,
+                    nan_mode: NanPropagationMode::IGNORE,
+                },
+                &["x"],
+                &["y"],
+            )],
+            &["x"],
+            &["y"],
+        );
+        let model = virtio_accel_tosa::parse(&bytes).unwrap();
+        let analysis = model.analyze_for(FLOAT_TARGET).unwrap();
+        let OpAttributes::ArgMax { axis, nan_mode } =
+            analysis.operators().last().unwrap().source().attributes()
+        else {
+            panic!("ARGMAX attribute");
+        };
+        assert_eq!(axis, 1);
+        assert_eq!(nan_mode, NanPropagationMode::IGNORE);
+    }
+
     #[test]
     fn incrementally_owned_graph_matches_borrowed_artifact_bytes() {
         let one = 1.0_f32.to_le_bytes();
@@ -1006,6 +1247,59 @@ mod tests {
     fn every_operator_kind_serializes_its_pinned_opcode_and_union_tag() {
         let cases = [
             (OperatorKind::MatMul, Op::MATMUL, 7),
+            (
+                OperatorKind::ArgMax {
+                    axis: 1,
+                    nan_mode: NanPropagationMode::PROPAGATE,
+                },
+                Op::ARGMAX,
+                1,
+            ),
+            (OperatorKind::Ceil, Op::CEIL, 34),
+            (OperatorKind::Floor, Op::FLOOR, 38),
+            (
+                OperatorKind::Clamp {
+                    min_val: [0; MAX_CLAMP_BOUND_BYTES],
+                    max_val: [0, 0, 0x80, 0x3f, 0, 0, 0, 0],
+                    bound_bytes: 4,
+                    nan_mode: NanPropagationMode::PROPAGATE,
+                },
+                Op::CLAMP,
+                11,
+            ),
+            (OperatorKind::Concat { axis: 0 }, Op::CONCAT, 55),
+            (OperatorKind::Reverse { axis: 1 }, Op::REVERSE, 58),
+            (
+                OperatorKind::Transpose {
+                    perms: [1, 0, 2, 0, 0, 0],
+                    rank: 3,
+                },
+                Op::TRANSPOSE,
+                61,
+            ),
+            (
+                OperatorKind::ReduceMax {
+                    axis: 1,
+                    nan_mode: NanPropagationMode::PROPAGATE,
+                },
+                Op::REDUCE_MAX,
+                51,
+            ),
+            (
+                OperatorKind::ReduceMin {
+                    axis: 1,
+                    nan_mode: NanPropagationMode::IGNORE,
+                },
+                Op::REDUCE_MIN,
+                52,
+            ),
+            (
+                OperatorKind::ReduceProduct { axis: 0 },
+                Op::REDUCE_PRODUCT,
+                53,
+            ),
+            (OperatorKind::ReduceSum { axis: 0 }, Op::REDUCE_SUM, 54),
+            (OperatorKind::Erf, Op::ERF, 12),
             (
                 OperatorKind::MaxPool2d {
                     kernel: [2, 2],

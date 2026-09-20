@@ -33,6 +33,7 @@ PUBLISH_ORDER = (
     "virtio-accel-coreml",
     "virtio-accel-openvino",
     "virtio-accel-hexagon",
+    "virtio-accel-vulkan",
     "virtio-accel",
 )
 

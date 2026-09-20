@@ -36,6 +36,10 @@ pub(crate) const ELEMENT_I8: ov_element_type_e = 7;
 pub(crate) const ELEMENT_I32: ov_element_type_e = 9;
 pub(crate) const ELEMENT_I64: ov_element_type_e = 10;
 pub(crate) const ELEMENT_U8: ov_element_type_e = 16;
+pub(crate) const ELEMENT_F8E4M3: ov_element_type_e = 21;
+/// `f8e5m2`. Upstream spells the enumerator `F8E5M3` -- a typo in `ov_common.h`, whose own
+/// doc comment on the same line reads "f8e5m2 element type". The code, 22, is what matters.
+pub(crate) const ELEMENT_F8E5M2: ov_element_type_e = 22;
 
 macro_rules! opaque_handle {
     ($(#[$doc:meta] $name:ident),* $(,)?) => {
@@ -78,8 +82,17 @@ pub(crate) struct ov_available_devices_t {
     pub size: usize,
 }
 
+/// `ov_version_t`: two runtime-owned C strings released by `ov_version_free`.
+#[repr(C)]
+pub(crate) struct ov_version_t {
+    pub build_number: *const c_char,
+    pub description: *const c_char,
+}
+
 unsafe extern "C" {
     // Core lifecycle and discovery.
+    pub(crate) fn ov_get_openvino_version(version: *mut ov_version_t) -> ov_status_e;
+    pub(crate) fn ov_version_free(version: *mut ov_version_t);
     pub(crate) fn ov_core_create(core: *mut *mut ov_core_t) -> ov_status_e;
     pub(crate) fn ov_core_free(core: *mut ov_core_t);
     pub(crate) fn ov_core_get_available_devices(
@@ -89,6 +102,11 @@ unsafe extern "C" {
     pub(crate) fn ov_available_devices_free(devices: *mut ov_available_devices_t);
 
     // Model reading and compilation.
+    /// Serialize a compiled model (the plugin's device-specific form) to a file.
+    pub(crate) fn ov_compiled_model_export_model(
+        compiled_model: *const ov_compiled_model_t,
+        export_model_path: *const c_char,
+    ) -> ov_status_e;
     pub(crate) fn ov_core_read_model_from_memory_buffer(
         core: *const ov_core_t,
         model_str: *const c_char,

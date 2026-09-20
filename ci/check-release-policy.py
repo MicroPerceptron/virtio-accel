@@ -36,6 +36,7 @@ PUBLISHED_PACKAGES = {
     "crates/virtio-accel-openvino": "virtio-accel-openvino",
     "crates/virtio-accel-proto": "virtio-accel-proto",
     "crates/virtio-accel-vaccel": "virtio-accel-vaccel",
+    "crates/virtio-accel-vulkan": "virtio-accel-vulkan",
     "crates/virtio-accel-split-queue": "virtio-accel-split-queue",
     "crates/virtio-accel-tosa": "virtio-accel-tosa",
     "crates/virtio-accel-tosa-build": "virtio-accel-tosa-build",
@@ -85,6 +86,11 @@ UNSAFE_AUDITS = {
         ROOT / "crates" / "virtio-accel-coreml" / "SAFETY.md",
         'cfg_attr(not(target_os = "macos"), forbid(unsafe_code))',
         ("Objective-C bridge", "AlignedAllocation", "atomic two-reference"),
+    ),
+    ROOT / "crates" / "virtio-accel-vulkan" / "src" / "lib.rs": (
+        ROOT / "crates" / "virtio-accel-vulkan" / "SAFETY.md",
+        "cfg_attr(not(va_vulkan), forbid(unsafe_code))",
+        ("ash 0.38.0", "persistent mapping", "VK_ERROR_DEVICE_LOST"),
     ),
     ROOT / "crates" / "virtio-accel-openvino" / "src" / "lib.rs": (
         ROOT / "crates" / "virtio-accel-openvino" / "SAFETY.md",

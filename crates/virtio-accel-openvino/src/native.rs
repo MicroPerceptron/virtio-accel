@@ -550,6 +550,52 @@ impl Drop for CompiledModelHandle {
     }
 }
 
+/// Read an IR document into a model, sharing the caller's weights memory when there is any.
+fn read_model(
+    core: &CoreHandle,
+    xml: &[u8],
+    weights: Option<&TensorHandle>,
+) -> Result<ModelHandle, BackendError> {
+    let mut model = ptr::null_mut();
+    // SAFETY: core, document bytes, and the (possibly null) weights tensor are live for this
+    // synchronous call; the created model shares the weights memory, which the caller keeps
+    // resident for as long as the model lives.
+    let status = unsafe {
+        ffi::ov_core_read_model_from_memory_buffer(
+            core.as_const_ptr(),
+            xml.as_ptr().cast(),
+            xml.len(),
+            weights.map_or(ptr::null(), TensorHandle::as_const_ptr),
+            &mut model,
+        )
+    };
+    check_status(status)?;
+    NonNull::new(model)
+        .map(|model| ModelHandle { model })
+        .ok_or(BackendError::External {
+            domain: OPENVINO_EXTERNAL_DOMAIN,
+            code: 0,
+        })
+}
+
+/// Whether this device's compiler accepts an FP8 graph, asked by compiling the smallest one.
+///
+/// Advertised capability has to be true of the device in hand, not of the backend in general.
+/// Intel NPU arch 5010 (Panther Lake) compiles FP8; arch 40XX (Lunar Lake) refuses even an FP8
+/// `IDENTITY`, and the FP8 handling in the driver-side compiler's own tree is arch-gated. There
+/// is no property to read for this -- `OPTIMIZATION_CAPABILITIES` omits FP8 on 5010, where it
+/// works -- so the tier is probed rather than branded, and a driver that gains FP8 later starts
+/// advertising it here with no allowlist to edit.
+fn device_accepts_fp8(core: &CoreHandle, device: &CStr) -> bool {
+    let probe = crate::lower::fp8_probe_document();
+    let Ok(model) = read_model(core, &probe.xml, None) else {
+        return false;
+    };
+    let accepted = compile_with_accuracy(core, &model, device).is_ok();
+    drop(model);
+    accepted
+}
+
 /// The only C-variadic call site: compile with the `ACCURACY` execution-mode hint so plugins may
 /// not silently run a declared-FP32 model at reduced precision.
 fn compile_with_accuracy(
@@ -585,6 +631,8 @@ const fn element_code(element: OvElement) -> ffi::ov_element_type_e {
     match element {
         OvElement::F32 => ffi::ELEMENT_F32,
         OvElement::F16 => ffi::ELEMENT_F16,
+        OvElement::F8E4M3 => ffi::ELEMENT_F8E4M3,
+        OvElement::F8E5M2 => ffi::ELEMENT_F8E5M2,
         OvElement::I8 => ffi::ELEMENT_I8,
         OvElement::I32 => ffi::ELEMENT_I32,
         OvElement::I64 => ffi::ELEMENT_I64,
@@ -823,6 +871,8 @@ pub struct OpenVinoAccelerator {
     direct_binding_admissions: AtomicU64,
     explicit_transfer_bytes: AtomicU64,
     info: DeviceInfo,
+    /// Whether this device's compiler accepts FP8, probed once at open.
+    fp8: bool,
 }
 
 impl std::fmt::Debug for OpenVinoAccelerator {
@@ -866,6 +916,7 @@ impl OpenVinoAccelerator {
     fn with_selected(core: Arc<CoreHandle>, device: String) -> Result<Self, InitError> {
         let info = device_info_for(&device);
         let device = CString::new(device).map_err(|_| InitError::DeviceUnavailable)?;
+        let fp8 = device_accepts_fp8(&core, &device);
         Ok(Self {
             core,
             device,
@@ -873,10 +924,62 @@ impl OpenVinoAccelerator {
             direct_binding_admissions: AtomicU64::new(0),
             explicit_transfer_bytes: AtomicU64::new(0),
             info,
+            fp8,
         })
     }
 
+    /// Whether this instance advertises the FP8 tier, which depends on the device it opened.
+    pub fn advertises_fp8(&self) -> bool {
+        self.fp8
+    }
+
     /// The enumerated name of the device this instance executes on.
+    /// The runtime's build number (`ov_get_openvino_version`), the version a captured compiled
+    /// blob must be bound to.
+    pub fn runtime_version() -> Result<String, InitError> {
+        let mut version = ffi::ov_version_t {
+            build_number: ptr::null(),
+            description: ptr::null(),
+        };
+        // SAFETY: `version` is a valid out-structure; on success the runtime owns both strings
+        // until `ov_version_free`, and they are copied before that release.
+        unsafe {
+            if ffi::ov_get_openvino_version(&mut version) != ffi::OV_STATUS_OK
+                || version.build_number.is_null()
+            {
+                return Err(InitError::RuntimeUnavailable);
+            }
+            let build = CStr::from_ptr(version.build_number)
+                .to_string_lossy()
+                .into_owned();
+            ffi::ov_version_free(&mut version);
+            Ok(build)
+        }
+    }
+
+    /// Export the plugin-compiled form of `program` to `path` through
+    /// `ov_compiled_model_export_model`: the NPU plugin writes its VPUX ELF, the GPU plugin its
+    /// serialized graph with the OpenCL program binaries (Intel GT zebin ELFs) embedded. The
+    /// bytes are the runtime's own export format for this device and OpenVINO version; a
+    /// consumer that keeps them must bind them to the artifact and version that produced them.
+    /// The program stays loaded and usable afterwards.
+    pub fn export_program(
+        &self,
+        program: &OpenVinoProgram,
+        path: &std::path::Path,
+    ) -> Result<(), BackendError> {
+        let path = CString::new(path.as_os_str().as_encoded_bytes())
+            .map_err(|_| BackendError::InvalidArgument)?;
+        // SAFETY: the compiled model is live for the program's lifetime and `path` is a valid
+        // NUL-terminated string for the duration of the call.
+        unsafe {
+            check_status(ffi::ov_compiled_model_export_model(
+                program.compiled.as_const_ptr(),
+                path.as_ptr(),
+            ))
+        }
+    }
+
     pub fn device_name(&self) -> &str {
         self.device.to_str().unwrap_or_default()
     }
@@ -976,7 +1079,11 @@ impl OpenVinoAccelerator {
 
 impl TosaCapabilityProvider for OpenVinoAccelerator {
     fn tosa_capabilities(&self) -> &'static [CapabilityDescriptor] {
-        crate::TOSA_CAPABILITIES
+        if self.fp8 {
+            crate::TOSA_CAPABILITIES_WITH_FP8
+        } else {
+            crate::TOSA_CAPABILITIES
+        }
     }
 }
 
@@ -1197,28 +1304,7 @@ impl Accelerator for OpenVinoAccelerator {
             )?)
         };
 
-        let mut model = ptr::null_mut();
-        // SAFETY: core, document bytes, and the (possibly null) weights tensor are live for this
-        // synchronous call; the created model shares the weights memory, which the returned
-        // program keeps resident.
-        let status = unsafe {
-            ffi::ov_core_read_model_from_memory_buffer(
-                self.core.as_const_ptr(),
-                lowered.xml.as_ptr().cast(),
-                lowered.xml.len(),
-                weights_tensor
-                    .as_ref()
-                    .map_or(ptr::null(), TensorHandle::as_const_ptr),
-                &mut model,
-            )
-        };
-        check_status(status)?;
-        let model = NonNull::new(model)
-            .map(|model| ModelHandle { model })
-            .ok_or(BackendError::External {
-                domain: OPENVINO_EXTERNAL_DOMAIN,
-                code: 0,
-            })?;
+        let model = read_model(&self.core, &lowered.xml, weights_tensor.as_ref())?;
         let compiled = compile_with_accuracy(&self.core, &model, &self.device)?;
         drop(model);
 
@@ -1438,7 +1524,8 @@ impl Accelerator for OpenVinoAccelerator {
 mod tests {
     use super::*;
     use virtio_accel_conformance::numerics::{
-        IDENTITY_EDGES_FP32, MATMUL_FP16, MATMUL_FP32, MAX_POOL2D_FP32,
+        IDENTITY_EDGES_FP32, IDENTITY_FP8E4M3, IDENTITY_FP8E5M2, MATMUL_FP16, MATMUL_FP32,
+        MAX_POOL2D_FP32,
     };
 
     const IDENTITY_FP32_LOCAL: &[u8] = include_bytes!("../tests/data/identity-fp32-v1.0.0.tosa");
@@ -1486,9 +1573,16 @@ mod tests {
     }
 
     fn tosa_artifact<'a>(payload: &'a SliceSource<'a>) -> ArtifactRef<'a> {
+        tosa_artifact_for(payload, crate::OPENVINO_TOSA_TARGET)
+    }
+
+    fn tosa_artifact_for<'a>(
+        payload: &'a SliceSource<'a>,
+        target: virtio_accel_tosa::Target,
+    ) -> ArtifactRef<'a> {
         ArtifactRef {
             format: virtio_accel_tosa::ARTIFACT_FORMAT,
-            target: crate::OPENVINO_TOSA_TARGET.to_identity(),
+            target: target.to_identity(),
             payload,
             resident_bytes: REQUIRED_RESIDENT_BYTES,
         }
@@ -1627,6 +1721,160 @@ mod tests {
 
     /// The milestone gate: a device-neutral TOSA identity executes end-to-end on the selected
     /// device with direct bindings only.
+    #[test]
+    fn fp8_tier_graphs_compile_on_the_device() {
+        let Some(backend) = backend() else { return };
+        eprintln!(
+            "FP8 tier device: {} (FP8 advertised: {})",
+            backend.device_name(),
+            backend.advertises_fp8()
+        );
+        if !backend.advertises_fp8() {
+            return;
+        }
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        for dtype in [
+            virtio_accel_tosa::DType::FP8E4M3,
+            virtio_accel_tosa::DType::FP8E5M2,
+        ] {
+            for (name, artifact) in [
+                ("matmul", crate::lower::fp8_matmul_graph(dtype)),
+                ("max_pool2d", crate::lower::fp8_pool_graph(dtype)),
+                ("transpose", crate::lower::fp8_transpose_graph(dtype)),
+            ] {
+                let program = backend
+                    .load_program(
+                        &context,
+                        tosa_artifact_for(&SliceSource(&artifact), crate::OPENVINO_TOSA_FP8_TARGET),
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!("{dtype:?} {name}: device compilation failed: {error:?}")
+                    });
+                backend.unload_program(program).unwrap();
+            }
+        }
+        backend.destroy_context(context).unwrap();
+    }
+
+    /// Advertisement must match what the device will actually do, in both directions. A device
+    /// that advertises FP8 loads an FP8 graph; a device that does not must refuse it at load
+    /// rather than accept the program and fail later. Intel NPU arch 5010 takes the first branch
+    /// and arch 40XX the second, so this is the one FP8 test that is meaningful on every device.
+    #[test]
+    fn fp8_advertisement_matches_what_the_device_accepts() {
+        let Some(backend) = backend() else { return };
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        let artifact = crate::lower::fp8_matmul_graph(virtio_accel_tosa::DType::FP8E4M3);
+        let outcome = backend.load_program(
+            &context,
+            tosa_artifact_for(&SliceSource(&artifact), crate::OPENVINO_TOSA_FP8_TARGET),
+        );
+        match (backend.advertises_fp8(), outcome) {
+            (true, Ok(program)) => backend.unload_program(program).unwrap(),
+            (true, Err(error)) => panic!(
+                "{}: advertises FP8 but refused an FP8 graph: {error:?}",
+                backend.device_name()
+            ),
+            (false, Err(_)) => {}
+            (false, Ok(_)) => panic!(
+                "{}: does not advertise FP8 but accepted an FP8 graph",
+                backend.device_name()
+            ),
+        }
+        backend.destroy_context(context).unwrap();
+    }
+
+    /// The lowering tests assert the emitted document's shape; this asserts the real compiler
+    /// builds a blob from it. The distinction is the whole point of the widening: a raw FP8
+    /// MatMul reaches MLIR's verifier and is rejected, because the NPU compiler's IE dialect
+    /// declares MatMul operands without the FP8 types.
+    #[test]
+    fn fp8_identity_moves_every_byte_pattern_on_the_device() {
+        let Some(backend) = backend() else { return };
+        // Name the device: FP8 movement works on several plugins, so a pass says nothing about
+        // which one ran it. The evidence pin needs the device, not just the result.
+        eprintln!(
+            "FP8 device: {} (FP8 advertised: {})",
+            backend.device_name(),
+            backend.advertises_fp8()
+        );
+        if !backend.advertises_fp8() {
+            return;
+        }
+        for case in [IDENTITY_FP8E4M3, IDENTITY_FP8E5M2] {
+            let context = backend.create_context(ContextDesc::default()).unwrap();
+            let program = backend
+                .load_program(
+                    &context,
+                    tosa_artifact_for(&SliceSource(case.artifact), crate::OPENVINO_TOSA_FP8_TARGET),
+                )
+                .unwrap_or_else(|error| panic!("{}: load rejected: {error:?}", case.name));
+            let bytes = program.slots[0].byte_len;
+            let desc = BufferDesc::new(
+                bytes,
+                4096,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_SOURCE
+                    | BufferUsage::TRANSFER_DESTINATION
+                    | BufferUsage::PROGRAM_INPUT
+                    | BufferUsage::PROGRAM_OUTPUT,
+            )
+            .unwrap();
+            let (mut input, _) = backend
+                .allocate_buffer(&context, desc)
+                .unwrap()
+                .into_parts();
+            let (output, _) = backend
+                .allocate_buffer(&context, desc)
+                .unwrap()
+                .into_parts();
+            // Walk the encoding space: one byte per element, so NaNs, both zeros, the
+            // subnormals and the maxima are all covered rather than sampled.
+            let payload = (0..bytes as usize)
+                .map(|index| (index % 256) as u8)
+                .collect::<Vec<_>>();
+            backend
+                .write_buffer(&mut input, 0, &SliceSource(&payload))
+                .unwrap();
+            let queue = backend
+                .create_queue(&context, QueueDesc::default())
+                .unwrap();
+            let bindings = [
+                BindingRef {
+                    slot: 0,
+                    buffer: &input,
+                    range: virtio_accel_core::BufferRange::new(0, bytes).unwrap(),
+                    access: AccessMode::Read,
+                },
+                BindingRef {
+                    slot: 1,
+                    buffer: &output,
+                    range: virtio_accel_core::BufferRange::new(0, bytes).unwrap(),
+                    access: AccessMode::Write,
+                },
+            ];
+            let event = backend
+                .submit(&queue, &program, &bindings, Timeout::Infinite)
+                .unwrap_or_else(|_| panic!("{}: submission failed", case.name));
+            assert_eq!(
+                wait_for_terminal(&backend, &event),
+                EventState::Complete,
+                "{}",
+                case.name
+            );
+            let mut result = vec![0u8; bytes as usize];
+            backend
+                .read_buffer(&output, 0, &mut SliceSink(&mut result))
+                .unwrap();
+            assert_eq!(
+                result, payload,
+                "{}: FP8 movement is not bit-exact",
+                case.name
+            );
+            backend.destroy_event(event).unwrap();
+        }
+    }
+
     #[test]
     fn executes_device_neutral_tosa_identity_end_to_end() {
         let Some(backend) = backend() else { return };

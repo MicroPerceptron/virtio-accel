@@ -380,6 +380,26 @@ preserve OpenVINO's static admission, direct-binding, capability, and conformanc
 process, serialized stream, and XDNA-specific local-memory envelopes are documented hardware/runtime
 constraints rather than portable API changes or silent fallback paths.
 
+The Vulkan provider is the first GPU-class consumer of the seam and keeps the data plane
+graph-shaped (ADR 0001): one admitted TOSA graph becomes one sequence of compute pipelines created
+at load from crate-authored SPIR-V kernels specialized by validated shape constants, so guest bytes
+never reach a driver's shader compiler (ADR 0003, ADR 0007). Every kernel addresses tensors through
+one descriptor — an array of storage buffers holding the submission's bound slots and a
+per-program arena for constants and intermediates — so one module per kernel serves every binding
+layout, and a whole graph is recorded into one command buffer with compute barriers between
+dependent dispatches. Buffers are dedicated `VkDeviceMemory` allocations bound directly as storage
+buffers; host-visible domains stay persistently mapped, and device-local memory is reached only
+through bounded staging inside the explicit transfer calls. Each context owns a bounded ring of
+command buffers, fences, and descriptor sets; `vkQueueSubmit2` success is the admission boundary
+and `vkGetFenceStatus` is the whole completion path, so no worker thread bridges the runtime.
+Device loss poisons the instance. The backend runs the conformance suite and the shared FP32
+operator corpus on every device it enumerates; the FP32 operator tier is verified on the Mesa
+lavapipe CI lane, on Intel ANV (Arc 140V), and on Apple M4 via MoltenVK. The FP16 tier (ADR
+0008) — the same operators over packed binary16 storage with crate-owned conversions and
+binary32 evaluation, advertised on every device — has executed its corpus on Apple M4 via
+MoltenVK, Intel Arc LNL (Mesa ANV), and AMD Radeon 860M (RADV), and the lavapipe CI lane
+exercises it on every change.
+
 The Qualcomm adapter uses the same seam. Its safe planner admits 41 of the 42 floating-point
 operators shared by Core ML and OpenVINO, including owned constants/data movement, FP16 unary and
 binary computation, BOOL comparison/selection/logical tensors, and INT32 indexing results. `ERF` is

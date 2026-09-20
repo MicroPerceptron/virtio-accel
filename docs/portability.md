@@ -13,6 +13,7 @@ Rust 2024 edition selected by the workspace. Every package inherits the same `ru
 | `style-and-api` | Current stable on Ubuntu | Formatting, complete normative-requirement ledger, release-policy invariants, Clippy with warnings denied, and warning-free public docs |
 | `native-test` | Current stable on Ubuntu, macOS, and Windows | All workspace unit, integration, target, feature, and documentation tests, runnable examples, and release-profile checking |
 | `openvino-host-test` | Current stable on Ubuntu with a pinned Intel OpenVINO runtime | The real (probed) OpenVINO backend: lint, unit, integration, semantic-conformance, and example runs against the CPU plugin |
+| `vulkan-lavapipe-test` | Current stable on Ubuntu with the Mesa lavapipe ICD pinned | The native Vulkan 1.3 backend: lint, unit, integration, semantic-conformance, the shared FP32 operator corpus, and example runs without allowing a placeholder skip |
 | `msrv` | Rust 1.85.0 on Ubuntu | Every workspace target and test continues to compile at the declared MSRV |
 | `portable-target` | Stable `aarch64-unknown-none`, `riscv64gc-unknown-none-elf`, and `wasm32-unknown-unknown` | `cleanroom`, `proto`, `transport`, and `core` remain `no_std`; guest, split-queue, device, and facade layers require at most `alloc`; Wasm also checks the std reference crates |
 | `feature-sets-and-dependencies` | Stable on Ubuntu | Every Cargo feature combination plus dependency and `std`/`alloc` leakage guards for the portable codecs, queue ports, and core |
@@ -38,7 +39,7 @@ directly, and they must keep working on any platform the portable crates support
 | `core-only` | `virtio-accel-cleanroom`, `virtio-accel-proto`, `virtio-accel-transport`, `virtio-accel-core` | `core`; the clean-room codec and transport ports have no normal/build dependencies, while proc-macros used by other crates may execute with `std` on the build host |
 | `alloc-portable` | `virtio-accel-guest`, `virtio-accel-split-queue`, `virtio-accel-device`, `virtio-accel-tosa`, `virtio-accel-tosa-build`, `virtio-accel` | `core + alloc`; no OS, filesystem, sockets, threads, or host synchronization |
 | `std-reference` | `virtio-accel-mock`, `virtio-accel-conformance` | Portable `std`; no host-OS or vendor-specific API |
-| `host-native` | `virtio-accel-coreml`, `virtio-accel-openvino`, `virtio-accel-hexagon`, `virtio-accel-xdna` | Core ML/Foundation on macOS 14+, the OpenVINO C runtime (`libopenvino_c` 2026.x), the complete QAIRT/QNN C SDK on Windows ARM64, or the amdxdna-native HRX runtime (`libhrx`) when detected at build time; a compile-only unsupported-platform or unsupported-runtime placeholder elsewhere |
+| `host-native` | `virtio-accel-coreml`, `virtio-accel-openvino`, `virtio-accel-hexagon`, `virtio-accel-xdna`, `virtio-accel-vulkan` | Core ML/Foundation on macOS 14+, the OpenVINO C runtime (`libopenvino_c` 2026.x), the complete QAIRT/QNN C SDK on Windows ARM64, the amdxdna-native HRX runtime (`libhrx`), or a dynamically loaded Vulkan loader (via `ash`) on the build.rs-enumerated host targets; a compile-only unsupported-platform or unsupported-runtime placeholder elsewhere |
 
 No host-native crate is a dependency of the facade or any portable layer. The Core ML crate's
 Objective-C bridge and TOSA-to-Core ML model compilation are built only when the Cargo target is
@@ -108,6 +109,20 @@ is represented as explicit per-slot padding in the compiled artifact, never as h
 submission-time staging. Tile-compatible MATMUL shapes widen/subtract zero points on the NPU and
 use the native 4x4x8 INT16 matrix unit; smaller shapes and exact 64-bit RESCALE arithmetic use
 scalar on-NPU kernels. RESCALE clears the at-most-three-byte padded output tail on the NPU.
+
+The Vulkan crate binds Vulkan 1.3 through the pinned `ash` crate and executes admitted TOSA graphs
+on crate-authored SPIR-V compute kernels specialized at `load_program`; the admitted tier is the
+FP32 operator set shared with Core ML and OpenVINO, executed graph-at-a-time (ADR 0007). Unlike the SDK-probing backends, there is nothing to detect at build time — `ash` loads the
+platform's Vulkan loader dynamically at run time — so the `va_vulkan` cfg enumerates the host
+target operating systems (Linux, Android, Windows, macOS) and runtime loader or device absence
+surfaces as `InitError`. `VIRTIO_ACCEL_VULKAN=0` forces the placeholder everywhere;
+`VIRTIO_ACCEL_VULKAN=1` makes an unsupported target a loud build failure; unset is auto (ADR 0002
+in `docs/adr/`). Buffers are dedicated allocations bound directly as storage buffers; `Host` and
+`Shared` domains are persistently mapped host-coherent memory, `Device` is device-local memory
+reached only through bounded staging inside the explicit transfer calls (ADR 0005).
+The dedicated `vulkan-lavapipe-test` job forces the native build, requires an enumerated device,
+and pins Mesa's software ICD before running Clippy, all Vulkan tests, and the example. This keeps
+the run deterministic while ensuring loader discovery and the real Vulkan lifecycle execute in CI.
 
 Concrete VMM, kernel, OS, and vendor adapters are outside the portable-v1 milestone and must not
 become default dependencies of a portable crate.

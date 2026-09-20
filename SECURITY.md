@@ -37,7 +37,7 @@ bounty.
 
 | Version | Supported |
 |---|---|
-| Cargo `0.1.x` | Yes — the current line, and the only one receiving fixes |
+| Cargo `0.3.x` | Yes — the current line, and the only one receiving fixes |
 | Protocol 1.0 wire ABI | Yes — frozen by the [freeze audit](conformance/v1.0/freeze-audit.md) |
 
 Only the most recent `0.1.x` release receives security fixes. There are no earlier published

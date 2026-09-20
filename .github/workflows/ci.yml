@@ -158,6 +158,47 @@ jobs:
       - name: Run the example against the real runtime
         run: cargo run -p virtio-accel-openvino --example tosa_openvino
 
+  vulkan-lavapipe-test:
+    name: vulkan-lavapipe-test (ubuntu, Mesa software ICD)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # The native path must compile; a silent placeholder fallback would test nothing.
+      VIRTIO_ACCEL_VULKAN: "1"
+      # And a missing ICD must fail the lane rather than skip every device test.
+      VIRTIO_ACCEL_VULKAN_REQUIRE_DEVICE: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: stable
+
+      - name: Install the distribution Vulkan loader and Mesa software ICD
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan1 mesa-vulkan-drivers
+
+      - name: Pin the loader to lavapipe
+        run: |
+          icd="$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' | head -n1)"
+          test -n "$icd"
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+
+      - name: Lint the native backend
+        run: cargo clippy -p virtio-accel-vulkan --all-targets -- -D warnings
+
+      - name: Test against the software ICD
+        run: cargo test -p virtio-accel-vulkan --all-targets
+
+      - name: Run the example against the software ICD
+        run: cargo run -p virtio-accel-vulkan --example tosa_vulkan
+
   freebsd-qemu-smoke:
     name: freebsd-qemu-smoke (amd64)
     runs-on: ubuntu-latest

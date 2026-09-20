@@ -42,6 +42,18 @@ pub const OPENVINO_TOSA_INTEGER_TARGET: Target = Target::new(
     ExtensionSet::NONE,
 );
 
+/// TOSA FP8 target (ADR 0009), mirroring `VULKAN_TOSA_FP8_TARGET` exactly.
+///
+/// TOSA gates FP8 legality on the `FP8E4M3` / `FP8E5M2` extensions rather than on the base
+/// floating-point profile, so the FP8 envelope is a distinct *target* rather than a dtype
+/// narrowing of [`OPENVINO_TOSA_TARGET`] -- unlike FP16, which shares the float target identity.
+pub const OPENVINO_TOSA_FP8_TARGET: Target = Target::new(
+    Version::TOSA_1_0,
+    ProfileSet::FLOATING_POINT,
+    Level::Level8K,
+    ExtensionSet::FP8E4M3.union(ExtensionSet::FP8E5M2),
+);
+
 const FLOAT_DTYPES: &[DTypeCapability] = &[
     DTypeCapability::new(DType::FP16, ValueRoles::ALL),
     DTypeCapability::new(DType::FP32, ValueRoles::ALL),
@@ -112,6 +124,38 @@ const FLOAT_OPERATORS: &[OperatorCapability] = &[
     OperatorCapability::new(Op::IDENTITY),
 ];
 
+/// `CAST` for the FP8 tier only.
+///
+/// It is deliberately absent from [`FLOAT_OPERATORS`]: that list is the operator surface shared
+/// with the Core ML provider, and `advertised_operator_and_dtype_surface_is_exact` in the Hexagon
+/// crate asserts the two agree operator for operator through `supports_tosa_operator`. Adding
+/// `CAST` there would have OpenVINO advertise an operator Core ML does not. The FP8 tier extends
+/// the shared list instead of mutating it.
+const CAST_CAPABILITY: OperatorCapability = OperatorCapability::new(Op::CAST);
+
+/// The FP8 tier's operators: every shared float operator, plus `CAST` as the narrowing path the
+/// Vulkan FP8 tier also carries. Built from [`FLOAT_OPERATORS`] rather than restated, so the two
+/// envelopes cannot drift.
+const FLOAT8_OPERATORS: &[OperatorCapability] = &{
+    let mut extended = [CAST_CAPABILITY; FLOAT_OPERATORS.len() + 1];
+    let mut index = 0;
+    while index < FLOAT_OPERATORS.len() {
+        extended[index] = FLOAT_OPERATORS[index];
+        index += 1;
+    }
+    extended
+};
+
+/// The FP8 tier's dtypes: both encodings in every role, plus FP16 because TOSA's FP8 `MATMUL`
+/// accumulates into it and INT32 because `ARGMAX` indexes with it. Mirrors the Vulkan tier's
+/// `FLOAT8_DTYPES` so a graph admitted by one backend is admitted by the other.
+const FLOAT8_DTYPES: &[DTypeCapability] = &[
+    DTypeCapability::new(DType::FP8E4M3, ValueRoles::ALL),
+    DTypeCapability::new(DType::FP8E5M2, ValueRoles::ALL),
+    DTypeCapability::new(DType::FP16, ValueRoles::ALL),
+    DTypeCapability::new(DType::INT32, ValueRoles::ALL),
+];
+
 const INTEGER_OPERATORS: &[OperatorCapability] = &[
     OperatorCapability::new(Op::CONST),
     OperatorCapability::new(Op::IDENTITY),
@@ -144,6 +188,42 @@ pub const OPENVINO_TOSA_INTEGER_CAPABILITY: CapabilityDescriptor = CapabilityDes
     },
 };
 
+/// FP8 capability boundary (ADR 0009): `(FP8, FP8) -> FP16` MATMUL and exact FP8 data movement.
+pub const OPENVINO_TOSA_FP8_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
+    target: OPENVINO_TOSA_FP8_TARGET,
+    dtypes: FLOAT8_DTYPES,
+    // The float tier's envelope plus CAST, narrowed by dtype rather than by a restated list --
+    // close to how the FP16 tier relates to FP32. TOSA's own per-operator dtype rules do the real
+    // constraining: it admits no FP8 elementwise operator, so an FP8-typed ADD is rejected by
+    // `analyze_for` even though ADD appears here. What that leaves reachable is FP8 MATMUL, FP8
+    // data movement, FP8 CAST, and FP16 arithmetic over FP8-sourced operands -- a superset of the
+    // Vulkan FP8 tier, so any graph Vulkan admits is admitted here too.
+    operators: FLOAT8_OPERATORS,
+    graph: GraphCapabilities {
+        max_regions: 1,
+        max_blocks: 1,
+        dynamic_shapes: false,
+        runtime_conditions: RuntimeConditionSupport::None,
+    },
+};
+
+/// The descriptor that governs `target`, or `None` if this backend does not lower it.
+///
+/// Admission must consult the descriptor for the target actually being lowered rather than a
+/// fixed one: the FP8 tier carries operators (`CAST`) the float tier does not, and rejects most
+/// of the operators the float tier admits, so one hardcoded descriptor cannot gate both.
+fn capability_for(target: Target) -> Option<&'static CapabilityDescriptor> {
+    if target == OPENVINO_TOSA_TARGET {
+        Some(&OPENVINO_TOSA_CAPABILITY)
+    } else if target == OPENVINO_TOSA_INTEGER_TARGET {
+        Some(&OPENVINO_TOSA_INTEGER_CAPABILITY)
+    } else if target == OPENVINO_TOSA_FP8_TARGET {
+        Some(&OPENVINO_TOSA_FP8_CAPABILITY)
+    } else {
+        None
+    }
+}
+
 /// Weights-blob entries are aligned generously so every element type loads aligned.
 const WEIGHTS_ALIGNMENT: usize = 64;
 
@@ -171,6 +251,8 @@ impl std::error::Error for LoweringError {}
 pub(crate) enum OvElement {
     F32,
     F16,
+    F8E4M3,
+    F8E5M2,
     I8,
     I32,
     I64,
@@ -183,6 +265,8 @@ impl OvElement {
         match self {
             Self::F32 => "f32",
             Self::F16 => "f16",
+            Self::F8E4M3 => "f8e4m3",
+            Self::F8E5M2 => "f8e5m2",
             Self::I8 => "i8",
             Self::I32 => "i32",
             Self::I64 => "i64",
@@ -195,6 +279,9 @@ impl OvElement {
         match self {
             Self::F32 => "FP32",
             Self::F16 => "FP16",
+            // Not "FP8E4M3": OpenVINO writes the FP8 port precisions without the FP prefix.
+            Self::F8E4M3 => "F8E4M3",
+            Self::F8E5M2 => "F8E5M2",
             Self::I8 => "I8",
             Self::I32 => "I32",
             Self::I64 => "I64",
@@ -207,7 +294,7 @@ impl OvElement {
         match self {
             Self::F32 | Self::I32 => 4,
             Self::F16 => 2,
-            Self::I8 => 1,
+            Self::F8E4M3 | Self::F8E5M2 | Self::I8 => 1,
             Self::I64 => 8,
             Self::Bool => 1,
         }
@@ -217,6 +304,8 @@ impl OvElement {
         match dtype {
             DType::FP32 => Ok(Self::F32),
             DType::FP16 => Ok(Self::F16),
+            DType::FP8E4M3 => Ok(Self::F8E4M3),
+            DType::FP8E5M2 => Ok(Self::F8E5M2),
             DType::INT8 => Ok(Self::I8),
             DType::INT32 => Ok(Self::I32),
             DType::BOOL => Ok(Self::Bool),
@@ -230,6 +319,8 @@ fn boundary_element(dtype: DType) -> Result<OvElement, LoweringError> {
     match dtype {
         DType::FP16 => Ok(OvElement::F16),
         DType::FP32 => Ok(OvElement::F32),
+        DType::FP8E4M3 => Ok(OvElement::F8E4M3),
+        DType::FP8E5M2 => Ok(OvElement::F8E5M2),
         DType::INT8 => Ok(OvElement::I8),
         DType::INT32 => Ok(OvElement::I32),
         DType::BOOL => Ok(OvElement::Bool),
@@ -263,6 +354,45 @@ pub(crate) struct LoweredModel {
     pub features: Vec<LoweredFeature>,
 }
 
+/// A one-element FP8 `IDENTITY` document, for asking a device's compiler whether it accepts FP8
+/// at all.
+///
+/// Built through the same [`IrBuilder`] the real lowering uses, so it cannot drift from the
+/// document format that is known to work -- hand-written probe XML would be a second format to
+/// keep correct. FP8E4M3 stands in for both encodings: a compiler with no FP8 support at all
+/// rejects the type, and one that supports the extension supports both halves of it.
+pub(crate) fn fp8_probe_document() -> LoweredModel {
+    const ELEMENT: OvElement = OvElement::F8E4M3;
+    const DIMS: &[i64] = &[1];
+    // Three layers and two values: inside every bound `IrBuilder::new` checks.
+    let mut builder = IrBuilder::new(2).expect("a three-layer document is always within bounds");
+    let parameter = builder.emit_layer(
+        "Parameter",
+        "opset1",
+        "fp8_probe_input",
+        &format!("shape=\"1\" element_type=\"{}\"", ELEMENT.element_type()),
+        &[],
+        &[(ELEMENT, DIMS)],
+    )[0];
+    let identity = builder.emit_layer(
+        "Convert",
+        "opset1",
+        "fp8_probe_identity",
+        &format!("destination_type=\"{}\"", ELEMENT.element_type()),
+        &[(parameter, DIMS)],
+        &[(ELEMENT, DIMS)],
+    )[0];
+    builder.emit_layer(
+        "Result",
+        "opset1",
+        "fp8_probe_output",
+        "",
+        &[(identity, DIMS)],
+        &[],
+    );
+    builder.finish()
+}
+
 /// Whether the initial OpenVINO lowering tier can lower `op` for supported types and attributes.
 pub const fn supports_tosa_operator(op: Op) -> bool {
     OPENVINO_TOSA_CAPABILITY.supports_operator(op)
@@ -278,6 +408,8 @@ pub const fn supports_tosa_dtype(dtype: DType) -> bool {
         || OPENVINO_TOSA_CAPABILITY.supports_dtype(dtype, ValueRoles::OUTPUT)
         || OPENVINO_TOSA_INTEGER_CAPABILITY.supports_dtype(dtype, ValueRoles::INPUT)
         || OPENVINO_TOSA_INTEGER_CAPABILITY.supports_dtype(dtype, ValueRoles::OUTPUT)
+        || OPENVINO_TOSA_FP8_CAPABILITY.supports_dtype(dtype, ValueRoles::INPUT)
+        || OPENVINO_TOSA_FP8_CAPABILITY.supports_dtype(dtype, ValueRoles::OUTPUT)
 }
 
 /// A produced tensor inside the document: one output port of one layer.
@@ -474,9 +606,7 @@ fn element_byte_len(element: OvElement, dims: &[i64]) -> Result<u64, LoweringErr
 }
 
 pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, LoweringError> {
-    if target != OPENVINO_TOSA_TARGET && target != OPENVINO_TOSA_INTEGER_TARGET {
-        return Err(LoweringError::UnsupportedGraph);
-    }
+    let capability = capability_for(target).ok_or(LoweringError::UnsupportedGraph)?;
     let model = parse(bytes).map_err(LoweringError::Parse)?;
     let analysis = model.analyze_for(target).map_err(LoweringError::Analysis)?;
     validate_target_types(&analysis, target)?;
@@ -540,7 +670,7 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, L
     }
 
     for operator in analysis.execution_order(block) {
-        encode_operator(&mut builder, &analysis, *operator)?;
+        encode_operator(&mut builder, &analysis, *operator, capability)?;
     }
 
     for (index, value) in outputs.iter().copied().enumerate() {
@@ -587,6 +717,15 @@ fn validate_target_types(analysis: &TosaAnalysis<'_>, target: Target) -> Result<
             dtype == DType::INT8
                 && !(analysis.serialized_constant(value.id()).is_some()
                     && constant_is_parameter_only(analysis, value.id()))
+        } else if target == OPENVINO_TOSA_FP8_TARGET {
+            // The FP8 tier's own dtypes and no others. FP16 is legal here because TOSA's FP8
+            // `MATMUL` accumulates into it and INT32 because `ARGMAX` indexes with it; a graph
+            // carrying FP32 or INT8 belongs to another tier and must not be relabeled into this
+            // one. The float branch above cannot serve: it admits FP32 and FP16 alike.
+            !matches!(
+                dtype,
+                DType::FP8E4M3 | DType::FP8E5M2 | DType::FP16 | DType::INT32
+            )
         } else {
             matches!(dtype, DType::FP16 | DType::FP32)
         };
@@ -641,10 +780,11 @@ fn encode_operator(
     builder: &mut IrBuilder,
     analysis: &TosaAnalysis<'_>,
     operator_id: virtio_accel_tosa::OperatorId,
+    capability: &CapabilityDescriptor,
 ) -> Result<(), LoweringError> {
     let operator = analysis.operator(operator_id);
     let op = operator.op();
-    if !supports_tosa_operator(op) {
+    if !capability.supports_operator(op) {
         return Err(LoweringError::UnsupportedOperator(op));
     }
     let all_inputs = analysis.operator_inputs(operator_id);
@@ -737,6 +877,10 @@ fn encode_operator(
         // writing a caller-bound output tensor (observed with the 2026.3 CPU plugin), which the
         // output-pointer honesty check cannot detect.
         Op::IDENTITY => (
+            "Convert",
+            format!("destination_type=\"{}\"", output_element.element_type()),
+        ),
+        Op::CAST => (
             "Convert",
             format!("destination_type=\"{}\"", output_element.element_type()),
         ),
@@ -877,8 +1021,18 @@ fn encode_operator(
     };
 
     let mut connected = Vec::with_capacity(inputs.len());
-    for value in inputs {
-        let (source, dims) = value_port_dims(builder, analysis, *value)?;
+    for (index, value) in inputs.iter().enumerate() {
+        let (mut source, dims) = value_port_dims(builder, analysis, *value)?;
+        if let Some(widened) = fp8_widening(op, tensor(analysis, *value)?.dtype()) {
+            source = builder.emit_layer(
+                "Convert",
+                "opset1",
+                &format!("{stem}_widen_{index}"),
+                &format!("destination_type=\"{}\"", widened.element_type()),
+                &[(source, dims.as_slice())],
+                &[(widened, dims.as_slice())],
+            )[0];
+        }
         connected.push((source, dims));
     }
     let connected = connected
@@ -929,6 +1083,18 @@ fn encode_max_pool2d(
 
     let input_tensor = tensor(analysis, inputs[0])?;
     let element = OvElement::for_dtype(input_tensor.dtype())?;
+    // No plugin has an FP8 pooling primitive -- the NPU compiler's IE dialect admits FP8 on
+    // MaxPool only as an optional scale, and the CPU plugin reports an empty primitive list --
+    // so the window itself runs in binary16 while the transposes around it stay FP8. That keeps
+    // the bytes that move narrow, and the round trip is exact for every finite value: each
+    // widened tap is an exact FP8 value, the maximum is therefore one of them, and narrowing an
+    // exactly-representable value returns it. A NaN that propagates through the window may come
+    // back canonicalized, losing its sign.
+    let pool_element = match element {
+        OvElement::F8E4M3 | OvElement::F8E5M2 => OvElement::F16,
+        other => other,
+    };
+    let widens = pool_element != element;
     let nhwc_in = static_dims(input_tensor)?;
     let nhwc_out = static_dims(tensor(analysis, outputs[0])?)?;
     if nhwc_in.len() != 4 || nhwc_out.len() != 4 {
@@ -954,14 +1120,38 @@ fn encode_max_pool2d(
          rounding_type=\"floor\" auto_pad=\"explicit\"",
         stride[0], stride[1], kernel[0], kernel[1]
     );
+    let widened_input = if widens {
+        builder.emit_layer(
+            "Convert",
+            "opset1",
+            &format!("{stem}_widen"),
+            &format!("destination_type=\"{}\"", pool_element.element_type()),
+            &[(nchw_input, nchw_in.as_slice())],
+            &[(pool_element, nchw_in.as_slice())],
+        )[0]
+    } else {
+        nchw_input
+    };
     let pooled = builder.emit_layer(
         "MaxPool",
         "opset1",
         stem,
         &data,
-        &[(nchw_input, nchw_in.as_slice())],
-        &[(element, nchw_out.as_slice())],
+        &[(widened_input, nchw_in.as_slice())],
+        &[(pool_element, nchw_out.as_slice())],
     )[0];
+    let pooled = if widens {
+        builder.emit_layer(
+            "Convert",
+            "opset1",
+            &format!("{stem}_narrow"),
+            &format!("destination_type=\"{}\"", element.element_type()),
+            &[(pooled, nchw_out.as_slice())],
+            &[(element, nchw_out.as_slice())],
+        )[0]
+    } else {
+        pooled
+    };
 
     let to_nhwc = builder.emit_i64_const(&format!("{stem}_nhwc_perms"), &[0, 2, 3, 1], false)?;
     let restored = builder.emit_layer(
@@ -1212,6 +1402,20 @@ fn constant_is_parameter_only(analysis: &TosaAnalysis<'_>, value: ValueId) -> bo
     consumed
 }
 
+/// The element type an FP8 operand of `op` must be widened to before emission, if any.
+///
+/// The NPU compiler's IE dialect declares `MatMul` operands as
+/// `RankedTensorOf<[F16, F32, F64, SI32, quant_QuantizedType]>`, so MLIR's own verifier rejects a
+/// MatMul over raw FP8 before any hardware question is asked. Widening is exact -- every FP8
+/// value is representable in binary16 -- and costs nothing semantically, because TOSA's FP8
+/// `MATMUL` already accumulates into FP16: the widened operands and the declared output type
+/// agree, so nothing narrows back. Data movement is deliberately absent here; it must stay FP8
+/// to remain bit-exact, since a widen/narrow round trip may canonicalize a NaN payload.
+fn fp8_widening(op: Op, dtype: DType) -> Option<OvElement> {
+    let is_fp8 = matches!(dtype, DType::FP8E4M3 | DType::FP8E5M2);
+    (is_fp8 && op == Op::MATMUL).then_some(OvElement::F16)
+}
+
 fn validate_operator_types(
     analysis: &TosaAnalysis<'_>,
     op: Op,
@@ -1227,14 +1431,47 @@ fn validate_operator_types(
         }
     };
     let is_float = |dtype| matches!(dtype, DType::FP16 | DType::FP32);
-    let is_float_or_int8 = |dtype| matches!(dtype, DType::FP16 | DType::FP32 | DType::INT8);
+    let is_float_or_fp8 = |dtype| {
+        matches!(
+            dtype,
+            DType::FP16 | DType::FP32 | DType::FP8E4M3 | DType::FP8E5M2
+        )
+    };
+    let is_movable = |dtype| {
+        matches!(
+            dtype,
+            DType::FP16 | DType::FP32 | DType::INT8 | DType::FP8E4M3 | DType::FP8E5M2
+        )
+    };
     let is_bool = |dtype| dtype == DType::BOOL;
     let is_int32 = |dtype| dtype == DType::INT32;
 
     match op {
         Op::IDENTITY => {
             for value in inputs.iter().chain(outputs) {
-                require(*value, is_float_or_int8)?;
+                require(*value, is_movable)?;
+            }
+        }
+        // CAST is the one operator whose input and output types are *meant* to differ, so each
+        // side is checked independently rather than against a shared predicate.
+        Op::CAST => {
+            for value in inputs.iter().chain(outputs) {
+                require(*value, is_float_or_fp8)?;
+            }
+        }
+        // FP8 operands are legal and widened at emission; the result is not FP8. TOSA's FP8
+        // MATMUL accumulates into FP16, so requiring a float output states that rule locally.
+        Op::MATMUL => {
+            for value in inputs {
+                require(*value, is_float_or_fp8)?;
+            }
+            require(outputs[0], is_float)?;
+        }
+        // Data movement and pooling carry FP8 through unchanged: these are the operators whose
+        // FP8 form must stay bit-exact, so nothing widens and nothing rounds.
+        Op::CONCAT | Op::RESHAPE | Op::REVERSE | Op::TRANSPOSE | Op::MAX_POOL2D => {
+            for value in inputs.iter().chain(outputs) {
+                require(*value, is_float_or_fp8)?;
             }
         }
         Op::LOGICAL_AND | Op::LOGICAL_OR | Op::LOGICAL_XOR | Op::LOGICAL_NOT => {
@@ -1255,7 +1492,7 @@ fn validate_operator_types(
             }
         }
         Op::ARGMAX => {
-            require(inputs[0], is_float)?;
+            require(inputs[0], is_float_or_fp8)?;
             require(outputs[0], is_int32)?;
         }
         _ => {
@@ -1318,13 +1555,91 @@ fn serialized_float_is_zero(dtype: DType, bytes: &[u8]) -> bool {
         DType::FP32 if bytes.len() == 4 => {
             u32::from_le_bytes(bytes.try_into().expect("length checked")) & 0x7fff_ffff == 0
         }
+        DType::FP8E4M3 | DType::FP8E5M2 if bytes.len() == 1 => bytes[0] & 0x7f == 0,
         _ => false,
     }
 }
 
 #[cfg(test)]
+mod fp8_graphs_impl {
+    use super::*;
+    use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
+    pub(crate) fn fp8_matmul_graph(dtype: DType) -> Vec<u8> {
+        let (m, k, n) = (4, 6, 2);
+        let mut graph = OwnedGraph::new("main");
+        graph
+            .push_tensor(OwnedTensor::new("a", vec![1, m, k], dtype))
+            .push_tensor(OwnedTensor::new("b", vec![1, k, n], dtype))
+            .push_tensor(OwnedTensor::constant("a_zp", vec![1], dtype, vec![0]))
+            .push_tensor(OwnedTensor::constant("b_zp", vec![1], dtype, vec![0]))
+            .push_tensor(OwnedTensor::new("y", vec![1, m, n], DType::FP16))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::Const,
+                vec![],
+                vec!["a_zp".into()],
+            ))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::Const,
+                vec![],
+                vec!["b_zp".into()],
+            ))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::MatMul,
+                vec!["a".into(), "b".into(), "a_zp".into(), "b_zp".into()],
+                vec!["y".into()],
+            ))
+            .push_input("a")
+            .push_input("b")
+            .push_output("y");
+        graph.build(OPENVINO_TOSA_FP8_TARGET).unwrap()
+    }
+
+    pub(crate) fn fp8_pool_graph(dtype: DType) -> Vec<u8> {
+        let mut graph = OwnedGraph::new("main");
+        graph
+            .push_tensor(OwnedTensor::new("x", vec![1, 4, 4, 1], dtype))
+            .push_tensor(OwnedTensor::new("y", vec![1, 2, 2, 1], dtype))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::MaxPool2d {
+                    kernel: [2, 2],
+                    stride: [2, 2],
+                    pad: [0; 4],
+                    nan_mode: NanPropagationMode::PROPAGATE,
+                },
+                vec!["x".into()],
+                vec!["y".into()],
+            ))
+            .push_input("x")
+            .push_output("y");
+        graph.build(OPENVINO_TOSA_FP8_TARGET).unwrap()
+    }
+
+    pub(crate) fn fp8_transpose_graph(dtype: DType) -> Vec<u8> {
+        let mut graph = OwnedGraph::new("main");
+        graph
+            .push_tensor(OwnedTensor::new("x", vec![2, 3], dtype))
+            .push_tensor(OwnedTensor::new("y", vec![3, 2], dtype))
+            .push_operator(OwnedOperator::new(
+                OperatorKind::Transpose {
+                    perms: [1, 0, 0, 0, 0, 0],
+                    rank: 2,
+                },
+                vec!["x".into()],
+                vec!["y".into()],
+            ))
+            .push_input("x")
+            .push_output("y");
+        graph.build(OPENVINO_TOSA_FP8_TARGET).unwrap()
+    }
+}
+
+#[cfg(test)]
+pub(crate) use fp8_graphs_impl::{fp8_matmul_graph, fp8_pool_graph, fp8_transpose_graph};
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
     use virtio_accel_conformance::numerics::{
         HEXAGON_LOGICAL_CASES, IDENTITY_EDGES_FP16, IDENTITY_EDGES_FP32, IDENTITY_FP8E4M3,
         IDENTITY_FP8E5M2, IDENTITY_INT4, IDENTITY_INT8, MATMUL_FP16, MATMUL_FP32, MATMUL_INT8,
@@ -1385,14 +1700,82 @@ mod tests {
         );
     }
 
+    /// FP8 MATMUL must reach the device as an FP16 MatMul fed by two explicit widening Converts.
+    /// The NPU compiler's IE dialect declares MatMul operands without the FP8 types, so emitting
+    /// a raw FP8 MatMul is rejected by MLIR's verifier -- this asserts the structure that avoids
+    /// it, rather than numerics the plugin is free to accumulate its own way.
+    #[test]
+    fn fp8_matmul_reaches_the_device_widened() {
+        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+            let lowered = lower_tosa(&fp8_matmul_graph(dtype), OPENVINO_TOSA_FP8_TARGET)
+                .unwrap_or_else(|error| panic!("{dtype:?}: {error:?}"));
+            let xml = xml_str(&lowered);
+            assert_eq!(
+                xml.matches("type=\"Convert\"").count(),
+                2,
+                "{dtype:?}: expected one widening Convert per operand\n{xml}"
+            );
+            assert_eq!(xml.matches("type=\"MatMul\"").count(), 1, "{dtype:?}");
+            assert!(xml.contains("destination_type=\"f16\""), "{dtype:?}");
+            // The FP8 boundary survives: the parameters are still FP8 at the model edge, which
+            // is where the bandwidth saving lives.
+            let spelling = if dtype == DType::FP8E4M3 {
+                "F8E4M3"
+            } else {
+                "F8E5M2"
+            };
+            assert!(
+                xml.contains(spelling),
+                "{dtype:?}: boundary lost its FP8 type"
+            );
+        }
+    }
+
+    /// Pooling widens around the window only. No plugin has an FP8 pooling primitive, but the
+    /// transposes either side stay FP8, so the bytes that move stay narrow.
+    #[test]
+    fn fp8_pooling_widens_only_around_the_window() {
+        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+            let lowered = lower_tosa(&fp8_pool_graph(dtype), OPENVINO_TOSA_FP8_TARGET)
+                .unwrap_or_else(|error| panic!("{dtype:?}: {error:?}"));
+            let xml = xml_str(&lowered);
+            assert_eq!(
+                xml.matches("type=\"Convert\"").count(),
+                2,
+                "{dtype:?}: expected a widen and a narrow\n{xml}"
+            );
+            assert_eq!(xml.matches("type=\"MaxPool\"").count(), 1, "{dtype:?}");
+            assert_eq!(xml.matches("type=\"Transpose\"").count(), 2, "{dtype:?}");
+        }
+    }
+
+    /// Data movement must not widen: a round trip through binary16 could canonicalize a NaN
+    /// payload, and the tier's claim for movement is that it is bit-exact.
+    #[test]
+    fn fp8_data_movement_never_widens() {
+        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+            let lowered = lower_tosa(&fp8_transpose_graph(dtype), OPENVINO_TOSA_FP8_TARGET)
+                .unwrap_or_else(|error| panic!("{dtype:?}: {error:?}"));
+            let xml = xml_str(&lowered);
+            assert_eq!(
+                xml.matches("type=\"Convert\"").count(),
+                0,
+                "{dtype:?}: FP8 movement was widened\n{xml}"
+            );
+            assert_eq!(xml.matches("type=\"Transpose\"").count(), 1, "{dtype:?}");
+        }
+    }
+
     #[test]
     fn reports_the_exact_integer_boundary_independently_of_other_low_precision_types() {
-        for dtype in [DType::INT4, DType::FP8E4M3, DType::FP8E5M2] {
-            assert!(!supports_tosa_dtype(dtype), "{dtype:?}");
-        }
+        // INT4 has no tier here and must stay out of the reported boundary. FP8 left this list
+        // when the FP8 tier landed (ADR 0009); it is now reported like any other admitted dtype.
+        assert!(!supports_tosa_dtype(DType::INT4), "INT4");
         for dtype in [
             DType::FP16,
             DType::FP32,
+            DType::FP8E4M3,
+            DType::FP8E5M2,
             DType::INT8,
             DType::INT32,
             DType::BOOL,

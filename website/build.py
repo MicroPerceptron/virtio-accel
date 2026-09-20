@@ -122,7 +122,8 @@ def rewrite_link(source_repo_rel: str, dest_site_rel: str, target: str) -> str:
     if is_curated(repo_rel):
         dest = curated_dest_map()[repo_rel]
         dest_dir = Path(dest_site_rel).parent
-        new_target = os.path.relpath(dest, dest_dir)
+        # Site links are URLs even when the build runs on Windows, where relpath uses `\\`.
+        new_target = os.path.relpath(dest, dest_dir).replace(os.sep, "/")
         return new_target + anchor
 
     if (REPO_ROOT / repo_rel).exists():

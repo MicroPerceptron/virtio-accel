@@ -1,0 +1,3153 @@
+//! Native Vulkan backend over `ash`: the audited `Accelerator` implementation.
+//!
+//! `SAFETY.md` is the audit of record; every `unsafe` block below carries a local `SAFETY:` note.
+//! Each Vulkan handle has exactly one Rust owner with a `Drop` implementation, every `VkResult`
+//! is checked before an out-value is trusted, and `VK_ERROR_DEVICE_LOST` poisons the whole backend
+//! instance (ADR 0006). Completion is a nonblocking `vkGetFenceStatus` read: no worker thread, no
+//! callback, no foreign code ever owns Rust memory.
+//!
+//! Handles are deliberately neither `Send` nor `Sync` (`Rc` inside): Vulkan queues and command
+//! pools are externally synchronized objects, and the contract permits thread-affine providers.
+
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::ffi::CStr;
+use std::ptr::NonNull;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex, OnceLock};
+
+use ash::vk;
+use virtio_accel_core::{
+    Accelerator, AcceleratorClass, AccessMode, AllocatedBuffer, ArtifactRef, BackendError,
+    BindingRef, BufferDesc, BufferInfo, BufferProperties, BufferUsage, ByteSink, ByteSource,
+    Capabilities, ContextDesc, DeviceIdentity, DeviceInfo, DeviceLimits, EventState, MemoryDomain,
+    QueueDesc, ReleaseFailure, SubmitFailure, Timeout,
+};
+use virtio_accel_tosa::{CapabilityDescriptor, TosaCapabilityProvider};
+
+use crate::lower::{KernelSpec, LoweringError, ProgramPlan, SlotRole, Work, lower_tosa};
+use crate::shader::{self, KernelKey};
+use crate::{InitError, REQUIRED_RESIDENT_BYTES};
+
+/// Maximal TOSA artifact bytes admitted before parsing (mirrors the other TOSA backends).
+const MAX_TOSA_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Stable provider-owned error namespace for unmapped `VkResult` codes (`"VULK"`).
+const VULKAN_EXTERNAL_DOMAIN: u32 = 0x5655_4c4b;
+
+/// Bounded staging allocation for explicit transfers into and out of `MemoryDomain::Device`.
+const STAGING_BYTES: u64 = 4 * 1024 * 1024;
+
+/// How long a synchronous explicit transfer may take before the device is treated as lost.
+const TRANSFER_TIMEOUT_NS: u64 = 30_000_000_000;
+
+/// `maxMemoryAllocationCount` is assumed at the spec minimum (ADR 0005): every buffer here is one
+/// dedicated `VkDeviceMemory`, so the advertised aggregate buffer count plus one transient staging
+/// allocation must stay inside it.
+const ASSUMED_MAX_MEMORY_ALLOCATIONS: u32 = 4096;
+const MAX_CONTEXTS: u32 = 16;
+const MAX_BUFFERS_PER_CONTEXT: u32 = 190;
+/// Every program may own one arena allocation for its constants and intermediates.
+const MAX_PROGRAMS_PER_CONTEXT: u32 = 64;
+const MAX_QUEUES_PER_CONTEXT: u32 = 16;
+/// Ring depth per context: one (command buffer, fence, descriptor set) triple per outstanding
+/// event (ADR 0006).
+const RING_DEPTH: u32 = 64;
+const MAX_BINDINGS_PER_SUBMISSION: u32 = 16;
+
+/// Explicit transfers and constant uploads hold at most one transient staging allocation at a
+/// time, on top of the guest buffers and program arenas.
+const TRANSIENT_STAGING_ALLOCATIONS: u32 = 1;
+
+const _: () = assert!(
+    MAX_CONTEXTS * (MAX_BUFFERS_PER_CONTEXT + MAX_PROGRAMS_PER_CONTEXT)
+        + TRANSIENT_STAGING_ALLOCATIONS
+        <= ASSUMED_MAX_MEMORY_ALLOCATIONS,
+    "advertised buffers, program arenas, and the staging allocation must fit the assumed allocation count"
+);
+
+/// Preferred 1-D workgroup size of the grid-stride kernels, and the size used on a device whose
+/// `maxComputeWorkGroupInvocations` is only the specification minimum (128).
+const PREFERRED_WORKGROUP: u32 = 256;
+const FALLBACK_WORKGROUP: u32 = 128;
+/// Preferred register-tiled MATMUL tile (256 invocations, a 64 × 64 block over 8 KiB of shared
+/// slabs) and the fallback tile (64 invocations, 32 × 32). The streaming kernel for eight rows or
+/// fewer is a fixed 64-invocation 1-D workgroup with an 8 KiB reduction buffer.
+const PREFERRED_MATMUL_TILE: u32 = 16;
+const FALLBACK_MATMUL_TILE: u32 = 8;
+/// Bytes every `VkBuffer` size is rounded up to so byte-storage tensors can be addressed by
+/// whole words at their tail; the logical buffer size the guest sees is unchanged.
+const WORD_BYTES: u64 = 4;
+
+/// Kernel parameters fixed per device from its limits (ADR 0007).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Tuning {
+    /// 1-D workgroup size of the elementwise, reduction, pooling, and copy kernels.
+    workgroup: u32,
+    /// Side of the square MATMUL tile.
+    matmul_tile: u32,
+    /// Length of the storage-buffer descriptor array: bound slots plus the program arena.
+    buffers: u32,
+}
+
+impl Tuning {
+    /// Derive the tuning, or `None` when the device cannot host even the smallest kernels.
+    fn from_limits(limits: &vk::PhysicalDeviceLimits) -> Option<Self> {
+        let invocations = limits.max_compute_work_group_invocations;
+        let size = limits.max_compute_work_group_size;
+        let workgroup = if invocations >= PREFERRED_WORKGROUP && size[0] >= PREFERRED_WORKGROUP {
+            PREFERRED_WORKGROUP
+        } else if invocations >= FALLBACK_WORKGROUP && size[0] >= FALLBACK_WORKGROUP {
+            FALLBACK_WORKGROUP
+        } else {
+            return None;
+        };
+        // Both MATMUL kernels must fit: the square one is `tile × tile` invocations, the
+        // streaming one a 1-D `STREAM_WORKGROUP`, and each declares its shared slabs.
+        let tile_fits = |tile: u32| {
+            invocations >= tile * tile
+                && size[0] >= tile.max(shader::STREAM_WORKGROUP)
+                && size[1] >= tile
+                && limits.max_compute_shared_memory_size >= shader::matmul_shared_bytes(tile)
+        };
+        let matmul_tile = if tile_fits(PREFERRED_MATMUL_TILE) {
+            PREFERRED_MATMUL_TILE
+        } else if tile_fits(FALLBACK_MATMUL_TILE) {
+            FALLBACK_MATMUL_TILE
+        } else {
+            return None;
+        };
+        // Every element of the descriptor array counts against both per-stage and per-set
+        // storage-buffer limits; at least one input, one output, and the arena must fit.
+        let descriptors = limits
+            .max_per_stage_descriptor_storage_buffers
+            .min(limits.max_descriptor_set_storage_buffers)
+            .min(MAX_BINDINGS_PER_SUBMISSION + 1);
+        if descriptors < 3 {
+            return None;
+        }
+        Some(Self {
+            workgroup,
+            matmul_tile,
+            buffers: descriptors,
+        })
+    }
+
+    /// Bindings a submission may carry: every descriptor but the arena's.
+    const fn max_bindings(self) -> u32 {
+        self.buffers - 1
+    }
+
+    fn key(self, kernel: KernelSpec) -> KernelKey {
+        match kernel {
+            KernelSpec::Elementwise {
+                op,
+                float,
+                broadcast,
+            } => KernelKey::Elementwise {
+                op,
+                float,
+                broadcast,
+                workgroup: self.workgroup,
+                buffers: self.buffers,
+            },
+            KernelSpec::Reduce { op, float } => KernelKey::Reduce {
+                op,
+                float,
+                workgroup: self.workgroup,
+                buffers: self.buffers,
+            },
+            KernelSpec::Matmul { input, output } => KernelKey::Matmul {
+                input,
+                output,
+                tile: self.matmul_tile,
+                buffers: self.buffers,
+            },
+            KernelSpec::MatmulStream { rhs, output } => KernelKey::MatmulStream {
+                rhs,
+                output,
+                buffers: self.buffers,
+            },
+            KernelSpec::MaxPool { nan_mode, float } => KernelKey::MaxPool {
+                nan_mode,
+                float,
+                workgroup: self.workgroup,
+                buffers: self.buffers,
+            },
+            KernelSpec::Cast { input, output } => KernelKey::Cast {
+                input,
+                output,
+                workgroup: self.workgroup,
+                buffers: self.buffers,
+            },
+            KernelSpec::Move {
+                storage,
+                contiguous,
+            } => KernelKey::Move {
+                storage,
+                contiguous,
+                workgroup: self.workgroup,
+                buffers: self.buffers,
+            },
+        }
+    }
+
+    /// Workgroup counts for `work`, or `None` when they exceed the device's dispatch limits.
+    fn workgroups(self, work: Work, limits: &vk::PhysicalDeviceLimits) -> Option<[u32; 3]> {
+        let max = limits.max_compute_work_group_count;
+        match work {
+            Work::Linear(count) => Some([
+                shader::linear_workgroups(count, self.workgroup, max[0].max(1)),
+                1,
+                1,
+            ]),
+            Work::Matmul { m, n, batch } => {
+                let groups = shader::matmul_workgroups(m, n, batch, self.matmul_tile);
+                (groups[0] <= max[0] && groups[1] <= max[1] && groups[2] <= max[2])
+                    .then_some(groups)
+            }
+            Work::MatmulStream { n, batch } => {
+                let groups = shader::stream_matmul_workgroups(n, batch);
+                (groups[0] <= max[0] && groups[2] <= max[2]).then_some(groups)
+            }
+        }
+    }
+}
+
+const EXCLUSIVE_ACCESS: u64 = 1 << 63;
+
+/// The process-wide loader handle: one `dlopen` of the platform Vulkan loader.
+fn entry() -> Result<ash::Entry, InitError> {
+    static ENTRY: OnceLock<Result<ash::Entry, InitError>> = OnceLock::new();
+    ENTRY
+        .get_or_init(|| {
+            // SAFETY: loading the platform Vulkan loader runs its initializers exactly once per
+            // process under this `OnceLock`; nothing else in this crate loads it.
+            unsafe { ash::Entry::load() }.map_err(|_| InitError::RuntimeUnavailable)
+        })
+        .clone()
+}
+
+fn backend_error(result: vk::Result) -> BackendError {
+    match result {
+        vk::Result::ERROR_OUT_OF_HOST_MEMORY | vk::Result::ERROR_OUT_OF_DEVICE_MEMORY => {
+            BackendError::OutOfMemory
+        }
+        vk::Result::ERROR_TOO_MANY_OBJECTS => BackendError::ResourceLimit,
+        vk::Result::ERROR_DEVICE_LOST => BackendError::DeviceLost,
+        vk::Result::ERROR_MEMORY_MAP_FAILED => BackendError::Incompatible,
+        other => BackendError::External {
+            domain: VULKAN_EXTERNAL_DOMAIN,
+            code: i64::from(other.as_raw()),
+        },
+    }
+}
+
+/// Owned `VkInstance`; destroyed after every device that was created from it.
+struct Instance {
+    /// Kept so the loaded library outlives the instance created from it.
+    _entry: ash::Entry,
+    instance: ash::Instance,
+}
+
+impl Instance {
+    fn create() -> Result<Self, InitError> {
+        let entry = entry()?;
+        // SAFETY: querying the loader's instance version has no preconditions.
+        let loader_version = unsafe { entry.try_enumerate_instance_version() }
+            .ok()
+            .flatten()
+            .unwrap_or(vk::API_VERSION_1_0);
+        if loader_version < vk::API_VERSION_1_3 {
+            return Err(InitError::RuntimeUnavailable);
+        }
+        let application = vk::ApplicationInfo::default()
+            .application_name(c"virtio-accel-vulkan")
+            .api_version(vk::API_VERSION_1_3);
+        // MoltenVK and other portability drivers refuse enumeration unless the instance opts
+        // into the portability extension; requesting it is a no-op on conformant native drivers.
+        let extension_names = [c"VK_KHR_portability_enumeration".as_ptr()];
+        let info = vk::InstanceCreateInfo::default()
+            .application_info(&application)
+            .flags(vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR)
+            .enabled_extension_names(&extension_names);
+        // SAFETY: `info` and the structures it points to outlive the call; no layers are
+        // requested, and the extension name is a static literal whose pointer outlives the call.
+        let instance = match unsafe { entry.create_instance(&info, None) } {
+            Ok(instance) => instance,
+            Err(vk::Result::ERROR_INCOMPATIBLE_DRIVER) => {
+                return Err(InitError::RuntimeUnavailable);
+            }
+            Err(_) => return Err(InitError::InstanceCreationFailed),
+        };
+        Ok(Self {
+            _entry: entry,
+            instance,
+        })
+    }
+}
+
+impl Drop for Instance {
+    fn drop(&mut self) {
+        // SAFETY: this owner is dropped exactly once, after every `Shared` (and thus every
+        // device) created from it: `Shared` holds the `Instance` and destroys its device first.
+        unsafe { self.instance.destroy_instance(None) };
+    }
+}
+
+/// Everything probed about one physical device before it is opened.
+#[derive(Clone)]
+struct PhysicalDeviceRecord {
+    handle: vk::PhysicalDevice,
+    name: String,
+    device_type: vk::PhysicalDeviceType,
+    vendor_id: u32,
+    device_id: u32,
+    uuid: [u8; 16],
+    queue_family: u32,
+    limits: vk::PhysicalDeviceLimits,
+    memory: vk::PhysicalDeviceMemoryProperties,
+    buffer_device_address: bool,
+    /// `minImportedHostPointerAlignment` when the device offers `VK_EXT_external_memory_host`,
+    /// the one extension this backend enables, and only for
+    /// [`VulkanAccelerator::import_host_buffer`] (ADR 0013).
+    host_import_alignment: Option<u64>,
+    /// Vulkan 1.2 `timelineSemaphore`, enabled when reported, for host gates (ADR 0013).
+    timeline_semaphore: bool,
+    tuning: Tuning,
+}
+
+impl PhysicalDeviceRecord {
+    /// Probe one device; `None` when it cannot host this backend (API floor, compute queue,
+    /// mandatory `synchronization2`).
+    fn probe(instance: &ash::Instance, handle: vk::PhysicalDevice) -> Option<Self> {
+        let mut vulkan11 = vk::PhysicalDeviceVulkan11Properties::default();
+        let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut vulkan11);
+        // SAFETY: `handle` was enumerated from `instance`; the chained structures are live locals.
+        unsafe { instance.get_physical_device_properties2(handle, &mut properties) };
+        let properties = properties.properties;
+        if properties.api_version < vk::API_VERSION_1_3 {
+            return None;
+        }
+        let tuning = Tuning::from_limits(&properties.limits)?;
+
+        let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default();
+        let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default();
+        let mut features = vk::PhysicalDeviceFeatures2::default()
+            .push_next(&mut vulkan12)
+            .push_next(&mut vulkan13);
+        // SAFETY: as above; the feature chain is fully initialized before the call.
+        unsafe { instance.get_physical_device_features2(handle, &mut features) };
+        if vulkan13.synchronization2 == vk::FALSE {
+            return None;
+        }
+
+        // SAFETY: `handle` is a live physical device of `instance`.
+        let families = unsafe { instance.get_physical_device_queue_family_properties(handle) };
+        // A compute-only family keeps this backend's work off the graphics queue when the device
+        // offers one; otherwise the first compute-capable family serves.
+        let compute_only = families.iter().position(|family| {
+            family.queue_flags.contains(vk::QueueFlags::COMPUTE)
+                && !family.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+        });
+        let any_compute = families
+            .iter()
+            .position(|family| family.queue_flags.contains(vk::QueueFlags::COMPUTE));
+        let queue_family = u32::try_from(compute_only.or(any_compute)?).ok()?;
+
+        // SAFETY: `handle` is a live physical device of `instance`.
+        let memory = unsafe { instance.get_physical_device_memory_properties(handle) };
+        let host_import_alignment = host_import_alignment(instance, handle);
+        let name = CStr::from_bytes_until_nul(bytemuck_i8_to_u8(&properties.device_name))
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| String::from("vulkan-device"));
+        Some(Self {
+            handle,
+            name,
+            device_type: properties.device_type,
+            vendor_id: properties.vendor_id,
+            device_id: properties.device_id,
+            uuid: vulkan11.device_uuid,
+            queue_family,
+            limits: properties.limits,
+            memory,
+            buffer_device_address: vulkan12.buffer_device_address == vk::TRUE,
+            host_import_alignment,
+            timeline_semaphore: vulkan12.timeline_semaphore == vk::TRUE,
+            tuning,
+        })
+    }
+
+    /// Preference order when no device was named: discrete, integrated, virtual, CPU, other.
+    fn rank(&self) -> u8 {
+        match self.device_type {
+            vk::PhysicalDeviceType::DISCRETE_GPU => 0,
+            vk::PhysicalDeviceType::INTEGRATED_GPU => 1,
+            vk::PhysicalDeviceType::VIRTUAL_GPU => 2,
+            vk::PhysicalDeviceType::CPU => 3,
+            _ => 4,
+        }
+    }
+
+    fn class(&self) -> AcceleratorClass {
+        if self.device_type == vk::PhysicalDeviceType::CPU {
+            AcceleratorClass::OTHER
+        } else {
+            AcceleratorClass::GPU
+        }
+    }
+}
+
+/// `minImportedHostPointerAlignment`, when `handle` offers `VK_EXT_external_memory_host`.
+fn host_import_alignment(instance: &ash::Instance, handle: vk::PhysicalDevice) -> Option<u64> {
+    // SAFETY: `handle` is a live physical device of `instance`; no layer is named.
+    let extensions = unsafe { instance.enumerate_device_extension_properties(handle) }.ok()?;
+    let name = ash::ext::external_memory_host::NAME;
+    extensions
+        .iter()
+        .any(|extension| extension.extension_name_as_c_str() == Ok(name))
+        .then_some(())?;
+    let mut host = vk::PhysicalDeviceExternalMemoryHostPropertiesEXT::default();
+    let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut host);
+    // SAFETY: as above; the chained structure belongs to an extension the device reported.
+    unsafe { instance.get_physical_device_properties2(handle, &mut properties) };
+    let alignment = host.min_imported_host_pointer_alignment;
+    alignment.is_power_of_two().then_some(alignment)
+}
+
+/// View a driver-filled `c_char` name array as bytes for `CStr` parsing.
+fn bytemuck_i8_to_u8(name: &[std::ffi::c_char; 256]) -> &[u8; 256] {
+    // SAFETY: `c_char` and `u8` have identical size and alignment; the array is plain data.
+    unsafe { &*(name as *const [std::ffi::c_char; 256]).cast::<[u8; 256]>() }
+}
+
+fn enumerate(instance: &ash::Instance) -> Result<Vec<PhysicalDeviceRecord>, InitError> {
+    // SAFETY: enumeration on a live instance has no other preconditions.
+    let handles = unsafe { instance.enumerate_physical_devices() }
+        .map_err(|_| InitError::DeviceEnumerationFailed)?;
+    Ok(handles
+        .into_iter()
+        .filter_map(|handle| PhysicalDeviceRecord::probe(instance, handle))
+        .collect())
+}
+
+/// The memory type chosen for each advertised domain (ADR 0005 memory-domain map).
+#[derive(Clone, Copy, Debug)]
+struct MemoryPlan {
+    /// `HOST_VISIBLE | HOST_COHERENT`, preferring system memory and a host-cached type.
+    host: u32,
+    /// `DEVICE_LOCAL`, preferring a type the host cannot see; absent on devices without one.
+    device: Option<u32>,
+    /// `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT`: ReBAR or UMA, never assumed.
+    shared: Option<u32>,
+}
+
+/// Backend options a host may set when opening a device. The defaults are what
+/// [`VulkanAccelerator::new`] and [`VulkanAccelerator::with_device`] use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VulkanOptions {
+    /// On a device with a single memory heap — an integrated GPU, Apple silicon, a software
+    /// ICD — there is no second memory for the `Device` domain to be local to, so its
+    /// allocations take a host-visible device-local type and `write_buffer`/`read_buffer` are a
+    /// mapped copy rather than a staged copy through a transient buffer and a GPU transfer
+    /// (ADR 0012). `false` keeps the discrete-GPU plan (a non-host-visible type, staged
+    /// transfers) on such devices too; the staging path's tests use it.
+    pub map_unified_device_memory: bool,
+}
+
+impl Default for VulkanOptions {
+    fn default() -> Self {
+        Self {
+            map_unified_device_memory: true,
+        }
+    }
+}
+
+impl MemoryPlan {
+    /// Choose one type per domain among those `buffer_type_mask` (the `memoryTypeBits` a
+    /// storage buffer of this backend reports) permits. With `unified`, the `Device` domain
+    /// prefers a host-visible type (see [`VulkanOptions::map_unified_device_memory`]).
+    fn select(
+        memory: &vk::PhysicalDeviceMemoryProperties,
+        buffer_type_mask: u32,
+        unified: bool,
+    ) -> Option<Self> {
+        let types = &memory.memory_types[..memory.memory_type_count as usize];
+        let usable = |index: usize, flags: vk::MemoryPropertyFlags| {
+            buffer_type_mask & (1 << index) != 0
+                && !flags.intersects(
+                    vk::MemoryPropertyFlags::PROTECTED
+                        | vk::MemoryPropertyFlags::LAZILY_ALLOCATED
+                        | vk::MemoryPropertyFlags::DEVICE_COHERENT_AMD
+                        | vk::MemoryPropertyFlags::RDMA_CAPABLE_NV,
+                )
+        };
+        let pick = |required: vk::MemoryPropertyFlags,
+                    score: fn(vk::MemoryPropertyFlags) -> u8|
+         -> Option<u32> {
+            types
+                .iter()
+                .enumerate()
+                .filter(|(index, ty)| {
+                    usable(*index, ty.property_flags) && ty.property_flags.contains(required)
+                })
+                .max_by_key(|(_, ty)| score(ty.property_flags))
+                .and_then(|(index, _)| u32::try_from(index).ok())
+        };
+        let host_coherent =
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        Some(Self {
+            host: pick(host_coherent, |flags| {
+                u8::from(!flags.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)) * 2
+                    + u8::from(flags.contains(vk::MemoryPropertyFlags::HOST_CACHED))
+            })?,
+            device: pick(
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                if unified {
+                    |flags| {
+                        u8::from(flags.contains(
+                            vk::MemoryPropertyFlags::HOST_VISIBLE
+                                | vk::MemoryPropertyFlags::HOST_COHERENT,
+                        )) * 2
+                            + u8::from(flags.contains(vk::MemoryPropertyFlags::HOST_CACHED))
+                    }
+                } else {
+                    |flags| u8::from(!flags.contains(vk::MemoryPropertyFlags::HOST_VISIBLE))
+                },
+            ),
+            shared: pick(
+                vk::MemoryPropertyFlags::DEVICE_LOCAL | host_coherent,
+                |flags| u8::from(flags.contains(vk::MemoryPropertyFlags::HOST_CACHED)),
+            ),
+        })
+    }
+
+    /// Whether the chosen type for `domain` is host-visible and coherent, i.e. whether its
+    /// allocations are persistently mapped and transfers are a plain copy.
+    fn is_mapped(self, memory: &vk::PhysicalDeviceMemoryProperties, domain: MemoryDomain) -> bool {
+        self.for_domain(domain).is_some_and(|index| {
+            memory.memory_types[index as usize].property_flags.contains(
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+        })
+    }
+
+    fn for_domain(self, domain: MemoryDomain) -> Option<u32> {
+        match domain {
+            MemoryDomain::Host => Some(self.host),
+            MemoryDomain::Device => self.device,
+            MemoryDomain::Shared => self.shared,
+        }
+    }
+
+    fn capabilities(self) -> Capabilities {
+        let mut capabilities = Capabilities::HOST_VISIBLE_MEMORY;
+        if self.device.is_some() {
+            capabilities |= Capabilities::DEVICE_LOCAL_MEMORY;
+        }
+        if self.shared.is_some() {
+            capabilities |= Capabilities::SHARED_MEMORY;
+        }
+        capabilities
+    }
+}
+
+/// Live provider resource totals for accounting hooks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LiveResources {
+    pub contexts: u64,
+    pub buffers: u64,
+    pub programs: u64,
+    pub queues: u64,
+    pub events: u64,
+}
+
+#[derive(Default)]
+struct Counters {
+    direct_binding_admissions: Cell<u64>,
+    explicit_transfer_bytes: Cell<u64>,
+    contexts: Cell<u64>,
+    buffers: Cell<u64>,
+    programs: Cell<u64>,
+    queues: Cell<u64>,
+    events: Cell<u64>,
+}
+
+fn increment(cell: &Cell<u64>, by: u64) {
+    cell.set(cell.get().saturating_add(by));
+}
+
+fn decrement(cell: &Cell<u64>) {
+    cell.set(cell.get().saturating_sub(1));
+}
+
+/// The opened device and everything shared by all handles of one backend instance.
+///
+/// Field order matters for teardown: the explicit `Drop` destroys device-level objects and the
+/// device, then the `instance` field's own `Drop` destroys the instance.
+struct Shared {
+    device: ash::Device,
+    physical: PhysicalDeviceRecord,
+    queue: vk::Queue,
+    set_layout: vk::DescriptorSetLayout,
+    pipeline_layout: vk::PipelineLayout,
+    /// Driver-side cache shared by every pipeline of this instance: programs selecting the same
+    /// kernel with the same specialization are compiled once (ADR 0007).
+    pipeline_cache: vk::PipelineCache,
+    /// Assembled kernel modules by variant; assembled once per instance, on first use.
+    modules: RefCell<HashMap<KernelKey, Rc<[u32]>>>,
+    memory_plan: MemoryPlan,
+    /// The `VK_EXT_external_memory_host` entry points, when the extension was enabled.
+    host_memory: Option<ash::ext::external_memory_host::Device>,
+    info: DeviceInfo,
+    /// Sticky device-loss flag: after `VK_ERROR_DEVICE_LOST` no entry point is re-entered except
+    /// destruction (ADR 0006).
+    poisoned: Cell<bool>,
+    counters: Counters,
+    /// Dropped last (see the struct documentation): destroys the instance after the device.
+    _instance: Instance,
+}
+
+impl Shared {
+    fn open(
+        instance: Instance,
+        physical: PhysicalDeviceRecord,
+        options: VulkanOptions,
+    ) -> Result<Rc<Self>, InitError> {
+        let priorities = [1.0_f32];
+        let queue_info = vk::DeviceQueueCreateInfo::default()
+            .queue_family_index(physical.queue_family)
+            .queue_priorities(&priorities);
+        let queue_infos = [queue_info];
+        // `synchronization2` is core in 1.3 but still an opt-in feature (ADR 0005);
+        // `bufferDeviceAddress` is enabled only to measure allocation alignment honestly.
+        let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default()
+            .buffer_device_address(physical.buffer_device_address)
+            .timeline_semaphore(physical.timeline_semaphore);
+        let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default().synchronization2(true);
+        // `VK_EXT_external_memory_host`, when offered, only for importing caller memory
+        // (ADR 0013); nothing else depends on it.
+        let extensions = [ash::ext::external_memory_host::NAME.as_ptr()];
+        let enabled = if physical.host_import_alignment.is_some() {
+            &extensions[..]
+        } else {
+            &[]
+        };
+        let info = vk::DeviceCreateInfo::default()
+            .queue_create_infos(&queue_infos)
+            .enabled_extension_names(enabled)
+            .push_next(&mut vulkan12)
+            .push_next(&mut vulkan13);
+        // SAFETY: `physical.handle` belongs to `instance.instance`; every pointed-to structure
+        // outlives the call; the requested features and extension were reported supported by the
+        // probe.
+        let device = unsafe {
+            instance
+                .instance
+                .create_device(physical.handle, &info, None)
+        }
+        .map_err(|_| InitError::DeviceCreationFailed)?;
+        // SAFETY: the queue family and index 0 were requested at device creation.
+        let queue = unsafe { device.get_device_queue(physical.queue_family, 0) };
+
+        // Which memory types a storage buffer of this backend may live in is a property of the
+        // buffer usage, not of the heap list alone (ANV exposes types buffers cannot use), so the
+        // memory-domain map is chosen against a probe buffer's `memoryTypeBits`.
+        let buffer_type_mask = match probe_buffer_type_mask(&device, &physical) {
+            Ok(mask) => mask,
+            Err(_) => {
+                // SAFETY: the device was created above and has no other objects yet.
+                unsafe { device.destroy_device(None) };
+                return Err(InitError::DeviceCreationFailed);
+            }
+        };
+        let unified = options.map_unified_device_memory && physical.memory.memory_heap_count == 1;
+        let Some(memory_plan) = MemoryPlan::select(&physical.memory, buffer_type_mask, unified)
+        else {
+            // SAFETY: as above.
+            unsafe { device.destroy_device(None) };
+            return Err(InitError::DeviceUnavailable);
+        };
+
+        // One descriptor: set 0, binding 0, an array of storage buffers. Elements `0..bindings`
+        // are the submission's bound slots and the last element is the program arena; kernels
+        // select operands by specialization constant (ADR 0007).
+        let bindings = [vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(physical.tuning.buffers)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)];
+        let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+        // SAFETY: the device is live and `layout_info` points at live locals.
+        let set_layout = match unsafe { device.create_descriptor_set_layout(&layout_info, None) } {
+            Ok(layout) => layout,
+            Err(_) => {
+                // SAFETY: the device was created above and has no other objects yet.
+                unsafe { device.destroy_device(None) };
+                return Err(InitError::DeviceCreationFailed);
+            }
+        };
+        let set_layouts = [set_layout];
+        let pipeline_layout_info =
+            vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
+        // SAFETY: the device and set layout are live.
+        let pipeline_layout =
+            match unsafe { device.create_pipeline_layout(&pipeline_layout_info, None) } {
+                Ok(layout) => layout,
+                Err(_) => {
+                    // SAFETY: both objects were created above and nothing references them.
+                    unsafe {
+                        device.destroy_descriptor_set_layout(set_layout, None);
+                        device.destroy_device(None);
+                    }
+                    return Err(InitError::DeviceCreationFailed);
+                }
+            };
+
+        // SAFETY: the device is live; an empty create info is a valid empty cache.
+        let pipeline_cache = match unsafe {
+            device.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None)
+        } {
+            Ok(cache) => cache,
+            Err(_) => {
+                // SAFETY: the three objects were created above and nothing references them.
+                unsafe {
+                    device.destroy_pipeline_layout(pipeline_layout, None);
+                    device.destroy_descriptor_set_layout(set_layout, None);
+                    device.destroy_device(None);
+                }
+                return Err(InitError::DeviceCreationFailed);
+            }
+        };
+
+        let info = device_info(&physical, memory_plan);
+        let host_memory = physical
+            .host_import_alignment
+            .map(|_| ash::ext::external_memory_host::Device::new(&instance.instance, &device));
+        Ok(Rc::new(Self {
+            device,
+            physical,
+            queue,
+            set_layout,
+            pipeline_layout,
+            pipeline_cache,
+            modules: RefCell::new(HashMap::new()),
+            memory_plan,
+            host_memory,
+            info,
+            poisoned: Cell::new(false),
+            counters: Counters::default(),
+            _instance: instance,
+        }))
+    }
+
+    /// Map a failed `VkResult`, latching device loss.
+    fn fail(&self, result: vk::Result) -> BackendError {
+        if result == vk::Result::ERROR_DEVICE_LOST {
+            self.poisoned.set(true);
+        }
+        backend_error(result)
+    }
+
+    fn check_live(&self) -> Result<(), BackendError> {
+        if self.poisoned.get() {
+            Err(BackendError::DeviceLost)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// The assembled module for `key`, built on first use and shared by every program after.
+    fn module(&self, key: KernelKey) -> Rc<[u32]> {
+        Rc::clone(
+            self.modules
+                .borrow_mut()
+                .entry(key)
+                .or_insert_with(|| Rc::from(key.assemble())),
+        )
+    }
+
+    /// Block until the device is idle; used only on teardown paths that must not free memory a
+    /// pending submission may still touch.
+    fn wait_idle(&self) {
+        // SAFETY: the device is live; waiting has no other preconditions. Errors are latched.
+        if let Err(result) = unsafe { self.device.device_wait_idle() } {
+            self.fail(result);
+        }
+    }
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        // SAFETY: every child object holds an `Rc<Shared>`, so this runs only after all of them
+        // were destroyed; the layouts and device are destroyed exactly once, then the `_instance`
+        // field drops and destroys the instance.
+        unsafe {
+            let _ = self.device.device_wait_idle();
+            self.device
+                .destroy_pipeline_cache(self.pipeline_cache, None);
+            self.device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
+            self.device
+                .destroy_descriptor_set_layout(self.set_layout, None);
+            self.device.destroy_device(None);
+        }
+    }
+}
+
+fn device_info(physical: &PhysicalDeviceRecord, memory_plan: MemoryPlan) -> DeviceInfo {
+    let largest_heap = physical.memory.memory_heaps[..physical.memory.memory_heap_count as usize]
+        .iter()
+        .map(|heap| heap.size)
+        .max()
+        .unwrap_or(0);
+    // A storage-buffer descriptor cannot exceed `maxStorageBufferRange` (128 MiB on lavapipe),
+    // so no buffer may either: a larger allocation could never be bound directly.
+    // Sizes are rounded up to whole words at allocation, so the advertised bound is rounded
+    // down to keep every rounded descriptor range inside `maxStorageBufferRange`.
+    let max_buffer_bytes = (u64::from(physical.limits.max_storage_buffer_range).min(largest_heap)
+        / WORD_BYTES
+        * WORD_BYTES)
+        .max(WORD_BYTES);
+    DeviceInfo {
+        identity: DeviceIdentity {
+            uuid: physical.uuid,
+            class: physical.class(),
+            vendor_id: physical.vendor_id,
+            device_id: physical.device_id,
+        },
+        capabilities: memory_plan.capabilities(),
+        limits: DeviceLimits {
+            max_contexts: MAX_CONTEXTS,
+            max_buffers_per_context: MAX_BUFFERS_PER_CONTEXT,
+            max_programs_per_context: MAX_PROGRAMS_PER_CONTEXT,
+            max_queues_per_context: MAX_QUEUES_PER_CONTEXT,
+            max_events_per_context: RING_DEPTH,
+            max_bindings_per_submission: physical.tuning.max_bindings(),
+            max_buffer_bytes,
+            max_artifact_bytes: MAX_TOSA_ARTIFACT_BYTES,
+        },
+    }
+}
+
+/// One preallocated ring slot: claimed by exactly one live event at a time (ADR 0006).
+struct Slot {
+    command_buffer: vk::CommandBuffer,
+    fence: vk::Fence,
+    descriptor_set: vk::DescriptorSet,
+}
+
+/// Provider state of one context: the pools, the ring, and the synchronous transfer kit.
+struct ContextInner {
+    shared: Rc<Shared>,
+    id: u64,
+    command_pool: vk::CommandPool,
+    descriptor_pool: vk::DescriptorPool,
+    slots: Vec<Slot>,
+    /// Indices into `slots` not owned by a live event.
+    free_slots: RefCell<Vec<u16>>,
+    /// Command buffer and fence for blocking `write_buffer`/`read_buffer` staging copies.
+    transfer_command_buffer: vk::CommandBuffer,
+    transfer_fence: vk::Fence,
+}
+
+impl ContextInner {
+    fn create(shared: &Rc<Shared>, id: u64) -> Result<Rc<Self>, BackendError> {
+        let device = &shared.device;
+        let pool_info = vk::CommandPoolCreateInfo::default()
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+            .queue_family_index(shared.physical.queue_family);
+        // SAFETY: the device is live; `pool_info` is a live local.
+        let command_pool = unsafe { device.create_command_pool(&pool_info, None) }
+            .map_err(|result| shared.fail(result))?;
+        let mut partial = PartialContext {
+            shared,
+            command_pool,
+            descriptor_pool: vk::DescriptorPool::null(),
+            fences: Vec::new(),
+        };
+
+        let allocate_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(RING_DEPTH + 1);
+        // SAFETY: the pool is live; the buffers are freed with the pool.
+        let command_buffers = unsafe { device.allocate_command_buffers(&allocate_info) }
+            .map_err(|result| shared.fail(result))?;
+
+        // Each set holds the whole descriptor array, so every set charges `buffers` descriptors.
+        let pool_sizes = [vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::STORAGE_BUFFER,
+            descriptor_count: RING_DEPTH * shared.physical.tuning.buffers,
+        }];
+        let descriptor_pool_info = vk::DescriptorPoolCreateInfo::default()
+            .max_sets(RING_DEPTH)
+            .pool_sizes(&pool_sizes);
+        // SAFETY: the device is live; `descriptor_pool_info` is a live local.
+        partial.descriptor_pool =
+            unsafe { device.create_descriptor_pool(&descriptor_pool_info, None) }
+                .map_err(|result| shared.fail(result))?;
+        let set_layouts = vec![shared.set_layout; RING_DEPTH as usize];
+        let set_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(partial.descriptor_pool)
+            .set_layouts(&set_layouts);
+        // SAFETY: the pool was sized for exactly these sets; they are freed with the pool.
+        let descriptor_sets = unsafe { device.allocate_descriptor_sets(&set_info) }
+            .map_err(|result| shared.fail(result))?;
+
+        for _ in 0..=RING_DEPTH {
+            // SAFETY: the device is live; each fence is owned by this context and destroyed once.
+            let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::default(), None) }
+                .map_err(|result| shared.fail(result))?;
+            partial.fences.push(fence);
+        }
+
+        let (transfer_command_buffer, ring_command_buffers) = command_buffers
+            .split_last()
+            .expect("RING_DEPTH + 1 buffers");
+        let transfer_fence = partial.fences.pop().expect("RING_DEPTH + 1 fences");
+        let slots = ring_command_buffers
+            .iter()
+            .zip(&partial.fences)
+            .zip(&descriptor_sets)
+            .map(|((command_buffer, fence), descriptor_set)| Slot {
+                command_buffer: *command_buffer,
+                fence: *fence,
+                descriptor_set: *descriptor_set,
+            })
+            .collect::<Vec<_>>();
+        let free_slots = (0..RING_DEPTH as u16).rev().collect();
+        let descriptor_pool = partial.descriptor_pool;
+        // Ownership transfers to the context; the partial guard must not destroy anything now.
+        partial.fences.clear();
+        partial.descriptor_pool = vk::DescriptorPool::null();
+        partial.command_pool = vk::CommandPool::null();
+        increment(&shared.counters.contexts, 1);
+        Ok(Rc::new(Self {
+            shared: Rc::clone(shared),
+            id,
+            command_pool,
+            descriptor_pool,
+            slots,
+            free_slots: RefCell::new(free_slots),
+            transfer_command_buffer: *transfer_command_buffer,
+            transfer_fence,
+        }))
+    }
+
+    fn claim_slot(&self) -> Option<u16> {
+        self.free_slots.borrow_mut().pop()
+    }
+
+    fn release_slot(&self, slot: u16) {
+        self.free_slots.borrow_mut().push(slot);
+    }
+
+    /// Record, submit, and wait for one buffer-to-buffer copy on the transfer kit.
+    fn blocking_copy(
+        &self,
+        source: vk::Buffer,
+        destination: vk::Buffer,
+        region: vk::BufferCopy,
+        visibility: CopyVisibility,
+    ) -> Result<(), BackendError> {
+        let shared = &self.shared;
+        let device = &shared.device;
+        let command_buffer = self.transfer_command_buffer;
+        let fence = self.transfer_fence;
+        let begin = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        let barrier = vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COPY)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE);
+        let barrier = match visibility {
+            CopyVisibility::HostRead => barrier
+                .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+                .dst_access_mask(vk::AccessFlags2::HOST_READ),
+            CopyVisibility::Device => barrier
+                .dst_stage_mask(
+                    vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::COPY,
+                )
+                .dst_access_mask(
+                    vk::AccessFlags2::SHADER_STORAGE_READ
+                        | vk::AccessFlags2::SHADER_STORAGE_WRITE
+                        | vk::AccessFlags2::TRANSFER_READ
+                        | vk::AccessFlags2::TRANSFER_WRITE,
+                ),
+        };
+        let barriers = [barrier];
+        let dependency = vk::DependencyInfo::default().memory_barriers(&barriers);
+        let submit_buffers =
+            [vk::CommandBufferSubmitInfo::default().command_buffer(command_buffer)];
+        let submits = [vk::SubmitInfo2::default().command_buffer_infos(&submit_buffers)];
+        // SAFETY: the transfer command buffer and fence are used only by this synchronous method,
+        // which waits for the fence before returning, so no prior use is still pending; both
+        // buffers are live allocations of this context and the region was bounds-checked by the
+        // caller. `begin_command_buffer` implicitly resets the buffer (pool flag).
+        unsafe {
+            device
+                .reset_fences(&[fence])
+                .map_err(|result| shared.fail(result))?;
+            device
+                .begin_command_buffer(command_buffer, &begin)
+                .map_err(|result| shared.fail(result))?;
+            device.cmd_copy_buffer(command_buffer, source, destination, &[region]);
+            device.cmd_pipeline_barrier2(command_buffer, &dependency);
+            device
+                .end_command_buffer(command_buffer)
+                .map_err(|result| shared.fail(result))?;
+            device
+                .queue_submit2(shared.queue, &submits, fence)
+                .map_err(|result| shared.fail(result))?;
+            match device.wait_for_fences(&[fence], true, TRANSFER_TIMEOUT_NS) {
+                Ok(()) => Ok(()),
+                Err(vk::Result::TIMEOUT) => {
+                    // A bounded copy that never completes leaves the staging allocation in
+                    // unknown device use: treat the device as lost rather than free it.
+                    shared.poisoned.set(true);
+                    Err(BackendError::DeviceLost)
+                }
+                Err(result) => Err(shared.fail(result)),
+            }
+        }
+    }
+}
+
+/// Who consumes the destination of a blocking copy, and therefore which barrier follows it.
+/// Submissions carry no implicit memory dependency between one another, so every consumer of a
+/// copied range is named explicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CopyVisibility {
+    /// The host reads the destination through a mapping after the fence signals.
+    HostRead,
+    /// Later submissions read or write the destination: compute dispatches over a bound buffer
+    /// or the arena, and further staging copies out of or into it.
+    Device,
+}
+
+/// Copy arbitrary source bytes through a staging buffer. Vulkan copies operate on whole words, so
+/// partial first and last words are read-modify-written to preserve neighbouring logical bytes.
+fn write_through_staging<S: ByteSource + ?Sized>(
+    context: &ContextInner,
+    destination: vk::Buffer,
+    start: u64,
+    data: &S,
+    len: u64,
+    staging: &mut Staging<'_>,
+) -> Result<(), BackendError> {
+    let mut done = 0_u64;
+    let misalignment = start % WORD_BYTES;
+    if misalignment != 0 {
+        let prefix = (WORD_BYTES - misalignment).min(len);
+        context.blocking_copy(
+            destination,
+            staging.raw.buffer,
+            vk::BufferCopy {
+                src_offset: start - misalignment,
+                dst_offset: 0,
+                size: WORD_BYTES,
+            },
+            CopyVisibility::HostRead,
+        )?;
+        let slice_start = usize::try_from(misalignment).map_err(|_| BackendError::OutOfBounds)?;
+        let end = slice_start
+            .checked_add(usize::try_from(prefix).map_err(|_| BackendError::OutOfBounds)?)
+            .ok_or(BackendError::OutOfBounds)?;
+        data.read_at(done, &mut staging.as_mut_slice()[slice_start..end])?;
+        context.blocking_copy(
+            staging.raw.buffer,
+            destination,
+            vk::BufferCopy {
+                src_offset: 0,
+                dst_offset: start - misalignment,
+                size: WORD_BYTES,
+            },
+            CopyVisibility::Device,
+        )?;
+        done += prefix;
+    }
+    while len - done >= WORD_BYTES {
+        let chunk = ((len - done).min(staging.bytes) / WORD_BYTES) * WORD_BYTES;
+        let chunk_len = usize::try_from(chunk).map_err(|_| BackendError::OutOfBounds)?;
+        data.read_at(done, &mut staging.as_mut_slice()[..chunk_len])?;
+        context.blocking_copy(
+            staging.raw.buffer,
+            destination,
+            vk::BufferCopy {
+                src_offset: 0,
+                dst_offset: start + done,
+                size: chunk,
+            },
+            CopyVisibility::Device,
+        )?;
+        done += chunk;
+    }
+    if done < len {
+        let tail = len - done;
+        context.blocking_copy(
+            destination,
+            staging.raw.buffer,
+            vk::BufferCopy {
+                src_offset: start + done,
+                dst_offset: 0,
+                size: WORD_BYTES,
+            },
+            CopyVisibility::HostRead,
+        )?;
+        let tail_len = usize::try_from(tail).map_err(|_| BackendError::OutOfBounds)?;
+        data.read_at(done, &mut staging.as_mut_slice()[..tail_len])?;
+        context.blocking_copy(
+            staging.raw.buffer,
+            destination,
+            vk::BufferCopy {
+                src_offset: 0,
+                dst_offset: start + done,
+                size: WORD_BYTES,
+            },
+            CopyVisibility::Device,
+        )?;
+    }
+    Ok(())
+}
+
+/// Copy arbitrary bytes from a buffer through staging. Partial first and last words are copied in
+/// full, but only their requested logical bytes are sent to the caller.
+fn read_through_staging(
+    context: &ContextInner,
+    source: vk::Buffer,
+    start: u64,
+    data: &mut dyn ByteSink,
+    len: u64,
+    staging: &mut Staging<'_>,
+) -> Result<(), BackendError> {
+    let mut done = 0_u64;
+    let misalignment = start % WORD_BYTES;
+    if misalignment != 0 {
+        let prefix = (WORD_BYTES - misalignment).min(len);
+        context.blocking_copy(
+            source,
+            staging.raw.buffer,
+            vk::BufferCopy {
+                src_offset: start - misalignment,
+                dst_offset: 0,
+                size: WORD_BYTES,
+            },
+            CopyVisibility::HostRead,
+        )?;
+        let slice_start = usize::try_from(misalignment).map_err(|_| BackendError::OutOfBounds)?;
+        let end = slice_start
+            .checked_add(usize::try_from(prefix).map_err(|_| BackendError::OutOfBounds)?)
+            .ok_or(BackendError::OutOfBounds)?;
+        data.write_at(done, &staging.as_mut_slice()[slice_start..end])?;
+        done += prefix;
+    }
+    while len - done >= WORD_BYTES {
+        let chunk = ((len - done).min(staging.bytes) / WORD_BYTES) * WORD_BYTES;
+        let chunk_len = usize::try_from(chunk).map_err(|_| BackendError::OutOfBounds)?;
+        context.blocking_copy(
+            source,
+            staging.raw.buffer,
+            vk::BufferCopy {
+                src_offset: start + done,
+                dst_offset: 0,
+                size: chunk,
+            },
+            CopyVisibility::HostRead,
+        )?;
+        data.write_at(done, &staging.as_mut_slice()[..chunk_len])?;
+        done += chunk;
+    }
+    if done < len {
+        let tail = usize::try_from(len - done).map_err(|_| BackendError::OutOfBounds)?;
+        context.blocking_copy(
+            source,
+            staging.raw.buffer,
+            vk::BufferCopy {
+                src_offset: start + done,
+                dst_offset: 0,
+                size: WORD_BYTES,
+            },
+            CopyVisibility::HostRead,
+        )?;
+        data.write_at(done, &staging.as_mut_slice()[..tail])?;
+    }
+    Ok(())
+}
+
+/// Destroys partially created context objects if creation fails midway.
+struct PartialContext<'a> {
+    shared: &'a Shared,
+    command_pool: vk::CommandPool,
+    descriptor_pool: vk::DescriptorPool,
+    fences: Vec<vk::Fence>,
+}
+
+impl Drop for PartialContext<'_> {
+    fn drop(&mut self) {
+        let device = &self.shared.device;
+        // SAFETY: each handle here was created by `ContextInner::create` and not yet handed to a
+        // context; null handles are skipped, and destroying a pool frees its allocations.
+        unsafe {
+            for fence in self.fences.drain(..) {
+                device.destroy_fence(fence, None);
+            }
+            if self.descriptor_pool != vk::DescriptorPool::null() {
+                device.destroy_descriptor_pool(self.descriptor_pool, None);
+            }
+            if self.command_pool != vk::CommandPool::null() {
+                device.destroy_command_pool(self.command_pool, None);
+            }
+        }
+    }
+}
+
+impl Drop for ContextInner {
+    fn drop(&mut self) {
+        let shared = &self.shared;
+        // Every child holds an `Rc<ContextInner>`, so no event can still be pending here; the
+        // idle wait is defense in depth for a poisoned or misused instance.
+        if self.free_slots.borrow().len() != self.slots.len() {
+            shared.wait_idle();
+        }
+        // SAFETY: the pools own their command buffers and descriptor sets; the fences were created
+        // by this context. Each is destroyed exactly once.
+        unsafe {
+            for slot in &self.slots {
+                shared.device.destroy_fence(slot.fence, None);
+            }
+            shared.device.destroy_fence(self.transfer_fence, None);
+            shared
+                .device
+                .destroy_descriptor_pool(self.descriptor_pool, None);
+            shared.device.destroy_command_pool(self.command_pool, None);
+        }
+        decrement(&shared.counters.contexts);
+    }
+}
+
+/// Vulkan context handle: pools plus the bounded submission ring.
+pub struct VulkanContext {
+    inner: Rc<ContextInner>,
+}
+
+impl std::fmt::Debug for VulkanContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VulkanContext")
+            .field("id", &self.inner.id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// In-flight gate shared between a buffer and the events bound to it.
+///
+/// Zero: idle. `1..EXCLUSIVE_ACCESS`: that many read-only bindings in flight. `EXCLUSIVE_ACCESS`:
+/// one writing binding in flight. Explicit transfers require zero.
+#[derive(Default)]
+struct BufferState {
+    in_flight: Cell<u64>,
+}
+
+/// One dedicated `VkBuffer` + `VkDeviceMemory`, persistently mapped unless device-local.
+pub struct VulkanBuffer {
+    context: Rc<ContextInner>,
+    desc: BufferDesc,
+    buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+    mapped: Option<NonNull<u8>>,
+    /// The memory is the caller's, imported (ADR 0013): `mapped` is the caller's pointer, not a
+    /// `vkMapMemory` mapping, and the bytes outlive this handle.
+    imported: bool,
+    state: Rc<BufferState>,
+}
+
+impl std::fmt::Debug for VulkanBuffer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VulkanBuffer")
+            .field("context", &self.context.id)
+            .field("desc", &self.desc)
+            .field("mapped", &self.mapped.is_some())
+            .field("imported", &self.imported)
+            .finish_non_exhaustive()
+    }
+}
+
+impl VulkanBuffer {
+    fn in_flight(&self) -> u64 {
+        self.state.in_flight.get()
+    }
+
+    /// Pointer to `offset` inside the persistent mapping, when the buffer is mapped at all.
+    fn mapped_at(&self, offset: usize) -> Option<*mut u8> {
+        // SAFETY: callers validated `offset` (plus their length) against `desc.bytes()`, and the
+        // mapping covers the whole allocation.
+        self.mapped
+            .map(|pointer| unsafe { pointer.as_ptr().add(offset) })
+    }
+}
+
+impl Drop for VulkanBuffer {
+    fn drop(&mut self) {
+        let shared = &self.context.shared;
+        // The contract forbids dropping an in-flight buffer; if it happens anyway, never free
+        // memory a submission may still address.
+        if self.in_flight() != 0 {
+            shared.wait_idle();
+        }
+        // SAFETY: this handle owns the mapping, buffer, and memory, all created together in
+        // `allocate` (or `import`, which maps nothing) and released exactly once here, in the
+        // reverse order. Freeing imported memory releases the device's claim on the caller's
+        // pages, never the pages.
+        unsafe {
+            if self.mapped.is_some() && !self.imported {
+                shared.device.unmap_memory(self.memory);
+            }
+            shared.device.destroy_buffer(self.buffer, None);
+            shared.device.free_memory(self.memory, None);
+        }
+        decrement(&shared.counters.buffers);
+    }
+}
+
+/// Usage flags of every buffer this backend creates: directly bindable as a storage buffer, a
+/// transfer source and destination, and device-addressable when alignment can be measured.
+fn buffer_usage(physical: &PhysicalDeviceRecord) -> vk::BufferUsageFlags {
+    let mut usage = vk::BufferUsageFlags::STORAGE_BUFFER
+        | vk::BufferUsageFlags::TRANSFER_SRC
+        | vk::BufferUsageFlags::TRANSFER_DST;
+    if physical.buffer_device_address {
+        usage |= vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
+    }
+    usage
+}
+
+/// The `memoryTypeBits` a buffer with this backend's usage reports on `device`.
+fn probe_buffer_type_mask(
+    device: &ash::Device,
+    physical: &PhysicalDeviceRecord,
+) -> Result<u32, vk::Result> {
+    let buffer_info = vk::BufferCreateInfo::default()
+        .size(4)
+        .usage(buffer_usage(physical))
+        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    // SAFETY: the device is live; the probe buffer is never bound and is destroyed here.
+    unsafe {
+        let buffer = device.create_buffer(&buffer_info, None)?;
+        let requirements = device.get_buffer_memory_requirements(buffer);
+        device.destroy_buffer(buffer, None);
+        Ok(requirements.memory_type_bits)
+    }
+}
+
+/// Owned raw buffer + memory pair used while an allocation is being assembled or staged.
+struct RawAllocation<'a> {
+    shared: &'a Shared,
+    buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+    mapped: Option<NonNull<u8>>,
+    allocation_bytes: u64,
+    /// The smallest power-of-two alignment every measured address satisfied.
+    measured_alignment: u64,
+    memory_flags: vk::MemoryPropertyFlags,
+}
+
+impl<'a> RawAllocation<'a> {
+    /// Create a buffer, allocate dedicated memory of `memory_type`, bind at offset 0, and map it
+    /// when `map` is set. Alignment is measured, never assumed.
+    fn create(
+        shared: &'a Shared,
+        bytes: u64,
+        memory_type: u32,
+        map: bool,
+    ) -> Result<Self, BackendError> {
+        let device = &shared.device;
+        // Whole words: byte-storage tensors are read and atomically written by word, so the
+        // buffer behind any binding must extend to the word containing its last byte.
+        let rounded = bytes
+            .checked_add(WORD_BYTES - 1)
+            .ok_or(BackendError::ResourceLimit)?
+            / WORD_BYTES
+            * WORD_BYTES;
+        let buffer_info = vk::BufferCreateInfo::default()
+            .size(rounded)
+            .usage(buffer_usage(&shared.physical))
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        // SAFETY: the device is live and `buffer_info` is a live local.
+        let buffer = unsafe { device.create_buffer(&buffer_info, None) }
+            .map_err(|result| shared.fail(result))?;
+        let mut raw = Self {
+            shared,
+            buffer,
+            memory: vk::DeviceMemory::null(),
+            mapped: None,
+            allocation_bytes: 0,
+            measured_alignment: 0,
+            memory_flags: shared.physical.memory.memory_types[memory_type as usize].property_flags,
+        };
+
+        // SAFETY: `buffer` is live.
+        let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+        if requirements.memory_type_bits & (1 << memory_type) == 0 {
+            return Err(BackendError::Incompatible);
+        }
+        let mut flags =
+            vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
+        let mut allocate_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(requirements.size)
+            .memory_type_index(memory_type);
+        if shared.physical.buffer_device_address {
+            allocate_info = allocate_info.push_next(&mut flags);
+        }
+        // SAFETY: the device is live; the chained structures outlive the call.
+        raw.memory = unsafe { device.allocate_memory(&allocate_info, None) }
+            .map_err(|result| shared.fail(result))?;
+        raw.allocation_bytes = requirements.size;
+        // SAFETY: fresh buffer and memory; offset 0 satisfies every alignment requirement.
+        unsafe { device.bind_buffer_memory(buffer, raw.memory, 0) }
+            .map_err(|result| shared.fail(result))?;
+
+        let mut alignment = u64::MAX;
+        if map {
+            // SAFETY: the memory is host-visible (chosen by the memory plan), unmapped, and
+            // mapping the whole allocation is always in range.
+            let pointer = unsafe {
+                device.map_memory(raw.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+            }
+            .map_err(|result| shared.fail(result))?;
+            let pointer = NonNull::new(pointer.cast::<u8>()).ok_or(BackendError::Incompatible)?;
+            raw.mapped = Some(pointer);
+            alignment = alignment.min(address_alignment(pointer.as_ptr() as u64));
+        }
+        if shared.physical.buffer_device_address {
+            let address_info = vk::BufferDeviceAddressInfo::default().buffer(buffer);
+            // SAFETY: the feature is enabled, the buffer carries the device-address usage, and
+            // its memory was allocated with the device-address flag.
+            let address = unsafe { device.get_buffer_device_address(&address_info) };
+            alignment = alignment.min(address_alignment(address));
+        } else if !map {
+            // Nothing observable to measure: the binding requirement is the only guarantee.
+            alignment = alignment.min(requirements.alignment.max(1));
+        }
+        raw.measured_alignment = alignment;
+        Ok(raw)
+    }
+
+    /// Create a buffer over `len` bytes of caller memory at `pointer`, imported as a host
+    /// allocation (`VK_EXT_external_memory_host`) into a host-coherent memory type, and bind it
+    /// at offset 0. Nothing is mapped: the caller's pointer is the host's view.
+    ///
+    /// # Safety
+    ///
+    /// `pointer..pointer + len` is live host memory that stays allocated and mapped until the
+    /// memory object is freed; `pointer` and `len` are multiples of the device's
+    /// `minImportedHostPointerAlignment`.
+    unsafe fn import(
+        shared: &'a Shared,
+        pointer: NonNull<u8>,
+        len: u64,
+    ) -> Result<Self, BackendError> {
+        let device = &shared.device;
+        let host = shared
+            .host_memory
+            .as_ref()
+            .ok_or(BackendError::Unsupported)?;
+        let handle_type = vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT;
+        let mut host_properties = vk::MemoryHostPointerPropertiesEXT::default();
+        // SAFETY: the extension is enabled on this device, so the entry point is loaded; the
+        // caller vouches for the pointer; the out-structure is a live local. `ash` 0.38 has no
+        // wrapper for this command, so the raw pointer is called and its result checked.
+        unsafe {
+            (host.fp().get_memory_host_pointer_properties_ext)(
+                host.device(),
+                handle_type,
+                pointer.as_ptr().cast(),
+                &mut host_properties,
+            )
+        }
+        .result()
+        .map_err(|result| shared.fail(result))?;
+        let mut external = vk::ExternalMemoryBufferCreateInfo::default().handle_types(handle_type);
+        let buffer_info = vk::BufferCreateInfo::default()
+            .size(len)
+            .usage(buffer_usage(&shared.physical))
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .push_next(&mut external);
+        // SAFETY: the device is live and `buffer_info` and its chain are live locals.
+        let buffer = unsafe { device.create_buffer(&buffer_info, None) }
+            .map_err(|result| shared.fail(result))?;
+        // SAFETY: `buffer` is live.
+        let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+        let coherent =
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        let memory = &shared.physical.memory;
+        // A host-coherent type both the pointer and the buffer allow, device-local first.
+        let memory_type = (0..memory.memory_type_count)
+            .filter(|&index| {
+                host_properties.memory_type_bits & requirements.memory_type_bits & (1 << index) != 0
+                    && memory.memory_types[index as usize]
+                        .property_flags
+                        .contains(coherent)
+            })
+            .min_by_key(|&index| {
+                !memory.memory_types[index as usize]
+                    .property_flags
+                    .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+            });
+        let mut raw = Self {
+            shared,
+            buffer,
+            memory: vk::DeviceMemory::null(),
+            mapped: None,
+            allocation_bytes: 0,
+            measured_alignment: 0,
+            memory_flags: vk::MemoryPropertyFlags::empty(),
+        };
+        let memory_type = memory_type.ok_or(BackendError::Incompatible)?;
+        raw.memory_flags = memory.memory_types[memory_type as usize].property_flags;
+        if requirements.size > len {
+            return Err(BackendError::ResourceLimit);
+        }
+        let mut import = vk::ImportMemoryHostPointerInfoEXT::default()
+            .handle_type(handle_type)
+            .host_pointer(pointer.as_ptr().cast());
+        let mut flags =
+            vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
+        let mut allocate_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(len)
+            .memory_type_index(memory_type)
+            .push_next(&mut import);
+        if shared.physical.buffer_device_address {
+            allocate_info = allocate_info.push_next(&mut flags);
+        }
+        // SAFETY: the device is live; the chained structures outlive the call; the caller
+        // vouches that the range is live, aligned host memory, and the type admits the pointer.
+        raw.memory = unsafe { device.allocate_memory(&allocate_info, None) }
+            .map_err(|result| shared.fail(result))?;
+        raw.allocation_bytes = len;
+        // SAFETY: fresh buffer and memory; offset 0 satisfies every alignment requirement.
+        unsafe { device.bind_buffer_memory(buffer, raw.memory, 0) }
+            .map_err(|result| shared.fail(result))?;
+        let mut alignment = address_alignment(pointer.as_ptr() as u64);
+        if shared.physical.buffer_device_address {
+            let address_info = vk::BufferDeviceAddressInfo::default().buffer(buffer);
+            // SAFETY: the feature is enabled, the buffer carries the device-address usage, and
+            // its memory was allocated with the device-address flag.
+            let address = unsafe { device.get_buffer_device_address(&address_info) };
+            alignment = alignment.min(address_alignment(address));
+        }
+        raw.measured_alignment = alignment;
+        Ok(raw)
+    }
+
+    /// Transfer ownership of the handles to a `VulkanBuffer`.
+    fn into_parts(self) -> (vk::Buffer, vk::DeviceMemory, Option<NonNull<u8>>) {
+        let parts = (self.buffer, self.memory, self.mapped);
+        std::mem::forget(self);
+        parts
+    }
+}
+
+impl Drop for RawAllocation<'_> {
+    fn drop(&mut self) {
+        let device = &self.shared.device;
+        // SAFETY: the handles were created by `create` and are released exactly once; null
+        // memory (allocation failed) is skipped by the loader-defined null-handle rule.
+        unsafe {
+            if self.mapped.is_some() {
+                device.unmap_memory(self.memory);
+            }
+            device.destroy_buffer(self.buffer, None);
+            if self.memory != vk::DeviceMemory::null() {
+                device.free_memory(self.memory, None);
+            }
+        }
+    }
+}
+
+/// The largest power of two dividing `address`, capped so a zero address does not overflow.
+fn address_alignment(address: u64) -> u64 {
+    1_u64 << address.trailing_zeros().min(40)
+}
+
+/// Bounded host-visible staging buffer for device-local transfers; one per explicit transfer.
+struct Staging<'a> {
+    raw: RawAllocation<'a>,
+    bytes: u64,
+}
+
+impl<'a> Staging<'a> {
+    fn new(shared: &'a Shared, bytes: u64) -> Result<Self, BackendError> {
+        let bytes = bytes
+            .max(WORD_BYTES)
+            .checked_add(WORD_BYTES - 1)
+            .ok_or(BackendError::ResourceLimit)?
+            / WORD_BYTES
+            * WORD_BYTES;
+        let raw = RawAllocation::create(shared, bytes, shared.memory_plan.host, true)?;
+        Ok(Self { raw, bytes })
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        let pointer = self.raw.mapped.expect("staging is mapped");
+        // SAFETY: the mapping covers `bytes` bytes of host-coherent memory owned by `self`; the
+        // GPU never accesses it while this borrow is live (every copy is waited for).
+        unsafe { std::slice::from_raw_parts_mut(pointer.as_ptr(), self.bytes as usize) }
+    }
+}
+
+/// Program-side in-flight count: pipelines stay alive until every submission using them retired.
+#[derive(Default)]
+struct ProgramState {
+    in_flight: Cell<u32>,
+}
+
+/// One recorded dispatch of a resident program.
+struct Dispatch {
+    pipeline: vk::Pipeline,
+    workgroups: [u32; 3],
+    barrier_before: bool,
+}
+
+/// The program-owned arena: constants and intermediates in one dedicated allocation, bound as
+/// the last element of the descriptor array. Never mapped; constants arrive through staging.
+struct Arena {
+    buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+    bytes: u64,
+    /// The persistent mapping when the arena's memory type is host-visible (a unified-memory
+    /// device): constants are then written by a plain copy rather than through staging.
+    mapped: Option<NonNull<u8>>,
+}
+
+/// Resident compute pipelines specialized for one admitted TOSA graph.
+pub struct VulkanProgram {
+    context: Rc<ContextInner>,
+    dispatches: Vec<Dispatch>,
+    arena: Option<Arena>,
+    plan: ProgramPlan,
+    state: Rc<ProgramState>,
+}
+
+impl std::fmt::Debug for VulkanProgram {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VulkanProgram")
+            .field("context", &self.context.id)
+            .field("dispatches", &self.dispatches.len())
+            .field("arena_bytes", &self.plan.arena_bytes)
+            .field("slots", &self.plan.slots.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl VulkanProgram {
+    /// Number of `vkCmdDispatch` calls one submission of this program records.
+    pub fn dispatch_count(&self) -> usize {
+        self.dispatches.len()
+    }
+
+    /// Bytes of program-owned arena storage (constants plus intermediates).
+    pub fn arena_bytes(&self) -> u64 {
+        self.plan.arena_bytes
+    }
+}
+
+impl Drop for VulkanProgram {
+    fn drop(&mut self) {
+        let shared = &self.context.shared;
+        if self.state.in_flight.get() != 0 {
+            shared.wait_idle();
+        }
+        // SAFETY: this handle owns every pipeline and the arena, created in `load_program` and
+        // destroyed exactly once here; no submission references them (in-flight count is zero
+        // or the device was idled above).
+        unsafe {
+            for dispatch in &self.dispatches {
+                shared.device.destroy_pipeline(dispatch.pipeline, None);
+            }
+            if let Some(arena) = &self.arena {
+                shared.device.destroy_buffer(arena.buffer, None);
+                shared.device.free_memory(arena.memory, None);
+            }
+        }
+        decrement(&shared.counters.programs);
+    }
+}
+
+/// Vulkan execution queue handle. Every queue of a context feeds the device's one compute queue.
+pub struct VulkanQueue {
+    context: Rc<ContextInner>,
+}
+
+impl std::fmt::Debug for VulkanQueue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VulkanQueue")
+            .field("context", &self.context.id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for VulkanQueue {
+    fn drop(&mut self) {
+        decrement(&self.context.shared.counters.queues);
+    }
+}
+
+/// In-flight guard for one buffer bound to one submission.
+struct Guard {
+    state: Rc<BufferState>,
+    exclusive: bool,
+}
+
+impl Guard {
+    fn acquire(state: &Rc<BufferState>, exclusive: bool) -> Result<Self, BackendError> {
+        let current = state.in_flight.get();
+        let next = if exclusive {
+            if current != 0 {
+                return Err(BackendError::Busy);
+            }
+            EXCLUSIVE_ACCESS
+        } else {
+            if current >= EXCLUSIVE_ACCESS - 1 {
+                return Err(BackendError::Busy);
+            }
+            current + 1
+        };
+        state.in_flight.set(next);
+        Ok(Self {
+            state: Rc::clone(state),
+            exclusive,
+        })
+    }
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        let current = self.state.in_flight.get();
+        self.state.in_flight.set(if self.exclusive {
+            debug_assert_eq!(current, EXCLUSIVE_ACCESS);
+            0
+        } else {
+            debug_assert!((1..EXCLUSIVE_ACCESS).contains(&current));
+            current - 1
+        });
+    }
+}
+
+/// One submission: a claimed ring slot, its fence, and the guards it holds until terminal.
+pub struct VulkanEvent {
+    context: Rc<ContextInner>,
+    slot: u16,
+    program: Rc<ProgramState>,
+    guards: RefCell<[Option<Guard>; MAX_BINDINGS_PER_SUBMISSION as usize]>,
+    latched: Cell<Option<EventState>>,
+    /// Set once the slot was returned to the ring (by `destroy_event` or `Drop`).
+    released: Cell<bool>,
+}
+
+impl std::fmt::Debug for VulkanEvent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VulkanEvent")
+            .field("context", &self.context.id)
+            .field("slot", &self.slot)
+            .field("latched", &self.latched.get())
+            .finish_non_exhaustive()
+    }
+}
+
+impl VulkanEvent {
+    /// Publish the first terminal state. Guards are released strictly before the latch becomes
+    /// observable so a caller seeing a terminal state can transfer buffer bytes immediately.
+    fn latch(&self, state: EventState) -> EventState {
+        for guard in self.guards.borrow_mut().iter_mut() {
+            *guard = None;
+        }
+        let in_flight = self.program.in_flight.get();
+        self.program.in_flight.set(in_flight.saturating_sub(1));
+        self.latched.set(Some(state));
+        state
+    }
+
+    /// Nonblocking status read of the slot's fence (ADR 0006).
+    fn poll(&self) -> Result<EventState, BackendError> {
+        if let Some(state) = self.latched.get() {
+            return Ok(state);
+        }
+        let shared = &self.context.shared;
+        let fence = self.context.slots[self.slot as usize].fence;
+        // SAFETY: the fence belongs to this event's claimed slot and was submitted exactly once
+        // since its last reset; `vkGetFenceStatus` is a read-only query.
+        match unsafe { shared.device.get_fence_status(fence) } {
+            Ok(true) => Ok(self.latch(EventState::Complete)),
+            Ok(false) => Ok(EventState::Pending),
+            Err(vk::Result::ERROR_DEVICE_LOST) => {
+                shared.poisoned.set(true);
+                Ok(self.latch(EventState::Failed(BackendError::DeviceLost)))
+            }
+            Err(result) => Err(shared.fail(result)),
+        }
+    }
+
+    fn release(&self) {
+        if self.released.replace(true) {
+            return;
+        }
+        self.context.release_slot(self.slot);
+        decrement(&self.context.shared.counters.events);
+    }
+}
+
+impl Drop for VulkanEvent {
+    fn drop(&mut self) {
+        if self.released.get() {
+            return;
+        }
+        // Dropping a pending event outside `destroy_event` is a contract violation; still, never
+        // return a slot whose command buffer may be executing: wait for its fence first.
+        if self.latched.get().is_none() {
+            let shared = &self.context.shared;
+            let fence = self.context.slots[self.slot as usize].fence;
+            // SAFETY: the fence is this slot's, submitted once; waiting has no preconditions.
+            match unsafe { shared.device.wait_for_fences(&[fence], true, u64::MAX) } {
+                Ok(()) => {
+                    self.latch(EventState::Complete);
+                }
+                Err(result) => {
+                    shared.fail(result);
+                    self.latch(EventState::Failed(BackendError::DeviceLost));
+                }
+            }
+        }
+        self.release();
+    }
+}
+
+/// Vulkan backend instance bound to one physical device.
+/// A timeline semaphore the host raises, which [`VulkanAccelerator::submit_after`] submissions
+/// wait on (ADR 0013): work is queued before its inputs exist, and whoever produces them (a
+/// thread finishing a storage read, say) releases it with a [`VulkanGateSignal`], without a
+/// round trip through the thread that owns the backend.
+///
+/// Dropping the gate releases every submission still waiting on it, then waits for the device
+/// to idle before destroying the semaphore, so no submission can wait forever.
+pub struct VulkanHostGate {
+    shared: Rc<Shared>,
+    core: Arc<GateCore>,
+    /// The highest value any submission was queued to wait for.
+    awaited: Cell<u64>,
+}
+
+struct GateCore {
+    device: ash::Device,
+    semaphore: vk::Semaphore,
+    state: Mutex<GateState>,
+}
+
+struct GateState {
+    /// Cleared, under the lock, before the semaphore is destroyed.
+    open: bool,
+    raised: u64,
+}
+
+/// The raising half of a [`VulkanHostGate`], for any thread.
+#[derive(Clone)]
+pub struct VulkanGateSignal {
+    core: Arc<GateCore>,
+}
+
+impl std::fmt::Debug for VulkanHostGate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VulkanHostGate")
+            .field("awaited", &self.awaited.get())
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for VulkanGateSignal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VulkanGateSignal")
+            .finish_non_exhaustive()
+    }
+}
+
+impl VulkanGateSignal {
+    /// Raise the gate to `value`, releasing every submission waiting for it or less. A value at
+    /// or below the gate's current one changes nothing, so raises may arrive in any order.
+    /// Returns `false`, raising nothing, once the gate has been dropped.
+    pub fn raise(&self, value: u64) -> Result<bool, BackendError> {
+        // The state is two plain fields written together; a panic elsewhere cannot tear it.
+        let mut state = self
+            .core
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if !state.open {
+            return Ok(false);
+        }
+        if value > state.raised {
+            let info = vk::SemaphoreSignalInfo::default()
+                .semaphore(self.core.semaphore)
+                .value(value);
+            // SAFETY: the gate is open, so its device and semaphore are live: the gate closes
+            // under this lock before destroying either. The value exceeds the semaphore's current
+            // one (`raised` tracks every signal, and only this path signals).
+            unsafe { self.core.device.signal_semaphore(&info) }.map_err(backend_error)?;
+            state.raised = value;
+        }
+        Ok(true)
+    }
+}
+
+impl VulkanHostGate {
+    /// A raising handle for another thread.
+    pub fn signal(&self) -> VulkanGateSignal {
+        VulkanGateSignal {
+            core: Arc::clone(&self.core),
+        }
+    }
+}
+
+impl Drop for VulkanHostGate {
+    fn drop(&mut self) {
+        let mut state = self
+            .core
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let awaited = self.awaited.get();
+        if awaited > state.raised {
+            let info = vk::SemaphoreSignalInfo::default()
+                .semaphore(self.core.semaphore)
+                .value(awaited);
+            // SAFETY: the gate is still open and the value exceeds the current one. Releasing
+            // the waiters is what lets the idle wait below return.
+            if unsafe { self.core.device.signal_semaphore(&info) }.is_ok() {
+                state.raised = awaited;
+            }
+        }
+        state.open = false;
+        drop(state);
+        self.shared.wait_idle();
+        // SAFETY: no submission still references the semaphore (the device is idle), no raise
+        // can reach it (closed under the lock above), and it is destroyed exactly once.
+        unsafe {
+            self.shared
+                .device
+                .destroy_semaphore(self.core.semaphore, None)
+        };
+    }
+}
+
+pub struct VulkanAccelerator {
+    shared: Rc<Shared>,
+    next_id: Cell<u64>,
+}
+
+impl std::fmt::Debug for VulkanAccelerator {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VulkanAccelerator")
+            .field("device", &self.device_name())
+            .finish_non_exhaustive()
+    }
+}
+
+impl VulkanAccelerator {
+    /// Open the preferred Vulkan 1.3 compute device: discrete, integrated, virtual, then CPU.
+    pub fn new() -> Result<Self, InitError> {
+        let instance = Instance::create()?;
+        let devices = enumerate(&instance.instance)?;
+        let physical = devices
+            .into_iter()
+            .min_by_key(PhysicalDeviceRecord::rank)
+            .ok_or(InitError::DeviceUnavailable)?;
+        Self::open(instance, physical, VulkanOptions::default())
+    }
+
+    /// Open the device whose enumerated name (`available_devices`) equals `device`.
+    pub fn with_device(device: &str) -> Result<Self, InitError> {
+        Self::with_device_options(device, VulkanOptions::default())
+    }
+
+    /// [`with_device`](Self::with_device) with explicit [`VulkanOptions`].
+    pub fn with_device_options(device: &str, options: VulkanOptions) -> Result<Self, InitError> {
+        let instance = Instance::create()?;
+        let physical = enumerate(&instance.instance)?
+            .into_iter()
+            .find(|record| record.name == device)
+            .ok_or(InitError::DeviceUnavailable)?;
+        Self::open(instance, physical, options)
+    }
+
+    /// Enumerate the names of every suitable device visible through the loader.
+    pub fn available_devices() -> Result<Vec<String>, InitError> {
+        let instance = Instance::create()?;
+        Ok(enumerate(&instance.instance)?
+            .into_iter()
+            .map(|record| record.name)
+            .collect())
+    }
+
+    fn open(
+        instance: Instance,
+        physical: PhysicalDeviceRecord,
+        options: VulkanOptions,
+    ) -> Result<Self, InitError> {
+        Ok(Self {
+            shared: Shared::open(instance, physical, options)?,
+            next_id: Cell::new(0),
+        })
+    }
+
+    /// The enumerated name of the device this instance executes on.
+    pub fn device_name(&self) -> &str {
+        &self.shared.physical.name
+    }
+
+    /// Whether this instance observed device loss and refuses further work.
+    pub fn is_poisoned(&self) -> bool {
+        self.shared.poisoned.get()
+    }
+
+    /// A new [`VulkanHostGate`] at value 0, or `Unsupported` without timeline semaphores.
+    pub fn host_gate(&self) -> Result<VulkanHostGate, BackendError> {
+        let shared = &self.shared;
+        shared.check_live()?;
+        if !shared.physical.timeline_semaphore {
+            return Err(BackendError::Unsupported);
+        }
+        let mut timeline = vk::SemaphoreTypeCreateInfo::default()
+            .semaphore_type(vk::SemaphoreType::TIMELINE)
+            .initial_value(0);
+        let info = vk::SemaphoreCreateInfo::default().push_next(&mut timeline);
+        // SAFETY: the device is live with `timelineSemaphore` enabled; `info` is a live local.
+        let semaphore = unsafe { shared.device.create_semaphore(&info, None) }
+            .map_err(|result| shared.fail(result))?;
+        Ok(VulkanHostGate {
+            shared: Rc::clone(shared),
+            core: Arc::new(GateCore {
+                device: shared.device.clone(),
+                semaphore,
+                state: Mutex::new(GateState {
+                    open: true,
+                    raised: 0,
+                }),
+            }),
+            awaited: Cell::new(0),
+        })
+    }
+
+    /// [`Accelerator::submit`], the work waiting on the device until `gate` reaches `value`
+    /// (ADR 0013). The bindings are held from now, as `submit` holds them, with one difference
+    /// the gate exists for: the bytes of the program's *input* bindings may still be written
+    /// until the gate is raised to `value` (by host stores into an imported buffer, or by a
+    /// device's DMA the host has seen complete), because raising the gate orders every host
+    /// operation before it ahead of the device's wait. Outputs, and inputs after the raise,
+    /// follow `submit`'s rules.
+    // The result type is `Accelerator::submit`'s, whose event travels in the failure.
+    #[allow(clippy::result_large_err)]
+    pub fn submit_after(
+        &self,
+        queue: &VulkanQueue,
+        program: &VulkanProgram,
+        bindings: &[BindingRef<'_, VulkanBuffer>],
+        gate: &VulkanHostGate,
+        value: u64,
+    ) -> Result<VulkanEvent, SubmitFailure<VulkanEvent>> {
+        if !Rc::ptr_eq(&gate.shared, &self.shared) {
+            return Err(SubmitFailure::Rejected(BackendError::InvalidArgument));
+        }
+        gate.awaited.set(gate.awaited.get().max(value));
+        let wait = Some((gate.core.semaphore, value));
+        self.submit_waiting(queue, program, bindings, Timeout::Infinite, wait)
+    }
+
+    /// The alignment [`import_host_buffer`](Self::import_host_buffer) requires of a pointer and a
+    /// length, or `None` when the device cannot import host memory.
+    pub fn host_import_alignment(&self) -> Option<u64> {
+        self.shared.physical.host_import_alignment
+    }
+
+    /// A buffer over caller-owned host memory, imported rather than copied (ADR 0013): the device
+    /// addresses `memory..memory + len` itself, so bytes placed there by the host, or by another
+    /// device's DMA, are the buffer's contents with no `write_buffer`. Behaves as an allocated
+    /// buffer of `desc` in every other respect: bound by submissions, gated while in flight, read
+    /// and written by the explicit transfers, released by `free_buffer`. Its domain must be
+    /// `Host` or `Shared`, the domains whose contract is host-visible memory.
+    ///
+    /// This is a host-side API of this backend, not a protocol feature: the protocol's external
+    /// memory import remains deferred.
+    ///
+    /// # Safety
+    ///
+    /// `memory..memory + len` must be live host memory (anonymous or huge-page mappings; not a
+    /// device mapping) that stays allocated and mapped, and is not remapped, until the buffer is
+    /// released and no submission that bound it is still executing. While a submission that binds
+    /// the buffer is in flight, the host must not write bytes that submission reads or read bytes
+    /// it writes.
+    pub unsafe fn import_host_buffer(
+        &self,
+        context: &VulkanContext,
+        desc: BufferDesc,
+        memory: NonNull<u8>,
+        len: u64,
+    ) -> Result<AllocatedBuffer<VulkanBuffer>, BackendError> {
+        let shared = &self.shared;
+        shared.info.validate_buffer_desc(desc)?;
+        shared.check_live()?;
+        let alignment = shared
+            .physical
+            .host_import_alignment
+            .ok_or(BackendError::Unsupported)?;
+        if !matches!(desc.domain, MemoryDomain::Host | MemoryDomain::Shared) {
+            return Err(BackendError::Unsupported);
+        }
+        if memory.as_ptr() as u64 % alignment != 0 || len % alignment != 0 || desc.bytes() > len {
+            return Err(BackendError::InvalidArgument);
+        }
+        if shared.counters.buffers.get()
+            >= u64::from(MAX_BUFFERS_PER_CONTEXT) * u64::from(MAX_CONTEXTS)
+        {
+            return Err(BackendError::ResourceLimit);
+        }
+        // SAFETY: the caller vouches for the range; alignment was checked above.
+        let raw = unsafe { RawAllocation::import(shared, memory, len) }?;
+        if raw.measured_alignment < desc.alignment() {
+            return Err(BackendError::ResourceLimit);
+        }
+        let mut properties = BufferProperties::DIRECT_BINDING | BufferProperties::HOST_VISIBLE;
+        if raw
+            .memory_flags
+            .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+        {
+            properties |= BufferProperties::DEVICE_LOCAL;
+        }
+        let info = BufferInfo::new(
+            desc,
+            raw.allocation_bytes,
+            raw.measured_alignment,
+            properties,
+        )?;
+        let (buffer, device_memory, _) = raw.into_parts();
+        increment(&shared.counters.buffers, 1);
+        Ok(AllocatedBuffer::new(
+            VulkanBuffer {
+                context: Rc::clone(&context.inner),
+                desc,
+                buffer,
+                memory: device_memory,
+                mapped: Some(memory),
+                imported: true,
+                state: Rc::new(BufferState::default()),
+            },
+            info,
+        ))
+    }
+
+    /// Cumulative count of buffers admitted as direct bindings.
+    pub fn direct_binding_admissions(&self) -> u64 {
+        self.shared.counters.direct_binding_admissions.get()
+    }
+
+    /// Cumulative bytes moved by explicit `write_buffer`/`read_buffer` transfers.
+    pub fn explicit_transfer_bytes(&self) -> u64 {
+        self.shared.counters.explicit_transfer_bytes.get()
+    }
+
+    /// Provider handles currently alive for this instance.
+    pub fn live_resources(&self) -> LiveResources {
+        let counters = &self.shared.counters;
+        LiveResources {
+            contexts: counters.contexts.get(),
+            buffers: counters.buffers.get(),
+            programs: counters.programs.get(),
+            queues: counters.queues.get(),
+            events: counters.events.get(),
+        }
+    }
+
+    fn next_id(&self) -> Result<u64, BackendError> {
+        let id = self.next_id.get();
+        if id == u64::MAX {
+            return Err(BackendError::ResourceLimit);
+        }
+        self.next_id.set(id + 1);
+        Ok(id)
+    }
+
+    fn checked_range(
+        buffer: &VulkanBuffer,
+        offset: u64,
+        bytes: u64,
+    ) -> Result<(usize, usize), BackendError> {
+        if bytes == 0 {
+            return Err(BackendError::InvalidArgument);
+        }
+        let end = offset
+            .checked_add(bytes)
+            .filter(|end| *end <= buffer.desc.bytes())
+            .ok_or(BackendError::OutOfBounds)?;
+        let start = usize::try_from(offset).map_err(|_| BackendError::OutOfBounds)?;
+        let end = usize::try_from(end).map_err(|_| BackendError::OutOfBounds)?;
+        Ok((start, end))
+    }
+
+    fn lowering_error(error: LoweringError) -> BackendError {
+        match error {
+            LoweringError::Parse(_) | LoweringError::Analysis(_) => BackendError::InvalidArgument,
+            LoweringError::UnsupportedTarget => BackendError::Incompatible,
+            LoweringError::UnsupportedGraph
+            | LoweringError::UnsupportedType(_)
+            | LoweringError::UnsupportedOperator(_) => BackendError::Unsupported,
+            LoweringError::ResourceLimit => BackendError::ResourceLimit,
+        }
+    }
+
+    /// Write into a device-local buffer through a bounded staging allocation.
+    fn staged_write(
+        &self,
+        buffer: &VulkanBuffer,
+        start: u64,
+        data: &dyn ByteSource,
+        len: u64,
+    ) -> Result<(), BackendError> {
+        let shared = &self.shared;
+        let mut staging = Staging::new(shared, len.min(STAGING_BYTES))?;
+        write_through_staging(
+            &buffer.context,
+            buffer.buffer,
+            start,
+            data,
+            len,
+            &mut staging,
+        )?;
+        increment(&shared.counters.explicit_transfer_bytes, len);
+        Ok(())
+    }
+
+    /// Read out of a device-local buffer through a bounded staging allocation.
+    fn staged_read(
+        &self,
+        buffer: &VulkanBuffer,
+        start: u64,
+        data: &mut dyn ByteSink,
+        len: u64,
+    ) -> Result<(), BackendError> {
+        let shared = &self.shared;
+        let mut staging = Staging::new(shared, len.min(STAGING_BYTES))?;
+        read_through_staging(
+            &buffer.context,
+            buffer.buffer,
+            start,
+            data,
+            len,
+            &mut staging,
+        )?;
+        increment(&shared.counters.explicit_transfer_bytes, len);
+        Ok(())
+    }
+
+    /// `Accelerator::submit`, the batch first waiting for `wait`'s semaphore to reach its value
+    /// when one is given (ADR 0013).
+    // The result type is `Accelerator::submit`'s, whose event travels in the failure.
+    #[allow(clippy::result_large_err)]
+    fn submit_waiting(
+        &self,
+        queue: &VulkanQueue,
+        program: &VulkanProgram,
+        bindings: &[BindingRef<'_, VulkanBuffer>],
+        timeout: Timeout,
+        wait: Option<(vk::Semaphore, u64)>,
+    ) -> Result<VulkanEvent, SubmitFailure<VulkanEvent>> {
+        let shared = &self.shared;
+        let reject = SubmitFailure::Rejected;
+        shared.check_live().map_err(reject)?;
+        // Vulkan has no cancel primitive, so a finite deadline is refused before admission rather
+        // than latched against retained resources (ADR 0006).
+        if let Timeout::AfterNs(_) = timeout {
+            return Err(reject(BackendError::DeadlineExpired));
+        }
+        if bindings.is_empty() || bindings.len() > shared.physical.tuning.max_bindings() as usize {
+            return Err(reject(BackendError::ResourceLimit));
+        }
+        if !Rc::ptr_eq(&queue.context, &program.context) {
+            return Err(reject(BackendError::InvalidArgument));
+        }
+        let context = &queue.context;
+        let plan = &program.plan;
+
+        // Per-binding reasons (bounds, access, slot) are reported before the aggregate count
+        // check so a host learns the most specific rejection first.
+        let offset_alignment = shared
+            .physical
+            .limits
+            .min_storage_buffer_offset_alignment
+            .max(WORD_BYTES);
+        let tuning = shared.physical.tuning;
+        let mut descriptors = vec![vk::DescriptorBufferInfo::default(); tuning.buffers as usize];
+        let mut seen = 0_u32;
+        for binding in bindings {
+            if !Rc::ptr_eq(&binding.buffer.context, context) {
+                return Err(reject(BackendError::InvalidArgument));
+            }
+            if !binding.buffer.desc.allows_access(binding.access) {
+                return Err(reject(BackendError::PermissionDenied));
+            }
+            let (start, _) =
+                Self::checked_range(binding.buffer, binding.range.offset, binding.range.bytes())
+                    .map_err(reject)?;
+            let index = plan
+                .slots
+                .iter()
+                .position(|slot| slot.slot == binding.slot)
+                .ok_or(reject(BackendError::Incompatible))?;
+            if seen & (1 << index) != 0 {
+                return Err(reject(BackendError::InvalidArgument));
+            }
+            seen |= 1 << index;
+            let slot_plan = &plan.slots[index];
+            let expected_access = match slot_plan.role {
+                SlotRole::Input => AccessMode::Read,
+                SlotRole::Output => AccessMode::Write,
+            };
+            if binding.access != expected_access {
+                return Err(reject(BackendError::Incompatible));
+            }
+            // The descriptor covers the range directly: exact tensor bytes, word- and
+            // `minStorageBufferOffsetAlignment`-aligned start. Byte-storage tensors are
+            // addressed by whole words, so their descriptor range extends to the containing
+            // word; the allocation behind every buffer is word-sized so that word exists.
+            if binding.range.bytes() != slot_plan.byte_len || (start as u64) % offset_alignment != 0
+            {
+                return Err(reject(BackendError::Incompatible));
+            }
+            descriptors[index] = vk::DescriptorBufferInfo {
+                buffer: binding.buffer.buffer,
+                offset: start as u64,
+                range: binding.range.bytes().div_ceil(WORD_BYTES) * WORD_BYTES,
+            };
+        }
+        if bindings.len() != plan.slots.len() {
+            return Err(reject(BackendError::Incompatible));
+        }
+        // The arena follows the slots; every element the program never addresses is filled
+        // with the first bound buffer so the whole array is valid.
+        if let Some(arena) = &program.arena {
+            descriptors[plan.arena_buffer_index() as usize] = vk::DescriptorBufferInfo {
+                buffer: arena.buffer,
+                offset: 0,
+                range: arena.bytes,
+            };
+        }
+        let filler = descriptors[0];
+        for descriptor in &mut descriptors[plan.buffer_count() as usize..] {
+            *descriptor = filler;
+        }
+        // A TOSA graph's inputs and outputs are distinct tensors, so one allocation may back
+        // several read-only slots but never a written slot together with any other slot: that
+        // aliasing is a program incompatibility, reported here rather than as a transient `Busy`
+        // from the in-flight gates below.
+        for (index, binding) in bindings.iter().enumerate() {
+            let aliased = bindings[..index].iter().any(|prior| {
+                Rc::ptr_eq(&prior.buffer.state, &binding.buffer.state)
+                    && (prior.access != AccessMode::Read || binding.access != AccessMode::Read)
+            });
+            if aliased {
+                return Err(reject(BackendError::Incompatible));
+            }
+        }
+
+        let slot_index = context
+            .claim_slot()
+            .ok_or(reject(BackendError::ResourceLimit))?;
+        let mut guards: [Option<Guard>; MAX_BINDINGS_PER_SUBMISSION as usize] =
+            [const { None }; MAX_BINDINGS_PER_SUBMISSION as usize];
+        for (index, binding) in bindings.iter().enumerate() {
+            let exclusive = binding.access != AccessMode::Read;
+            // Aliasing with a written slot was rejected above, so a conflict here can only come
+            // from another in-flight submission: a transient `Busy`.
+            match Guard::acquire(&binding.buffer.state, exclusive) {
+                Ok(guard) => guards[index] = Some(guard),
+                Err(error) => {
+                    drop(guards);
+                    context.release_slot(slot_index);
+                    return Err(reject(error));
+                }
+            }
+        }
+
+        let slot = &context.slots[slot_index as usize];
+        match self.record_and_submit(slot, program, &descriptors, wait) {
+            Ok(()) => {}
+            Err(vk::Result::ERROR_DEVICE_LOST) => {
+                // Past the admission boundary with an ambiguous outcome: the event owns the slot
+                // and latches the loss; the instance is poisoned (ADR 0006).
+                shared.poisoned.set(true);
+                program
+                    .state
+                    .in_flight
+                    .set(program.state.in_flight.get() + 1);
+                increment(&shared.counters.events, 1);
+                let event = VulkanEvent {
+                    context: Rc::clone(context),
+                    slot: slot_index,
+                    program: Rc::clone(&program.state),
+                    guards: RefCell::new(guards),
+                    latched: Cell::new(None),
+                    released: Cell::new(false),
+                };
+                event.latch(EventState::Failed(BackendError::DeviceLost));
+                return Err(SubmitFailure::Indeterminate {
+                    error: BackendError::DeviceLost,
+                    event,
+                });
+            }
+            Err(result) => {
+                // Recording and submission failures before the queue accepted the work leave
+                // every resource untouched (Vulkan guarantees this for out-of-memory results).
+                drop(guards);
+                context.release_slot(slot_index);
+                return Err(reject(shared.fail(result)));
+            }
+        }
+        program
+            .state
+            .in_flight
+            .set(program.state.in_flight.get() + 1);
+        increment(
+            &shared.counters.direct_binding_admissions,
+            bindings.len() as u64,
+        );
+        increment(&shared.counters.events, 1);
+        Ok(VulkanEvent {
+            context: Rc::clone(context),
+            slot: slot_index,
+            program: Rc::clone(&program.state),
+            guards: RefCell::new(guards),
+            latched: Cell::new(None),
+            released: Cell::new(false),
+        })
+    }
+
+    /// Record every dispatch of `program` for one claimed slot and submit it with the slot's
+    /// fence.
+    fn record_and_submit(
+        &self,
+        slot: &Slot,
+        program: &VulkanProgram,
+        descriptors: &[vk::DescriptorBufferInfo],
+        wait: Option<(vk::Semaphore, u64)>,
+    ) -> Result<(), vk::Result> {
+        let shared = &self.shared;
+        let device = &shared.device;
+        // One write covers the whole descriptor array: bound slots, the arena, and valid
+        // filler for elements this program never addresses.
+        let write = vk::WriteDescriptorSet::default()
+            .dst_set(slot.descriptor_set)
+            .dst_binding(0)
+            .dst_array_element(0)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .buffer_info(descriptors);
+        let begin = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        // Between dependent dispatches. A `COMPUTE_SHADER → COMPUTE_SHADER` barrier is an
+        // execution dependency on every prior compute command, which alone orders a later write
+        // after earlier reads (WAR: an arena region reused after its last reader). The access
+        // masks add the memory dependency the RAW and WAW cases need: prior storage writes made
+        // available, then visible to the next dispatch's storage reads and writes. Read accesses
+        // never appear in a source mask because a read leaves nothing to make available.
+        let compute_barrier = [vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .dst_access_mask(
+                vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
+            )];
+        let compute_dependency = vk::DependencyInfo::default().memory_barriers(&compute_barrier);
+        // After the last dispatch: make the shader's storage writes visible to host reads once
+        // the fence signals, and to the staging copies a later `read_buffer`/`write_buffer` of a
+        // device-local buffer submits (there is no implicit dependency between submissions).
+        let host_barrier = [vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::HOST | vk::PipelineStageFlags2::COPY)
+            .dst_access_mask(
+                vk::AccessFlags2::HOST_READ
+                    | vk::AccessFlags2::TRANSFER_READ
+                    | vk::AccessFlags2::TRANSFER_WRITE,
+            )];
+        let host_dependency = vk::DependencyInfo::default().memory_barriers(&host_barrier);
+        let submit_buffers =
+            [vk::CommandBufferSubmitInfo::default().command_buffer(slot.command_buffer)];
+        // A gated submission's first dispatch waits for the gate's value; everything the host
+        // wrote before signalling it is then visible to the device (the semaphore signal operation
+        // is a host-to-device memory dependency).
+        let waits: Vec<vk::SemaphoreSubmitInfo> = wait
+            .map(|(semaphore, value)| {
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(semaphore)
+                    .value(value)
+                    .stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            })
+            .into_iter()
+            .collect();
+        let submits = [vk::SubmitInfo2::default()
+            .wait_semaphore_infos(&waits)
+            .command_buffer_infos(&submit_buffers)];
+        // SAFETY: the slot is free (no submission references its command buffer, fence, or
+        // descriptor set), the descriptor infos name live buffers whose ranges were validated,
+        // every pipeline is live and in-flight-counted by the caller, and the pool flag lets
+        // `begin_command_buffer` reset the buffer implicitly. Host writes made before this
+        // submission are visible to the device by the implicit host-write ordering guarantee.
+        unsafe {
+            device.update_descriptor_sets(std::slice::from_ref(&write), &[]);
+            device.reset_fences(&[slot.fence])?;
+            device.begin_command_buffer(slot.command_buffer, &begin)?;
+            device.cmd_bind_descriptor_sets(
+                slot.command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                shared.pipeline_layout,
+                0,
+                &[slot.descriptor_set],
+                &[],
+            );
+            for dispatch in &program.dispatches {
+                if dispatch.barrier_before {
+                    device.cmd_pipeline_barrier2(slot.command_buffer, &compute_dependency);
+                }
+                device.cmd_bind_pipeline(
+                    slot.command_buffer,
+                    vk::PipelineBindPoint::COMPUTE,
+                    dispatch.pipeline,
+                );
+                device.cmd_dispatch(
+                    slot.command_buffer,
+                    dispatch.workgroups[0],
+                    dispatch.workgroups[1],
+                    dispatch.workgroups[2],
+                );
+            }
+            device.cmd_pipeline_barrier2(slot.command_buffer, &host_dependency);
+            device.end_command_buffer(slot.command_buffer)?;
+            device.queue_submit2(shared.queue, &submits, slot.fence)
+        }
+    }
+
+    /// Upload every constant of `plan` into `arena` through the context's staging path.
+    fn upload_constants(
+        &self,
+        context: &ContextInner,
+        arena: &Arena,
+        plan: &ProgramPlan,
+    ) -> Result<(), BackendError> {
+        let shared = &self.shared;
+        let largest = plan
+            .constants
+            .iter()
+            .map(|constant| constant.bytes.len() as u64)
+            .max()
+            .unwrap_or(0);
+        if largest == 0 {
+            return Ok(());
+        }
+        if let Some(mapped) = arena.mapped {
+            for constant in &plan.constants {
+                let offset =
+                    usize::try_from(constant.offset).map_err(|_| BackendError::OutOfBounds)?;
+                // SAFETY: the arena was just created with `plan.arena_bytes` bytes, every
+                // constant's region lies inside it (lowering placed them), the mapping covers
+                // the whole allocation, and nothing else references the arena yet. Coherent
+                // memory needs no flush.
+                let target = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        mapped.as_ptr().add(offset),
+                        constant.bytes.len(),
+                    )
+                };
+                target.copy_from_slice(&constant.bytes);
+            }
+            return Ok(());
+        }
+        let mut staging = Staging::new(shared, largest.min(STAGING_BYTES))?;
+        for constant in &plan.constants {
+            write_through_staging(
+                context,
+                arena.buffer,
+                constant.offset,
+                constant.bytes.as_slice(),
+                constant.bytes.len() as u64,
+                &mut staging,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// Destroys pipelines and the arena of a program whose creation fails midway.
+struct PartialProgram<'a> {
+    shared: &'a Shared,
+    pipelines: Vec<vk::Pipeline>,
+    arena: Option<Arena>,
+}
+
+impl Drop for PartialProgram<'_> {
+    fn drop(&mut self) {
+        // SAFETY: every handle here was created by `load_program` and not yet handed to a
+        // program; nothing references them.
+        unsafe {
+            for pipeline in self.pipelines.drain(..) {
+                if pipeline != vk::Pipeline::null() {
+                    self.shared.device.destroy_pipeline(pipeline, None);
+                }
+            }
+            if let Some(arena) = self.arena.take() {
+                self.shared.device.destroy_buffer(arena.buffer, None);
+                self.shared.device.free_memory(arena.memory, None);
+            }
+        }
+    }
+}
+
+impl TosaCapabilityProvider for VulkanAccelerator {
+    fn tosa_capabilities(&self) -> &'static [CapabilityDescriptor] {
+        // Neither tier needs a device feature (ADR 0008, ADR 0009): every conversion is
+        // crate-owned integer and binary32 code, so both are advertised on every device the
+        // backend opens, with numerics identical everywhere.
+        &[
+            crate::VULKAN_TOSA_FP16_CAPABILITY,
+            crate::VULKAN_TOSA_FP8_CAPABILITY,
+        ]
+    }
+}
+
+impl Accelerator for VulkanAccelerator {
+    type Context = VulkanContext;
+    type Buffer = VulkanBuffer;
+    type Program = VulkanProgram;
+    type Queue = VulkanQueue;
+    type Event = VulkanEvent;
+
+    fn device_info(&self) -> Result<DeviceInfo, BackendError> {
+        Ok(self.shared.info)
+    }
+
+    fn create_context(&self, desc: ContextDesc) -> Result<Self::Context, BackendError> {
+        self.shared.info.validate_context_desc(desc)?;
+        self.shared.check_live()?;
+        if self.shared.counters.contexts.get() >= u64::from(MAX_CONTEXTS) {
+            return Err(BackendError::ResourceLimit);
+        }
+        let inner = ContextInner::create(&self.shared, self.next_id()?)?;
+        Ok(VulkanContext { inner })
+    }
+
+    fn destroy_context(&self, context: Self::Context) -> Result<(), ReleaseFailure<Self::Context>> {
+        if Rc::strong_count(&context.inner) > 1 {
+            return Err(ReleaseFailure::Rejected {
+                error: BackendError::Busy,
+                resource: context,
+            });
+        }
+        Ok(())
+    }
+
+    fn allocate_buffer(
+        &self,
+        context: &Self::Context,
+        desc: BufferDesc,
+    ) -> Result<AllocatedBuffer<Self::Buffer>, BackendError> {
+        let shared = &self.shared;
+        shared.info.validate_buffer_desc(desc)?;
+        shared.check_live()?;
+        if shared.counters.buffers.get()
+            >= u64::from(MAX_BUFFERS_PER_CONTEXT) * u64::from(MAX_CONTEXTS)
+        {
+            return Err(BackendError::ResourceLimit);
+        }
+        let memory_type = shared
+            .memory_plan
+            .for_domain(desc.domain)
+            .ok_or(BackendError::Unsupported)?;
+        // Mapped whenever the type allows: on a unified-memory device that includes `Device`.
+        let map = shared
+            .memory_plan
+            .is_mapped(&shared.physical.memory, desc.domain);
+        let raw = RawAllocation::create(shared, desc.bytes(), memory_type, map)?;
+        if raw.measured_alignment < desc.alignment() {
+            return Err(BackendError::ResourceLimit);
+        }
+        let mut properties = BufferProperties::DIRECT_BINDING;
+        if raw.mapped.is_some() {
+            properties |= BufferProperties::HOST_VISIBLE;
+        }
+        if raw
+            .memory_flags
+            .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+        {
+            properties |= BufferProperties::DEVICE_LOCAL;
+        }
+        let info = BufferInfo::new(
+            desc,
+            raw.allocation_bytes,
+            raw.measured_alignment,
+            properties,
+        )?;
+        let (buffer, memory, mapped) = raw.into_parts();
+        increment(&shared.counters.buffers, 1);
+        Ok(AllocatedBuffer::new(
+            VulkanBuffer {
+                context: Rc::clone(&context.inner),
+                desc,
+                buffer,
+                memory,
+                mapped,
+                imported: false,
+                state: Rc::new(BufferState::default()),
+            },
+            info,
+        ))
+    }
+
+    fn write_buffer(
+        &self,
+        buffer: &mut Self::Buffer,
+        offset: u64,
+        data: &dyn ByteSource,
+    ) -> Result<(), BackendError> {
+        if !buffer
+            .desc
+            .usage
+            .contains(BufferUsage::TRANSFER_DESTINATION)
+        {
+            return Err(BackendError::PermissionDenied);
+        }
+        if buffer.in_flight() != 0 {
+            return Err(BackendError::Busy);
+        }
+        self.shared.check_live()?;
+        let (start, end) = Self::checked_range(buffer, offset, data.len())?;
+        let len = end - start;
+        let Some(target) = buffer.mapped_at(start) else {
+            return self.staged_write(buffer, start as u64, data, len as u64);
+        };
+        // SAFETY: `target..target + len` is inside the persistent host-coherent mapping of a
+        // buffer that is exclusively borrowed and not in flight; the source is a distinct
+        // borrowed region. Coherent memory needs no flush.
+        let target = unsafe { std::slice::from_raw_parts_mut(target, len) };
+        match data.as_contiguous() {
+            Some(source) if source.len() == len => target.copy_from_slice(source),
+            Some(_) => return Err(BackendError::InvalidArgument),
+            None => data.read_at(0, target)?,
+        }
+        increment(&self.shared.counters.explicit_transfer_bytes, len as u64);
+        Ok(())
+    }
+
+    fn read_buffer(
+        &self,
+        buffer: &Self::Buffer,
+        offset: u64,
+        data: &mut dyn ByteSink,
+    ) -> Result<(), BackendError> {
+        if !buffer.desc.usage.contains(BufferUsage::TRANSFER_SOURCE) {
+            return Err(BackendError::PermissionDenied);
+        }
+        if buffer.in_flight() != 0 {
+            return Err(BackendError::Busy);
+        }
+        self.shared.check_live()?;
+        let (start, end) = Self::checked_range(buffer, offset, data.len())?;
+        let len = end - start;
+        let Some(source) = buffer.mapped_at(start) else {
+            return self.staged_read(buffer, start as u64, data, len as u64);
+        };
+        // SAFETY: the range is inside the mapping and the in-flight gate proved no submission
+        // still writes this buffer; every completed submission's writes were made host-visible
+        // by its command buffer's barrier before its fence signaled.
+        let source = unsafe { std::slice::from_raw_parts(source.cast_const(), len) };
+        match data.as_contiguous_mut() {
+            Some(target) if target.len() == len => target.copy_from_slice(source),
+            Some(_) => return Err(BackendError::InvalidArgument),
+            None => data.write_at(0, source)?,
+        }
+        increment(&self.shared.counters.explicit_transfer_bytes, len as u64);
+        Ok(())
+    }
+
+    fn free_buffer(&self, buffer: Self::Buffer) -> Result<(), ReleaseFailure<Self::Buffer>> {
+        if buffer.in_flight() != 0 {
+            return Err(ReleaseFailure::Rejected {
+                error: BackendError::Busy,
+                resource: buffer,
+            });
+        }
+        Ok(())
+    }
+
+    fn load_program(
+        &self,
+        context: &Self::Context,
+        artifact: ArtifactRef<'_>,
+    ) -> Result<Self::Program, BackendError> {
+        let shared = &self.shared;
+        if artifact.payload.len() > shared.info.limits.max_artifact_bytes {
+            return Err(BackendError::ResourceLimit);
+        }
+        if artifact.resident_bytes != REQUIRED_RESIDENT_BYTES {
+            return Err(BackendError::ResourceLimit);
+        }
+        if artifact.format != virtio_accel_tosa::ARTIFACT_FORMAT {
+            return Err(BackendError::Unsupported);
+        }
+        let target = virtio_accel_tosa::Target::from_identity(artifact.target)
+            .map_err(|_| BackendError::Incompatible)?;
+        shared.check_live()?;
+        if shared.counters.programs.get()
+            >= u64::from(MAX_PROGRAMS_PER_CONTEXT) * u64::from(MAX_CONTEXTS)
+        {
+            return Err(BackendError::ResourceLimit);
+        }
+        let mut owned = Vec::new();
+        let bytes = match artifact.payload.as_contiguous() {
+            Some(bytes) => bytes,
+            None => {
+                let len = usize::try_from(artifact.payload.len())
+                    .map_err(|_| BackendError::ResourceLimit)?;
+                owned
+                    .try_reserve_exact(len)
+                    .map_err(|_| BackendError::OutOfMemory)?;
+                owned.resize(len, 0);
+                artifact.payload.read_at(0, &mut owned)?;
+                &owned
+            }
+        };
+        let plan = lower_tosa(bytes, target).map_err(Self::lowering_error)?;
+        let tuning = shared.physical.tuning;
+        let limits = &shared.physical.limits;
+        // The plan's slots and arena must fit the descriptor array, and the arena one storage
+        // buffer descriptor.
+        if plan.buffer_count() > tuning.buffers
+            || plan.slots.len() > tuning.max_bindings() as usize
+            || plan.arena_bytes > u64::from(limits.max_storage_buffer_range)
+        {
+            return Err(BackendError::ResourceLimit);
+        }
+        let mut workgroups = Vec::with_capacity(plan.dispatches.len());
+        for dispatch in &plan.dispatches {
+            workgroups.push(
+                tuning
+                    .workgroups(dispatch.work, limits)
+                    .ok_or(BackendError::ResourceLimit)?,
+            );
+        }
+
+        let mut partial = PartialProgram {
+            shared,
+            pipelines: Vec::new(),
+            arena: None,
+        };
+        if plan.arena_bytes != 0 {
+            // Device-local when the device has such memory: intermediates never leave the GPU.
+            let (memory_type, map) = match shared.memory_plan.device {
+                Some(device) => (
+                    device,
+                    shared
+                        .memory_plan
+                        .is_mapped(&shared.physical.memory, MemoryDomain::Device),
+                ),
+                None => (shared.memory_plan.host, true),
+            };
+            let raw = RawAllocation::create(shared, plan.arena_bytes, memory_type, map)?;
+            let (buffer, memory, mapped) = raw.into_parts();
+            partial.arena = Some(Arena {
+                buffer,
+                memory,
+                bytes: plan.arena_bytes,
+                mapped,
+            });
+            self.upload_constants(
+                &context.inner,
+                partial.arena.as_ref().expect("arena set above"),
+                &plan,
+            )?;
+        }
+
+        // One shader module per distinct kernel variant, one pipeline per dispatch, created in
+        // a single call against the instance's pipeline cache.
+        let device = &shared.device;
+        let mut modules: Vec<(KernelKey, vk::ShaderModule)> = Vec::new();
+        let mut module_for = |key: KernelKey| -> Result<vk::ShaderModule, BackendError> {
+            if let Some((_, module)) = modules.iter().find(|(existing, _)| *existing == key) {
+                return Ok(*module);
+            }
+            let code = shared.module(key);
+            let module_info = vk::ShaderModuleCreateInfo::default().code(&code);
+            // SAFETY: `code` is the crate-assembled SPIR-V module, live for the call.
+            let module = unsafe { device.create_shader_module(&module_info, None) }
+                .map_err(|result| shared.fail(result))?;
+            modules.push((key, module));
+            Ok(module)
+        };
+        struct ModuleGuard<'a>(&'a ash::Device, Vec<vk::ShaderModule>);
+        impl Drop for ModuleGuard<'_> {
+            fn drop(&mut self) {
+                for module in self.1.drain(..) {
+                    // SAFETY: modules are no longer needed once pipeline creation returned (or
+                    // failed); each is destroyed exactly once.
+                    unsafe { self.0.destroy_shader_module(module, None) };
+                }
+            }
+        }
+        let mut stage_modules = Vec::with_capacity(plan.dispatches.len());
+        for dispatch in &plan.dispatches {
+            let key = tuning.key(dispatch.kernel);
+            debug_assert_eq!(dispatch.spec.len() as u32, key.spec_constant_count());
+            match module_for(key) {
+                Ok(module) => stage_modules.push(module),
+                Err(error) => {
+                    drop(ModuleGuard(
+                        device,
+                        modules.into_iter().map(|(_, m)| m).collect(),
+                    ));
+                    return Err(error);
+                }
+            }
+        }
+        let module_guard = ModuleGuard(device, modules.into_iter().map(|(_, m)| m).collect());
+        let entries: Vec<Vec<vk::SpecializationMapEntry>> = plan
+            .dispatches
+            .iter()
+            .map(|dispatch| {
+                (0..dispatch.spec.len() as u32)
+                    .map(|id| vk::SpecializationMapEntry {
+                        constant_id: id,
+                        offset: id * 4,
+                        size: 4,
+                    })
+                    .collect()
+            })
+            .collect();
+        let spec_data: Vec<Vec<u8>> = plan
+            .dispatches
+            .iter()
+            .map(|dispatch| {
+                dispatch
+                    .spec
+                    .iter()
+                    .flat_map(|word| word.to_ne_bytes())
+                    .collect()
+            })
+            .collect();
+        let specializations: Vec<vk::SpecializationInfo<'_>> = entries
+            .iter()
+            .zip(&spec_data)
+            .map(|(entries, data)| {
+                vk::SpecializationInfo::default()
+                    .map_entries(entries)
+                    .data(data)
+            })
+            .collect();
+        let stages: Vec<vk::PipelineShaderStageCreateInfo<'_>> = stage_modules
+            .iter()
+            .zip(&specializations)
+            .map(|(module, specialization)| {
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::COMPUTE)
+                    .module(*module)
+                    .name(c"main")
+                    .specialization_info(specialization)
+            })
+            .collect();
+        let pipeline_infos: Vec<vk::ComputePipelineCreateInfo<'_>> = stages
+            .iter()
+            .map(|stage| {
+                vk::ComputePipelineCreateInfo::default()
+                    .stage(*stage)
+                    .layout(shared.pipeline_layout)
+            })
+            .collect();
+        if !pipeline_infos.is_empty() {
+            // SAFETY: modules, layout, and cache are live; every pointed-to structure outlives
+            // the call. On failure ash returns the partially created array, whose non-null
+            // entries are destroyed by the partial-program guard.
+            let created = unsafe {
+                device.create_compute_pipelines(shared.pipeline_cache, &pipeline_infos, None)
+            };
+            match created {
+                Ok(pipelines) => partial.pipelines = pipelines,
+                Err((pipelines, result)) => {
+                    partial.pipelines = pipelines;
+                    drop(module_guard);
+                    return Err(shared.fail(result));
+                }
+            }
+        }
+        drop(module_guard);
+
+        let dispatches = partial
+            .pipelines
+            .drain(..)
+            .zip(&plan.dispatches)
+            .zip(workgroups)
+            .map(|((pipeline, dispatch), workgroups)| Dispatch {
+                pipeline,
+                workgroups,
+                barrier_before: dispatch.barrier_before,
+            })
+            .collect();
+        let arena = partial.arena.take();
+        increment(&shared.counters.programs, 1);
+        Ok(VulkanProgram {
+            context: Rc::clone(&context.inner),
+            dispatches,
+            arena,
+            plan,
+            state: Rc::new(ProgramState::default()),
+        })
+    }
+
+    fn unload_program(&self, program: Self::Program) -> Result<(), ReleaseFailure<Self::Program>> {
+        if program.state.in_flight.get() != 0 {
+            return Err(ReleaseFailure::Rejected {
+                error: BackendError::Busy,
+                resource: program,
+            });
+        }
+        Ok(())
+    }
+
+    fn create_queue(
+        &self,
+        context: &Self::Context,
+        desc: QueueDesc,
+    ) -> Result<Self::Queue, BackendError> {
+        self.shared.info.validate_queue_desc(desc)?;
+        self.shared.check_live()?;
+        if self.shared.counters.queues.get()
+            >= u64::from(MAX_QUEUES_PER_CONTEXT) * u64::from(MAX_CONTEXTS)
+        {
+            return Err(BackendError::ResourceLimit);
+        }
+        increment(&self.shared.counters.queues, 1);
+        Ok(VulkanQueue {
+            context: Rc::clone(&context.inner),
+        })
+    }
+
+    fn destroy_queue(&self, _queue: Self::Queue) -> Result<(), ReleaseFailure<Self::Queue>> {
+        Ok(())
+    }
+
+    fn submit(
+        &self,
+        queue: &Self::Queue,
+        program: &Self::Program,
+        bindings: &[BindingRef<'_, Self::Buffer>],
+        timeout: Timeout,
+    ) -> Result<Self::Event, SubmitFailure<Self::Event>> {
+        self.submit_waiting(queue, program, bindings, timeout, None)
+    }
+
+    fn poll_event(&self, event: &Self::Event) -> Result<EventState, BackendError> {
+        event.poll()
+    }
+
+    fn destroy_event(&self, event: Self::Event) -> Result<(), ReleaseFailure<Self::Event>> {
+        match event.poll() {
+            Ok(EventState::Pending) => Err(ReleaseFailure::Rejected {
+                error: BackendError::Busy,
+                resource: event,
+            }),
+            Ok(_) => {
+                event.release();
+                Ok(())
+            }
+            Err(error) => Err(ReleaseFailure::Rejected {
+                error,
+                resource: event,
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The memory types a Radeon 860M (RADV, Mesa 26.1.8) reports. The ordinary types come first
+    /// and `VK_AMD_device_coherent_memory` appends its own after them, which is what makes a
+    /// last-wins tie-break select exactly the types that require an enabled feature.
+    fn amd_device_coherent_memory() -> vk::PhysicalDeviceMemoryProperties {
+        use vk::MemoryPropertyFlags as Flags;
+        let amd = Flags::DEVICE_COHERENT_AMD | Flags::DEVICE_UNCACHED_AMD;
+        let host_coherent = Flags::HOST_VISIBLE | Flags::HOST_COHERENT;
+        let layout = [
+            (Flags::DEVICE_LOCAL, 1),
+            (Flags::DEVICE_LOCAL, 1),
+            (host_coherent, 0),
+            (Flags::DEVICE_LOCAL | host_coherent, 1),
+            (Flags::DEVICE_LOCAL | host_coherent, 1),
+            (host_coherent | Flags::HOST_CACHED, 0),
+            (host_coherent | Flags::HOST_CACHED, 0),
+            (Flags::DEVICE_LOCAL | amd, 1),
+            (host_coherent | amd, 0),
+            (Flags::DEVICE_LOCAL | host_coherent | amd, 1),
+            (host_coherent | Flags::HOST_CACHED | amd, 0),
+        ];
+        let mut memory = vk::PhysicalDeviceMemoryProperties::default();
+        for (slot, (flags, heap)) in layout.iter().enumerate() {
+            memory.memory_types[slot] = vk::MemoryType::default()
+                .property_flags(*flags)
+                .heap_index(*heap);
+        }
+        memory.memory_type_count =
+            u32::try_from(layout.len()).expect("the fixture declares eleven memory types");
+        memory.memory_heap_count = 2;
+        memory
+    }
+
+    /// `VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD` may not be allocated from unless the
+    /// `deviceCoherentMemory` feature is enabled, which this backend does not request, and the
+    /// spec advises against that memory anyway: it is uncached, so repeated accesses to nearby
+    /// locations — a tiled MATMUL — are slower. No CI device exposes these types, so the layout
+    /// is a fixture rather than a live probe.
+    #[test]
+    fn never_selects_memory_that_requires_an_unrequested_feature() {
+        let memory = amd_device_coherent_memory();
+        let plan = MemoryPlan::select(&memory, u32::MAX, false)
+            .expect("a host-visible coherent type is present in the fixture");
+
+        for (domain, selected) in [
+            ("host", Some(plan.host)),
+            ("device", plan.device),
+            ("shared", plan.shared),
+        ] {
+            let Some(index) = selected else { continue };
+            let flags = memory.memory_types[index as usize].property_flags;
+            assert!(
+                !flags.intersects(
+                    vk::MemoryPropertyFlags::DEVICE_COHERENT_AMD
+                        | vk::MemoryPropertyFlags::RDMA_CAPABLE_NV
+                ),
+                "{domain} domain selected memory type {index}, which requires a feature the \
+                 backend never enables: property flags {:#x}",
+                flags.as_raw(),
+            );
+        }
+    }
+
+    /// Excluding those types must not cost a domain: the AMD extension adds its memory types
+    /// alongside the ordinary ones rather than replacing them, so every domain stays reachable.
+    #[test]
+    fn excluding_them_strands_no_memory_domain() {
+        let plan = MemoryPlan::select(&amd_device_coherent_memory(), u32::MAX, false)
+            .expect("a host-visible coherent type is present in the fixture");
+        assert!(plan.device.is_some(), "device-local domain lost");
+        assert!(plan.shared.is_some(), "shared domain lost");
+    }
+}
