@@ -92,6 +92,9 @@ struct Tuning {
     /// The device advertises the exact subgroup cooperative-matrix shape used by the NVFP4
     /// projection kernel: FP16 8x16x16 with FP32 accumulation.
     cooperative_nvfp4: bool,
+    /// Fixed 32-lane subgroups with arithmetic reductions remove shared-memory synchronization
+    /// from the scalar NVFP4 decode kernel.
+    subgroup_nvfp4: bool,
 }
 
 impl Tuning {
@@ -135,6 +138,7 @@ impl Tuning {
             matmul_tile,
             buffers: descriptors,
             cooperative_nvfp4: false,
+            subgroup_nvfp4: false,
         })
     }
 
@@ -145,9 +149,10 @@ impl Tuning {
 
     fn key(self, kernel: KernelSpec) -> KernelKey {
         match kernel {
-            KernelSpec::Nvfp4Matmul => KernelKey::Nvfp4Matmul {
+            KernelSpec::Nvfp4Matmul { cooperative } => KernelKey::Nvfp4Matmul {
                 buffers: self.buffers,
-                cooperative: self.cooperative_nvfp4,
+                cooperative: cooperative && self.cooperative_nvfp4,
+                subgroup: !(cooperative && self.cooperative_nvfp4) && self.subgroup_nvfp4,
             },
             KernelSpec::Elementwise {
                 op,
@@ -202,7 +207,12 @@ impl Tuning {
     }
 
     /// Workgroup counts for `work`, or `None` when they exceed the device's dispatch limits.
-    fn workgroups(self, work: Work, limits: &vk::PhysicalDeviceLimits) -> Option<[u32; 3]> {
+    fn workgroups(
+        self,
+        work: Work,
+        kernel: KernelSpec,
+        limits: &vk::PhysicalDeviceLimits,
+    ) -> Option<[u32; 3]> {
         let max = limits.max_compute_work_group_count;
         match work {
             Work::Linear(count) => Some([
@@ -220,11 +230,9 @@ impl Tuning {
                 (groups[0] <= max[0] && groups[2] <= max[2]).then_some(groups)
             }
             Work::Nvfp4Matmul { m, n } => {
-                let columns = if self.cooperative_nvfp4 {
-                    n.div_ceil(16)
-                } else {
-                    n
-                };
+                let cooperative = matches!(kernel, KernelSpec::Nvfp4Matmul { cooperative: true })
+                    && self.cooperative_nvfp4;
+                let columns = if cooperative { n.div_ceil(16) } else { n };
                 let groups = [columns, m, 1];
                 (groups[0] <= max[0] && groups[1] <= max[1]).then_some(groups)
             }
@@ -395,6 +403,13 @@ impl PhysicalDeviceRecord {
             && supports_extension(instance, handle, ash::khr::cooperative_matrix::NAME)
             && supports_nvfp4_cooperative_matrix(owner, handle);
         tuning.cooperative_nvfp4 = cooperative_nvfp4;
+        tuning.subgroup_nvfp4 = subgroup.subgroup_size == 32
+            && subgroup
+                .supported_stages
+                .contains(vk::ShaderStageFlags::COMPUTE)
+            && subgroup
+                .supported_operations
+                .contains(vk::SubgroupFeatureFlags::ARITHMETIC);
         let name = CStr::from_bytes_until_nul(bytemuck_i8_to_u8(&properties.device_name))
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|_| String::from("vulkan-device"));
@@ -2921,7 +2936,7 @@ impl Accelerator for VulkanAccelerator {
         for dispatch in &plan.dispatches {
             workgroups.push(
                 tuning
-                    .workgroups(dispatch.work, limits)
+                    .workgroups(dispatch.work, dispatch.kernel, limits)
                     .ok_or(BackendError::ResourceLimit)?,
             );
         }

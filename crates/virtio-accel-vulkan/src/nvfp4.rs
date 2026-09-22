@@ -223,7 +223,7 @@ pub(crate) fn lower_nvfp4(bytes: &[u8]) -> Result<ProgramPlan, LoweringError> {
             arena_bytes: 0,
             constants: Vec::new(),
             dispatches: vec![DispatchPlan {
-                kernel: KernelSpec::Nvfp4Matmul,
+                kernel: KernelSpec::Nvfp4Matmul { cooperative: false },
                 spec: nvfp4_matmul_spec(
                     operand(0),
                     &packed,
@@ -277,7 +277,9 @@ pub(crate) fn lower_nvfp4(bytes: &[u8]) -> Result<ProgramPlan, LoweringError> {
         arena_bytes: 0,
         constants: Vec::new(),
         dispatches: vec![DispatchPlan {
-            kernel: KernelSpec::Nvfp4Matmul,
+            kernel: KernelSpec::Nvfp4Matmul {
+                cooperative: weight_mode == 0 && m >= 8,
+            },
             spec: nvfp4_matmul_spec(
                 operand(0),
                 &[operand(1)],

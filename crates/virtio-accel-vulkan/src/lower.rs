@@ -272,7 +272,11 @@ pub(crate) const ARENA_ALIGNMENT: u64 = 256;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum KernelSpec {
     /// Native packed E2M1 weights with one E4M3 scale per sixteen weights.
-    Nvfp4Matmul,
+    Nvfp4Matmul {
+        /// Shared weights and enough tokens make the cooperative-matrix path eligible. Device
+        /// tuning still falls back when the exact matrix shape is unavailable.
+        cooperative: bool,
+    },
     Elementwise {
         op: ElementwiseOp,
         float: Storage,
