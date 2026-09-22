@@ -4012,9 +4012,9 @@ fn assemble_nvfp4_matmul_cooperative(buffers: u32) -> Vec<u32> {
     b.finish([32, 1, 1])
 }
 
-/// Subgroup-reduced scalar NVFP4 projection. A fixed 32-lane subgroup folds a complete output
-/// row without shared memory or workgroup barriers; devices without subgroup arithmetic retain
-/// the portable 64-lane shared-memory reduction below.
+/// Subgroup-reduced scalar NVFP4 projection. A fixed 32-lane subgroup folds four output rows,
+/// reusing every activation load across them and cutting dispatch count by four. Devices without
+/// subgroup arithmetic retain the portable 64-lane shared-memory reduction below.
 fn assemble_nvfp4_matmul_subgroup(buffers: u32) -> Vec<u32> {
     let mut b = Builder::new();
     b.enable_subgroup_arithmetic();
@@ -4036,7 +4036,7 @@ fn assemble_nvfp4_matmul_subgroup(buffers: u32) -> Vec<u32> {
     let u32_ty = b.u32_ty();
     let f32_ty = b.f32_ty();
     let block_var = b.local(u32_ty);
-    let accumulator = b.local(f32_ty);
+    let accumulators = core::array::from_fn::<_, 4, _>(|_| b.local(f32_ty));
     let fp4 = b.private_u32_array(&[
         0.0f32.to_bits(),
         0.5f32.to_bits(),
@@ -4056,7 +4056,7 @@ fn assemble_nvfp4_matmul_subgroup(buffers: u32) -> Vec<u32> {
         (-6.0f32).to_bits(),
     ]);
     let lid = b.builtin_component(local_id, 0);
-    let out_row = b.builtin_component(group_id, 0);
+    let output_group = b.builtin_component(group_id, 0);
     let token = b.builtin_component(group_id, 1);
     let zero = b.c_u32(0);
     let zero_f = b.c_f32(0.0);
@@ -4066,6 +4066,7 @@ fn assemble_nvfp4_matmul_subgroup(buffers: u32) -> Vec<u32> {
     let thirty_two = b.c_u32(32);
     let nibble_mask = b.c_u32(15);
     let blocks = b.udiv(k, sixteen);
+    let output_base = b.imul(output_group, four);
     let mut packed_operand = packed[0];
     let mut scale_operand = block_scales[0];
     for index in 1..6 {
@@ -4080,46 +4081,67 @@ fn assemble_nvfp4_matmul_subgroup(buffers: u32) -> Vec<u32> {
     let contiguous = b.ieq(weight_mode, contiguous_mode);
     let weight_batch = b.select_u32(contiguous, token, zero);
     let batch_rows = b.imul(weight_batch, n);
-    let weight_row = b.iadd(batch_rows, out_row);
-    let row_blocks = b.imul(weight_row, blocks);
     let two = b.c_u32(2);
     let row_bytes = b.udiv(k, two);
-    let packed_row = b.imul(weight_row, row_bytes);
     let activation_row = b.imul(token, k);
-    b.store(accumulator, zero_f);
+    let output_rows = core::array::from_fn::<_, 4, _>(|index| {
+        let offset = b.c_u32(index as u32);
+        b.iadd(output_base, offset)
+    });
+    let row_valid = output_rows.map(|row| b.ult(row, n));
+    let weight_rows = core::array::from_fn::<_, 4, _>(|index| {
+        let safe_row = b.select_u32(row_valid[index], output_rows[index], zero);
+        b.iadd(batch_rows, safe_row)
+    });
+    let row_blocks = weight_rows.map(|row| b.imul(row, blocks));
+    let packed_rows = weight_rows.map(|row| b.imul(row, row_bytes));
+    for accumulator in accumulators {
+        b.store(accumulator, zero_f);
+    }
     b.store(block_var, lid);
     let (scope, block) = b.begin_loop(block_var, blocks);
-    let scale_element = b.iadd(row_blocks, block);
-    let scale_bits = b.load_byte_bits(array, scale_operand, scale_element);
-    let scale = b.widen_fp8(Fp8Format::E4M3, scale_bits);
+    let scales = core::array::from_fn::<_, 4, _>(|index| {
+        let scale_element = b.iadd(row_blocks[index], block);
+        let scale_bits = b.load_byte_bits(array, scale_operand, scale_element);
+        b.widen_fp8(Fp8Format::E4M3, scale_bits)
+    });
     let packed_block = b.imul(block, eight);
-    let packed_base = b.iadd(packed_row, packed_block);
+    let packed_bases = packed_rows.map(|row| b.iadd(row, packed_block));
     let activation_block = b.imul(block, sixteen);
     let activation_base = b.iadd(activation_row, activation_block);
     for byte in 0..8 {
         let byte_offset = b.c_u32(byte);
-        let byte_index = b.iadd(packed_base, byte_offset);
-        let codes = b.load_byte_bits(array, packed_operand, byte_index);
-        let low = b.band(codes, nibble_mask);
-        let high = b.shr(codes, four);
-        for (lane, code) in [low, high].into_iter().enumerate() {
-            let pointer_ty = b.pointer(STORAGE_CLASS_PRIVATE, u32_ty);
-            let pointer = b.access_chain(pointer_ty, fp4, &[code]);
-            let weight_bits = b.load(u32_ty, pointer);
-            let weight = b.bitcast_f32(weight_bits);
-            let weight = b.fmul(weight, scale);
+        let codes = core::array::from_fn::<_, 4, _>(|index| {
+            let byte_index = b.iadd(packed_bases[index], byte_offset);
+            b.load_byte_bits(array, packed_operand, byte_index)
+        });
+        for lane in 0..2 {
             let inner = b.c_u32(byte * 2 + lane as u32);
             let element = b.iadd(activation_base, inner);
             let value = b.load_f32(array, activation, element);
-            let acc = b.load(f32_ty, accumulator);
-            let next = b.fma(value, weight, acc);
-            b.store(accumulator, next);
+            for index in 0..4 {
+                let code = if lane == 0 {
+                    b.band(codes[index], nibble_mask)
+                } else {
+                    b.shr(codes[index], four)
+                };
+                let pointer_ty = b.pointer(STORAGE_CLASS_PRIVATE, u32_ty);
+                let pointer = b.access_chain(pointer_ty, fp4, &[code]);
+                let weight_bits = b.load(u32_ty, pointer);
+                let weight = b.bitcast_f32(weight_bits);
+                let weight = b.fmul(weight, scales[index]);
+                let acc = b.load(f32_ty, accumulators[index]);
+                let next = b.fma(value, weight, acc);
+                b.store(accumulators[index], next);
+            }
         }
     }
     b.end_loop(scope, block_var, thirty_two);
 
-    let partial = b.load(f32_ty, accumulator);
-    let sum = b.subgroup_sum_f32(partial);
+    let sums = accumulators.map(|accumulator| {
+        let partial = b.load(f32_ty, accumulator);
+        b.subgroup_sum_f32(partial)
+    });
 
     let first = b.ieq(lid, zero);
     b.if_then(first, |b| {
@@ -4127,22 +4149,26 @@ fn assemble_nvfp4_matmul_subgroup(buffers: u32) -> Vec<u32> {
         let batched = b.ine(weight_mode, shared_mode);
         let tensor_scale_index = b.select_u32(batched, token, zero);
         let tensor_scale = b.load_f32(array, tensor_scale, tensor_scale_index);
-        let sum = b.fmul(sum, tensor_scale);
-        let negated = b.fneg(sum);
-        let exp = b.ext_f32(GLSL_EXP, &[negated]);
-        let one_f = b.c_f32(1.0);
-        let denominator = b.fadd(one_f, exp);
-        let sigmoid = b.fdiv(one_f, denominator);
-        let silu = b.fmul(sum, sigmoid);
-        let silu_mode = b.c_u32(1);
-        let sigmoid_mode = b.c_u32(2);
-        let is_silu = b.ieq(epilogue, silu_mode);
-        let is_sigmoid = b.ieq(epilogue, sigmoid_mode);
-        let sum = b.select_f32(is_silu, silu, sum);
-        let sum = b.select_f32(is_sigmoid, sigmoid, sum);
-        let element = b.imul(token, n);
-        let element = b.iadd(element, out_row);
-        b.store_f32(array, output, element, sum);
+        for index in 0..4 {
+            b.if_then(row_valid[index], |b| {
+                let sum = b.fmul(sums[index], tensor_scale);
+                let negated = b.fneg(sum);
+                let exp = b.ext_f32(GLSL_EXP, &[negated]);
+                let one_f = b.c_f32(1.0);
+                let denominator = b.fadd(one_f, exp);
+                let sigmoid = b.fdiv(one_f, denominator);
+                let silu = b.fmul(sum, sigmoid);
+                let silu_mode = b.c_u32(1);
+                let sigmoid_mode = b.c_u32(2);
+                let is_silu = b.ieq(epilogue, silu_mode);
+                let is_sigmoid = b.ieq(epilogue, sigmoid_mode);
+                let sum = b.select_f32(is_silu, silu, sum);
+                let sum = b.select_f32(is_sigmoid, sigmoid, sum);
+                let element = b.imul(token, n);
+                let element = b.iadd(element, output_rows[index]);
+                b.store_f32(array, output, element, sum);
+            });
+        }
     });
     b.end_main();
     b.finish([32, 1, 1])
