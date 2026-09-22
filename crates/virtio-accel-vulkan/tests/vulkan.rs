@@ -381,7 +381,8 @@ fn executes_the_shared_fp32_matmul_in_every_advertised_domain() {
 
 #[test]
 fn native_nvfp4_matmul_matches_its_f32_expansion() {
-    const M: usize = 2;
+    // Eight rows exercise the native cooperative tile and the ninth verifies tail padding.
+    const M: usize = 9;
     const N: usize = 3;
     const K: usize = 16;
     let activation: Vec<f32> = (0..M * K).map(|i| i as f32 / 7.0 - 1.0).collect();

@@ -3818,9 +3818,9 @@ fn assemble_matmul_stream(rhs_storage: Storage, output_storage: Storage, buffers
 }
 
 /// Cooperative-matrix NVFP4 projection for devices that advertise subgroup FP16 8x16x16 with
-/// FP32 accumulation. One subgroup owns sixteen output rows. Packed FP4 weights are decoded once
-/// into a binary16 workgroup tile, then the driver lowers `OpCooperativeMatrixMulAddKHR` to the
-/// architecture's matrix engine (XMX on Intel Xe2/Xe3).
+/// FP32 accumulation. One subgroup owns an 8-token by 16-output tile. Packed FP4 weights are
+/// decoded once into a binary16 workgroup tile, then the driver lowers
+/// `OpCooperativeMatrixMulAddKHR` to the architecture's matrix engine (XMX on Intel Xe2/Xe3).
 fn assemble_nvfp4_matmul_cooperative(buffers: u32) -> Vec<u32> {
     let mut b = Builder::new();
     b.enable_cooperative_matrix();
@@ -3830,7 +3830,7 @@ fn assemble_nvfp4_matmul_cooperative(buffers: u32) -> Vec<u32> {
     let block_scales = core::array::from_fn::<_, 6, _>(|_| b.spec_operand());
     let tensor_scale = b.spec_operand();
     let output = b.spec_operand();
-    let _m = b.spec_u32(1);
+    let m = b.spec_u32(1);
     let n = b.spec_u32(1);
     let k = b.spec_u32(16);
     let epilogue = b.spec_u32(0);
@@ -3871,7 +3871,7 @@ fn assemble_nvfp4_matmul_cooperative(buffers: u32) -> Vec<u32> {
     ]);
     let lid = b.builtin_component(local_id, 0);
     let output_tile = b.builtin_component(group_id, 0);
-    let token = b.builtin_component(group_id, 1);
+    let token_tile = b.builtin_component(group_id, 1);
     let zero = b.c_u32(0);
     let one = b.c_u32(1);
     let two = b.c_u32(2);
@@ -3882,20 +3882,10 @@ fn assemble_nvfp4_matmul_cooperative(buffers: u32) -> Vec<u32> {
     let zero_h = b.f32_to_f16(zero_f);
     let blocks = b.udiv(k, sixteen);
     let output_base = b.imul(output_tile, sixteen);
-
-    let mut packed_operand = packed[0];
-    let mut scale_operand = block_scales[0];
-    for index in 1..6 {
-        let index_id = b.c_u32(index as u32);
-        let selected = b.ieq(token, index_id);
-        packed_operand.0 = b.select_u32(selected, packed[index].0, packed_operand.0);
-        packed_operand.1 = b.select_u32(selected, packed[index].1, packed_operand.1);
-        scale_operand.0 = b.select_u32(selected, block_scales[index].0, scale_operand.0);
-        scale_operand.1 = b.select_u32(selected, block_scales[index].1, scale_operand.1);
-    }
-    let contiguous = b.ieq(weight_mode, one);
-    let weight_batch = b.select_u32(contiguous, token, zero);
-    let weight_batch_rows = b.imul(weight_batch, n);
+    let token_base = b.imul(token_tile, eight);
+    // Cooperative lowering is selected only for shared weights. Keep the specialization operand
+    // live so an artifact compiled with the wrong mode cannot silently use this shader.
+    let shared_mode = b.ieq(weight_mode, zero);
     let row_bytes = b.udiv(k, two);
 
     let f32_workgroup_ptr = b.pointer(STORAGE_CLASS_WORKGROUP, f32_ty);
@@ -3915,18 +3905,21 @@ fn assemble_nvfp4_matmul_cooperative(buffers: u32) -> Vec<u32> {
     b.store(block_var, zero);
     let (scope, block) = b.begin_loop(block_var, blocks);
     let activation_block = b.imul(block, sixteen);
-    let activation_row = b.imul(token, k);
-    let activation_base = b.iadd(activation_row, activation_block);
-    // A is 8x16. Row zero carries the token and the remaining rows are zero, which maps an M=1
-    // decode product to the hardware's native M=8 tile without changing the public artifact ABI.
+    // A is a real 8x16 token tile. The final partial tile is zero padded, allowing every native
+    // cooperative-matrix row to perform useful prompt work whenever eight tokens remain.
     for wave in 0..4 {
         let offset = b.c_u32(wave * 32);
         let element = b.iadd(lid, offset);
-        let row_zero = b.ult(element, sixteen);
-        let source = b.iadd(activation_base, element);
-        let source = b.select_u32(row_zero, source, activation_base);
+        let tile_row = b.udiv(element, sixteen);
+        let tile_column = b.umod(element, sixteen);
+        let token = b.iadd(token_base, tile_row);
+        let token_in_range = b.ult(token, m);
+        let activation_row = b.imul(token, k);
+        let source = b.iadd(activation_row, activation_block);
+        let source = b.iadd(source, tile_column);
+        let source = b.select_u32(token_in_range, source, zero);
         let value = b.load_f32(array, activation, source);
-        let value = b.select_f32(row_zero, value, zero_f);
+        let value = b.select_f32(token_in_range, value, zero_f);
         let value = b.f32_to_f16(value);
         let pointer = b.access_chain(f16_workgroup_ptr, a_tile, &[element]);
         b.store(pointer, value);
@@ -3944,13 +3937,13 @@ fn assemble_nvfp4_matmul_cooperative(buffers: u32) -> Vec<u32> {
         let pointer = b.access_chain(f16_workgroup_ptr, b_tile, &[element]);
         b.store(pointer, zero_h);
         b.if_then(in_range, |b| {
-            let weight_row = b.iadd(weight_batch_rows, output_row);
+            let weight_row = output_row;
             let packed_row = b.imul(weight_row, row_bytes);
             let packed_block = b.imul(block, eight);
             let packed_base = b.iadd(packed_row, packed_block);
             let packed_lane = b.udiv(k_lane, two);
             let packed_index = b.iadd(packed_base, packed_lane);
-            let codes = b.load_byte_bits(array, packed_operand, packed_index);
+            let codes = b.load_byte_bits(array, packed[0], packed_index);
             let nibble_mask = b.c_u32(15);
             let low = b.band(codes, nibble_mask);
             let high = b.shr(codes, four);
@@ -3963,7 +3956,7 @@ fn assemble_nvfp4_matmul_cooperative(buffers: u32) -> Vec<u32> {
             let weight = b.bitcast_f32(weight_bits);
             let scale_row = b.imul(weight_row, blocks);
             let scale_index = b.iadd(scale_row, block);
-            let scale_bits = b.load_byte_bits(array, scale_operand, scale_index);
+            let scale_bits = b.load_byte_bits(array, block_scales[0], scale_index);
             let scale = b.widen_fp8(Fp8Format::E4M3, scale_bits);
             let weight = b.fmul(weight, scale);
             let weight = b.f32_to_f16(weight);
@@ -3984,32 +3977,37 @@ fn assemble_nvfp4_matmul_cooperative(buffers: u32) -> Vec<u32> {
     let matrix_c = b.load(matrix_c_ty, accumulator);
     b.cooperative_store(c_pointer, matrix_c, sixteen);
     b.workgroup_barrier();
-    let lane_in_tile = b.ult(lid, sixteen);
-    let output_row = b.iadd(output_base, lid);
-    let row_in_tensor = b.ult(output_row, n);
-    let write = b.land(lane_in_tile, row_in_tensor);
-    b.if_then(write, |b| {
-        let pointer = b.access_chain(f32_workgroup_ptr, c_tile, &[lid]);
-        let sum = b.load(f32_ty, pointer);
-        let shared_mode = b.c_u32(0);
-        let batched = b.ine(weight_mode, shared_mode);
-        let tensor_scale_index = b.select_u32(batched, token, zero);
-        let scale = b.load_f32(array, tensor_scale, tensor_scale_index);
-        let sum = b.fmul(sum, scale);
-        let negated = b.fneg(sum);
-        let exp = b.ext_f32(GLSL_EXP, &[negated]);
-        let one_f = b.c_f32(1.0);
-        let denominator = b.fadd(one_f, exp);
-        let sigmoid = b.fdiv(one_f, denominator);
-        let silu = b.fmul(sum, sigmoid);
-        let is_silu = b.ieq(epilogue, one);
-        let is_sigmoid = b.ieq(epilogue, two);
-        let sum = b.select_f32(is_silu, silu, sum);
-        let sum = b.select_f32(is_sigmoid, sigmoid, sum);
-        let destination = b.imul(token, n);
-        let destination = b.iadd(destination, output_row);
-        b.store_f32(array, output, destination, sum);
-    });
+    for wave in 0..4 {
+        let offset = b.c_u32(wave * 32);
+        let element = b.iadd(lid, offset);
+        let tile_row = b.udiv(element, sixteen);
+        let tile_column = b.umod(element, sixteen);
+        let token = b.iadd(token_base, tile_row);
+        let output_row = b.iadd(output_base, tile_column);
+        let token_in_range = b.ult(token, m);
+        let row_in_tensor = b.ult(output_row, n);
+        let write = b.land(token_in_range, row_in_tensor);
+        let write = b.land(write, shared_mode);
+        b.if_then(write, |b| {
+            let pointer = b.access_chain(f32_workgroup_ptr, c_tile, &[element]);
+            let sum = b.load(f32_ty, pointer);
+            let scale = b.load_f32(array, tensor_scale, zero);
+            let sum = b.fmul(sum, scale);
+            let negated = b.fneg(sum);
+            let exp = b.ext_f32(GLSL_EXP, &[negated]);
+            let one_f = b.c_f32(1.0);
+            let denominator = b.fadd(one_f, exp);
+            let sigmoid = b.fdiv(one_f, denominator);
+            let silu = b.fmul(sum, sigmoid);
+            let is_silu = b.ieq(epilogue, one);
+            let is_sigmoid = b.ieq(epilogue, two);
+            let sum = b.select_f32(is_silu, silu, sum);
+            let sum = b.select_f32(is_sigmoid, sigmoid, sum);
+            let destination = b.imul(token, n);
+            let destination = b.iadd(destination, output_row);
+            b.store_f32(array, output, destination, sum);
+        });
+    }
     b.end_main();
     b.finish([32, 1, 1])
 }
