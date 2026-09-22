@@ -271,6 +271,8 @@ pub(crate) const ARENA_ALIGNMENT: u64 = 256;
 /// once the device's workgroup tuning and descriptor-array length are known.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum KernelSpec {
+    /// Native packed E2M1 weights with one E4M3 scale per sixteen weights.
+    Nvfp4Matmul,
     Elementwise {
         op: ElementwiseOp,
         float: Storage,
@@ -313,6 +315,8 @@ pub(crate) enum Work {
     Matmul { m: u32, n: u32, batch: u32 },
     /// A streaming MATMUL over `n` columns per batch.
     MatmulStream { n: u32, batch: u32 },
+    /// One workgroup reduces each `[token, output-row]` dot product.
+    Nvfp4Matmul { m: u32, n: u32 },
 }
 
 /// One recorded `vkCmdDispatch`.

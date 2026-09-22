@@ -364,6 +364,8 @@ pub enum ReduceOp {
 /// that changes only numbers is a specialization constant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KernelKey {
+    /// F32 activations times row-major packed E2M1 weights and E4M3 block scales.
+    Nvfp4Matmul { buffers: u32 },
     /// Elementwise lanes over `count` output elements; `broadcast` selects the strided
     /// multi-index addressing, otherwise every operand shares the output's linear index. `float`
     /// is the storage of the operator's floating-point tensors (`Word` for FP32, `Half` for
@@ -435,6 +437,7 @@ impl KernelKey {
     /// Assemble the module for this variant.
     pub fn assemble(self) -> Vec<u32> {
         match self {
+            Self::Nvfp4Matmul { buffers } => assemble_nvfp4_matmul(buffers),
             Self::Elementwise {
                 op,
                 float,
@@ -485,6 +488,7 @@ impl KernelKey {
     /// variant is validated the moment it is added here.
     pub fn every_variant() -> Vec<KernelKey> {
         let mut keys = Vec::new();
+        keys.push(KernelKey::Nvfp4Matmul { buffers: 17 });
         let ops = [
             ElementwiseOp::Abs,
             ElementwiseOp::Ceil,
@@ -680,6 +684,7 @@ impl KernelKey {
             }
             Self::Reduce { .. } => 2 + 2 + 3,
             Self::Matmul { .. } | Self::MatmulStream { .. } => 3 * 2 + 4,
+            Self::Nvfp4Matmul { .. } => 5 * 2 + 4,
             Self::MaxPool { .. } => 2 + 2 + 12,
             Self::Move { contiguous, .. } => {
                 if contiguous {
@@ -701,7 +706,7 @@ impl KernelKey {
             | Self::Move { workgroup, .. }
             | Self::Cast { workgroup, .. } => [workgroup, 1, 1],
             Self::Matmul { tile, .. } => MatmulGeometry::wide(tile).local_size(),
-            Self::MatmulStream { .. } => [STREAM_WORKGROUP, 1, 1],
+            Self::MatmulStream { .. } | Self::Nvfp4Matmul { .. } => [STREAM_WORKGROUP, 1, 1],
         }
     }
 }
@@ -780,6 +785,29 @@ pub fn matmul_spec(
     rhs.push(&mut words);
     output.push(&mut words);
     words.extend_from_slice(&[m, n, k, batch]);
+    words
+}
+
+/// Specialization payload for native row-major NVFP4: activation, packed
+/// weights, block scales, tensor scale, output, then `m`, `n`, `k`, activation.
+pub fn nvfp4_matmul_spec(
+    activation: Operand,
+    packed: Operand,
+    block_scales: Operand,
+    tensor_scale: Operand,
+    output: Operand,
+    m: u32,
+    n: u32,
+    k: u32,
+    epilogue: u32,
+) -> Vec<u32> {
+    let mut words = Vec::with_capacity(14);
+    activation.push(&mut words);
+    packed.push(&mut words);
+    block_scales.push(&mut words);
+    tensor_scale.push(&mut words);
+    output.push(&mut words);
+    words.extend_from_slice(&[m, n, k, epilogue]);
     words
 }
 
@@ -3621,6 +3649,141 @@ fn assemble_matmul_stream(rhs_storage: Storage, output_storage: Storage, buffers
     b.finish([STREAM_WORKGROUP, 1, 1])
 }
 
+/// Scalar baseline for native NVFP4 projections. One workgroup owns one
+/// `[token, output-row]` dot product. Its 64 invocations divide whole
+/// 16-weight scale blocks, so every packed byte and scale is read exactly once
+/// and only 64 partial sums cross workgroup memory. The same artifact can later
+/// select a cooperative-matrix/XMX kernel without changing its storage ABI.
+fn assemble_nvfp4_matmul(buffers: u32) -> Vec<u32> {
+    let mut b = Builder::new();
+    let array = b.buffer_array(buffers);
+    let activation = b.spec_operand();
+    let packed = b.spec_operand();
+    let block_scales = b.spec_operand();
+    let tensor_scale = b.spec_operand();
+    let output = b.spec_operand();
+    let _m = b.spec_u32(1);
+    let n = b.spec_u32(1);
+    let k = b.spec_u32(16);
+    let epilogue = b.spec_u32(0);
+    let partials = b.shared_f32_array(STREAM_WORKGROUP);
+    let local_id = b.builtin_uvec3(BUILT_IN_LOCAL_INVOCATION_ID);
+    let group_id = b.builtin_uvec3(BUILT_IN_WORKGROUP_ID);
+
+    b.begin_main();
+    let u32_ty = b.u32_ty();
+    let f32_ty = b.f32_ty();
+    let block_var = b.local(u32_ty);
+    let accumulator = b.local(f32_ty);
+    let fp4 = b.private_u32_array(&[
+        0.0f32.to_bits(),
+        0.5f32.to_bits(),
+        1.0f32.to_bits(),
+        1.5f32.to_bits(),
+        2.0f32.to_bits(),
+        3.0f32.to_bits(),
+        4.0f32.to_bits(),
+        6.0f32.to_bits(),
+        (-0.0f32).to_bits(),
+        (-0.5f32).to_bits(),
+        (-1.0f32).to_bits(),
+        (-1.5f32).to_bits(),
+        (-2.0f32).to_bits(),
+        (-3.0f32).to_bits(),
+        (-4.0f32).to_bits(),
+        (-6.0f32).to_bits(),
+    ]);
+    let lid = b.builtin_component(local_id, 0);
+    let out_row = b.builtin_component(group_id, 0);
+    let token = b.builtin_component(group_id, 1);
+    let zero = b.c_u32(0);
+    let zero_f = b.c_f32(0.0);
+    let one = b.c_u32(1);
+    let four = b.c_u32(4);
+    let eight = b.c_u32(8);
+    let sixteen = b.c_u32(16);
+    let sixty_four = b.c_u32(STREAM_WORKGROUP);
+    let nibble_mask = b.c_u32(15);
+    let blocks = b.udiv(k, sixteen);
+    let row_blocks = b.imul(out_row, blocks);
+    let two = b.c_u32(2);
+    let row_bytes = b.udiv(k, two);
+    let packed_row = b.imul(out_row, row_bytes);
+    let activation_row = b.imul(token, k);
+    b.store(accumulator, zero_f);
+    b.store(block_var, lid);
+    let (scope, block) = b.begin_loop(block_var, blocks);
+    let scale_element = b.iadd(row_blocks, block);
+    let scale_bits = b.load_byte_bits(array, block_scales, scale_element);
+    let scale = b.widen_fp8(Fp8Format::E4M3, scale_bits);
+    let packed_block = b.imul(block, eight);
+    let packed_base = b.iadd(packed_row, packed_block);
+    let activation_block = b.imul(block, sixteen);
+    let activation_base = b.iadd(activation_row, activation_block);
+    for byte in 0..8 {
+        let byte_offset = b.c_u32(byte);
+        let byte_index = b.iadd(packed_base, byte_offset);
+        let codes = b.load_byte_bits(array, packed, byte_index);
+        let low = b.band(codes, nibble_mask);
+        let high = b.shr(codes, four);
+        for (lane, code) in [low, high].into_iter().enumerate() {
+            let pointer_ty = b.pointer(STORAGE_CLASS_PRIVATE, u32_ty);
+            let pointer = b.access_chain(pointer_ty, fp4, &[code]);
+            let weight_bits = b.load(u32_ty, pointer);
+            let weight = b.bitcast_f32(weight_bits);
+            let weight = b.fmul(weight, scale);
+            let inner = b.c_u32(byte * 2 + lane as u32);
+            let element = b.iadd(activation_base, inner);
+            let value = b.load_f32(array, activation, element);
+            let acc = b.load(f32_ty, accumulator);
+            let next = b.fma(value, weight, acc);
+            b.store(accumulator, next);
+        }
+    }
+    b.end_loop(scope, block_var, sixty_four);
+
+    let workgroup_ptr = b.pointer(STORAGE_CLASS_WORKGROUP, f32_ty);
+    let partial_ptr = b.access_chain(workgroup_ptr, partials, &[lid]);
+    let partial = b.load(f32_ty, accumulator);
+    b.store(partial_ptr, partial);
+    b.workgroup_barrier();
+
+    let first = b.ieq(lid, zero);
+    b.if_then(first, |b| {
+        let sum_var = b.local(f32_ty);
+        let index_var = b.local(u32_ty);
+        b.store(sum_var, zero_f);
+        b.store(index_var, zero);
+        let (sum_scope, index) = b.begin_loop(index_var, sixty_four);
+        let pointer = b.access_chain(workgroup_ptr, partials, &[index]);
+        let value = b.load(f32_ty, pointer);
+        let sum = b.load(f32_ty, sum_var);
+        let next = b.fadd(sum, value);
+        b.store(sum_var, next);
+        b.end_loop(sum_scope, index_var, one);
+        let sum = b.load(f32_ty, sum_var);
+        let tensor_scale = b.load_f32(array, tensor_scale, zero);
+        let sum = b.fmul(sum, tensor_scale);
+        let negated = b.fneg(sum);
+        let exp = b.ext_f32(GLSL_EXP, &[negated]);
+        let one_f = b.c_f32(1.0);
+        let denominator = b.fadd(one_f, exp);
+        let sigmoid = b.fdiv(one_f, denominator);
+        let silu = b.fmul(sum, sigmoid);
+        let silu_mode = b.c_u32(1);
+        let sigmoid_mode = b.c_u32(2);
+        let is_silu = b.ieq(epilogue, silu_mode);
+        let is_sigmoid = b.ieq(epilogue, sigmoid_mode);
+        let sum = b.select_f32(is_silu, silu, sum);
+        let sum = b.select_f32(is_sigmoid, sigmoid, sum);
+        let element = b.imul(token, n);
+        let element = b.iadd(element, out_row);
+        b.store_f32(array, output, element, sum);
+    });
+    b.end_main();
+    b.finish([STREAM_WORKGROUP, 1, 1])
+}
+
 /// NHWC MAX_POOL2D at `float` storage: one invocation per output element folds its window with
 /// `apply_max_s` from `-inf`; padded positions are skipped, never substituted. FP16 inputs are
 /// widened for the fold — an exact selection, so the narrowed store is exact.
@@ -3986,6 +4149,9 @@ mod tests {
                 KernelKey::Reduce { .. } => reduce_spec(operand, operand, 2, 3, 1),
                 KernelKey::Matmul { .. } | KernelKey::MatmulStream { .. } => {
                     matmul_spec(operand, operand, operand, 1, 2, 3, 1)
+                }
+                KernelKey::Nvfp4Matmul { .. } => {
+                    nvfp4_matmul_spec(operand, operand, operand, operand, operand, 1, 2, 16, 0)
                 }
                 KernelKey::MaxPool { .. } => max_pool_spec(
                     operand,
