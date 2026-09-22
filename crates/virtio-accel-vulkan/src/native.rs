@@ -233,7 +233,8 @@ impl Tuning {
                 let cooperative = matches!(kernel, KernelSpec::Nvfp4Matmul { cooperative: true })
                     && self.cooperative_nvfp4;
                 let columns = if cooperative { n.div_ceil(16) } else { n };
-                let groups = [columns, m, 1];
+                let rows = if cooperative { m.div_ceil(8) } else { m };
+                let groups = [columns, rows, 1];
                 (groups[0] <= max[0] && groups[1] <= max[1]).then_some(groups)
             }
         }
