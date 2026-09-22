@@ -431,77 +431,78 @@ fn lower_nvfp4_moe(bytes: &[u8]) -> Result<ProgramPlan, LoweringError> {
         storage: Storage::Word,
     });
     let arena_slot = slots.len() as u32;
-    let operands = |plane: usize| {
-        (0..*batch)
-            .map(|expert| Operand {
-                buffer: 1 + expert,
-                // SPIR-V storage operands index 32-bit words; the artifact
-                // exposes byte offsets to match host tensor views.
-                base: offsets[expert as usize][plane] / 4,
-            })
-            .collect::<Vec<_>>()
+    let operand = |expert: u32, plane: usize| Operand {
+        buffer: 1 + expert,
+        // SPIR-V storage operands index 32-bit words; the artifact exposes
+        // byte offsets to match host tensor views.
+        base: offsets[expert as usize][plane] / 4,
     };
+    // Different experts have different weights, so they cannot share the B
+    // operand of one cooperative matrix tile. Keep all projections in one
+    // command buffer while giving every expert an independent 8x16x16 XMX
+    // dispatch. The seven padded M rows are deliberately idle.
+    let mut dispatches = Vec::with_capacity(*batch as usize * 2);
+    for expert in 0..*batch {
+        dispatches.push(DispatchPlan {
+            kernel: KernelSpec::Nvfp4Matmul { cooperative: true },
+            spec: nvfp4_matmul_spec(
+                Operand {
+                    buffer: 0,
+                    base: expert * *width,
+                },
+                &[operand(expert, 0)],
+                &[operand(expert, 1)],
+                Operand {
+                    buffer: up_tensor_slot,
+                    base: expert,
+                },
+                Operand {
+                    buffer: arena_slot,
+                    base: expert * *inner,
+                },
+                1,
+                *inner,
+                *width,
+                Nvfp4Activation::SquaredRelu as u32,
+                0,
+            ),
+            work: Work::Nvfp4Matmul { m: 1, n: *inner },
+            barrier_before: false,
+        });
+    }
+    for expert in 0..*batch {
+        dispatches.push(DispatchPlan {
+            kernel: KernelSpec::Nvfp4Matmul { cooperative: true },
+            spec: nvfp4_matmul_spec(
+                Operand {
+                    buffer: arena_slot,
+                    base: expert * *inner,
+                },
+                &[operand(expert, 2)],
+                &[operand(expert, 3)],
+                Operand {
+                    buffer: down_tensor_slot,
+                    base: expert,
+                },
+                Operand {
+                    buffer: output_slot,
+                    base: expert * *width,
+                },
+                1,
+                *width,
+                *inner,
+                Nvfp4Activation::None as u32,
+                0,
+            ),
+            work: Work::Nvfp4Matmul { m: 1, n: *width },
+            barrier_before: expert == 0,
+        });
+    }
     Ok(ProgramPlan {
         slots,
         arena_bytes: intermediate_bytes,
         constants: Vec::new(),
-        dispatches: vec![
-            DispatchPlan {
-                kernel: KernelSpec::Nvfp4Matmul { cooperative: false },
-                spec: nvfp4_matmul_spec(
-                    Operand { buffer: 0, base: 0 },
-                    &operands(0),
-                    &operands(1),
-                    Operand {
-                        buffer: up_tensor_slot,
-                        base: 0,
-                    },
-                    Operand {
-                        buffer: arena_slot,
-                        base: 0,
-                    },
-                    *batch,
-                    *inner,
-                    *width,
-                    Nvfp4Activation::SquaredRelu as u32,
-                    2,
-                ),
-                work: Work::Nvfp4Matmul {
-                    m: *batch,
-                    n: *inner,
-                },
-                barrier_before: false,
-            },
-            DispatchPlan {
-                kernel: KernelSpec::Nvfp4Matmul { cooperative: false },
-                spec: nvfp4_matmul_spec(
-                    Operand {
-                        buffer: arena_slot,
-                        base: 0,
-                    },
-                    &operands(2),
-                    &operands(3),
-                    Operand {
-                        buffer: down_tensor_slot,
-                        base: 0,
-                    },
-                    Operand {
-                        buffer: output_slot,
-                        base: 0,
-                    },
-                    *batch,
-                    *width,
-                    *inner,
-                    Nvfp4Activation::None as u32,
-                    2,
-                ),
-                work: Work::Nvfp4Matmul {
-                    m: *batch,
-                    n: *width,
-                },
-                barrier_before: true,
-            },
-        ],
+        dispatches,
     })
 }
 
@@ -576,14 +577,19 @@ mod tests {
         let plan = lower_nvfp4(&artifact.bytes).unwrap();
         assert_eq!(plan.slots.len(), 10);
         assert_eq!(plan.arena_bytes, 6 * u64::from(inner) * 4);
-        assert_eq!(plan.dispatches.len(), 2);
+        assert_eq!(plan.dispatches.len(), 12);
         assert!(!plan.dispatches[0].barrier_before);
-        assert!(plan.dispatches[1].barrier_before);
+        assert!(plan.dispatches[6].barrier_before);
+        assert!(
+            plan.dispatches[7..]
+                .iter()
+                .all(|dispatch| !dispatch.barrier_before)
+        );
         // First packed operand follows the activation operand in the
         // specialization payload and names byte offset zero in words.
         assert_eq!(plan.dispatches[0].spec[2..4], [1, 0]);
         // The first down packed operand begins at 3 MiB, encoded as words.
-        assert_eq!(plan.dispatches[1].spec[2..4], [1, (3 << 20) / 4]);
+        assert_eq!(plan.dispatches[6].spec[2..4], [1, (3 << 20) / 4]);
     }
 
     #[test]
