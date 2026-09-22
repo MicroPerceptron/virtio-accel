@@ -438,8 +438,11 @@ fn native_nvfp4_matmul_matches_its_f32_expansion() {
             let actual = floats(&actual);
             assert_eq!(actual.len(), expected.len());
             for (actual, expected) in actual.iter().zip(&expected) {
+                // Cooperative-matrix devices stage both operands as FP16 and accumulate as FP32;
+                // scalar fallback evaluates the same product in FP32 throughout.
+                let tolerance = 0.01 * expected.abs().max(1.0);
                 assert!(
-                    (actual - expected).abs() < 1e-5,
+                    (actual - expected).abs() <= tolerance,
                     "{device}: {domain:?}: {actual} != {expected}"
                 );
             }

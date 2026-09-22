@@ -88,6 +88,7 @@ pub const MAX_ELEMENTWISE_INPUTS: usize = 3;
 // SPIR-V opcodes (Unified specification, section 3.52).
 const OP_EXT_INST_IMPORT: u16 = 11;
 const OP_EXT_INST: u16 = 12;
+const OP_EXTENSION: u16 = 10;
 const OP_MEMORY_MODEL: u16 = 14;
 const OP_ENTRY_POINT: u16 = 15;
 const OP_EXECUTION_MODE: u16 = 16;
@@ -116,6 +117,7 @@ const OP_DECORATE: u16 = 71;
 const OP_MEMBER_DECORATE: u16 = 72;
 const OP_CONVERT_F_TO_U: u16 = 109;
 const OP_CONVERT_U_TO_F: u16 = 112;
+const OP_F_CONVERT: u16 = 115;
 const OP_BITCAST: u16 = 124;
 const OP_F_NEGATE: u16 = 127;
 const OP_I_ADD: u16 = 128;
@@ -156,9 +158,16 @@ const OP_LABEL: u16 = 248;
 const OP_BRANCH: u16 = 249;
 const OP_BRANCH_CONDITIONAL: u16 = 250;
 const OP_RETURN: u16 = 253;
+const OP_TYPE_COOPERATIVE_MATRIX_KHR: u16 = 4456;
+const OP_COOPERATIVE_MATRIX_LOAD_KHR: u16 = 4457;
+const OP_COOPERATIVE_MATRIX_STORE_KHR: u16 = 4458;
+const OP_COOPERATIVE_MATRIX_MUL_ADD_KHR: u16 = 4459;
 
 // Enumerants (section 3).
 const CAPABILITY_SHADER: u32 = 1;
+const CAPABILITY_FLOAT16: u32 = 9;
+const CAPABILITY_VULKAN_MEMORY_MODEL: u32 = 5345;
+const CAPABILITY_COOPERATIVE_MATRIX_KHR: u32 = 6022;
 const ADDRESSING_MODEL_LOGICAL: u32 = 0;
 const MEMORY_MODEL_GLSL450: u32 = 1;
 const EXECUTION_MODEL_GL_COMPUTE: u32 = 5;
@@ -365,7 +374,7 @@ pub enum ReduceOp {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KernelKey {
     /// F32 activations times row-major packed E2M1 weights and E4M3 block scales.
-    Nvfp4Matmul { buffers: u32 },
+    Nvfp4Matmul { buffers: u32, cooperative: bool },
     /// Elementwise lanes over `count` output elements; `broadcast` selects the strided
     /// multi-index addressing, otherwise every operand shares the output's linear index. `float`
     /// is the storage of the operator's floating-point tensors (`Word` for FP32, `Half` for
@@ -437,7 +446,14 @@ impl KernelKey {
     /// Assemble the module for this variant.
     pub fn assemble(self) -> Vec<u32> {
         match self {
-            Self::Nvfp4Matmul { buffers } => assemble_nvfp4_matmul(buffers),
+            Self::Nvfp4Matmul {
+                buffers,
+                cooperative: false,
+            } => assemble_nvfp4_matmul(buffers),
+            Self::Nvfp4Matmul {
+                buffers,
+                cooperative: true,
+            } => assemble_nvfp4_matmul_cooperative(buffers),
             Self::Elementwise {
                 op,
                 float,
@@ -488,7 +504,14 @@ impl KernelKey {
     /// variant is validated the moment it is added here.
     pub fn every_variant() -> Vec<KernelKey> {
         let mut keys = Vec::new();
-        keys.push(KernelKey::Nvfp4Matmul { buffers: 17 });
+        keys.push(KernelKey::Nvfp4Matmul {
+            buffers: 17,
+            cooperative: false,
+        });
+        keys.push(KernelKey::Nvfp4Matmul {
+            buffers: 17,
+            cooperative: true,
+        });
         let ops = [
             ElementwiseOp::Abs,
             ElementwiseOp::Ceil,
@@ -684,7 +707,9 @@ impl KernelKey {
             }
             Self::Reduce { .. } => 2 + 2 + 3,
             Self::Matmul { .. } | Self::MatmulStream { .. } => 3 * 2 + 4,
-            Self::Nvfp4Matmul { .. } => 5 * 2 + 4,
+            // Activation, six packed bindings, six scale bindings, tensor scale and output,
+            // followed by m/n/k/epilogue/weight mode.
+            Self::Nvfp4Matmul { .. } => 15 * 2 + 5,
             Self::MaxPool { .. } => 2 + 2 + 12,
             Self::Move { contiguous, .. } => {
                 if contiguous {
@@ -706,7 +731,13 @@ impl KernelKey {
             | Self::Move { workgroup, .. }
             | Self::Cast { workgroup, .. } => [workgroup, 1, 1],
             Self::Matmul { tile, .. } => MatmulGeometry::wide(tile).local_size(),
-            Self::MatmulStream { .. } | Self::Nvfp4Matmul { .. } => [STREAM_WORKGROUP, 1, 1],
+            Self::MatmulStream { .. } => [STREAM_WORKGROUP, 1, 1],
+            Self::Nvfp4Matmul {
+                cooperative: false, ..
+            } => [STREAM_WORKGROUP, 1, 1],
+            Self::Nvfp4Matmul {
+                cooperative: true, ..
+            } => [32, 1, 1],
         }
     }
 }
@@ -1117,6 +1148,7 @@ enum TypeKey {
     Bool,
     U32,
     F32,
+    F16,
     Vector(Id, u32),
     Pointer(u32, Id),
     RuntimeArray(Id),
@@ -1136,6 +1168,7 @@ enum ConstKey {
 struct Builder {
     next_id: Id,
     capabilities: Vec<u32>,
+    extensions: Vec<u32>,
     imports: Vec<u32>,
     memory_model: Vec<u32>,
     entry_point: Vec<u32>,
@@ -1177,6 +1210,7 @@ impl Builder {
         let mut builder = Self {
             next_id: 1,
             capabilities: Vec::new(),
+            extensions: Vec::new(),
             imports: Vec::new(),
             memory_model: Vec::new(),
             entry_point: Vec::new(),
@@ -1235,6 +1269,7 @@ impl Builder {
         let mut words = vec![SPIRV_MAGIC, SPIRV_VERSION_1_3, 0, self.next_id, 0];
         for section in [
             &self.capabilities,
+            &self.extensions,
             &self.imports,
             &self.memory_model,
             &self.entry_point,
@@ -1260,6 +1295,7 @@ impl Builder {
             TypeKey::Bool => instruction(&mut self.declarations, OP_TYPE_BOOL, &[id]),
             TypeKey::U32 => instruction(&mut self.declarations, OP_TYPE_INT, &[id, 32, 0]),
             TypeKey::F32 => instruction(&mut self.declarations, OP_TYPE_FLOAT, &[id, 32]),
+            TypeKey::F16 => instruction(&mut self.declarations, OP_TYPE_FLOAT, &[id, 16]),
             TypeKey::Vector(element, count) => {
                 instruction(
                     &mut self.declarations,
@@ -1307,6 +1343,9 @@ impl Builder {
     }
     fn f32_ty(&mut self) -> Id {
         self.ty(TypeKey::F32)
+    }
+    fn f16_ty(&mut self) -> Id {
+        self.ty(TypeKey::F16)
     }
     fn uvec3(&mut self) -> Id {
         let u32_ty = self.u32_ty();
@@ -1481,6 +1520,59 @@ impl Builder {
             &[pointer, variable, STORAGE_CLASS_WORKGROUP],
         );
         variable
+    }
+
+    /// A workgroup-shared binary16 array used as a cooperative-matrix staging tile.
+    fn shared_f16_array(&mut self, length: u32) -> Id {
+        let f16_ty = self.f16_ty();
+        let length = self.c_u32(length);
+        let array = self.ty(TypeKey::Array(f16_ty, length));
+        let pointer = self.pointer(STORAGE_CLASS_WORKGROUP, array);
+        let variable = self.id();
+        instruction(
+            &mut self.declarations,
+            OP_VARIABLE,
+            &[pointer, variable, STORAGE_CLASS_WORKGROUP],
+        );
+        variable
+    }
+
+    fn enable_cooperative_matrix(&mut self) {
+        instruction(&mut self.capabilities, OP_CAPABILITY, &[CAPABILITY_FLOAT16]);
+        instruction(
+            &mut self.capabilities,
+            OP_CAPABILITY,
+            &[CAPABILITY_COOPERATIVE_MATRIX_KHR],
+        );
+        instruction(
+            &mut self.capabilities,
+            OP_CAPABILITY,
+            &[CAPABILITY_VULKAN_MEMORY_MODEL],
+        );
+        let memory_extension = literal_string("SPV_KHR_vulkan_memory_model");
+        instruction(&mut self.extensions, OP_EXTENSION, &memory_extension);
+        let extension = literal_string("SPV_KHR_cooperative_matrix");
+        instruction(&mut self.extensions, OP_EXTENSION, &extension);
+        self.memory_model.clear();
+        instruction(
+            &mut self.memory_model,
+            OP_MEMORY_MODEL,
+            &[ADDRESSING_MODEL_LOGICAL, 3], // VulkanKHR
+        );
+    }
+
+    fn cooperative_matrix_ty(&mut self, component: Id, rows: u32, columns: u32, usage: u32) -> Id {
+        let ty = self.id();
+        let scope = self.c_u32(3); // Scope Subgroup
+        let rows = self.c_u32(rows);
+        let columns = self.c_u32(columns);
+        let usage = self.c_u32(usage);
+        instruction(
+            &mut self.declarations,
+            OP_TYPE_COOPERATIVE_MATRIX_KHR,
+            &[ty, component, scope, rows, columns, usage],
+        );
+        ty
     }
 
     // -- function body ------------------------------------------------------------------------
@@ -1671,6 +1763,31 @@ impl Builder {
     fn bitcast_u32(&mut self, float: Id) -> Id {
         let ty = self.u32_ty();
         self.value(OP_BITCAST, ty, &[float])
+    }
+    fn f32_to_f16(&mut self, float: Id) -> Id {
+        let ty = self.f16_ty();
+        self.value(OP_F_CONVERT, ty, &[float])
+    }
+
+    fn cooperative_load(&mut self, ty: Id, pointer: Id, stride: Id) -> Id {
+        let row_major = self.c_u32(0);
+        self.value(
+            OP_COOPERATIVE_MATRIX_LOAD_KHR,
+            ty,
+            &[pointer, row_major, stride],
+        )
+    }
+
+    fn cooperative_store(&mut self, pointer: Id, value: Id, stride: Id) {
+        let row_major = self.c_u32(0);
+        self.emit(
+            OP_COOPERATIVE_MATRIX_STORE_KHR,
+            &[pointer, value, row_major, stride],
+        );
+    }
+
+    fn cooperative_mul_add(&mut self, ty: Id, a: Id, b: Id, c: Id) -> Id {
+        self.value(OP_COOPERATIVE_MATRIX_MUL_ADD_KHR, ty, &[a, b, c])
     }
     fn u_to_f(&mut self, word: Id) -> Id {
         let ty = self.f32_ty();
@@ -3655,6 +3772,203 @@ fn assemble_matmul_stream(rhs_storage: Storage, output_storage: Storage, buffers
     b.finish([STREAM_WORKGROUP, 1, 1])
 }
 
+/// Cooperative-matrix NVFP4 projection for devices that advertise subgroup FP16 8x16x16 with
+/// FP32 accumulation. One subgroup owns sixteen output rows. Packed FP4 weights are decoded once
+/// into a binary16 workgroup tile, then the driver lowers `OpCooperativeMatrixMulAddKHR` to the
+/// architecture's matrix engine (XMX on Intel Xe2/Xe3).
+fn assemble_nvfp4_matmul_cooperative(buffers: u32) -> Vec<u32> {
+    let mut b = Builder::new();
+    b.enable_cooperative_matrix();
+    let array = b.buffer_array(buffers);
+    let activation = b.spec_operand();
+    let packed = core::array::from_fn::<_, 6, _>(|_| b.spec_operand());
+    let block_scales = core::array::from_fn::<_, 6, _>(|_| b.spec_operand());
+    let tensor_scale = b.spec_operand();
+    let output = b.spec_operand();
+    let _m = b.spec_u32(1);
+    let n = b.spec_u32(1);
+    let k = b.spec_u32(16);
+    let epilogue = b.spec_u32(0);
+    let weight_mode = b.spec_u32(0);
+
+    let a_tile = b.shared_f16_array(8 * 16);
+    let b_tile = b.shared_f16_array(16 * 16);
+    let c_tile = b.shared_f32_array(8 * 16);
+    let local_id = b.builtin_uvec3(BUILT_IN_LOCAL_INVOCATION_ID);
+    let group_id = b.builtin_uvec3(BUILT_IN_WORKGROUP_ID);
+
+    b.begin_main();
+    let u32_ty = b.u32_ty();
+    let f32_ty = b.f32_ty();
+    let f16_ty = b.f16_ty();
+    let matrix_a_ty = b.cooperative_matrix_ty(f16_ty, 8, 16, 0);
+    let matrix_b_ty = b.cooperative_matrix_ty(f16_ty, 16, 16, 1);
+    let matrix_c_ty = b.cooperative_matrix_ty(f32_ty, 8, 16, 2);
+    let accumulator = b.local(matrix_c_ty);
+    let block_var = b.local(u32_ty);
+    let fp4 = b.private_u32_array(&[
+        0.0f32.to_bits(),
+        0.5f32.to_bits(),
+        1.0f32.to_bits(),
+        1.5f32.to_bits(),
+        2.0f32.to_bits(),
+        3.0f32.to_bits(),
+        4.0f32.to_bits(),
+        6.0f32.to_bits(),
+        (-0.0f32).to_bits(),
+        (-0.5f32).to_bits(),
+        (-1.0f32).to_bits(),
+        (-1.5f32).to_bits(),
+        (-2.0f32).to_bits(),
+        (-3.0f32).to_bits(),
+        (-4.0f32).to_bits(),
+        (-6.0f32).to_bits(),
+    ]);
+    let lid = b.builtin_component(local_id, 0);
+    let output_tile = b.builtin_component(group_id, 0);
+    let token = b.builtin_component(group_id, 1);
+    let zero = b.c_u32(0);
+    let one = b.c_u32(1);
+    let two = b.c_u32(2);
+    let four = b.c_u32(4);
+    let eight = b.c_u32(8);
+    let sixteen = b.c_u32(16);
+    let zero_f = b.c_f32(0.0);
+    let zero_h = b.f32_to_f16(zero_f);
+    let blocks = b.udiv(k, sixteen);
+    let output_base = b.imul(output_tile, sixteen);
+
+    let mut packed_operand = packed[0];
+    let mut scale_operand = block_scales[0];
+    for index in 1..6 {
+        let index_id = b.c_u32(index as u32);
+        let selected = b.ieq(token, index_id);
+        packed_operand.0 = b.select_u32(selected, packed[index].0, packed_operand.0);
+        packed_operand.1 = b.select_u32(selected, packed[index].1, packed_operand.1);
+        scale_operand.0 = b.select_u32(selected, block_scales[index].0, scale_operand.0);
+        scale_operand.1 = b.select_u32(selected, block_scales[index].1, scale_operand.1);
+    }
+    let contiguous = b.ieq(weight_mode, one);
+    let weight_batch = b.select_u32(contiguous, token, zero);
+    let weight_batch_rows = b.imul(weight_batch, n);
+    let row_bytes = b.udiv(k, two);
+
+    let f32_workgroup_ptr = b.pointer(STORAGE_CLASS_WORKGROUP, f32_ty);
+    let f16_workgroup_ptr = b.pointer(STORAGE_CLASS_WORKGROUP, f16_ty);
+    // Initialize the accumulator tile once. Each lane owns four consecutive-stride elements.
+    for wave in 0..4 {
+        let offset = b.c_u32(wave * 32);
+        let element = b.iadd(lid, offset);
+        let pointer = b.access_chain(f32_workgroup_ptr, c_tile, &[element]);
+        b.store(pointer, zero_f);
+    }
+    b.workgroup_barrier();
+    let c_pointer = b.access_chain(f32_workgroup_ptr, c_tile, &[zero]);
+    let initial = b.cooperative_load(matrix_c_ty, c_pointer, sixteen);
+    b.store(accumulator, initial);
+
+    b.store(block_var, zero);
+    let (scope, block) = b.begin_loop(block_var, blocks);
+    let activation_block = b.imul(block, sixteen);
+    let activation_row = b.imul(token, k);
+    let activation_base = b.iadd(activation_row, activation_block);
+    // A is 8x16. Row zero carries the token and the remaining rows are zero, which maps an M=1
+    // decode product to the hardware's native M=8 tile without changing the public artifact ABI.
+    for wave in 0..4 {
+        let offset = b.c_u32(wave * 32);
+        let element = b.iadd(lid, offset);
+        let row_zero = b.ult(element, sixteen);
+        let source = b.iadd(activation_base, element);
+        let source = b.select_u32(row_zero, source, activation_base);
+        let value = b.load_f32(array, activation, source);
+        let value = b.select_f32(row_zero, value, zero_f);
+        let value = b.f32_to_f16(value);
+        let pointer = b.access_chain(f16_workgroup_ptr, a_tile, &[element]);
+        b.store(pointer, value);
+    }
+
+    // B is KxN in row-major cooperative-matrix order, while the checkpoint is N rows of packed
+    // K. Decode and transpose one 16x16 tile cooperatively.
+    for wave in 0..8 {
+        let offset = b.c_u32(wave * 32);
+        let element = b.iadd(lid, offset);
+        let k_lane = b.udiv(element, sixteen);
+        let column = b.umod(element, sixteen);
+        let output_row = b.iadd(output_base, column);
+        let in_range = b.ult(output_row, n);
+        let pointer = b.access_chain(f16_workgroup_ptr, b_tile, &[element]);
+        b.store(pointer, zero_h);
+        b.if_then(in_range, |b| {
+            let weight_row = b.iadd(weight_batch_rows, output_row);
+            let packed_row = b.imul(weight_row, row_bytes);
+            let packed_block = b.imul(block, eight);
+            let packed_base = b.iadd(packed_row, packed_block);
+            let packed_lane = b.udiv(k_lane, two);
+            let packed_index = b.iadd(packed_base, packed_lane);
+            let codes = b.load_byte_bits(array, packed_operand, packed_index);
+            let nibble_mask = b.c_u32(15);
+            let low = b.band(codes, nibble_mask);
+            let high = b.shr(codes, four);
+            let parity = b.band(k_lane, one);
+            let odd = b.ine(parity, zero);
+            let code = b.select_u32(odd, high, low);
+            let private_u32 = b.pointer(STORAGE_CLASS_PRIVATE, u32_ty);
+            let fp4_pointer = b.access_chain(private_u32, fp4, &[code]);
+            let weight_bits = b.load(u32_ty, fp4_pointer);
+            let weight = b.bitcast_f32(weight_bits);
+            let scale_row = b.imul(weight_row, blocks);
+            let scale_index = b.iadd(scale_row, block);
+            let scale_bits = b.load_byte_bits(array, scale_operand, scale_index);
+            let scale = b.widen_fp8(Fp8Format::E4M3, scale_bits);
+            let weight = b.fmul(weight, scale);
+            let weight = b.f32_to_f16(weight);
+            b.store(pointer, weight);
+        });
+    }
+    b.workgroup_barrier();
+    let a_pointer = b.access_chain(f16_workgroup_ptr, a_tile, &[zero]);
+    let b_pointer = b.access_chain(f16_workgroup_ptr, b_tile, &[zero]);
+    let matrix_a = b.cooperative_load(matrix_a_ty, a_pointer, sixteen);
+    let matrix_b = b.cooperative_load(matrix_b_ty, b_pointer, sixteen);
+    let matrix_c = b.load(matrix_c_ty, accumulator);
+    let matrix_c = b.cooperative_mul_add(matrix_c_ty, matrix_a, matrix_b, matrix_c);
+    b.store(accumulator, matrix_c);
+    b.workgroup_barrier();
+    b.end_loop(scope, block_var, one);
+
+    let matrix_c = b.load(matrix_c_ty, accumulator);
+    b.cooperative_store(c_pointer, matrix_c, sixteen);
+    b.workgroup_barrier();
+    let lane_in_tile = b.ult(lid, sixteen);
+    let output_row = b.iadd(output_base, lid);
+    let row_in_tensor = b.ult(output_row, n);
+    let write = b.land(lane_in_tile, row_in_tensor);
+    b.if_then(write, |b| {
+        let pointer = b.access_chain(f32_workgroup_ptr, c_tile, &[lid]);
+        let sum = b.load(f32_ty, pointer);
+        let shared_mode = b.c_u32(0);
+        let batched = b.ine(weight_mode, shared_mode);
+        let tensor_scale_index = b.select_u32(batched, token, zero);
+        let scale = b.load_f32(array, tensor_scale, tensor_scale_index);
+        let sum = b.fmul(sum, scale);
+        let negated = b.fneg(sum);
+        let exp = b.ext_f32(GLSL_EXP, &[negated]);
+        let one_f = b.c_f32(1.0);
+        let denominator = b.fadd(one_f, exp);
+        let sigmoid = b.fdiv(one_f, denominator);
+        let silu = b.fmul(sum, sigmoid);
+        let is_silu = b.ieq(epilogue, one);
+        let is_sigmoid = b.ieq(epilogue, two);
+        let sum = b.select_f32(is_silu, silu, sum);
+        let sum = b.select_f32(is_sigmoid, sigmoid, sum);
+        let destination = b.imul(token, n);
+        let destination = b.iadd(destination, output_row);
+        b.store_f32(array, output, destination, sum);
+    });
+    b.end_main();
+    b.finish([32, 1, 1])
+}
+
 /// Scalar baseline for native NVFP4 projections. One workgroup owns one
 /// `[token, output-row]` dot product. Its 64 invocations divide whole
 /// 16-weight scale blocks, so every packed byte and scale is read exactly once
@@ -4107,10 +4421,20 @@ mod tests {
         }
         assert_eq!(cursor, words.len(), "{key:?}");
         assert_eq!(opcodes[0], OP_CAPABILITY, "{key:?}");
-        assert_eq!(opcodes[1], OP_EXT_INST_IMPORT, "{key:?}");
-        assert_eq!(opcodes[2], OP_MEMORY_MODEL, "{key:?}");
-        assert_eq!(opcodes[3], OP_ENTRY_POINT, "{key:?}");
-        assert_eq!(opcodes[4], OP_EXECUTION_MODE, "{key:?}");
+        let import = opcodes
+            .iter()
+            .position(|op| *op == OP_EXT_INST_IMPORT)
+            .unwrap();
+        let memory = opcodes
+            .iter()
+            .position(|op| *op == OP_MEMORY_MODEL)
+            .unwrap();
+        let entry = opcodes.iter().position(|op| *op == OP_ENTRY_POINT).unwrap();
+        let mode = opcodes
+            .iter()
+            .position(|op| *op == OP_EXECUTION_MODE)
+            .unwrap();
+        assert!(import < memory && memory < entry && entry < mode, "{key:?}");
         assert_eq!(*opcodes.last().unwrap(), OP_FUNCTION_END, "{key:?}");
         assert_eq!(
             opcodes.iter().filter(|op| **op == OP_FUNCTION).count(),

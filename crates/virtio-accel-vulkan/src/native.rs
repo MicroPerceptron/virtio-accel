@@ -89,6 +89,9 @@ struct Tuning {
     matmul_tile: u32,
     /// Length of the storage-buffer descriptor array: bound slots plus the program arena.
     buffers: u32,
+    /// The device advertises the exact subgroup cooperative-matrix shape used by the NVFP4
+    /// projection kernel: FP16 8x16x16 with FP32 accumulation.
+    cooperative_nvfp4: bool,
 }
 
 impl Tuning {
@@ -131,6 +134,7 @@ impl Tuning {
             workgroup,
             matmul_tile,
             buffers: descriptors,
+            cooperative_nvfp4: false,
         })
     }
 
@@ -143,6 +147,7 @@ impl Tuning {
         match kernel {
             KernelSpec::Nvfp4Matmul => KernelKey::Nvfp4Matmul {
                 buffers: self.buffers,
+                cooperative: self.cooperative_nvfp4,
             },
             KernelSpec::Elementwise {
                 op,
@@ -215,7 +220,12 @@ impl Tuning {
                 (groups[0] <= max[0] && groups[2] <= max[2]).then_some(groups)
             }
             Work::Nvfp4Matmul { m, n } => {
-                let groups = [n, m, 1];
+                let columns = if self.cooperative_nvfp4 {
+                    n.div_ceil(16)
+                } else {
+                    n
+                };
+                let groups = [columns, m, 1];
                 (groups[0] <= max[0] && groups[1] <= max[1]).then_some(groups)
             }
         }
@@ -322,28 +332,37 @@ struct PhysicalDeviceRecord {
     host_import_alignment: Option<u64>,
     /// Vulkan 1.2 `timelineSemaphore`, enabled when reported, for host gates (ADR 0013).
     timeline_semaphore: bool,
+    shader_float16: bool,
+    vulkan_memory_model: bool,
+    cooperative_nvfp4: bool,
     tuning: Tuning,
 }
 
 impl PhysicalDeviceRecord {
     /// Probe one device; `None` when it cannot host this backend (API floor, compute queue,
     /// mandatory `synchronization2`).
-    fn probe(instance: &ash::Instance, handle: vk::PhysicalDevice) -> Option<Self> {
+    fn probe(owner: &Instance, handle: vk::PhysicalDevice) -> Option<Self> {
+        let instance = &owner.instance;
         let mut vulkan11 = vk::PhysicalDeviceVulkan11Properties::default();
-        let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut vulkan11);
+        let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
+        let mut properties = vk::PhysicalDeviceProperties2::default()
+            .push_next(&mut vulkan11)
+            .push_next(&mut subgroup);
         // SAFETY: `handle` was enumerated from `instance`; the chained structures are live locals.
         unsafe { instance.get_physical_device_properties2(handle, &mut properties) };
         let properties = properties.properties;
         if properties.api_version < vk::API_VERSION_1_3 {
             return None;
         }
-        let tuning = Tuning::from_limits(&properties.limits)?;
+        let mut tuning = Tuning::from_limits(&properties.limits)?;
 
         let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default();
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default();
+        let mut cooperative = vk::PhysicalDeviceCooperativeMatrixFeaturesKHR::default();
         let mut features = vk::PhysicalDeviceFeatures2::default()
             .push_next(&mut vulkan12)
-            .push_next(&mut vulkan13);
+            .push_next(&mut vulkan13)
+            .push_next(&mut cooperative);
         // SAFETY: as above; the feature chain is fully initialized before the call.
         unsafe { instance.get_physical_device_features2(handle, &mut features) };
         if vulkan13.synchronization2 == vk::FALSE {
@@ -366,6 +385,16 @@ impl PhysicalDeviceRecord {
         // SAFETY: `handle` is a live physical device of `instance`.
         let memory = unsafe { instance.get_physical_device_memory_properties(handle) };
         let host_import_alignment = host_import_alignment(instance, handle);
+        let cooperative_nvfp4 = vulkan12.shader_float16 == vk::TRUE
+            && vulkan12.vulkan_memory_model == vk::TRUE
+            && cooperative.cooperative_matrix == vk::TRUE
+            && subgroup.subgroup_size == 32
+            && subgroup
+                .supported_stages
+                .contains(vk::ShaderStageFlags::COMPUTE)
+            && supports_extension(instance, handle, ash::khr::cooperative_matrix::NAME)
+            && supports_nvfp4_cooperative_matrix(owner, handle);
+        tuning.cooperative_nvfp4 = cooperative_nvfp4;
         let name = CStr::from_bytes_until_nul(bytemuck_i8_to_u8(&properties.device_name))
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|_| String::from("vulkan-device"));
@@ -382,6 +411,9 @@ impl PhysicalDeviceRecord {
             buffer_device_address: vulkan12.buffer_device_address == vk::TRUE,
             host_import_alignment,
             timeline_semaphore: vulkan12.timeline_semaphore == vk::TRUE,
+            shader_float16: vulkan12.shader_float16 == vk::TRUE,
+            vulkan_memory_model: vulkan12.vulkan_memory_model == vk::TRUE,
+            cooperative_nvfp4,
             tuning,
         })
     }
@@ -423,15 +455,46 @@ fn host_import_alignment(instance: &ash::Instance, handle: vk::PhysicalDevice) -
     alignment.is_power_of_two().then_some(alignment)
 }
 
+fn supports_extension(instance: &ash::Instance, handle: vk::PhysicalDevice, name: &CStr) -> bool {
+    // SAFETY: `handle` is a live physical device of `instance`.
+    unsafe { instance.enumerate_device_extension_properties(handle) }.is_ok_and(|extensions| {
+        extensions
+            .iter()
+            .any(|extension| extension.extension_name_as_c_str() == Ok(name))
+    })
+}
+
+fn supports_nvfp4_cooperative_matrix(owner: &Instance, handle: vk::PhysicalDevice) -> bool {
+    let extension = ash::khr::cooperative_matrix::Instance::new(&owner._entry, &owner.instance);
+    // SAFETY: the caller checked that the physical device advertises the extension and `handle`
+    // belongs to this live instance.
+    let Ok(properties) =
+        (unsafe { extension.get_physical_device_cooperative_matrix_properties(handle) })
+    else {
+        return false;
+    };
+    properties.iter().any(|property| {
+        property.scope == vk::ScopeKHR::SUBGROUP
+            && property.m_size == 8
+            && property.n_size == 16
+            && property.k_size == 16
+            && property.a_type == vk::ComponentTypeKHR::FLOAT16
+            && property.b_type == vk::ComponentTypeKHR::FLOAT16
+            && property.c_type == vk::ComponentTypeKHR::FLOAT32
+            && property.result_type == vk::ComponentTypeKHR::FLOAT32
+            && property.saturating_accumulation == vk::FALSE
+    })
+}
+
 /// View a driver-filled `c_char` name array as bytes for `CStr` parsing.
 fn bytemuck_i8_to_u8(name: &[std::ffi::c_char; 256]) -> &[u8; 256] {
     // SAFETY: `c_char` and `u8` have identical size and alignment; the array is plain data.
     unsafe { &*(name as *const [std::ffi::c_char; 256]).cast::<[u8; 256]>() }
 }
 
-fn enumerate(instance: &ash::Instance) -> Result<Vec<PhysicalDeviceRecord>, InitError> {
+fn enumerate(instance: &Instance) -> Result<Vec<PhysicalDeviceRecord>, InitError> {
     // SAFETY: enumeration on a live instance has no other preconditions.
-    let handles = unsafe { instance.enumerate_physical_devices() }
+    let handles = unsafe { instance.instance.enumerate_physical_devices() }
         .map_err(|_| InitError::DeviceEnumerationFailed)?;
     Ok(handles
         .into_iter()
@@ -631,21 +694,27 @@ impl Shared {
         // `bufferDeviceAddress` is enabled only to measure allocation alignment honestly.
         let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default()
             .buffer_device_address(physical.buffer_device_address)
-            .timeline_semaphore(physical.timeline_semaphore);
+            .timeline_semaphore(physical.timeline_semaphore)
+            .shader_float16(physical.shader_float16)
+            .vulkan_memory_model(physical.vulkan_memory_model);
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default().synchronization2(true);
+        let mut cooperative = vk::PhysicalDeviceCooperativeMatrixFeaturesKHR::default()
+            .cooperative_matrix(physical.cooperative_nvfp4);
         // `VK_EXT_external_memory_host`, when offered, only for importing caller memory
         // (ADR 0013); nothing else depends on it.
-        let extensions = [ash::ext::external_memory_host::NAME.as_ptr()];
-        let enabled = if physical.host_import_alignment.is_some() {
-            &extensions[..]
-        } else {
-            &[]
-        };
+        let mut extensions = Vec::with_capacity(2);
+        if physical.host_import_alignment.is_some() {
+            extensions.push(ash::ext::external_memory_host::NAME.as_ptr());
+        }
+        if physical.cooperative_nvfp4 {
+            extensions.push(ash::khr::cooperative_matrix::NAME.as_ptr());
+        }
         let info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
-            .enabled_extension_names(enabled)
+            .enabled_extension_names(&extensions)
             .push_next(&mut vulkan12)
-            .push_next(&mut vulkan13);
+            .push_next(&mut vulkan13)
+            .push_next(&mut cooperative);
         // SAFETY: `physical.handle` belongs to `instance.instance`; every pointed-to structure
         // outlives the call; the requested features and extension were reported supported by the
         // probe.
@@ -1969,7 +2038,7 @@ impl VulkanAccelerator {
     /// Open the preferred Vulkan 1.3 compute device: discrete, integrated, virtual, then CPU.
     pub fn new() -> Result<Self, InitError> {
         let instance = Instance::create()?;
-        let devices = enumerate(&instance.instance)?;
+        let devices = enumerate(&instance)?;
         let physical = devices
             .into_iter()
             .min_by_key(PhysicalDeviceRecord::rank)
@@ -1985,7 +2054,7 @@ impl VulkanAccelerator {
     /// [`with_device`](Self::with_device) with explicit [`VulkanOptions`].
     pub fn with_device_options(device: &str, options: VulkanOptions) -> Result<Self, InitError> {
         let instance = Instance::create()?;
-        let physical = enumerate(&instance.instance)?
+        let physical = enumerate(&instance)?
             .into_iter()
             .find(|record| record.name == device)
             .ok_or(InitError::DeviceUnavailable)?;
@@ -1995,7 +2064,7 @@ impl VulkanAccelerator {
     /// Enumerate the names of every suitable device visible through the loader.
     pub fn available_devices() -> Result<Vec<String>, InitError> {
         let instance = Instance::create()?;
-        Ok(enumerate(&instance.instance)?
+        Ok(enumerate(&instance)?
             .into_iter()
             .map(|record| record.name)
             .collect())
