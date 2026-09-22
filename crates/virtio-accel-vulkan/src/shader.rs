@@ -4020,7 +4020,7 @@ fn assemble_nvfp4_matmul_cooperative(buffers: u32) -> Vec<u32> {
     b.finish([32, 1, 1])
 }
 
-/// Subgroup-reduced scalar NVFP4 projection. A fixed 32-lane subgroup folds four output rows,
+/// Subgroup-reduced scalar NVFP4 projection. A fixed 32-lane subgroup folds eight output rows,
 /// reusing every activation load across them and cutting dispatch count by four. Devices without
 /// subgroup arithmetic retain the portable 64-lane shared-memory reduction below.
 fn assemble_nvfp4_matmul_subgroup(buffers: u32) -> Vec<u32> {
@@ -4044,7 +4044,7 @@ fn assemble_nvfp4_matmul_subgroup(buffers: u32) -> Vec<u32> {
     let u32_ty = b.u32_ty();
     let f32_ty = b.f32_ty();
     let block_var = b.local(u32_ty);
-    let accumulators = core::array::from_fn::<_, 4, _>(|_| b.local(f32_ty));
+    let accumulators = core::array::from_fn::<_, 8, _>(|_| b.local(f32_ty));
     let fp4 = b.private_u32_array(&[
         0.0f32.to_bits(),
         0.5f32.to_bits(),
@@ -4074,7 +4074,7 @@ fn assemble_nvfp4_matmul_subgroup(buffers: u32) -> Vec<u32> {
     let thirty_two = b.c_u32(32);
     let nibble_mask = b.c_u32(15);
     let blocks = b.udiv(k, sixteen);
-    let output_base = b.imul(output_group, four);
+    let output_base = b.imul(output_group, eight);
     let mut packed_operand = packed[0];
     let mut scale_operand = block_scales[0];
     for index in 1..6 {
@@ -4092,12 +4092,12 @@ fn assemble_nvfp4_matmul_subgroup(buffers: u32) -> Vec<u32> {
     let two = b.c_u32(2);
     let row_bytes = b.udiv(k, two);
     let activation_row = b.imul(token, k);
-    let output_rows = core::array::from_fn::<_, 4, _>(|index| {
+    let output_rows = core::array::from_fn::<_, 8, _>(|index| {
         let offset = b.c_u32(index as u32);
         b.iadd(output_base, offset)
     });
     let row_valid = output_rows.map(|row| b.ult(row, n));
-    let weight_rows = core::array::from_fn::<_, 4, _>(|index| {
+    let weight_rows = core::array::from_fn::<_, 8, _>(|index| {
         let safe_row = b.select_u32(row_valid[index], output_rows[index], zero);
         b.iadd(batch_rows, safe_row)
     });
@@ -4108,7 +4108,7 @@ fn assemble_nvfp4_matmul_subgroup(buffers: u32) -> Vec<u32> {
     }
     b.store(block_var, lid);
     let (scope, block) = b.begin_loop(block_var, blocks);
-    let scales = core::array::from_fn::<_, 4, _>(|index| {
+    let scales = core::array::from_fn::<_, 8, _>(|index| {
         let scale_element = b.iadd(row_blocks[index], block);
         let scale_bits = b.load_byte_bits(array, scale_operand, scale_element);
         b.widen_fp8(Fp8Format::E4M3, scale_bits)
@@ -4119,7 +4119,7 @@ fn assemble_nvfp4_matmul_subgroup(buffers: u32) -> Vec<u32> {
     let activation_base = b.iadd(activation_row, activation_block);
     for byte in 0..8 {
         let byte_offset = b.c_u32(byte);
-        let codes = core::array::from_fn::<_, 4, _>(|index| {
+        let codes = core::array::from_fn::<_, 8, _>(|index| {
             let byte_index = b.iadd(packed_bases[index], byte_offset);
             b.load_byte_bits(array, packed_operand, byte_index)
         });
@@ -4127,7 +4127,7 @@ fn assemble_nvfp4_matmul_subgroup(buffers: u32) -> Vec<u32> {
             let inner = b.c_u32(byte * 2 + lane as u32);
             let element = b.iadd(activation_base, inner);
             let value = b.load_f32(array, activation, element);
-            for index in 0..4 {
+            for index in 0..8 {
                 let code = if lane == 0 {
                     b.band(codes[index], nibble_mask)
                 } else {
@@ -4157,7 +4157,7 @@ fn assemble_nvfp4_matmul_subgroup(buffers: u32) -> Vec<u32> {
         let batched = b.ine(weight_mode, shared_mode);
         let tensor_scale_index = b.select_u32(batched, token, zero);
         let tensor_scale = b.load_f32(array, tensor_scale, tensor_scale_index);
-        for index in 0..4 {
+        for index in 0..8 {
             b.if_then(row_valid[index], |b| {
                 let sum = b.fmul(sums[index], tensor_scale);
                 let negated = b.fneg(sum);
