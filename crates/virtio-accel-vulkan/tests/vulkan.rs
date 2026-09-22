@@ -381,11 +381,8 @@ fn executes_the_shared_fp32_matmul_in_every_advertised_domain() {
 
 #[test]
 fn native_nvfp4_matmul_matches_its_f32_expansion() {
-    // Eight rows exercise the native cooperative tile and the ninth verifies tail padding.
-    const M: usize = 9;
     const N: usize = 3;
     const K: usize = 16;
-    let activation: Vec<f32> = (0..M * K).map(|i| i as f32 / 7.0 - 1.0).collect();
     let codes: [[u8; K]; N] = [
         [2; K],
         [10; K],
@@ -404,52 +401,59 @@ fn native_nvfp4_matmul_matches_its_f32_expansion() {
         let magnitude = table[usize::from(code & 7)];
         if code & 8 == 0 { magnitude } else { -magnitude }
     };
-    let expected: Vec<f32> = (0..M)
-        .flat_map(|token| {
-            codes.map(|row| {
-                activation[token * K..][..K]
-                    .iter()
-                    .zip(row)
-                    .map(|(&a, code)| a * decode(code))
-                    .sum()
-            })
-        })
-        .collect();
-    let artifact = Nvfp4Artifact::new(M as u32, N as u32, K as u32, Nvfp4Activation::None).unwrap();
     for device in devices() {
         let backend = open(&device);
         for domain in advertised_domains(&backend) {
-            let context = backend.create_context(ContextDesc::default()).unwrap();
-            let program = backend
-                .load_program(&context, artifact.as_ref())
-                .unwrap_or_else(|error| panic!("{device}: NVFP4 load failed: {error:?}"));
-            let actual = execute(
-                &backend,
-                &context,
-                &program,
-                &[
-                    float_bytes(activation.iter().copied()),
-                    packed.clone(),
-                    scales.clone(),
-                    1.0f32.to_le_bytes().to_vec(),
-                ],
-                M * N * 4,
-                domain,
-            );
-            let actual = floats(&actual);
-            assert_eq!(actual.len(), expected.len());
-            for (actual, expected) in actual.iter().zip(&expected) {
-                // Cooperative-matrix devices stage both operands as FP16 and accumulate as FP32;
-                // scalar fallback evaluates the same product in FP32 throughout.
-                let tolerance = 0.01 * expected.abs().max(1.0);
-                assert!(
-                    (actual - expected).abs() <= tolerance,
-                    "{device}: {domain:?}: {actual} != {expected}"
+            // M=1 exercises the four-row subgroup tile and its output tail. M=9 exercises a full
+            // cooperative tile plus its token tail.
+            for m in [1, 9] {
+                let activation: Vec<f32> = (0..m * K).map(|i| i as f32 / 7.0 - 1.0).collect();
+                let expected: Vec<f32> = (0..m)
+                    .flat_map(|token| {
+                        codes.map(|row| {
+                            activation[token * K..][..K]
+                                .iter()
+                                .zip(row)
+                                .map(|(&a, code)| a * decode(code))
+                                .sum()
+                        })
+                    })
+                    .collect();
+                let artifact =
+                    Nvfp4Artifact::new(m as u32, N as u32, K as u32, Nvfp4Activation::None)
+                        .unwrap();
+                let context = backend.create_context(ContextDesc::default()).unwrap();
+                let program = backend
+                    .load_program(&context, artifact.as_ref())
+                    .unwrap_or_else(|error| panic!("{device}: NVFP4 load failed: {error:?}"));
+                let actual = execute(
+                    &backend,
+                    &context,
+                    &program,
+                    &[
+                        float_bytes(activation.iter().copied()),
+                        packed.clone(),
+                        scales.clone(),
+                        1.0f32.to_le_bytes().to_vec(),
+                    ],
+                    m * N * 4,
+                    domain,
                 );
+                let actual = floats(&actual);
+                assert_eq!(actual.len(), expected.len());
+                for (actual, expected) in actual.iter().zip(&expected) {
+                    // Cooperative-matrix devices stage both operands as FP16 and accumulate as
+                    // FP32; scalar/subgroup fallback evaluates the same product in FP32.
+                    let tolerance = 0.01 * expected.abs().max(1.0);
+                    assert!(
+                        (actual - expected).abs() <= tolerance,
+                        "{device}: {domain:?}: M={m}: {actual} != {expected}"
+                    );
+                }
+                release(backend.unload_program(program));
+                release(backend.destroy_context(context));
+                assert_eq!(backend.live_resources(), Default::default(), "{device}");
             }
-            release(backend.unload_program(program));
-            release(backend.destroy_context(context));
-            assert_eq!(backend.live_resources(), Default::default(), "{device}");
         }
     }
 }
