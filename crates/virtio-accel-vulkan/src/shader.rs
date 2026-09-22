@@ -800,14 +800,15 @@ pub fn nvfp4_matmul_spec(
     n: u32,
     k: u32,
     epilogue: u32,
+    batched_weights: u32,
 ) -> Vec<u32> {
-    let mut words = Vec::with_capacity(14);
+    let mut words = Vec::with_capacity(15);
     activation.push(&mut words);
     packed.push(&mut words);
     block_scales.push(&mut words);
     tensor_scale.push(&mut words);
     output.push(&mut words);
-    words.extend_from_slice(&[m, n, k, epilogue]);
+    words.extend_from_slice(&[m, n, k, epilogue, batched_weights]);
     words
 }
 
@@ -3666,6 +3667,7 @@ fn assemble_nvfp4_matmul(buffers: u32) -> Vec<u32> {
     let n = b.spec_u32(1);
     let k = b.spec_u32(16);
     let epilogue = b.spec_u32(0);
+    let batched_weights = b.spec_u32(0);
     let partials = b.shared_f32_array(STREAM_WORKGROUP);
     let local_id = b.builtin_uvec3(BUILT_IN_LOCAL_INVOCATION_ID);
     let group_id = b.builtin_uvec3(BUILT_IN_WORKGROUP_ID);
@@ -3705,10 +3707,14 @@ fn assemble_nvfp4_matmul(buffers: u32) -> Vec<u32> {
     let sixty_four = b.c_u32(STREAM_WORKGROUP);
     let nibble_mask = b.c_u32(15);
     let blocks = b.udiv(k, sixteen);
-    let row_blocks = b.imul(out_row, blocks);
+    let batched = b.ine(batched_weights, zero);
+    let weight_batch = b.select_u32(batched, token, zero);
+    let batch_rows = b.imul(weight_batch, n);
+    let weight_row = b.iadd(batch_rows, out_row);
+    let row_blocks = b.imul(weight_row, blocks);
     let two = b.c_u32(2);
     let row_bytes = b.udiv(k, two);
-    let packed_row = b.imul(out_row, row_bytes);
+    let packed_row = b.imul(weight_row, row_bytes);
     let activation_row = b.imul(token, k);
     b.store(accumulator, zero_f);
     b.store(block_var, lid);
@@ -3762,7 +3768,8 @@ fn assemble_nvfp4_matmul(buffers: u32) -> Vec<u32> {
         b.store(sum_var, next);
         b.end_loop(sum_scope, index_var, one);
         let sum = b.load(f32_ty, sum_var);
-        let tensor_scale = b.load_f32(array, tensor_scale, zero);
+        let tensor_scale_index = b.select_u32(batched, token, zero);
+        let tensor_scale = b.load_f32(array, tensor_scale, tensor_scale_index);
         let sum = b.fmul(sum, tensor_scale);
         let negated = b.fneg(sum);
         let exp = b.ext_f32(GLSL_EXP, &[negated]);
@@ -4151,7 +4158,7 @@ mod tests {
                     matmul_spec(operand, operand, operand, 1, 2, 3, 1)
                 }
                 KernelKey::Nvfp4Matmul { .. } => {
-                    nvfp4_matmul_spec(operand, operand, operand, operand, operand, 1, 2, 16, 0)
+                    nvfp4_matmul_spec(operand, operand, operand, operand, operand, 1, 2, 16, 0, 0)
                 }
                 KernelKey::MaxPool { .. } => max_pool_spec(
                     operand,

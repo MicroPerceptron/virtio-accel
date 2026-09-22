@@ -47,13 +47,37 @@ impl Nvfp4Artifact {
     /// The tensor scale is a one-element F32 input rather than artifact metadata, so one loaded
     /// program serves every checkpoint tensor with this geometry.
     pub fn new(m: u32, n: u32, k: u32, activation: Nvfp4Activation) -> Result<Self, LoweringError> {
+        Self::build(m, n, k, activation, false)
+    }
+
+    /// Describe `batch` independent `[k] F32 × [n,k] NVFP4 products.
+    ///
+    /// Activations, packed weights, block scales and tensor scales all carry
+    /// the leading batch dimension. This is the natural execution unit for a
+    /// routed MoE layer and amortizes submission over all selected experts.
+    pub fn new_batched(
+        batch: u32,
+        n: u32,
+        k: u32,
+        activation: Nvfp4Activation,
+    ) -> Result<Self, LoweringError> {
+        Self::build(batch, n, k, activation, true)
+    }
+
+    fn build(
+        m: u32,
+        n: u32,
+        k: u32,
+        activation: Nvfp4Activation,
+        batched_weights: bool,
+    ) -> Result<Self, LoweringError> {
         if m == 0 || n == 0 || k == 0 || !k.is_multiple_of(16) {
             return Err(LoweringError::UnsupportedGraph);
         }
-        checked_lengths(m, n, k)?;
+        checked_lengths(m, n, k, batched_weights)?;
         let mut bytes = [0; HEADER_BYTES];
         bytes[..8].copy_from_slice(&MAGIC);
-        for (offset, value) in [VERSION, m, n, k, activation as u32, 0]
+        for (offset, value) in [VERSION, m, n, k, activation as u32, batched_weights as u32]
             .into_iter()
             .enumerate()
         {
@@ -76,18 +100,24 @@ impl Nvfp4Artifact {
     }
 }
 
-fn checked_lengths(m: u32, n: u32, k: u32) -> Result<[u64; 5], LoweringError> {
+fn checked_lengths(
+    m: u32,
+    n: u32,
+    k: u32,
+    batched_weights: bool,
+) -> Result<[u64; 5], LoweringError> {
     let product = |a: u32, b: u32, bytes: u64| {
         u64::from(a)
             .checked_mul(u64::from(b))
             .and_then(|v| v.checked_mul(bytes))
             .ok_or(LoweringError::ResourceLimit)
     };
+    let batches = if batched_weights { m } else { 1 };
     Ok([
         product(m, k, 4)?,
-        product(n, k, 1)? / 2,
-        product(n, k, 1)? / 16,
-        4,
+        product(n, k, u64::from(batches))? / 2,
+        product(n, k, u64::from(batches))? / 16,
+        u64::from(batches) * 4,
         product(m, n, 4)?,
     ])
 }
@@ -109,10 +139,10 @@ pub(crate) fn lower_nvfp4(bytes: &[u8]) -> Result<ProgramPlan, LoweringError> {
     let n = word(bytes, 16)?;
     let k = word(bytes, 20)?;
     let activation = word(bytes, 24)?;
-    let reserved = word(bytes, 28)?;
+    let batched_weights = word(bytes, 28)?;
     if version != VERSION
         || activation > Nvfp4Activation::Sigmoid as u32
-        || reserved != 0
+        || batched_weights > 1
         || m == 0
         || n == 0
         || k == 0
@@ -120,7 +150,7 @@ pub(crate) fn lower_nvfp4(bytes: &[u8]) -> Result<ProgramPlan, LoweringError> {
     {
         return Err(LoweringError::UnsupportedGraph);
     }
-    let lengths = checked_lengths(m, n, k)?;
+    let lengths = checked_lengths(m, n, k, batched_weights != 0)?;
     let operand = |slot| Operand {
         buffer: slot,
         base: 0,
@@ -172,6 +202,7 @@ pub(crate) fn lower_nvfp4(bytes: &[u8]) -> Result<ProgramPlan, LoweringError> {
                 n,
                 k,
                 activation,
+                batched_weights,
             ),
             work: Work::Nvfp4Matmul { m, n },
             barrier_before: false,
@@ -195,6 +226,25 @@ mod tests {
             vec![3 * 2688 * 4, 17 * 2688 / 2, 17 * 2688 / 16, 4, 3 * 17 * 4,]
         );
         assert_eq!(plan.dispatches[0].work, Work::Nvfp4Matmul { m: 3, n: 17 });
+    }
+
+    #[test]
+    fn batched_artifact_batches_weights_scales_and_tensor_scales() {
+        let artifact = Nvfp4Artifact::new_batched(6, 1856, 2688, Nvfp4Activation::None).unwrap();
+        let plan = lower_nvfp4(artifact.as_bytes()).unwrap();
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.byte_len)
+                .collect::<Vec<_>>(),
+            vec![
+                6 * 2688 * 4,
+                6 * 1856 * 2688 / 2,
+                6 * 1856 * 2688 / 16,
+                6 * 4,
+                6 * 1856 * 4,
+            ]
+        );
     }
 
     #[test]
