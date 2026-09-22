@@ -792,23 +792,28 @@ pub fn matmul_spec(
 /// weights, block scales, tensor scale, output, then `m`, `n`, `k`, activation.
 pub fn nvfp4_matmul_spec(
     activation: Operand,
-    packed: Operand,
-    block_scales: Operand,
+    packed: &[Operand],
+    block_scales: &[Operand],
     tensor_scale: Operand,
     output: Operand,
     m: u32,
     n: u32,
     k: u32,
     epilogue: u32,
-    batched_weights: u32,
+    weight_mode: u32,
 ) -> Vec<u32> {
-    let mut words = Vec::with_capacity(15);
+    assert!(!packed.is_empty() && packed.len() <= 6 && packed.len() == block_scales.len());
+    let mut words = Vec::with_capacity(35);
     activation.push(&mut words);
-    packed.push(&mut words);
-    block_scales.push(&mut words);
+    for index in 0..6 {
+        packed[index.min(packed.len() - 1)].push(&mut words);
+    }
+    for index in 0..6 {
+        block_scales[index.min(block_scales.len() - 1)].push(&mut words);
+    }
     tensor_scale.push(&mut words);
     output.push(&mut words);
-    words.extend_from_slice(&[m, n, k, epilogue, batched_weights]);
+    words.extend_from_slice(&[m, n, k, epilogue, weight_mode]);
     words
 }
 
@@ -3659,15 +3664,15 @@ fn assemble_nvfp4_matmul(buffers: u32) -> Vec<u32> {
     let mut b = Builder::new();
     let array = b.buffer_array(buffers);
     let activation = b.spec_operand();
-    let packed = b.spec_operand();
-    let block_scales = b.spec_operand();
+    let packed = core::array::from_fn::<_, 6, _>(|_| b.spec_operand());
+    let block_scales = core::array::from_fn::<_, 6, _>(|_| b.spec_operand());
     let tensor_scale = b.spec_operand();
     let output = b.spec_operand();
     let _m = b.spec_u32(1);
     let n = b.spec_u32(1);
     let k = b.spec_u32(16);
     let epilogue = b.spec_u32(0);
-    let batched_weights = b.spec_u32(0);
+    let weight_mode = b.spec_u32(0);
     let partials = b.shared_f32_array(STREAM_WORKGROUP);
     let local_id = b.builtin_uvec3(BUILT_IN_LOCAL_INVOCATION_ID);
     let group_id = b.builtin_uvec3(BUILT_IN_WORKGROUP_ID);
@@ -3707,8 +3712,19 @@ fn assemble_nvfp4_matmul(buffers: u32) -> Vec<u32> {
     let sixty_four = b.c_u32(STREAM_WORKGROUP);
     let nibble_mask = b.c_u32(15);
     let blocks = b.udiv(k, sixteen);
-    let batched = b.ine(batched_weights, zero);
-    let weight_batch = b.select_u32(batched, token, zero);
+    let mut packed_operand = packed[0];
+    let mut scale_operand = block_scales[0];
+    for index in 1..6 {
+        let index_id = b.c_u32(index as u32);
+        let selected = b.ieq(token, index_id);
+        packed_operand.0 = b.select_u32(selected, packed[index].0, packed_operand.0);
+        packed_operand.1 = b.select_u32(selected, packed[index].1, packed_operand.1);
+        scale_operand.0 = b.select_u32(selected, block_scales[index].0, scale_operand.0);
+        scale_operand.1 = b.select_u32(selected, block_scales[index].1, scale_operand.1);
+    }
+    let contiguous_mode = b.c_u32(1);
+    let contiguous = b.ieq(weight_mode, contiguous_mode);
+    let weight_batch = b.select_u32(contiguous, token, zero);
     let batch_rows = b.imul(weight_batch, n);
     let weight_row = b.iadd(batch_rows, out_row);
     let row_blocks = b.imul(weight_row, blocks);
@@ -3720,7 +3736,7 @@ fn assemble_nvfp4_matmul(buffers: u32) -> Vec<u32> {
     b.store(block_var, lid);
     let (scope, block) = b.begin_loop(block_var, blocks);
     let scale_element = b.iadd(row_blocks, block);
-    let scale_bits = b.load_byte_bits(array, block_scales, scale_element);
+    let scale_bits = b.load_byte_bits(array, scale_operand, scale_element);
     let scale = b.widen_fp8(Fp8Format::E4M3, scale_bits);
     let packed_block = b.imul(block, eight);
     let packed_base = b.iadd(packed_row, packed_block);
@@ -3729,7 +3745,7 @@ fn assemble_nvfp4_matmul(buffers: u32) -> Vec<u32> {
     for byte in 0..8 {
         let byte_offset = b.c_u32(byte);
         let byte_index = b.iadd(packed_base, byte_offset);
-        let codes = b.load_byte_bits(array, packed, byte_index);
+        let codes = b.load_byte_bits(array, packed_operand, byte_index);
         let low = b.band(codes, nibble_mask);
         let high = b.shr(codes, four);
         for (lane, code) in [low, high].into_iter().enumerate() {
@@ -3768,6 +3784,8 @@ fn assemble_nvfp4_matmul(buffers: u32) -> Vec<u32> {
         b.store(sum_var, next);
         b.end_loop(sum_scope, index_var, one);
         let sum = b.load(f32_ty, sum_var);
+        let shared_mode = b.c_u32(0);
+        let batched = b.ine(weight_mode, shared_mode);
         let tensor_scale_index = b.select_u32(batched, token, zero);
         let tensor_scale = b.load_f32(array, tensor_scale, tensor_scale_index);
         let sum = b.fmul(sum, tensor_scale);
@@ -4157,9 +4175,18 @@ mod tests {
                 KernelKey::Matmul { .. } | KernelKey::MatmulStream { .. } => {
                     matmul_spec(operand, operand, operand, 1, 2, 3, 1)
                 }
-                KernelKey::Nvfp4Matmul { .. } => {
-                    nvfp4_matmul_spec(operand, operand, operand, operand, operand, 1, 2, 16, 0, 0)
-                }
+                KernelKey::Nvfp4Matmul { .. } => nvfp4_matmul_spec(
+                    operand,
+                    &[operand],
+                    &[operand],
+                    operand,
+                    operand,
+                    1,
+                    2,
+                    16,
+                    0,
+                    0,
+                ),
                 KernelKey::MaxPool { .. } => max_pool_spec(
                     operand,
                     operand,
