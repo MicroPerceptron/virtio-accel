@@ -33,8 +33,10 @@ pub enum Nvfp4Activation {
     None = 0,
     Silu = 1,
     Sigmoid = 2,
-    /// `max(x * tensor_scale, 0)^2` after the projection has already
-    /// applied `tensor_scale`, matching Nemotron's routed-expert ABI.
+    /// `max(x, 0)^2` after the projection has applied `tensor_scale` once.
+    /// A fused routed-expert caller folds the omitted second scale squared
+    /// into the following projection's tensor scale. This keeps the private
+    /// intermediate normal without changing the composed result.
     SquaredRelu = 3,
 }
 

@@ -4003,7 +4003,7 @@ fn assemble_nvfp4_matmul_cooperative(buffers: u32) -> Vec<u32> {
             let is_sigmoid = b.ieq(epilogue, two);
             let three = b.c_u32(3);
             let zero_f = b.c_f32(0.0);
-            let squared_input = b.fmul(sum, scale);
+            let squared_input = sum;
             let positive = b.fogt(squared_input, zero_f);
             let rectified = b.select_f32(positive, squared_input, zero_f);
             let squared = b.fmul(rectified, rectified);
@@ -4172,7 +4172,7 @@ fn assemble_nvfp4_matmul_subgroup(buffers: u32) -> Vec<u32> {
                 let is_silu = b.ieq(epilogue, silu_mode);
                 let is_sigmoid = b.ieq(epilogue, sigmoid_mode);
                 let zero_f = b.c_f32(0.0);
-                let squared_input = b.fmul(sum, tensor_scale);
+                let squared_input = sum;
                 let positive = b.fogt(squared_input, zero_f);
                 let rectified = b.select_f32(positive, squared_input, zero_f);
                 let squared = b.fmul(rectified, rectified);
@@ -4336,7 +4336,7 @@ fn assemble_nvfp4_matmul(buffers: u32) -> Vec<u32> {
         let is_silu = b.ieq(epilogue, silu_mode);
         let is_sigmoid = b.ieq(epilogue, sigmoid_mode);
         let zero_f = b.c_f32(0.0);
-        let squared_input = b.fmul(sum, tensor_scale);
+        let squared_input = sum;
         let positive = b.fogt(squared_input, zero_f);
         let rectified = b.select_f32(positive, squared_input, zero_f);
         let squared = b.fmul(rectified, rectified);
