@@ -39,7 +39,7 @@ pub enum Nvfp4Activation {
 }
 
 const MOE_MAGIC: [u8; 8] = *b"VKNVMOE\0";
-const MOE_HEADER_BYTES: usize = 64;
+const MOE_HEADER_BYTES: usize = 160;
 
 /// Two native NVFP4 expert projections with a device-local squared-ReLU
 /// intermediate. Each expert occupies one externally bound cache-slot span;
@@ -50,18 +50,19 @@ pub struct Nvfp4MoeArtifact {
 }
 
 impl Nvfp4MoeArtifact {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         batch: u32,
         width: u32,
         inner: u32,
         expert_bytes: u32,
-        up_packed: u32,
-        up_scales: u32,
-        down_packed: u32,
-        down_scales: u32,
+        offsets: &[[u32; 4]],
     ) -> Result<Self, LoweringError> {
-        if batch == 0 || batch > 6 || !width.is_multiple_of(16) || !inner.is_multiple_of(16) {
+        if batch == 0
+            || batch > 6
+            || offsets.len() != batch as usize
+            || !width.is_multiple_of(16)
+            || !inner.is_multiple_of(16)
+        {
             return Err(LoweringError::UnsupportedGraph);
         }
         let fits = |offset: u32, bytes: u64| {
@@ -69,30 +70,25 @@ impl Nvfp4MoeArtifact {
                 .checked_add(bytes)
                 .is_some_and(|last| last <= u64::from(expert_bytes))
         };
-        if !fits(up_packed, u64::from(inner) * u64::from(width) / 2)
-            || !fits(up_scales, u64::from(inner) * u64::from(width) / 16)
-            || !fits(down_packed, u64::from(width) * u64::from(inner) / 2)
-            || !fits(down_scales, u64::from(width) * u64::from(inner) / 16)
-        {
-            return Err(LoweringError::ResourceLimit);
+        for &[up_packed, up_scales, down_packed, down_scales] in offsets {
+            if !fits(up_packed, u64::from(inner) * u64::from(width) / 2)
+                || !fits(up_scales, u64::from(inner) * u64::from(width) / 16)
+                || !fits(down_packed, u64::from(width) * u64::from(inner) / 2)
+                || !fits(down_scales, u64::from(width) * u64::from(inner) / 16)
+            {
+                return Err(LoweringError::ResourceLimit);
+            }
         }
         let mut bytes = [0; MOE_HEADER_BYTES];
         bytes[..8].copy_from_slice(&MOE_MAGIC);
-        for (index, value) in [
-            VERSION,
-            batch,
-            width,
-            inner,
-            expert_bytes,
-            up_packed,
-            up_scales,
-            down_packed,
-            down_scales,
-        ]
-        .into_iter()
-        .enumerate()
+        for (index, value) in [VERSION, batch, width, inner, expert_bytes]
+            .into_iter()
+            .enumerate()
         {
             bytes[8 + index * 4..12 + index * 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in offsets.iter().flatten().copied().enumerate() {
+            bytes[28 + index * 4..32 + index * 4].copy_from_slice(&value.to_le_bytes());
         }
         Ok(Self { bytes })
     }
@@ -374,36 +370,26 @@ pub(crate) fn lower_nvfp4(bytes: &[u8]) -> Result<ProgramPlan, LoweringError> {
 }
 
 fn lower_nvfp4_moe(bytes: &[u8]) -> Result<ProgramPlan, LoweringError> {
-    let values: Vec<u32> = (0..9)
+    let values: Vec<u32> = (0..5)
         .map(|i| word(bytes, 8 + i * 4))
         .collect::<Result<_, _>>()?;
-    let [
-        version,
-        batch,
-        width,
-        inner,
-        expert_bytes,
-        up_packed,
-        up_scales,
-        down_packed,
-        down_scales,
-    ] = values.as_slice()
-    else {
+    let [version, batch, width, inner, expert_bytes] = values.as_slice() else {
         return Err(LoweringError::UnsupportedGraph);
     };
     if *version != VERSION || *batch == 0 || *batch > 6 || *expert_bytes == 0 {
         return Err(LoweringError::UnsupportedGraph);
     }
-    let artifact = Nvfp4MoeArtifact::new(
-        *batch,
-        *width,
-        *inner,
-        *expert_bytes,
-        *up_packed,
-        *up_scales,
-        *down_packed,
-        *down_scales,
-    )?;
+    let offsets = (0..*batch as usize)
+        .map(|expert| {
+            Ok([
+                word(bytes, 28 + (expert * 4) * 4)?,
+                word(bytes, 28 + (expert * 4 + 1) * 4)?,
+                word(bytes, 28 + (expert * 4 + 2) * 4)?,
+                word(bytes, 28 + (expert * 4 + 3) * 4)?,
+            ])
+        })
+        .collect::<Result<Vec<[u32; 4]>, LoweringError>>()?;
+    let artifact = Nvfp4MoeArtifact::new(*batch, *width, *inner, *expert_bytes, &offsets)?;
     let _ = artifact;
     let activation_bytes = u64::from(*batch) * u64::from(*width) * 4;
     let intermediate_bytes = u64::from(*batch) * u64::from(*inner) * 4;
@@ -440,11 +426,11 @@ fn lower_nvfp4_moe(bytes: &[u8]) -> Result<ProgramPlan, LoweringError> {
         storage: Storage::Word,
     });
     let arena_slot = slots.len() as u32;
-    let operands = |base: u32| {
+    let operands = |plane: usize| {
         (0..*batch)
             .map(|expert| Operand {
                 buffer: 1 + expert,
-                base,
+                base: offsets[expert as usize][plane],
             })
             .collect::<Vec<_>>()
     };
@@ -457,8 +443,8 @@ fn lower_nvfp4_moe(bytes: &[u8]) -> Result<ProgramPlan, LoweringError> {
                 kernel: KernelSpec::Nvfp4Matmul { cooperative: false },
                 spec: nvfp4_matmul_spec(
                     Operand { buffer: 0, base: 0 },
-                    &operands(*up_packed),
-                    &operands(*up_scales),
+                    &operands(0),
+                    &operands(1),
                     Operand {
                         buffer: up_tensor_slot,
                         base: 0,
@@ -486,8 +472,8 @@ fn lower_nvfp4_moe(bytes: &[u8]) -> Result<ProgramPlan, LoweringError> {
                         buffer: arena_slot,
                         base: 0,
                     },
-                    &operands(*down_packed),
-                    &operands(*down_scales),
+                    &operands(2),
+                    &operands(3),
                     Operand {
                         buffer: down_tensor_slot,
                         base: 0,
@@ -576,10 +562,7 @@ mod tests {
             width,
             inner,
             6 << 20,
-            0,
-            up_bytes,
-            3 << 20,
-            (3 << 20) + down_bytes,
+            &[[0, up_bytes, 3 << 20, (3 << 20) + down_bytes]; 6],
         )
         .unwrap();
         assert!(scale_bytes < 1 << 20);
