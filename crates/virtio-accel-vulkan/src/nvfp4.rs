@@ -73,7 +73,10 @@ impl Nvfp4MoeArtifact {
                 .is_some_and(|last| last <= u64::from(expert_bytes))
         };
         for &[up_packed, up_scales, down_packed, down_scales] in offsets {
-            if !fits(up_packed, u64::from(inner) * u64::from(width) / 2)
+            if [up_packed, up_scales, down_packed, down_scales]
+                .into_iter()
+                .any(|offset| !offset.is_multiple_of(4))
+                || !fits(up_packed, u64::from(inner) * u64::from(width) / 2)
                 || !fits(up_scales, u64::from(inner) * u64::from(width) / 16)
                 || !fits(down_packed, u64::from(width) * u64::from(inner) / 2)
                 || !fits(down_scales, u64::from(width) * u64::from(inner) / 16)
@@ -432,7 +435,9 @@ fn lower_nvfp4_moe(bytes: &[u8]) -> Result<ProgramPlan, LoweringError> {
         (0..*batch)
             .map(|expert| Operand {
                 buffer: 1 + expert,
-                base: offsets[expert as usize][plane],
+                // SPIR-V storage operands index 32-bit words; the artifact
+                // exposes byte offsets to match host tensor views.
+                base: offsets[expert as usize][plane] / 4,
             })
             .collect::<Vec<_>>()
     };
@@ -574,6 +579,11 @@ mod tests {
         assert_eq!(plan.dispatches.len(), 2);
         assert!(!plan.dispatches[0].barrier_before);
         assert!(plan.dispatches[1].barrier_before);
+        // First packed operand follows the activation operand in the
+        // specialization payload and names byte offset zero in words.
+        assert_eq!(plan.dispatches[0].spec[2..4], [1, 0]);
+        // The first down packed operand begins at 3 MiB, encoded as words.
+        assert_eq!(plan.dispatches[1].spec[2..4], [1, (3 << 20) / 4]);
     }
 
     #[test]
