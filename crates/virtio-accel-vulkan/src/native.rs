@@ -236,7 +236,7 @@ impl Tuning {
                 let columns = if cooperative {
                     n.div_ceil(16)
                 } else if subgroup {
-                    n.div_ceil(8)
+                    n.div_ceil(4)
                 } else {
                     n
                 };
