@@ -26,6 +26,7 @@ use virtio_accel_core::{
 use virtio_accel_tosa::{CapabilityDescriptor, TosaCapabilityProvider};
 
 use crate::lower::{KernelSpec, LoweringError, ProgramPlan, SlotRole, Work, lower_tosa};
+use crate::nvfp4::lower_nvfp4;
 use crate::shader::{self, KernelKey};
 use crate::{InitError, REQUIRED_RESIDENT_BYTES};
 
@@ -140,6 +141,9 @@ impl Tuning {
 
     fn key(self, kernel: KernelSpec) -> KernelKey {
         match kernel {
+            KernelSpec::Nvfp4Matmul => KernelKey::Nvfp4Matmul {
+                buffers: self.buffers,
+            },
             KernelSpec::Elementwise {
                 op,
                 float,
@@ -209,6 +213,10 @@ impl Tuning {
             Work::MatmulStream { n, batch } => {
                 let groups = shader::stream_matmul_workgroups(n, batch);
                 (groups[0] <= max[0] && groups[2] <= max[2]).then_some(groups)
+            }
+            Work::Nvfp4Matmul { m, n } => {
+                let groups = [n, m, 1];
+                (groups[0] <= max[0] && groups[1] <= max[1]).then_some(groups)
             }
         }
     }
@@ -2801,11 +2809,6 @@ impl Accelerator for VulkanAccelerator {
         if artifact.resident_bytes != REQUIRED_RESIDENT_BYTES {
             return Err(BackendError::ResourceLimit);
         }
-        if artifact.format != virtio_accel_tosa::ARTIFACT_FORMAT {
-            return Err(BackendError::Unsupported);
-        }
-        let target = virtio_accel_tosa::Target::from_identity(artifact.target)
-            .map_err(|_| BackendError::Incompatible)?;
         shared.check_live()?;
         if shared.counters.programs.get()
             >= u64::from(MAX_PROGRAMS_PER_CONTEXT) * u64::from(MAX_CONTEXTS)
@@ -2826,7 +2829,15 @@ impl Accelerator for VulkanAccelerator {
                 &owned
             }
         };
-        let plan = lower_tosa(bytes, target).map_err(Self::lowering_error)?;
+        let plan = if artifact.format == crate::nvfp4::VULKAN_NVFP4_FORMAT {
+            lower_nvfp4(bytes).map_err(Self::lowering_error)?
+        } else if artifact.format == virtio_accel_tosa::ARTIFACT_FORMAT {
+            let target = virtio_accel_tosa::Target::from_identity(artifact.target)
+                .map_err(|_| BackendError::Incompatible)?;
+            lower_tosa(bytes, target).map_err(Self::lowering_error)?
+        } else {
+            return Err(BackendError::Unsupported);
+        };
         let tuning = shared.physical.tuning;
         let limits = &shared.physical.limits;
         // The plan's slots and arena must fit the descriptor array, and the arena one storage

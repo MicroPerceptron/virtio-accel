@@ -32,6 +32,7 @@ use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedShap
 use virtio_accel_vulkan::{
     InitError, REQUIRED_RESIDENT_BYTES, VULKAN_TOSA_FP8_TARGET, VULKAN_TOSA_INTEGER_TARGET,
     VULKAN_TOSA_TARGET, VulkanAccelerator, VulkanEvent, VulkanOptions,
+    nvfp4::{Nvfp4Activation, Nvfp4Artifact},
 };
 
 const IDENTITY_FP32_LOCAL: &[u8] = include_bytes!("data/identity-fp32-v1.0.0.tosa");
@@ -374,6 +375,77 @@ fn executes_the_shared_fp32_matmul_in_every_advertised_domain() {
                 "{device}: {domain:?}: {actual:?} does not match {:?}",
                 case.outputs[0].values
             );
+        }
+    }
+}
+
+#[test]
+fn native_nvfp4_matmul_matches_its_f32_expansion() {
+    const M: usize = 2;
+    const N: usize = 3;
+    const K: usize = 16;
+    let activation: Vec<f32> = (0..M * K).map(|i| i as f32 / 7.0 - 1.0).collect();
+    let codes: [[u8; K]; N] = [
+        [2; K],
+        [10; K],
+        core::array::from_fn(|i| if i % 2 == 0 { 1 } else { 6 }),
+    ];
+    let mut packed = Vec::with_capacity(N * K / 2);
+    for row in codes {
+        for pair in row.chunks_exact(2) {
+            packed.push(pair[0] | pair[1] << 4);
+        }
+    }
+    // One E4M3 1.0 scale for each row's single 16-weight block.
+    let scales = vec![0x38; N];
+    let table = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+    let decode = |code: u8| {
+        let magnitude = table[usize::from(code & 7)];
+        if code & 8 == 0 { magnitude } else { -magnitude }
+    };
+    let expected: Vec<f32> = (0..M)
+        .flat_map(|token| {
+            codes.map(|row| {
+                activation[token * K..][..K]
+                    .iter()
+                    .zip(row)
+                    .map(|(&a, code)| a * decode(code))
+                    .sum()
+            })
+        })
+        .collect();
+    let artifact = Nvfp4Artifact::new(M as u32, N as u32, K as u32, Nvfp4Activation::None).unwrap();
+    for device in devices() {
+        let backend = open(&device);
+        for domain in advertised_domains(&backend) {
+            let context = backend.create_context(ContextDesc::default()).unwrap();
+            let program = backend
+                .load_program(&context, artifact.as_ref())
+                .unwrap_or_else(|error| panic!("{device}: NVFP4 load failed: {error:?}"));
+            let actual = execute(
+                &backend,
+                &context,
+                &program,
+                &[
+                    float_bytes(activation.iter().copied()),
+                    packed.clone(),
+                    scales.clone(),
+                    1.0f32.to_le_bytes().to_vec(),
+                ],
+                M * N * 4,
+                domain,
+            );
+            let actual = floats(&actual);
+            assert_eq!(actual.len(), expected.len());
+            for (actual, expected) in actual.iter().zip(&expected) {
+                assert!(
+                    (actual - expected).abs() < 1e-5,
+                    "{device}: {domain:?}: {actual} != {expected}"
+                );
+            }
+            release(backend.unload_program(program));
+            release(backend.destroy_context(context));
+            assert_eq!(backend.live_resources(), Default::default(), "{device}");
         }
     }
 }

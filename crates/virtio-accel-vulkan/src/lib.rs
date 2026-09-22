@@ -25,6 +25,7 @@
 #![cfg_attr(not(va_vulkan), forbid(unsafe_code))]
 
 mod lower;
+pub mod nvfp4;
 pub mod shader;
 
 pub use lower::{

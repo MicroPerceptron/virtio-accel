@@ -50,6 +50,7 @@ mod bench {
     use virtio_accel_vulkan::{
         InitError, REQUIRED_RESIDENT_BYTES, VULKAN_TOSA_FP8_TARGET, VULKAN_TOSA_TARGET,
         VulkanAccelerator,
+        nvfp4::{Nvfp4Activation, Nvfp4Artifact},
     };
 
     const BUFFER_ALIGNMENT: u64 = 4096;
@@ -105,11 +106,18 @@ mod bench {
         Flops { flops: u64, weight_bytes: u64 },
     }
 
+    enum CaseArtifact {
+        Tosa {
+            bytes: Vec<u8>,
+            target: virtio_accel_tosa::Target,
+        },
+        Nvfp4(Nvfp4Artifact),
+    }
+
     struct Case {
         group: &'static str,
         name: String,
-        artifact: Vec<u8>,
-        target: virtio_accel_tosa::Target,
+        artifact: CaseArtifact,
         inputs: Vec<Vec<u8>>,
         output_len: usize,
         metric: Metric,
@@ -300,6 +308,12 @@ mod bench {
             }
             cases.push(dequant_matmul_case("gemv", DType::FP16, 1, m, k, n));
             cases.push(dequant_matmul_case("gemv", DType::FP32, 1, m, k, n));
+            cases.push(nvfp4_case("gemv", m, k, n));
+        }
+        // Nemotron-H's hidden width is 2,688. Keep exact model geometry in both modes so the
+        // decode and prefill measurements can feed the tensor-parallel split planner directly.
+        for m in [1, 128] {
+            cases.push(nvfp4_case("nemotron", m, 2688, 2688));
         }
         cases
     }
@@ -392,8 +406,10 @@ mod bench {
         Case {
             group,
             name: format!("identity {} × {}", dtype_name(dtype), elements),
-            artifact: graph.build(target).unwrap(),
-            target,
+            artifact: CaseArtifact::Tosa {
+                bytes: graph.build(target).unwrap(),
+                target,
+            },
             inputs: vec![finite_bytes(dtype, u64::from(elements), 1)],
             output_len: bytes as usize,
             metric: Metric::Bytes(2 * bytes),
@@ -421,8 +437,10 @@ mod bench {
         Case {
             group: "cast",
             name: format!("{} → {} × {}", dtype_name(from), dtype_name(to), elements),
-            artifact: graph.build(target).unwrap(),
-            target,
+            artifact: CaseArtifact::Tosa {
+                bytes: graph.build(target).unwrap(),
+                target,
+            },
             inputs: vec![finite_bytes(from, u64::from(elements), 2)],
             output_len: out_bytes as usize,
             metric: Metric::Bytes(in_bytes + out_bytes),
@@ -481,8 +499,10 @@ mod bench {
         Case {
             group,
             name: format!("matmul {} {m}×{k}×{n}", dtype_name(dtype)),
-            artifact: graph.build(target).unwrap(),
-            target,
+            artifact: CaseArtifact::Tosa {
+                bytes: graph.build(target).unwrap(),
+                target,
+            },
             inputs: vec![
                 finite_bytes(dtype, batch * m * k, 3),
                 finite_bytes(dtype, batch * k * n, 4),
@@ -553,8 +573,10 @@ mod bench {
                 dtype_name(wide),
                 dtype_name(wide)
             ),
-            artifact: graph.build(target).unwrap(),
-            target,
+            artifact: CaseArtifact::Tosa {
+                bytes: graph.build(target).unwrap(),
+                target,
+            },
             inputs: vec![
                 finite_bytes(wide, batch * m * k, 5),
                 finite_bytes(weight, batch * k * n, 6),
@@ -563,6 +585,32 @@ mod bench {
             metric: Metric::Flops {
                 flops: 2 * batch * m * k * n,
                 weight_bytes: batch * k * n,
+            },
+        }
+    }
+
+    /// F32 activations multiplied by packed E2M1 weights with one E4M3 scale per 16 weights.
+    /// This is the checkpoint-native storage contract: the timed path never widens the matrix.
+    fn nvfp4_case(group: &'static str, m: u32, k: u32, n: u32) -> Case {
+        let activation_elements = u64::from(m) * u64::from(k);
+        let weight_elements = u64::from(n) * u64::from(k);
+        let output_elements = u64::from(m) * u64::from(n);
+        Case {
+            group,
+            name: format!("nvfp4 {m}×{k}×{n}"),
+            artifact: CaseArtifact::Nvfp4(
+                Nvfp4Artifact::new(m, n, k, Nvfp4Activation::None).unwrap(),
+            ),
+            inputs: vec![
+                finite_bytes(DType::FP32, activation_elements, 10),
+                finite_bytes(DType::FP8E4M3, weight_elements / 2, 11),
+                finite_bytes(DType::FP8E4M3, weight_elements / 16, 12),
+                1.0f32.to_le_bytes().to_vec(),
+            ],
+            output_len: usize::try_from(output_elements * 4).unwrap(),
+            metric: Metric::Flops {
+                flops: 2 * u64::from(m) * u64::from(k) * u64::from(n),
+                weight_bytes: weight_elements / 2 + weight_elements / 16,
             },
         }
     }
@@ -640,13 +688,17 @@ mod bench {
     ) -> Sample {
         let device = backend.device_name();
         let context = backend.create_context(ContextDesc::default()).unwrap();
-        let model = parse(&case.artifact).unwrap();
-        let artifact = model
-            .artifact_ref(case.target, REQUIRED_RESIDENT_BYTES)
-            .unwrap();
-        let program = backend
-            .load_program(&context, artifact)
-            .unwrap_or_else(|error| panic!("{device}: {} failed to load: {error:?}", case.name));
+        let program = match &case.artifact {
+            CaseArtifact::Tosa { bytes, target } => {
+                let model = parse(bytes).unwrap();
+                let artifact = model
+                    .artifact_ref(*target, REQUIRED_RESIDENT_BYTES)
+                    .unwrap();
+                backend.load_program(&context, artifact)
+            }
+            CaseArtifact::Nvfp4(artifact) => backend.load_program(&context, artifact.as_ref()),
+        }
+        .unwrap_or_else(|error| panic!("{device}: {} failed to load: {error:?}", case.name));
         let mut inputs = Vec::with_capacity(case.inputs.len());
         for bytes in &case.inputs {
             let mut buffer = allocate(
