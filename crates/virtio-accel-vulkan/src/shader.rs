@@ -158,6 +158,7 @@ const OP_LABEL: u16 = 248;
 const OP_BRANCH: u16 = 249;
 const OP_BRANCH_CONDITIONAL: u16 = 250;
 const OP_RETURN: u16 = 253;
+const OP_GROUP_NON_UNIFORM_F_ADD: u16 = 350;
 const OP_TYPE_COOPERATIVE_MATRIX_KHR: u16 = 4456;
 const OP_COOPERATIVE_MATRIX_LOAD_KHR: u16 = 4457;
 const OP_COOPERATIVE_MATRIX_STORE_KHR: u16 = 4458;
@@ -166,6 +167,7 @@ const OP_COOPERATIVE_MATRIX_MUL_ADD_KHR: u16 = 4459;
 // Enumerants (section 3).
 const CAPABILITY_SHADER: u32 = 1;
 const CAPABILITY_FLOAT16: u32 = 9;
+const CAPABILITY_GROUP_NON_UNIFORM_ARITHMETIC: u32 = 63;
 const CAPABILITY_VULKAN_MEMORY_MODEL: u32 = 5345;
 const CAPABILITY_COOPERATIVE_MATRIX_KHR: u32 = 6022;
 const ADDRESSING_MODEL_LOGICAL: u32 = 0;
@@ -374,7 +376,11 @@ pub enum ReduceOp {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KernelKey {
     /// F32 activations times row-major packed E2M1 weights and E4M3 block scales.
-    Nvfp4Matmul { buffers: u32, cooperative: bool },
+    Nvfp4Matmul {
+        buffers: u32,
+        cooperative: bool,
+        subgroup: bool,
+    },
     /// Elementwise lanes over `count` output elements; `broadcast` selects the strided
     /// multi-index addressing, otherwise every operand shares the output's linear index. `float`
     /// is the storage of the operator's floating-point tensors (`Word` for FP32, `Half` for
@@ -449,11 +455,18 @@ impl KernelKey {
             Self::Nvfp4Matmul {
                 buffers,
                 cooperative: false,
+                subgroup: false,
             } => assemble_nvfp4_matmul(buffers),
             Self::Nvfp4Matmul {
                 buffers,
                 cooperative: true,
+                ..
             } => assemble_nvfp4_matmul_cooperative(buffers),
+            Self::Nvfp4Matmul {
+                buffers,
+                cooperative: false,
+                subgroup: true,
+            } => assemble_nvfp4_matmul_subgroup(buffers),
             Self::Elementwise {
                 op,
                 float,
@@ -507,10 +520,17 @@ impl KernelKey {
         keys.push(KernelKey::Nvfp4Matmul {
             buffers: 17,
             cooperative: false,
+            subgroup: false,
         });
         keys.push(KernelKey::Nvfp4Matmul {
             buffers: 17,
             cooperative: true,
+            subgroup: false,
+        });
+        keys.push(KernelKey::Nvfp4Matmul {
+            buffers: 17,
+            cooperative: false,
+            subgroup: true,
         });
         let ops = [
             ElementwiseOp::Abs,
@@ -733,10 +753,17 @@ impl KernelKey {
             Self::Matmul { tile, .. } => MatmulGeometry::wide(tile).local_size(),
             Self::MatmulStream { .. } => [STREAM_WORKGROUP, 1, 1],
             Self::Nvfp4Matmul {
-                cooperative: false, ..
+                cooperative: false,
+                subgroup: false,
+                ..
             } => [STREAM_WORKGROUP, 1, 1],
             Self::Nvfp4Matmul {
                 cooperative: true, ..
+            } => [32, 1, 1],
+            Self::Nvfp4Matmul {
+                cooperative: false,
+                subgroup: true,
+                ..
             } => [32, 1, 1],
         }
     }
@@ -1561,6 +1588,14 @@ impl Builder {
         );
     }
 
+    fn enable_subgroup_arithmetic(&mut self) {
+        instruction(
+            &mut self.capabilities,
+            OP_CAPABILITY,
+            &[CAPABILITY_GROUP_NON_UNIFORM_ARITHMETIC],
+        );
+    }
+
     fn cooperative_matrix_ty(&mut self, component: Id, rows: u32, columns: u32, usage: u32) -> Id {
         let ty = self.id();
         let scope = self.c_u32(3); // Scope Subgroup
@@ -1788,6 +1823,16 @@ impl Builder {
 
     fn cooperative_mul_add(&mut self, ty: Id, a: Id, b: Id, c: Id) -> Id {
         self.value(OP_COOPERATIVE_MATRIX_MUL_ADD_KHR, ty, &[a, b, c])
+    }
+
+    fn subgroup_sum_f32(&mut self, value: Id) -> Id {
+        let ty = self.f32_ty();
+        let subgroup_scope = self.c_u32(3);
+        self.value(
+            OP_GROUP_NON_UNIFORM_F_ADD,
+            ty,
+            &[subgroup_scope, 0, value], // GroupOperation Reduce
+        )
     }
     fn u_to_f(&mut self, word: Id) -> Id {
         let ty = self.f32_ty();
@@ -3147,11 +3192,11 @@ fn assemble_reduce(op: ReduceOp, float: Storage, workgroup: u32, buffers: u32) -
     };
     b.store(acc_var, init);
     let zero = b.c_u32(0);
+    let one = b.c_u32(1);
     b.store(index_var, zero);
     let false_id = b.c_false();
     b.store(done_var, false_id);
     b.store(a_var, zero);
-    let one = b.c_u32(1);
     let (inner_scope, a) = b.begin_loop(a_var, axis);
     let offset = b.imul(a, inner);
     let element = b.iadd(base, offset);
@@ -3964,6 +4009,142 @@ fn assemble_nvfp4_matmul_cooperative(buffers: u32) -> Vec<u32> {
         let destination = b.imul(token, n);
         let destination = b.iadd(destination, output_row);
         b.store_f32(array, output, destination, sum);
+    });
+    b.end_main();
+    b.finish([32, 1, 1])
+}
+
+/// Subgroup-reduced scalar NVFP4 projection. A fixed 32-lane subgroup folds a complete output
+/// row without shared memory or workgroup barriers; devices without subgroup arithmetic retain
+/// the portable 64-lane shared-memory reduction below.
+fn assemble_nvfp4_matmul_subgroup(buffers: u32) -> Vec<u32> {
+    let mut b = Builder::new();
+    b.enable_subgroup_arithmetic();
+    let array = b.buffer_array(buffers);
+    let activation = b.spec_operand();
+    let packed = core::array::from_fn::<_, 6, _>(|_| b.spec_operand());
+    let block_scales = core::array::from_fn::<_, 6, _>(|_| b.spec_operand());
+    let tensor_scale = b.spec_operand();
+    let output = b.spec_operand();
+    let _m = b.spec_u32(1);
+    let n = b.spec_u32(1);
+    let k = b.spec_u32(16);
+    let epilogue = b.spec_u32(0);
+    let weight_mode = b.spec_u32(0);
+    let local_id = b.builtin_uvec3(BUILT_IN_LOCAL_INVOCATION_ID);
+    let group_id = b.builtin_uvec3(BUILT_IN_WORKGROUP_ID);
+
+    b.begin_main();
+    let u32_ty = b.u32_ty();
+    let f32_ty = b.f32_ty();
+    let block_var = b.local(u32_ty);
+    let accumulator = b.local(f32_ty);
+    let fp4 = b.private_u32_array(&[
+        0.0f32.to_bits(),
+        0.5f32.to_bits(),
+        1.0f32.to_bits(),
+        1.5f32.to_bits(),
+        2.0f32.to_bits(),
+        3.0f32.to_bits(),
+        4.0f32.to_bits(),
+        6.0f32.to_bits(),
+        (-0.0f32).to_bits(),
+        (-0.5f32).to_bits(),
+        (-1.0f32).to_bits(),
+        (-1.5f32).to_bits(),
+        (-2.0f32).to_bits(),
+        (-3.0f32).to_bits(),
+        (-4.0f32).to_bits(),
+        (-6.0f32).to_bits(),
+    ]);
+    let lid = b.builtin_component(local_id, 0);
+    let out_row = b.builtin_component(group_id, 0);
+    let token = b.builtin_component(group_id, 1);
+    let zero = b.c_u32(0);
+    let zero_f = b.c_f32(0.0);
+    let four = b.c_u32(4);
+    let eight = b.c_u32(8);
+    let sixteen = b.c_u32(16);
+    let thirty_two = b.c_u32(32);
+    let nibble_mask = b.c_u32(15);
+    let blocks = b.udiv(k, sixteen);
+    let mut packed_operand = packed[0];
+    let mut scale_operand = block_scales[0];
+    for index in 1..6 {
+        let index_id = b.c_u32(index as u32);
+        let selected = b.ieq(token, index_id);
+        packed_operand.0 = b.select_u32(selected, packed[index].0, packed_operand.0);
+        packed_operand.1 = b.select_u32(selected, packed[index].1, packed_operand.1);
+        scale_operand.0 = b.select_u32(selected, block_scales[index].0, scale_operand.0);
+        scale_operand.1 = b.select_u32(selected, block_scales[index].1, scale_operand.1);
+    }
+    let contiguous_mode = b.c_u32(1);
+    let contiguous = b.ieq(weight_mode, contiguous_mode);
+    let weight_batch = b.select_u32(contiguous, token, zero);
+    let batch_rows = b.imul(weight_batch, n);
+    let weight_row = b.iadd(batch_rows, out_row);
+    let row_blocks = b.imul(weight_row, blocks);
+    let two = b.c_u32(2);
+    let row_bytes = b.udiv(k, two);
+    let packed_row = b.imul(weight_row, row_bytes);
+    let activation_row = b.imul(token, k);
+    b.store(accumulator, zero_f);
+    b.store(block_var, lid);
+    let (scope, block) = b.begin_loop(block_var, blocks);
+    let scale_element = b.iadd(row_blocks, block);
+    let scale_bits = b.load_byte_bits(array, scale_operand, scale_element);
+    let scale = b.widen_fp8(Fp8Format::E4M3, scale_bits);
+    let packed_block = b.imul(block, eight);
+    let packed_base = b.iadd(packed_row, packed_block);
+    let activation_block = b.imul(block, sixteen);
+    let activation_base = b.iadd(activation_row, activation_block);
+    for byte in 0..8 {
+        let byte_offset = b.c_u32(byte);
+        let byte_index = b.iadd(packed_base, byte_offset);
+        let codes = b.load_byte_bits(array, packed_operand, byte_index);
+        let low = b.band(codes, nibble_mask);
+        let high = b.shr(codes, four);
+        for (lane, code) in [low, high].into_iter().enumerate() {
+            let pointer_ty = b.pointer(STORAGE_CLASS_PRIVATE, u32_ty);
+            let pointer = b.access_chain(pointer_ty, fp4, &[code]);
+            let weight_bits = b.load(u32_ty, pointer);
+            let weight = b.bitcast_f32(weight_bits);
+            let weight = b.fmul(weight, scale);
+            let inner = b.c_u32(byte * 2 + lane as u32);
+            let element = b.iadd(activation_base, inner);
+            let value = b.load_f32(array, activation, element);
+            let acc = b.load(f32_ty, accumulator);
+            let next = b.fma(value, weight, acc);
+            b.store(accumulator, next);
+        }
+    }
+    b.end_loop(scope, block_var, thirty_two);
+
+    let partial = b.load(f32_ty, accumulator);
+    let sum = b.subgroup_sum_f32(partial);
+
+    let first = b.ieq(lid, zero);
+    b.if_then(first, |b| {
+        let shared_mode = b.c_u32(0);
+        let batched = b.ine(weight_mode, shared_mode);
+        let tensor_scale_index = b.select_u32(batched, token, zero);
+        let tensor_scale = b.load_f32(array, tensor_scale, tensor_scale_index);
+        let sum = b.fmul(sum, tensor_scale);
+        let negated = b.fneg(sum);
+        let exp = b.ext_f32(GLSL_EXP, &[negated]);
+        let one_f = b.c_f32(1.0);
+        let denominator = b.fadd(one_f, exp);
+        let sigmoid = b.fdiv(one_f, denominator);
+        let silu = b.fmul(sum, sigmoid);
+        let silu_mode = b.c_u32(1);
+        let sigmoid_mode = b.c_u32(2);
+        let is_silu = b.ieq(epilogue, silu_mode);
+        let is_sigmoid = b.ieq(epilogue, sigmoid_mode);
+        let sum = b.select_f32(is_silu, silu, sum);
+        let sum = b.select_f32(is_sigmoid, sigmoid, sum);
+        let element = b.imul(token, n);
+        let element = b.iadd(element, out_row);
+        b.store_f32(array, output, element, sum);
     });
     b.end_main();
     b.finish([32, 1, 1])
