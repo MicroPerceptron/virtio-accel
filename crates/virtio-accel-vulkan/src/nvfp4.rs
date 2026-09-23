@@ -123,7 +123,8 @@ impl Nvfp4Artifact {
         Self::build(m, n, k, activation, 0)
     }
 
-    /// Describe `batch` independent `[k] F32 × [n,k] NVFP4 products.
+    /// Describe `batch` independent F32 vectors of length `k` multiplied by
+    /// NVFP4 weight matrices with `n` rows and `k` columns.
     ///
     /// Activations, packed weights, block scales and tensor scales all carry
     /// the leading batch dimension. This is the natural execution unit for a
