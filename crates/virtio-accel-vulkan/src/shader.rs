@@ -847,32 +847,40 @@ pub fn matmul_spec(
 }
 
 /// Specialization payload for native row-major NVFP4: activation, packed
-/// weights, block scales, tensor scale, output, then `m`, `n`, `k`, activation.
-pub fn nvfp4_matmul_spec(
-    activation: Operand,
-    packed: &[Operand],
-    block_scales: &[Operand],
-    tensor_scale: Operand,
-    output: Operand,
-    m: u32,
-    n: u32,
-    k: u32,
-    epilogue: u32,
-    weight_mode: u32,
-) -> Vec<u32> {
-    assert!(!packed.is_empty() && packed.len() <= 6 && packed.len() == block_scales.len());
-    let mut words = Vec::with_capacity(35);
-    activation.push(&mut words);
-    for index in 0..6 {
-        packed[index.min(packed.len() - 1)].push(&mut words);
+/// weights, block scales, tensor scale, output, then `m`, `n`, `k`, epilogue.
+pub struct Nvfp4MatmulSpec<'a> {
+    pub activation: Operand,
+    pub packed: &'a [Operand],
+    pub block_scales: &'a [Operand],
+    pub tensor_scale: Operand,
+    pub output: Operand,
+    pub m: u32,
+    pub n: u32,
+    pub k: u32,
+    pub epilogue: u32,
+    pub weight_mode: u32,
+}
+
+impl Nvfp4MatmulSpec<'_> {
+    pub fn words(&self) -> Vec<u32> {
+        assert!(
+            !self.packed.is_empty()
+                && self.packed.len() <= 6
+                && self.packed.len() == self.block_scales.len()
+        );
+        let mut words = Vec::with_capacity(35);
+        self.activation.push(&mut words);
+        for index in 0..6 {
+            self.packed[index.min(self.packed.len() - 1)].push(&mut words);
+        }
+        for index in 0..6 {
+            self.block_scales[index.min(self.block_scales.len() - 1)].push(&mut words);
+        }
+        self.tensor_scale.push(&mut words);
+        self.output.push(&mut words);
+        words.extend_from_slice(&[self.m, self.n, self.k, self.epilogue, self.weight_mode]);
+        words
     }
-    for index in 0..6 {
-        block_scales[index.min(block_scales.len() - 1)].push(&mut words);
-    }
-    tensor_scale.push(&mut words);
-    output.push(&mut words);
-    words.extend_from_slice(&[m, n, k, epilogue, weight_mode]);
-    words
 }
 
 /// NHWC pooling geometry: batch, input height/width, channels, output height/width, kernel,
@@ -4728,18 +4736,19 @@ mod tests {
                 KernelKey::Matmul { .. } | KernelKey::MatmulStream { .. } => {
                     matmul_spec(operand, operand, operand, 1, 2, 3, 1)
                 }
-                KernelKey::Nvfp4Matmul { .. } => nvfp4_matmul_spec(
-                    operand,
-                    &[operand],
-                    &[operand],
-                    operand,
-                    operand,
-                    1,
-                    2,
-                    16,
-                    0,
-                    0,
-                ),
+                KernelKey::Nvfp4Matmul { .. } => Nvfp4MatmulSpec {
+                    activation: operand,
+                    packed: &[operand],
+                    block_scales: &[operand],
+                    tensor_scale: operand,
+                    output: operand,
+                    m: 1,
+                    n: 2,
+                    k: 16,
+                    epilogue: 0,
+                    weight_mode: 0,
+                }
+                .words(),
                 KernelKey::MaxPool { .. } => max_pool_spec(
                     operand,
                     operand,

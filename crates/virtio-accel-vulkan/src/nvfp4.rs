@@ -11,7 +11,7 @@ use virtio_accel_core::{ArtifactFormat, ArtifactRef, TargetIdentity};
 use crate::lower::{
     DispatchPlan, KernelSpec, LoweringError, ProgramPlan, SlotPlan, SlotRole, Work,
 };
-use crate::shader::{Operand, Storage, nvfp4_matmul_spec};
+use crate::shader::{Nvfp4MatmulSpec, Operand, Storage};
 
 pub const VULKAN_NVFP4_FORMAT: ArtifactFormat = match ArtifactFormat::new(0x564e_4634) {
     Some(format) => format,
@@ -62,8 +62,8 @@ impl Nvfp4MoeArtifact {
         if batch == 0
             || batch > 6
             || offsets.len() != batch as usize
-            || !width.is_multiple_of(16)
-            || !inner.is_multiple_of(16)
+            || width % 16 != 0
+            || inner % 16 != 0
         {
             return Err(LoweringError::UnsupportedGraph);
         }
@@ -75,7 +75,7 @@ impl Nvfp4MoeArtifact {
         for &[up_packed, up_scales, down_packed, down_scales] in offsets {
             if [up_packed, up_scales, down_packed, down_scales]
                 .into_iter()
-                .any(|offset| !offset.is_multiple_of(4))
+                .any(|offset| offset % 4 != 0)
                 || !fits(up_packed, u64::from(inner) * u64::from(width) / 2)
                 || !fits(up_scales, u64::from(inner) * u64::from(width) / 16)
                 || !fits(down_packed, u64::from(width) * u64::from(inner) / 2)
@@ -160,7 +160,7 @@ impl Nvfp4Artifact {
         if m == 0
             || n == 0
             || k == 0
-            || !k.is_multiple_of(16)
+            || k % 16 != 0
             || weight_mode > 2
             || (weight_mode == 2 && m > 6)
         {
@@ -242,7 +242,7 @@ pub(crate) fn lower_nvfp4(bytes: &[u8]) -> Result<ProgramPlan, LoweringError> {
         || m == 0
         || n == 0
         || k == 0
-        || !k.is_multiple_of(16)
+        || k % 16 != 0
     {
         return Err(LoweringError::UnsupportedGraph);
     }
@@ -300,18 +300,19 @@ pub(crate) fn lower_nvfp4(bytes: &[u8]) -> Result<ProgramPlan, LoweringError> {
             constants: Vec::new(),
             dispatches: vec![DispatchPlan {
                 kernel: KernelSpec::Nvfp4Matmul { cooperative: false },
-                spec: nvfp4_matmul_spec(
-                    operand(0),
-                    &packed,
-                    &scales,
-                    operand(tensor_scale_slot),
-                    operand(output_slot),
+                spec: Nvfp4MatmulSpec {
+                    activation: operand(0),
+                    packed: &packed,
+                    block_scales: &scales,
+                    tensor_scale: operand(tensor_scale_slot),
+                    output: operand(output_slot),
                     m,
                     n,
                     k,
-                    activation,
+                    epilogue: activation,
                     weight_mode,
-                ),
+                }
+                .words(),
                 work: Work::Nvfp4Matmul { m, n },
                 barrier_before: false,
             }],
@@ -356,18 +357,19 @@ pub(crate) fn lower_nvfp4(bytes: &[u8]) -> Result<ProgramPlan, LoweringError> {
             kernel: KernelSpec::Nvfp4Matmul {
                 cooperative: weight_mode == 0 && m >= 8,
             },
-            spec: nvfp4_matmul_spec(
-                operand(0),
-                &[operand(1)],
-                &[operand(2)],
-                operand(3),
-                operand(4),
+            spec: Nvfp4MatmulSpec {
+                activation: operand(0),
+                packed: &[operand(1)],
+                block_scales: &[operand(2)],
+                tensor_scale: operand(3),
+                output: operand(4),
                 m,
                 n,
                 k,
-                activation,
+                epilogue: activation,
                 weight_mode,
-            ),
+            }
+            .words(),
             work: Work::Nvfp4Matmul { m, n },
             barrier_before: false,
         }],
@@ -448,24 +450,25 @@ fn lower_nvfp4_moe(bytes: &[u8]) -> Result<ProgramPlan, LoweringError> {
         dispatches: vec![
             DispatchPlan {
                 kernel: KernelSpec::Nvfp4Matmul { cooperative: false },
-                spec: nvfp4_matmul_spec(
-                    Operand { buffer: 0, base: 0 },
-                    &operands(0),
-                    &operands(1),
-                    Operand {
+                spec: Nvfp4MatmulSpec {
+                    activation: Operand { buffer: 0, base: 0 },
+                    packed: &operands(0),
+                    block_scales: &operands(1),
+                    tensor_scale: Operand {
                         buffer: up_tensor_slot,
                         base: 0,
                     },
-                    Operand {
+                    output: Operand {
                         buffer: arena_slot,
                         base: 0,
                     },
-                    *batch,
-                    *inner,
-                    *width,
-                    Nvfp4Activation::SquaredRelu as u32,
-                    2,
-                ),
+                    m: *batch,
+                    n: *inner,
+                    k: *width,
+                    epilogue: Nvfp4Activation::SquaredRelu as u32,
+                    weight_mode: 2,
+                }
+                .words(),
                 work: Work::Nvfp4Matmul {
                     m: *batch,
                     n: *inner,
@@ -474,27 +477,28 @@ fn lower_nvfp4_moe(bytes: &[u8]) -> Result<ProgramPlan, LoweringError> {
             },
             DispatchPlan {
                 kernel: KernelSpec::Nvfp4Matmul { cooperative: false },
-                spec: nvfp4_matmul_spec(
-                    Operand {
+                spec: Nvfp4MatmulSpec {
+                    activation: Operand {
                         buffer: arena_slot,
                         base: 0,
                     },
-                    &operands(2),
-                    &operands(3),
-                    Operand {
+                    packed: &operands(2),
+                    block_scales: &operands(3),
+                    tensor_scale: Operand {
                         buffer: down_tensor_slot,
                         base: 0,
                     },
-                    Operand {
+                    output: Operand {
                         buffer: output_slot,
                         base: 0,
                     },
-                    *batch,
-                    *width,
-                    *inner,
-                    Nvfp4Activation::None as u32,
-                    2,
-                ),
+                    m: *batch,
+                    n: *width,
+                    k: *inner,
+                    epilogue: Nvfp4Activation::None as u32,
+                    weight_mode: 2,
+                }
+                .words(),
                 work: Work::Nvfp4Matmul {
                     m: *batch,
                     n: *width,
