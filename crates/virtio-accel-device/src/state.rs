@@ -345,6 +345,7 @@ pub struct EventRecord<E> {
     context_id: ObjectId,
     queue_id: ObjectId,
     program_id: ObjectId,
+    sequence_program_ids: Option<Vec<ObjectId>>,
     buffer_ids: Vec<ObjectId>,
 }
 
@@ -361,8 +362,16 @@ impl<E> EventRecord<E> {
         self.queue_id
     }
 
+    /// First program in submission order. Every event has at least one.
     pub const fn program_id(&self) -> ObjectId {
         self.program_id
+    }
+
+    /// Programs retained by this event, in provider execution order.
+    pub fn program_ids(&self) -> &[ObjectId] {
+        self.sequence_program_ids
+            .as_deref()
+            .unwrap_or(core::slice::from_ref(&self.program_id))
     }
 
     pub fn buffer_ids(&self) -> &[ObjectId] {
@@ -373,7 +382,6 @@ impl<E> EventRecord<E> {
         self.resource.release
     }
 }
-
 /// Validated provider resources for one event-producing submission.
 pub struct SubmissionResources<'a, B, P, Q> {
     context_id: ObjectId,
@@ -424,6 +432,61 @@ impl<'a, B, P, Q> SubmissionResources<'a, B, P, Q> {
             .map_err(|_| DeviceStateError::InvalidArgument)?;
         let record = self.buffers.get(id).map_err(map_table_error)?;
         Ok((record.resource()?, record.info()))
+    }
+}
+
+/// Validated provider resources for one ordered, event-producing submission.
+/// Program order is preserved; retained buffer IDs are sorted by object ID.
+pub struct SubmissionSequenceResources<'a, B, P, Q> {
+    context_id: ObjectId,
+    queue: &'a Q,
+    programs: &'a ObjectTable<ProgramRecord<P>>,
+    program_ids: &'a [ObjectId],
+    buffers: &'a ObjectTable<BufferRecord<B>>,
+    buffer_ids: &'a [ObjectId],
+}
+
+impl<B, P, Q> core::fmt::Debug for SubmissionSequenceResources<'_, B, P, Q> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("SubmissionSequenceResources")
+            .field("context_id", &self.context_id)
+            .field("program_ids", &self.program_ids)
+            .field("buffer_ids", &self.buffer_ids)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, B, P, Q> SubmissionSequenceResources<'a, B, P, Q> {
+    pub const fn context_id(&self) -> ObjectId {
+        self.context_id
+    }
+
+    pub const fn queue(&self) -> &'a Q {
+        self.queue
+    }
+
+    pub fn program_ids(&self) -> &[ObjectId] {
+        self.program_ids
+    }
+
+    pub fn program(&self, index: usize) -> Result<&'a P, DeviceStateError> {
+        let id = *self
+            .program_ids
+            .get(index)
+            .ok_or(DeviceStateError::InvalidArgument)?;
+        self.programs.get(id).map_err(map_table_error)?.resource()
+    }
+
+    pub fn buffer_ids(&self) -> &[ObjectId] {
+        self.buffer_ids
+    }
+
+    pub fn buffer_by_id(&self, id: ObjectId) -> Result<&'a B, DeviceStateError> {
+        self.buffer_ids
+            .binary_search_by_key(&id.get(), |candidate| candidate.get())
+            .map_err(|_| DeviceStateError::InvalidArgument)?;
+        self.buffers.get(id).map_err(map_table_error)?.resource()
     }
 }
 
@@ -777,7 +840,6 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
         if buffer_ids.len() > self.limits.max_bindings_per_submission as usize {
             return Err(CreateError::State(DeviceStateError::ResourceLimit));
         }
-
         let context_id = self
             .validate_submission(queue_id, program_id, &buffer_ids)
             .map_err(CreateError::State)?;
@@ -793,10 +855,15 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
             .map_err(|error| CreateError::State(map_table_error(error)))?;
 
         buffer_ids.sort_unstable_by_key(|id| id.get());
-        self.check_reference_increments(queue_id, program_id, &buffer_ids)
+        self.check_reference_increments(queue_id, core::slice::from_ref(&program_id), &buffer_ids)
             .map_err(CreateError::State)?;
-        self.increment_event_references(context_id, queue_id, program_id, &buffer_ids)
-            .map_err(CreateError::State)?;
+        self.increment_event_references(
+            context_id,
+            queue_id,
+            core::slice::from_ref(&program_id),
+            &buffer_ids,
+        )
+        .map_err(CreateError::State)?;
 
         let event_result = {
             let queue = self
@@ -820,8 +887,13 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
         let event = match event_result {
             Ok(event) => event,
             Err(error) => {
-                self.decrement_event_references(context_id, queue_id, program_id, &buffer_ids)
-                    .map_err(CreateError::State)?;
+                self.decrement_event_references(
+                    context_id,
+                    queue_id,
+                    core::slice::from_ref(&program_id),
+                    &buffer_ids,
+                )
+                .map_err(CreateError::State)?;
                 return Err(CreateError::Provider(error));
             }
         };
@@ -831,6 +903,79 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
             context_id,
             queue_id,
             program_id,
+            sequence_program_ids: None,
+            buffer_ids,
+        });
+        Ok(id)
+    }
+
+    /// Admit one event that retains an ordered sequence of programs.
+    ///
+    /// This is a provider-side lifecycle primitive, not a wire operation. The
+    /// caller chooses a bounded encoding and validates each invocation's
+    /// bindings before entering this method. All programs, the queue and every
+    /// buffer must belong to one context; none can be released until the event
+    /// is committed.
+    pub fn create_event_sequence_with<ProviderError>(
+        &mut self,
+        queue_id: ObjectId,
+        program_ids: Vec<ObjectId>,
+        mut buffer_ids: Vec<ObjectId>,
+        create: impl FnOnce(SubmissionSequenceResources<'_, B, P, Q>) -> Result<E, ProviderError>,
+    ) -> Result<ObjectId, CreateError<ProviderError>> {
+        if program_ids.is_empty() || buffer_ids.is_empty() {
+            return Err(CreateError::State(DeviceStateError::InvalidArgument));
+        }
+        let context_id = self
+            .validate_submission_sequence(queue_id, &program_ids, &buffer_ids)
+            .map_err(CreateError::State)?;
+        let context = self
+            .contexts
+            .get(context_id)
+            .map_err(|error| CreateError::State(map_table_error(error)))?;
+        if context.children.events >= self.limits.max_events_per_context {
+            return Err(CreateError::State(DeviceStateError::ResourceLimit));
+        }
+        self.events
+            .try_reserve_insert()
+            .map_err(|error| CreateError::State(map_table_error(error)))?;
+
+        buffer_ids.sort_unstable_by_key(|id| id.get());
+        self.check_reference_increments(queue_id, &program_ids, &buffer_ids)
+            .map_err(CreateError::State)?;
+        self.increment_event_references(context_id, queue_id, &program_ids, &buffer_ids)
+            .map_err(CreateError::State)?;
+
+        let event_result = {
+            let queue = self
+                .queues
+                .get(queue_id)
+                .map_err(|error| CreateError::State(map_table_error(error)))?
+                .resource()?;
+            create(SubmissionSequenceResources {
+                context_id,
+                queue,
+                programs: &self.programs,
+                program_ids: &program_ids,
+                buffers: &self.buffers,
+                buffer_ids: &buffer_ids,
+            })
+        };
+        let event = match event_result {
+            Ok(event) => event,
+            Err(error) => {
+                self.decrement_event_references(context_id, queue_id, &program_ids, &buffer_ids)
+                    .map_err(CreateError::State)?;
+                return Err(CreateError::Provider(error));
+            }
+        };
+
+        let id = self.events.insert_prepared(EventRecord {
+            resource: ResourceSlot::new(event),
+            context_id,
+            queue_id,
+            program_id: program_ids[0],
+            sequence_program_ids: Some(program_ids),
             buffer_ids,
         });
         Ok(id)
@@ -973,13 +1118,17 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
         {
             let record = self.events.get(id).map_err(map_table_error)?;
             ensure_releasing(record)?;
-            self.validate_submission(record.queue_id, record.program_id, &record.buffer_ids)?;
+            self.validate_submission_sequence(
+                record.queue_id,
+                record.program_ids(),
+                &record.buffer_ids,
+            )?;
         }
         let record = self.events.remove(id).map_err(map_table_error)?;
         self.decrement_event_references(
             record.context_id,
             record.queue_id,
-            record.program_id,
+            record.program_ids(),
             &record.buffer_ids,
         )
     }
@@ -1026,10 +1175,30 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
         Ok(queue.context_id)
     }
 
+    fn validate_submission_sequence(
+        &self,
+        queue_id: ObjectId,
+        program_ids: &[ObjectId],
+        buffer_ids: &[ObjectId],
+    ) -> Result<ObjectId, DeviceStateError> {
+        let first = *program_ids
+            .first()
+            .ok_or(DeviceStateError::InvalidArgument)?;
+        let context_id = self.validate_submission(queue_id, first, buffer_ids)?;
+        for program_id in &program_ids[1..] {
+            let program = self.programs.get(*program_id).map_err(map_table_error)?;
+            program.resource()?;
+            if program.context_id != context_id {
+                return Err(DeviceStateError::ContextMismatch);
+            }
+        }
+        Ok(context_id)
+    }
+
     fn check_reference_increments(
         &self,
         queue_id: ObjectId,
-        program_id: ObjectId,
+        program_ids: &[ObjectId],
         sorted_buffer_ids: &[ObjectId],
     ) -> Result<(), DeviceStateError> {
         self.queues
@@ -1038,12 +1207,19 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
             .in_flight
             .checked_add(1)
             .ok_or(DeviceStateError::ReferenceCountOverflow)?;
-        self.programs
-            .get(program_id)
-            .map_err(map_table_error)?
-            .in_flight
-            .checked_add(1)
-            .ok_or(DeviceStateError::ReferenceCountOverflow)?;
+        for (index, id) in program_ids.iter().copied().enumerate() {
+            if program_ids[..index].contains(&id) {
+                continue;
+            }
+            let count = u32::try_from(program_ids[index..].iter().filter(|&&p| p == id).count())
+                .map_err(|_| DeviceStateError::ReferenceCountOverflow)?;
+            self.programs
+                .get(id)
+                .map_err(map_table_error)?
+                .in_flight
+                .checked_add(count)
+                .ok_or(DeviceStateError::ReferenceCountOverflow)?;
+        }
 
         let mut index = 0;
         while index < sorted_buffer_ids.len() {
@@ -1069,17 +1245,19 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
         &mut self,
         context_id: ObjectId,
         queue_id: ObjectId,
-        program_id: ObjectId,
+        program_ids: &[ObjectId],
         buffer_ids: &[ObjectId],
     ) -> Result<(), DeviceStateError> {
         self.queues
             .get_mut(queue_id)
             .map_err(map_table_error)?
             .in_flight += 1;
-        self.programs
-            .get_mut(program_id)
-            .map_err(map_table_error)?
-            .in_flight += 1;
+        for program_id in program_ids {
+            self.programs
+                .get_mut(*program_id)
+                .map_err(map_table_error)?
+                .in_flight += 1;
+        }
         for buffer_id in buffer_ids {
             self.buffers
                 .get_mut(*buffer_id)
@@ -1098,17 +1276,19 @@ impl<C, B, P, Q, E> DeviceState<C, B, P, Q, E> {
         &mut self,
         context_id: ObjectId,
         queue_id: ObjectId,
-        program_id: ObjectId,
+        program_ids: &[ObjectId],
         buffer_ids: &[ObjectId],
     ) -> Result<(), DeviceStateError> {
         self.queues
             .get_mut(queue_id)
             .map_err(map_table_error)?
             .in_flight -= 1;
-        self.programs
-            .get_mut(program_id)
-            .map_err(map_table_error)?
-            .in_flight -= 1;
+        for program_id in program_ids {
+            self.programs
+                .get_mut(*program_id)
+                .map_err(map_table_error)?
+                .in_flight -= 1;
+        }
         for buffer_id in buffer_ids {
             self.buffers
                 .get_mut(*buffer_id)
@@ -1447,6 +1627,93 @@ mod tests {
         assert_eq!(state.buffer_ids().next(), None);
         assert_eq!(state.program_ids().next(), None);
         assert_eq!(state.queue_ids().next(), None);
+    }
+
+    #[test]
+    fn ordered_event_retains_every_repeated_program_and_buffer_until_commit() {
+        let mut state = state(1, 1);
+        let context = create_context(&mut state, 10);
+        let buffer = admitted(
+            state
+                .create_buffer_with(context, buffer_desc(), |_, desc| {
+                    Ok::<_, &'static str>((20, buffer_info(desc)))
+                })
+                .unwrap(),
+        );
+        let program = state
+            .create_program_with(context, 1, 1, |_| Ok::<_, &'static str>(30))
+            .unwrap();
+        let queue = state
+            .create_queue_with(context, |_| Ok::<_, &'static str>(40))
+            .unwrap();
+
+        let event = state
+            .create_event_sequence_with(
+                queue,
+                alloc::vec![program, program],
+                alloc::vec![buffer, buffer],
+                |resources| {
+                    assert_eq!(resources.program_ids(), &[program, program]);
+                    assert_eq!(*resources.program(0).unwrap(), 30);
+                    assert_eq!(*resources.program(1).unwrap(), 30);
+                    assert_eq!(*resources.buffer_by_id(buffer).unwrap(), 20);
+                    Ok::<_, &'static str>(50)
+                },
+            )
+            .unwrap();
+        assert_eq!(state.program_record(program).unwrap().in_flight(), 2);
+        assert_eq!(state.buffer_record(buffer).unwrap().in_flight(), 2);
+        assert_eq!(state.queue_record(queue).unwrap().in_flight(), 1);
+        assert_eq!(
+            state.event_record(event).unwrap().program_ids(),
+            &[program, program]
+        );
+        assert_eq!(state.event_record(event).unwrap().program_id(), program);
+        assert_eq!(
+            state.begin_program_release(program),
+            Err(DeviceStateError::Busy)
+        );
+        assert_eq!(
+            state.begin_buffer_release(buffer),
+            Err(DeviceStateError::Busy)
+        );
+
+        assert_eq!(state.begin_event_release(event).unwrap(), 50);
+        state.commit_event_release(event).unwrap();
+        assert_eq!(state.program_record(program).unwrap().in_flight(), 0);
+        assert_eq!(state.buffer_record(buffer).unwrap().in_flight(), 0);
+        assert_eq!(state.queue_record(queue).unwrap().in_flight(), 0);
+    }
+
+    #[test]
+    fn rejected_ordered_event_restores_every_reference() {
+        let mut state = state(1, 1);
+        let context = create_context(&mut state, 10);
+        let buffer = admitted(
+            state
+                .create_buffer_with(context, buffer_desc(), |_, desc| {
+                    Ok::<_, &'static str>((20, buffer_info(desc)))
+                })
+                .unwrap(),
+        );
+        let program = state
+            .create_program_with(context, 1, 1, |_| Ok::<_, &'static str>(30))
+            .unwrap();
+        let queue = state
+            .create_queue_with(context, |_| Ok::<_, &'static str>(40))
+            .unwrap();
+
+        let result = state.create_event_sequence_with(
+            queue,
+            alloc::vec![program, program],
+            alloc::vec![buffer, buffer],
+            |_| Err::<u32, _>("rejected"),
+        );
+        assert!(matches!(result, Err(CreateError::Provider("rejected"))));
+        assert_eq!(state.event_count(), 0);
+        assert_eq!(state.program_record(program).unwrap().in_flight(), 0);
+        assert_eq!(state.buffer_record(buffer).unwrap().in_flight(), 0);
+        assert_eq!(state.queue_record(queue).unwrap().in_flight(), 0);
     }
 
     #[test]
