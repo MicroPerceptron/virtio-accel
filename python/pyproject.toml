@@ -1,0 +1,19 @@
+[build-system]
+requires = ["maturin>=1.8,<2"]
+build-backend = "maturin"
+
+[project]
+name = "virtio-accel"
+version = "0.1.0"
+description = "Experimental NumPy-style frontend and validated TOSA export for virtio-accel"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT OR Apache-2.0"
+dependencies = ["numpy>=2.0,<3"]
+
+[tool.maturin]
+manifest-path = "Cargo.toml"
+python-source = "."
+module-name = "virtio_accel._native"
+features = ["pyo3/extension-module"]
+
