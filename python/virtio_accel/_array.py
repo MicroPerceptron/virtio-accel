@@ -145,6 +145,8 @@ def host_array(value, dtype=None):
         return value
     if dtype is not None and np.dtype(dtype) != np.dtype("float32"):
         raise TypeError("only float32 is supported in this iteration")
+    if isinstance(value, (np.ndarray, np.generic)):
+        checked_shape(value.shape)  # Reject oversized views before allocating a copy.
     # Preserve ndarray/scalar dtype unless the caller explicitly requests a cast.
     # Python literals use FP32 by default, matching this frontend's numeric tier.
     if dtype is None and isinstance(value, (np.ndarray, np.generic)):
@@ -188,6 +190,7 @@ class Graph:
 
 
 def primitive(op, values, shape, **attrs):
+    shape = checked_shape(shape)  # Bound eager outputs before NumPy allocates them.
     values = tuple(host_array(v) for v in values)
     graphs = {id(v._graph): v._graph for v in values if v._graph is not None}
     if len(graphs) > 1:
