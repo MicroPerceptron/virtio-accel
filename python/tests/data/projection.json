@@ -1,0 +1,187 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "op": "input",
+      "shape": [
+        4,
+        8
+      ],
+      "inputs": [],
+      "attrs": {}
+    },
+    {
+      "op": "input",
+      "shape": [
+        8,
+        3
+      ],
+      "inputs": [],
+      "attrs": {}
+    },
+    {
+      "op": "input",
+      "shape": [
+        3
+      ],
+      "inputs": [],
+      "attrs": {}
+    },
+    {
+      "op": "reshape",
+      "shape": [
+        1,
+        4,
+        8
+      ],
+      "inputs": [
+        0
+      ],
+      "attrs": {}
+    },
+    {
+      "op": "reshape",
+      "shape": [
+        1,
+        8,
+        3
+      ],
+      "inputs": [
+        1
+      ],
+      "attrs": {}
+    },
+    {
+      "op": "matmul",
+      "shape": [
+        1,
+        4,
+        3
+      ],
+      "inputs": [
+        3,
+        4
+      ],
+      "attrs": {}
+    },
+    {
+      "op": "reshape",
+      "shape": [
+        4,
+        3
+      ],
+      "inputs": [
+        5
+      ],
+      "attrs": {}
+    },
+    {
+      "op": "reshape",
+      "shape": [
+        1,
+        3
+      ],
+      "inputs": [
+        2
+      ],
+      "attrs": {}
+    },
+    {
+      "op": "add",
+      "shape": [
+        4,
+        3
+      ],
+      "inputs": [
+        6,
+        7
+      ],
+      "attrs": {}
+    },
+    {
+      "op": "const",
+      "shape": [
+        1,
+        1
+      ],
+      "inputs": [],
+      "attrs": {
+        "data": "00000000"
+      }
+    },
+    {
+      "op": "maximum",
+      "shape": [
+        4,
+        3
+      ],
+      "inputs": [
+        8,
+        9
+      ],
+      "attrs": {}
+    },
+    {
+      "op": "reduce_sum",
+      "shape": [
+        4,
+        1
+      ],
+      "inputs": [
+        10
+      ],
+      "attrs": {
+        "axis": 1
+      }
+    },
+    {
+      "op": "reshape",
+      "shape": [
+        4
+      ],
+      "inputs": [
+        11
+      ],
+      "attrs": {}
+    },
+    {
+      "op": "const",
+      "shape": [
+        1
+      ],
+      "inputs": [],
+      "attrs": {
+        "data": "abaaaa3e"
+      }
+    },
+    {
+      "op": "mul",
+      "shape": [
+        4
+      ],
+      "inputs": [
+        12,
+        13
+      ],
+      "attrs": {}
+    },
+    {
+      "op": "identity",
+      "shape": [
+        4
+      ],
+      "inputs": [
+        14
+      ],
+      "attrs": {}
+    }
+  ],
+  "inputs": [
+    0,
+    1,
+    2
+  ],
+  "outputs": [
+    15
+  ]
+}
