@@ -197,6 +197,14 @@ class FrontendTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "node limit"):
             va.jit(long_trace).lower(np.ones(1, np.float32))
 
+    def test_size_limits_precede_host_copy_and_eager_output_allocation(self):
+        huge_view = np.broadcast_to(np.float32(1), (2**28,))
+        with self.assertRaisesRegex(ValueError, "256 MiB"):
+            vnp.asarray(huge_view)
+        # Inputs fit easily; the outer product must be refused before allocation.
+        with self.assertRaisesRegex(ValueError, "256 MiB"):
+            vnp.matmul(vnp.ones((16384, 1)), vnp.ones((1, 16384)))
+
     def test_concurrent_cache_use(self):
         f = va.jit(lambda x: x * 2, backend="reference")
         with ThreadPoolExecutor(max_workers=4) as pool:
