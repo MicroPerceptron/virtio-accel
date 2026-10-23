@@ -49,11 +49,12 @@ class Lowered:
             if op == "input":
                 value = inputs[index].to_numpy()
             elif op == "const":
-                value = np.frombuffer(bytes.fromhex(attrs["data"]), dtype="<f4").reshape(shape)
+                dtype = np.dtype(node["dtype"]).newbyteorder("<")
+                value = np.frombuffer(bytes.fromhex(attrs["data"]), dtype=dtype).reshape(shape)
             else:
-                value = evaluate(op, [values[i] for i in node["inputs"]], attrs, shape)
+                value = evaluate(op, [values[i] for i in node["inputs"]], attrs, shape, node["dtype"])
             values.append(value)
-        outputs = tuple(host_array(values[i], dtype=np.float32) for i in doc["outputs"])
+        outputs = tuple(host_array(values[i]) for i in doc["outputs"])
         return outputs if self._multiple else outputs[0]
 
 
@@ -93,7 +94,7 @@ class CompiledFunction:
                 return self._cache[specs]
             graph = Graph()
             for name, array in zip(bound.arguments, arrays):
-                bound.arguments[name] = graph.input(array.shape)
+                bound.arguments[name] = graph.input(array.shape, array.dtype)
             result = self._function(*bound.args, **bound.kwargs)
             multiple = isinstance(result, tuple)
             outputs = result if multiple else (result,)

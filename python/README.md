@@ -1,6 +1,6 @@
 # Experimental Python / NumPy frontend
 
-This first iteration provides `virtio_accel.numpy`, immutable FP32 reference arrays,
+This first iteration provides `virtio_accel.numpy`, immutable FP16/FP32 reference arrays,
 static function tracing, and native export through `virtio-accel-tosa-build` and the
 production TOSA validator. It is a compiler frontend prototype, not a hardware
 execution binding. No device execution, automatic CPU fallback, or speedup is claimed.
@@ -78,20 +78,22 @@ Functions may return one array or a nonempty tuple of arrays.
 | Shapes | `reshape` with one inferred dimension, `transpose`, `.T` |
 | Inspection | `shape`, `dtype`, `ndim`, `size`; explicit `to_numpy()` |
 
-Only FP32 is implemented. Python literals default to FP32. Existing NumPy arrays and
+FP16 and FP32 are implemented, including `astype` and `Array.astype`. Python literals default to FP32; in binary operations with an array they adopt its dtype. Mixed FP16/FP32 arrays promote to FP32 through explicit graph casts. Existing NumPy arrays and
 scalars preserve their declared dtype: unsupported dtypes raise, unless the caller
-explicitly requests `dtype=vnp.float32`. There is no implicit FP64 narrowing. Noncontiguous
+explicitly requests `dtype=vnp.float16` or `dtype=vnp.float32`. There is no implicit FP64 narrowing. Noncontiguous
 host inputs are copied into owned contiguous storage. Host reads return independent
 copies. Creation inside a traced function currently creates host constants which are
 embedded when used in the trace; device-native creation is future work.
 
 Arrays are immutable. Mutation, `out=`, comparison/Boolean arrays, division, slicing,
-dynamic shapes, zero-sized dimensions, arbitrary strides on device, FP16/FP8/BF16,
+dynamic shapes, zero-sized dimensions, arbitrary strides on device, FP8/BF16,
 integer arithmetic, autograd, DLPack, and standard NumPy dispatch are not implemented.
 Unsupported functions and keywords fail rather than forwarding to NumPy. In particular,
 `np.asarray(array)` is refused; use `array.to_numpy()` explicitly.
 
-The reference graph uses sequential axis reductions and mean via FP32 reciprocal
+FP16 operations round their results to FP16. Matrix products and reductions accumulate
+in FP32. Reductions narrow only after all axes (and mean scaling) are complete;
+`dtype=` selects the result dtype. The reference graph uses sequential axis reductions and mean via FP32 reciprocal
 multiplication. Its rounding can differ from NumPy's direct multi-axis reduction or
 division. Hardware numerical conformance is future work; no bitwise equivalence is
 claimed. NaN bytes in constants are preserved, and extrema request TOSA NaN propagation.
@@ -99,7 +101,7 @@ claimed. NaN bytes in constants are preserved, and extrema request TOSA NaN prop
 Limits are rank <= 6, positive dimensions fitting int32, 256 MiB per logical tensor,
 4096 frontend nodes, and 16 MiB of diagnostic graph JSON. The JSON is an internal
 bridge format, not a stable external ABI. TOSA export imposes the production parser's
-additional bounds. Aggregate execution-memory budgeting is future runtime work.
+additional bounds. Reference FP32 temporaries obey the same per-tensor bound. Aggregate execution-memory budgeting is future runtime work.
 
 ## Validation
 
@@ -134,3 +136,10 @@ is importable before running the suite, so missing native integration cannot sil
 
 The wire protocol and existing portable Rust public APIs are unchanged.
 
+
+## Examples and device placement
+
+See [examples](examples/README.md) for an MLP classifier, nearest-centroid classification,
+and FIR filtering, with independent numerical checks and optional TOSA export.
+The [device placement proposal](device-placement.md) describes portable `npu`/`npu:0`
+selectors and provider constraints. These selectors are not implemented yet.
