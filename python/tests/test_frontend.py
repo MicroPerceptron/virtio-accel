@@ -121,7 +121,7 @@ class FrontendTests(unittest.TestCase):
             self.assertArrayClose(f(x), getattr(np, name)(x, 1))
 
     def test_rejects_dtypes_without_implicit_narrowing(self):
-        for dtype in [np.float64, np.float16, np.int32, np.bool_, np.complex64]:
+        for dtype in [np.float64, np.int32, np.bool_, np.complex64]:
             with self.subTest(dtype=dtype):
                 with self.assertRaises(TypeError):
                     vnp.asarray(np.ones(2, dtype=dtype))

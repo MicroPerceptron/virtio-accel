@@ -1,4 +1,4 @@
-"""A deliberately small NumPy-style FP32 namespace.
+"""A deliberately small NumPy-style FP16/FP32 namespace.
 
 Eager calls are an explicit CPU reference implementation. Traced calls construct
 TOSA-compatible primitives. Unsupported functions are not forwarded to NumPy.
@@ -8,13 +8,14 @@ import math
 import operator
 import numpy as _np
 
-from ._array import Array, checked_shape, host_array, primitive
+from ._array import Array, cast, checked_dtype, checked_shape, host_array, primitive, promote
 
+float16 = _np.float16
 float32 = _np.float32
-__all__ = ["float32", "asarray", "array", "zeros", "ones", "full", "add",
+__all__ = ["float16", "float32", "asarray", "array", "zeros", "ones", "full", "add",
            "subtract", "multiply", "maximum", "minimum", "negative", "abs",
            "exp", "log", "tanh", "sin", "cos", "matmul", "reshape",
-           "transpose", "sum", "mean"]
+           "transpose", "astype", "sum", "mean"]
 
 
 def asarray(a, dtype=None):
@@ -25,10 +26,13 @@ def array(a, dtype=None):
     return host_array(a, dtype)
 
 
+def astype(a, dtype):
+    return cast(asarray(a), dtype)
+
+
 def full(shape, fill_value, dtype=float32):
-    shape = checked_shape((shape,) if isinstance(shape, int) else shape)
-    if _np.dtype(dtype) != _np.dtype("float32"):
-        raise TypeError("only float32 is supported")
+    dtype = checked_dtype(dtype)
+    shape = checked_shape((shape,) if isinstance(shape, int) else shape, dtype)
     if isinstance(fill_value, Array):
         raise TypeError("full requires a static scalar fill value")
     return asarray(_np.full(shape, fill_value, dtype=dtype))
@@ -43,8 +47,8 @@ def ones(shape, dtype=float32):
 
 
 def _binary(op, a, b):
-    a, b = asarray(a), asarray(b)
-    shape = checked_shape(_np.broadcast_shapes(a.shape, b.shape))
+    a, b = promote(a, b)
+    shape = checked_shape(_np.broadcast_shapes(a.shape, b.shape), a.dtype)
     # TOSA binary operands have equal rank; NumPy permits leading dimensions.
     if a.ndim < len(shape):
         a = reshape(a, (1,) * (len(shape) - a.ndim) + a.shape)
@@ -117,7 +121,7 @@ def reshape(a, shape):
         if known <= 0 or a.size % known:
             raise ValueError("cannot infer reshape dimension")
         shape = tuple(a.size // known if n == -1 else n for n in shape)
-    shape = checked_shape(shape)
+    shape = checked_shape(shape, a.dtype)
     if math.prod(shape) != a.size:
         raise ValueError("reshape must preserve the number of elements")
     return primitive("reshape", (a,), shape)
@@ -138,7 +142,7 @@ def transpose(a, axes=None):
 
 
 def matmul(a, b):
-    a, b = asarray(a), asarray(b)
+    a, b = promote(a, b)
     if a.ndim != 2 or b.ndim != 2:
         raise NotImplementedError("this iteration supports 2D matmul only")
     m, k = a.shape
@@ -163,27 +167,32 @@ def _axes(a, axis):
     return tuple(sorted(axes))
 
 
-def sum(a, axis=None, dtype=None, out=None, keepdims=False):
-    a = asarray(a)
+def _reduction(a, axis, dtype, out, keepdims, average):
     if out is not None:
         raise NotImplementedError("out= and mutation are not supported")
-    if dtype is not None and _np.dtype(dtype) != a.dtype:
-        raise TypeError("only float32 accumulation is supported")
+    result_dtype = a.dtype if dtype is None else checked_dtype(dtype)
     if not isinstance(keepdims, bool):
         raise TypeError("keepdims must be a static bool")
     axes = _axes(a, axis)
-    value = a
+    # Widen before reducing any axis. Narrow only after all reductions and,
+    # for mean, scaling; an FP16 intermediate sum could overflow spuriously.
+    value = cast(a, float32)
     for ax in axes:
         shape = list(value.shape)
         shape[ax] = 1
         value = primitive("reduce_sum", (value,), tuple(shape), axis=ax)
     if not keepdims:
         value = reshape(value, tuple(n for i, n in enumerate(a.shape) if i not in axes))
-    return value
+    if average:
+        count = math.prod(a.shape[i] for i in axes)
+        value = multiply(value, _np.float32(1.0 / count))
+    return cast(value, result_dtype)
+
+
+def sum(a, axis=None, dtype=None, out=None, keepdims=False):
+    return _reduction(asarray(a), axis, dtype, out, keepdims, False)
 
 
 def mean(a, axis=None, dtype=None, out=None, keepdims=False):
-    a = asarray(a)
-    count = math.prod(a.shape[i] for i in _axes(a, axis))
-    return multiply(sum(a, axis, dtype, out, keepdims), _np.float32(1.0 / count))
+    return _reduction(asarray(a), axis, dtype, out, keepdims, True)
 

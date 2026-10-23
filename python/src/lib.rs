@@ -26,8 +26,33 @@ struct Document {
 struct Node {
     op: String,
     shape: Vec<i32>,
+    dtype: ElementType,
     inputs: Vec<usize>,
     attrs: serde_json::Map<String, Value>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+enum ElementType {
+    #[serde(rename = "float16")]
+    Float16,
+    #[serde(rename = "float32")]
+    Float32,
+}
+
+impl ElementType {
+    fn tosa(self) -> DType {
+        match self {
+            Self::Float16 => DType::FP16,
+            Self::Float32 => DType::FP32,
+        }
+    }
+
+    fn bytes(self) -> usize {
+        match self {
+            Self::Float16 => 2,
+            Self::Float32 => 4,
+        }
+    }
 }
 
 fn name(index: usize) -> String {
@@ -63,7 +88,7 @@ pub fn compile_json(json: &str) -> Result<Vec<u8>, String> {
         return Err("frontend graph exceeds 16 MiB JSON limit".into());
     }
     let doc: Document = serde_json::from_str(json).map_err(|e| e.to_string())?;
-    if doc.version != 1 || doc.nodes.is_empty() || doc.nodes.len() > MAX_NODES {
+    if doc.version != 2 || doc.nodes.is_empty() || doc.nodes.len() > MAX_NODES {
         return Err("unsupported graph version or node count".into());
     }
     if doc.outputs.is_empty() || doc.outputs.len() > MAX_NODES || doc.inputs.len() > MAX_NODES {
@@ -88,7 +113,7 @@ pub fn compile_json(json: &str) -> Result<Vec<u8>, String> {
     }
     let mut graph = OwnedGraph::new("main");
     for (index, node) in doc.nodes.iter().enumerate() {
-        let result = lower_node(&mut graph, index, node);
+        let result = lower_node(&mut graph, index, node, &doc.nodes);
         result.map_err(|e| format!("node {index} ({}): {e}", node.op))?;
     }
     for index in doc.inputs {
@@ -108,14 +133,19 @@ pub fn compile_json(json: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("TOSA validation failed: {e:?}"))
 }
 
-fn lower_node(graph: &mut OwnedGraph<'static>, index: usize, node: &Node) -> Result<(), String> {
+fn lower_node(
+    graph: &mut OwnedGraph<'static>,
+    index: usize,
+    node: &Node,
+    nodes: &[Node],
+) -> Result<(), String> {
     if node.shape.len() > 6 || node.shape.iter().any(|n| *n <= 0) {
         return Err("expected positive dimensions and rank <= 6".into());
     }
     let bytes = node
         .shape
         .iter()
-        .try_fold(4usize, |size, n| size.checked_mul(*n as usize))
+        .try_fold(node.dtype.bytes(), |size, n| size.checked_mul(*n as usize))
         .filter(|n| *n <= MAX_TENSOR_BYTES)
         .ok_or("tensor exceeds size limit")?;
     if node.inputs.iter().any(|i| *i >= index) {
@@ -145,11 +175,11 @@ fn lower_node(graph: &mut OwnedGraph<'static>, index: usize, node: &Node) -> Res
         OwnedTensor::constant(
             &output,
             node.shape.clone(),
-            DType::FP32,
+            node.dtype.tosa(),
             constant(node, bytes)?,
         )
     } else {
-        OwnedTensor::new(&output, node.shape.clone(), DType::FP32)
+        OwnedTensor::new(&output, node.shape.clone(), node.dtype.tosa())
     };
     graph.push_tensor(tensor);
     let mut inputs: Vec<_> = node.inputs.iter().copied().map(name).collect();
@@ -160,7 +190,8 @@ fn lower_node(graph: &mut OwnedGraph<'static>, index: usize, node: &Node) -> Res
         let (dtype, data) = if node.op == "mul" {
             (DType::INT8, vec![0_u8])
         } else {
-            (DType::FP32, vec![0_u8; 4])
+            let operand_dtype = nodes[node.inputs[0]].dtype;
+            (operand_dtype.tosa(), vec![0_u8; operand_dtype.bytes()])
         };
         graph.push_tensor(OwnedTensor::constant(&auxiliary, vec![1], dtype, data));
         graph.push_operator(OwnedOperator::new(
@@ -177,6 +208,7 @@ fn lower_node(graph: &mut OwnedGraph<'static>, index: usize, node: &Node) -> Res
         "input" => return Ok(()),
         "const" => OperatorKind::Const,
         "identity" => OperatorKind::Identity,
+        "cast" => OperatorKind::Cast,
         "add" => OperatorKind::Add,
         "sub" => OperatorKind::Sub,
         "mul" => OperatorKind::Mul,
@@ -261,10 +293,10 @@ mod tests {
     use serde_json::json;
 
     fn graph() -> Value {
-        json!({"version":1,"nodes":[
-            {"op":"input","shape":[2,3],"inputs":[],"attrs":{}},
-            {"op":"const","shape":[1,1],"inputs":[],"attrs":{"data":"0000803f"}},
-            {"op":"add","shape":[2,3],"inputs":[0,1],"attrs":{}}
+        json!({"version":2,"nodes":[
+            {"op":"input","shape":[2,3],"dtype":"float32","inputs":[],"attrs":{}},
+            {"op":"const","shape":[1,1],"dtype":"float32","inputs":[],"attrs":{"data":"0000803f"}},
+            {"op":"add","shape":[2,3],"dtype":"float32","inputs":[0,1],"attrs":{}}
         ],"inputs":[0],"outputs":[2]})
     }
 
@@ -280,6 +312,26 @@ mod tests {
     fn projection_fixture_includes_required_tosa_auxiliary_operands() {
         let bytes = compile_json(include_str!("../tests/data/projection.json")).unwrap();
         virtio_accel_tosa::parse(&bytes).unwrap();
+    }
+
+    #[test]
+    fn fp16_constants_and_casts_validate() {
+        let mut g = graph();
+        for node in g["nodes"].as_array_mut().unwrap() {
+            node["dtype"] = json!("float16");
+        }
+        g["nodes"][1]["attrs"]["data"] = json!("003c");
+        assert!(compile_json(&g.to_string()).is_ok());
+        g["nodes"][1]["attrs"]["data"] = json!("0000803f");
+        assert!(compile_json(&g.to_string()).is_err());
+        g["nodes"][1]["attrs"]["data"] = json!("003c");
+        g["nodes"][2]["dtype"] = json!("float32");
+        assert!(compile_json(&g.to_string()).is_err());
+        g["nodes"][2]["op"] = json!("cast");
+        g["nodes"][2]["inputs"] = json!([0]);
+        assert!(compile_json(&g.to_string()).is_ok());
+        g["nodes"][0]["dtype"] = json!("float64");
+        assert!(compile_json(&g.to_string()).is_err());
     }
 
     #[test]
