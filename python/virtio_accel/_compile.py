@@ -34,6 +34,11 @@ class Lowered:
             raise RuntimeError("TOSA export requires the native extension; build with maturin") from exc
         return build_tosa(self._json)
 
+    def compile(self, device, *, timeout=30.0, strict=False):
+        """Compile for a native device; use the returned executable as a context manager."""
+        from ._runtime import Executable
+        return Executable(self, device, timeout=timeout, strict=strict)
+
     def reference(self, *args, **kwargs):
         """Evaluate with NumPy on the CPU. This is an oracle, not acceleration."""
         bound = self._signature.bind(*args, **kwargs)
@@ -61,13 +66,22 @@ class Lowered:
 class CompiledFunction:
     """Trace a pure function, specializing on input shapes and dtypes.
 
-    The initial implementation exports TOSA and provides an opt-in CPU oracle.
-    No hardware executor is selected implicitly.
+    Select device="npu" or "gpu" for native execution, or backend="reference"
+    for the CPU oracle. Programs and buffers are cached with each specialization.
     """
 
-    def __init__(self, function, *, backend=None, cache_size=16):
+    def __init__(self, function, *, backend=None, device=None, cache_size=16, timeout=30.0, strict=False):
         if backend not in (None, "reference"):
-            raise NotImplementedError("device execution is not implemented; only backend='reference' exists")
+            raise NotImplementedError("backend accepts only 'reference'; use device='npu' or device='gpu' for native execution")
+        from ._runtime import _selector, _timeout
+        if device is not None and backend is not None:
+            raise ValueError('device and backend are mutually exclusive')
+        if not isinstance(strict, bool):
+            raise TypeError('strict must be a bool')
+        self._device = _selector(device) if device is not None else None
+        self._timeout = _timeout(timeout)
+        self._strict = strict
+        self._executables = {}
         if not isinstance(cache_size, int) or cache_size < 1:
             raise ValueError("cache_size must be a positive integer")
         self._function = function
@@ -108,24 +122,43 @@ class CompiledFunction:
             lowered = Lowered(graph, self._signature, specs, multiple)
             self._cache[specs] = lowered
             if len(self._cache) > self._cache_size:
-                self._cache.popitem(last=False)
+                evicted, _ = self._cache.popitem(last=False)
+                executable = self._executables.pop(evicted, None)
+                if executable is not None:
+                    executable.close()
             return lowered
 
     def clear_cache(self):
         """Retrace on next use, including any changed captured constants."""
         with self._lock:
             self._cache.clear()
+            executables, self._executables = self._executables, {}
+            errors = []
+            for executable in executables.values():
+                try:
+                    executable.close()
+                except RuntimeError as error:
+                    errors.append(str(error))
+            if errors:
+                raise RuntimeError('; '.join(errors))
 
     def __call__(self, *args, **kwargs):
+        if self._device is not None:
+            with self._lock:
+                lowered = self.lower(*args, **kwargs)
+                key = lowered._specs
+                if key not in self._executables:
+                    self._executables[key] = lowered.compile(self._device, timeout=self._timeout, strict=self._strict)
+                return self._executables[key](*args, **kwargs)
         if self._backend is None:
-            raise RuntimeError("device execution is not implemented; use .lower(...).to_tosa() "
+            raise RuntimeError("device execution requires device=; use .lower(...).to_tosa() "
                                "or explicitly select jit(backend='reference')")
         return self.lower(*args, **kwargs).reference(*args, **kwargs)
 
 
-def jit(function=None, *, backend=None, cache_size=16):
-    """Trace/export a function; ``backend='reference'`` explicitly enables CPU evaluation."""
+def jit(function=None, *, backend=None, device=None, cache_size=16, timeout=30.0, strict=False):
+    """Trace/export, execute with device=, or explicitly select the CPU reference."""
     def wrap(fn):
-        return CompiledFunction(fn, backend=backend, cache_size=cache_size)
+        return CompiledFunction(fn, backend=backend, device=device, cache_size=cache_size, timeout=timeout, strict=strict)
     return wrap if function is None else wrap(function)
 

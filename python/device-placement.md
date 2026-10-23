@@ -1,10 +1,10 @@
-# Portable device selection (design proposal)
+# Portable device selection
 
-Status: proposed public API for the upcoming execution binding. The current package
-supports tracing/TOSA export and explicit CPU reference evaluation only. The selectors
-below are not accepted execution options yet.
+Status: `npu`/`npu:0` through Core ML and `gpu`/`gpu:N` through Vulkan are implemented.
+`cpu` is reserved and currently unavailable. OpenVINO, Hexagon and XDNA remain unbound.
+The remaining design work is described below; [README](README.md) covers execution and lifetimes.
 
-The public execution API should select a device class, with an optional instance index:
+The public execution API selects a device class, with an optional instance index:
 
 ```python
 @va.jit(device="npu")       # default NPU instance; equivalent to npu:0
@@ -14,7 +14,7 @@ def infer(x, weight):
 devices = va.devices("npu") # runtime discovery, not a platform-name heuristic
 ```
 
-Reserve `cpu`, `gpu`, `npu`, and indexed forms such as `gpu:1` and `npu:0`. An index is
+Recognize `cpu`, `gpu`, `npu`, and indexed forms such as `gpu:1` and `npu:0`. An index is
 relative to the current discovery snapshot, not a persistent hardware identity. Keep
 the indexed form even on single-NPU laptops: discrete accelerators, passthrough devices,
 and remote/virtual adapters can make multiple instances useful.
@@ -51,10 +51,9 @@ device discovery as `cpu:0` or `npu:0`.
 
 In particular, `device="npu"` cannot truthfully mean "every operation runs only on the
 NPU" across all current backends. A practical default can mean selecting the NPU-capable
-provider, with its possible CPU participation reported in placement metadata. A separate
-strict-placement option should fail if exclusive placement cannot be guaranteed. That
-policy needs to be explicit when the execution API lands; the frontend should not infer
-exclusive placement from `AcceleratorClass::NPU` alone.
+provider, with its possible CPU participation reported in placement metadata. The implemented
+`strict=True` option rejects Core ML because exclusive placement cannot be guaranteed.
+The frontend does not infer exclusive placement from `AcceleratorClass::NPU` alone.
 
 Discovery also needs stable ordering and a policy for physical devices exposed through
 multiple providers. The existing UUIDs are insufficient for universal deduplication.
@@ -68,3 +67,17 @@ Sources in this repository: [device support matrix](../docs/device-support-matri
 [Core ML](../crates/virtio-accel-coreml/src/lib.rs),
 [OpenVINO](../crates/virtio-accel-openvino/src/lib.rs),
 and [Vulkan](../crates/virtio-accel-vulkan/src/lib.rs).
+
+## Current discovery limits
+
+Vulkan endpoints are sorted by name, opened to verify their reported class, and CPU
+software devices are excluded. The Rust selection API currently opens by name, so
+all duplicate names are excluded with a diagnostic; the Python adapter does not invent
+an index that would silently reopen the first matching device. A future Rust selection
+API must expose physical-device identity to support multiple identically named GPUs.
+Discovery diagnostics include missing loaders and initialization failures. No installation
+or environment mutation is performed automatically.
+
+Core ML currently lacks CAST in its advertised floating-point tier. FP16 graph support
+does not imply that graphs mixing FP16 and FP32 will be admitted. This is a provider
+limitation, separate from the portable selector syntax.

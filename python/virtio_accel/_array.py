@@ -111,7 +111,7 @@ class Array:
         raise TypeError("arrays are immutable; use a = a @ b")
 
     def __repr__(self):
-        kind = "traced" if self._graph is not None else "reference:cpu"
+        kind = "traced" if self._graph is not None else "host"
         return f"Array(shape={self.shape}, dtype={self.dtype.name}, execution={kind!r})"
 
     def __add__(self, other):

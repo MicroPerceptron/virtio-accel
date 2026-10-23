@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "virtio-accel"
 version = "0.1.0"
-description = "Experimental NumPy-style frontend and validated TOSA export for virtio-accel"
+description = "NumPy-style tracing, TOSA export and explicit native execution for virtio-accel"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT OR Apache-2.0"

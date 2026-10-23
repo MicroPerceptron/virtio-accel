@@ -1,9 +1,8 @@
 # Experimental Python / NumPy frontend
 
-This first iteration provides `virtio_accel.numpy`, immutable FP16/FP32 reference arrays,
-static function tracing, and native export through `virtio-accel-tosa-build` and the
-production TOSA validator. It is a compiler frontend prototype, not a hardware
-execution binding. No device execution, automatic CPU fallback, or speedup is claimed.
+`virtio_accel.numpy` provides immutable FP16/FP32 arrays, static tracing, validated
+TOSA export, and synchronous native execution through Core ML (NPU-capable) and
+Vulkan (GPU). NumPy remains an explicit CPU reference. No speedup is claimed.
 
 ## Build from this repository
 
@@ -11,6 +10,8 @@ execution binding. No device execution, automatic CPU fallback, or speedup is cl
 python -m venv .venv
 . .venv/bin/activate
 python -m pip install maturin
+# On macOS, build/tag for the Core ML backend's minimum supported OS:
+# export MACOSX_DEPLOYMENT_TARGET=14.0
 python -m pip install ./python
 ```
 
@@ -49,14 +50,13 @@ np.testing.assert_allclose(
 
 The exported artifact is static TOSA 1.0 Floating Point, Level 8K, with no optional
 extensions. Validation is not a claim of admission by every backend. Backend dtype,
-operator, shape, and runtime requirements still apply. This iteration does not load
-the artifact, allocate device buffers, submit work, or manage completion events.
+operator, shape, and runtime requirements still apply. Unsupported graphs fail admission;
+there is no automatic provider, dtype, or CPU fallback.
 
 Eager `vnp` operations run on NumPy as a CPU reference. Calling a decorated function
-requires explicit `@va.jit(backend="reference")`; a plain `@va.jit` supports `.lower()`
-and refuses execution. This prevents a future device API from silently executing on
-the CPU today. The reference evaluator executes the normalized graph, not the original
-Python function. `jit` is a forward-looking API name here; it is not a performance claim.
+requires explicit `device="npu"` / `device="gpu"` or `backend="reference"`;
+a plain `@va.jit` supports `.lower()` and refuses execution. The reference evaluator
+executes the normalized graph, not the original Python function.
 
 `lower()` specializes on input shapes and dtypes, caches up to 16 traces by default,
 and does not capture input values as constants. Functions must be pure: Python executes
@@ -65,6 +65,52 @@ traced; changing a closure or global requires `clear_cache()`. Fixed Python loop
 shape-dependent branches execute while tracing. Array-dependent control flow, nested
 `jit`, variadic function signatures, and static non-tensor arguments are unsupported.
 Functions may return one array or a nonempty tuple of arrays.
+
+## Native execution
+
+```python
+print(va.devices())                 # immutable Device records, including provider/placement
+print(va.device_diagnostics())      # missing runtimes and excluded endpoints
+
+# Use the lowered FP32 project graph from above. Select an available class explicitly.
+with lowered.compile("npu", timeout=30.0) as executable:
+    result = executable(x, weight, bias).to_numpy()
+    print(executable.device)       # Core ML reports cpu_participation=True
+
+@va.jit(device="gpu", cache_size=4, timeout=30.0, strict=True)
+def gpu_project(x, weight):
+    return x @ weight
+
+# gpu_project(x, weight) compiles once per shape/dtype and reuses native buffers.
+# gpu_project.clear_cache() releases cached programs/buffers and retraces on next use.
+```
+
+`npu` and `gpu` alias `npu:0` and `gpu:0`. Indices describe the current discovery
+snapshot; they are not persistent hardware identities. `cpu` is reserved but has no
+native provider in this iteration. `backend="reference"` does not appear as a device.
+The Python build includes Core ML on macOS and dynamically loaded Vulkan on macOS,
+Linux and Windows. OpenVINO, Hexagon and XDNA bindings are subsequent work.
+
+Core ML uses **CPUAndNeuralEngine**. This selects an NPU-capable provider, not proven
+ANE-only execution; `strict=True` rejects it. Vulkan selects a GPU endpoint and excludes
+software CPU devices. Core ML's existing tier has no `CAST`: mixed FP16/FP32 arithmetic,
+FP16 reductions (which widen to FP32), and explicit casts can export TOSA but are rejected
+by this provider. FP32 nearest-centroid, and FP16/FP32 MLP/FIR examples run through Core ML.
+
+Native handles remain on one worker thread per compiled specialization. Calls serialize,
+release the GIL while waiting, explicitly copy inputs into reusable native allocations,
+and return independent host arrays. These arrays are not resident device tensors.
+Use the executable context manager or `close()`, and `clear_cache()` for decorated
+functions, to observe cleanup errors. Garbage collection disconnects the worker for
+best-effort cleanup; it is not a replacement for explicit close.
+
+`timeout` bounds each compilation/execution/close **wait**, not discovery or native
+cancellation. On an execution timeout the executable closes and cannot be reused; its
+worker retains ownership until native completion, then cleans up. Indeterminate submission
+is never retried. Unknown completion or release quarantines the affected resources and
+reports an error; there is no device-reset API yet. A hung native operation can retain a
+worker indefinitely, and quarantined resources may require a process restart. Applications
+requiring hard cancellation should isolate device execution in their own process.
 
 ## Compatibility boundary
 
@@ -95,8 +141,8 @@ FP16 operations round their results to FP16. Matrix products and reductions accu
 in FP32. Reductions narrow only after all axes (and mean scaling) are complete;
 `dtype=` selects the result dtype. The reference graph uses sequential axis reductions and mean via FP32 reciprocal
 multiplication. Its rounding can differ from NumPy's direct multi-axis reduction or
-division. Hardware numerical conformance is future work; no bitwise equivalence is
-claimed. NaN bytes in constants are preserved, and extrema request TOSA NaN propagation.
+division. The hardware smoke suite compares admitted workloads to this reference; full hardware
+numerical conformance and bitwise equivalence are not claimed. NaN bytes in constants are preserved, and extrema request TOSA NaN propagation.
 
 Limits are rank <= 6, positive dimensions fitting int32, 256 MiB per logical tensor,
 4096 frontend nodes, and 16 MiB of diagnostic graph JSON. The JSON is an internal
@@ -125,13 +171,10 @@ is importable before running the suite, so missing native integration cannot sil
 
 ## Next iterations
 
-1. Bind one real backend with explicit context/program/buffer/event ownership, including
-   indeterminate submissions, timeouts, release failures, and device loss.
-2. Reuse resident programs and device buffers; expose async submission only after lifetime
-   tests pass. Report actual backend placement rather than assuming all work runs on an NPU.
-3. Add dtype/operation coverage against backend-specific numerical tests and publish the
-   admitted subset. Add standard NumPy dispatch only as another frontend to these primitives.
-4. Validate source distributions, produce release wheels, and benchmark cold compilation,
+1. Add OpenVINO/Hexagon/XDNA discovery and execution adapters with device-specific admission tests.
+2. Add Core ML CAST support with numerical evidence, provider-level reset/recovery, and aggregate
+   memory budgets before exposing asynchronous or resident-array APIs.
+3. Validate source distributions, produce release wheels, and benchmark cold compilation,
    warm execution, and explicit transfers separately.
 
 The wire protocol and existing portable Rust public APIs are unchanged.
@@ -141,5 +184,14 @@ The wire protocol and existing portable Rust public APIs are unchanged.
 
 See [examples](examples/README.md) for an MLP classifier, nearest-centroid classification,
 and FIR filtering, with independent numerical checks and optional TOSA export.
-The [device placement proposal](device-placement.md) describes portable `npu`/`npu:0`
-selectors and provider constraints. These selectors are not implemented yet.
+See [device placement](device-placement.md) for selector semantics and provider constraints.
+
+Run the opt-in hardware suite against an installed wheel:
+
+```sh
+VIRTIO_ACCEL_PYTHON_TEST_DEVICE=npu python -m unittest discover -s python/tests -v
+# Or VIRTIO_ACCEL_PYTHON_TEST_DEVICE=gpu on a Vulkan GPU host.
+```
+
+A requested but unavailable device fails these tests; it is never silently skipped.
+Wheel CI checks discovery and explicit unavailable-device failures without requiring hardware.
