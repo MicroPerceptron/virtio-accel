@@ -1,0 +1,36 @@
+[package]
+name = "virtio-accel-python"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Keep Python's build/dependency policy out of the portable workspace.
+[workspace]
+
+[lib]
+name = "_native"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["python", "coreml", "vulkan"]
+coreml = ["dep:virtio-accel-coreml"]
+vulkan = ["dep:virtio-accel-vulkan"]
+python = ["dep:pyo3"]
+
+[dependencies]
+pyo3 = { version = "0.27", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+virtio-accel-tosa = { path = "../crates/virtio-accel-tosa" }
+virtio-accel-tosa-build = { path = "../crates/virtio-accel-tosa-build" }
+
+
+virtio-accel-core = { path = "../crates/virtio-accel-core" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+virtio-accel-coreml = { path = "../crates/virtio-accel-coreml", optional = true }
+
+[target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))'.dependencies]
+virtio-accel-vulkan = { path = "../crates/virtio-accel-vulkan", optional = true }
