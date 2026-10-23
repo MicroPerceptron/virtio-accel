@@ -1,6 +1,8 @@
 //! Native validation/serialization boundary for the experimental Python frontend.
 #![deny(unsafe_code)]
 
+mod runtime;
+
 use serde::Deserialize;
 use serde_json::Value;
 use virtio_accel_tosa::{
@@ -283,6 +285,7 @@ mod python {
     #[pymodule]
     fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module.add_function(wrap_pyfunction!(build_tosa, module)?)?;
+        super::runtime::register(module)?;
         Ok(())
     }
 }

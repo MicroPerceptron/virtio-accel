@@ -3,7 +3,7 @@
 Each script implements a reusable numerical function, generates deterministic demo
 inputs, evaluates the traced graph on the explicit CPU reference, and checks an
 independent NumPy result. `--export model.tosa` additionally writes a graph validated
-by the Rust TOSA implementation. Hardware execution is not yet connected to Python.
+by the Rust TOSA implementation. Use `--device npu` or `--device gpu` to execute through an available native provider.
 
 | Example | Workload | Output |
 | --- | --- | --- |
@@ -37,3 +37,16 @@ PYTHONPATH=python python -m examples.fir_filter --dtype float16
 by the wheel. Use the script form above with an installed wheel. Source-only runs cannot
 export TOSA unless the native extension has been built into the source package (for
 example with `maturin develop --manifest-path python/Cargo.toml` in a virtual environment).
+
+Native examples (installed wheel and available device required):
+
+```sh
+python python/examples/mlp_classifier.py --dtype float16 --device npu
+python python/examples/nearest_centroid.py --dtype float32 --device npu
+python python/examples/fir_filter.py --dtype float16 --device gpu
+```
+
+Each native run prints its selected provider and CPU-participation metadata. Core ML
+permits CPU participation. Its current tier has no CAST, so FP16 nearest-centroid
+fails admission; use FP32 inputs explicitly or a provider that admits CAST. No example
+automatically changes dtype or falls back after an execution failure.

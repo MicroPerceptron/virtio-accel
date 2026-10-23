@@ -59,7 +59,7 @@ class FrontendTests(unittest.TestCase):
             f(np.ones(2, np.float32))
         with self.assertRaises(NotImplementedError):
             va.jit(lambda x: x, backend="coreml")
-        self.assertIn("reference:cpu", repr(vnp.ones(2)))
+        self.assertIn("host", repr(vnp.ones(2)))
 
     def test_scalar_and_broadcasting(self):
         for left, right in [((2, 3), (3,)), ((2, 1, 3), (4, 1)), ((), (2, 3)), ((), ())]:

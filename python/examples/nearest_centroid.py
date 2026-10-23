@@ -21,14 +21,19 @@ def squared_distances(points, centers):
     return vnp.maximum(point_norms + center_norms - 2 * (points @ centers.T), 0)
 
 
-def demo(dtype="float16", export=None):
+def demo(dtype="float16", export=None, device=None):
     dtype = np.dtype(dtype)
     rng = np.random.default_rng(11)
     centers = rng.normal(size=(8, 12)).astype(dtype)
     labels = np.arange(64) % len(centers)
     points = (centers[labels].astype(np.float32) + rng.normal(0, 0.05, (64, 12))).astype(dtype)
     lowered = squared_distances.lower(points, centers)
-    distances = lowered.reference(points, centers).to_numpy()
+    if device is None:
+        distances = lowered.reference(points, centers).to_numpy()
+    else:
+        with lowered.compile(device) as executable:
+            distances = executable(points, centers).to_numpy()
+            print(f"Native target: {executable.device}")
     # A different formulation and higher precision provide a numerical oracle.
     differences = points.astype(np.float64)[:, None, :] - centers.astype(np.float64)[None, :, :]
     expected = np.sum(differences * differences, axis=-1)
@@ -39,7 +44,7 @@ def demo(dtype="float16", export=None):
     np.testing.assert_array_equal(predicted, labels)
     if export is not None:
         Path(export).write_bytes(lowered.to_tosa())
-    print(f"CPU reference, {dtype.name} inputs / float32 distances: "
+    print(f"{device or 'CPU reference'}, {dtype.name} inputs / float32 distances: "
           f"{len(points)} points assigned correctly to {len(centers)} centers")
     return distances
 
@@ -48,5 +53,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dtype", choices=("float16", "float32"), default="float16")
     parser.add_argument("--export", type=Path, help="write validated TOSA (requires native extension)")
+    parser.add_argument("--device", help="native target, e.g. npu or gpu; default is CPU reference")
     args = parser.parse_args()
-    demo(args.dtype, args.export)
+    demo(args.dtype, args.export, args.device)

@@ -7,6 +7,8 @@ on:
       - "crates/virtio-accel-tosa/**"
       - "crates/virtio-accel-tosa-build/**"
       - "crates/virtio-accel-core/**"
+      - "crates/virtio-accel-coreml/**"
+      - "crates/virtio-accel-vulkan/**"
       - "crates/virtio-accel-transport/**"
       - "Cargo.toml"
       - ".github/workflows/python.yml"
@@ -35,6 +37,8 @@ jobs:
           - os: windows-latest
             python: "3.13"
     runs-on: ${{ matrix.os }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
