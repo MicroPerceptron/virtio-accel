@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - "python/**"
+      - "pyproject.toml"
+      - ".github/workflows/python-release.yml"
       - "crates/virtio-accel-tosa/**"
       - "crates/virtio-accel-tosa-build/**"
       - "crates/virtio-accel-core/**"
@@ -19,6 +21,8 @@ on:
     branches: [main]
     paths:
       - "python/**"
+      - "pyproject.toml"
+      - ".github/workflows/python-release.yml"
       - ".github/workflows/python.yml"
   workflow_dispatch:
 
@@ -46,6 +50,13 @@ jobs:
           - os: ubuntu-latest
             python: "3.13"
             runtime: openvino
+          - os: windows-latest
+            python: "3.13"
+            runtime: openvino
+          - os: ubuntu-24.04-arm
+            python: "3.14"
+          - os: macos-26-intel
+            python: "3.14"
     runs-on: ${{ matrix.os }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.0"
@@ -78,36 +89,53 @@ jobs:
           }
           if (-not (Test-Path "$testDir/hexagon-results.zip")) { throw 'Missing diagnostic ZIP' }
           $global:LASTEXITCODE = 0
-      - name: Install OpenVINO for the native CPU execution lane
-        if: matrix.runtime == 'openvino'
-        shell: bash
-        run: |
-          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
-            | sudo gpg --dearmor -o /usr/share/keyrings/intel-openvino.gpg
-          echo "deb [signed-by=/usr/share/keyrings/intel-openvino.gpg] https://apt.repos.intel.com/openvino ubuntu24 main" \
-            | sudo tee /etc/apt/sources.list.d/intel-openvino.list
-          sudo apt-get update
-          sudo apt-get install -y openvino-libraries-dev-2026.3.0
-          pkg-config --modversion openvino
-          echo "VIRTIO_ACCEL_OPENVINO=1" >> "$GITHUB_ENV"
-          echo "VIRTIO_ACCEL_PYTHON_TEST_DEVICE=cpu" >> "$GITHUB_ENV"
-      - run: python -m pip install "maturin>=1.8,<2"
+      - run: python -m pip install "maturin[zig]>=1.16,<2" "twine>=6,<7"
       - run: cargo fmt --manifest-path python/Cargo.toml -- --check
       - run: cargo test --manifest-path python/Cargo.toml
       - run: cargo clippy --manifest-path python/Cargo.toml --all-targets -- -D warnings
-      - name: Build the platform wheel
-        if: matrix.runtime != 'openvino'
-        run: maturin build --release --manifest-path python/Cargo.toml --out dist
-      - name: Build against the installed OpenVINO runtime without bundling vendor libraries
+      - name: Build portable Linux wheel without a vendor SDK
+        if: runner.os == 'Linux'
+        run: maturin build --release --locked --manifest-path python/Cargo.toml --out dist --zig --compatibility manylinux_2_28 --auditwheel check
+      - name: Build macOS or Windows wheel
+        if: runner.os != 'Linux'
+        run: maturin build --release --locked --manifest-path python/Cargo.toml --out dist
+      - name: Install OpenVINO only after building the wheel
         if: matrix.runtime == 'openvino'
-        run: maturin build --release --manifest-path python/Cargo.toml --out dist --compatibility linux --auditwheel skip
+        shell: bash
+        run: |
+          python -m pip install 'openvino>=2026.3,<2027'
+          echo "VIRTIO_ACCEL_PYTHON_TEST_PROVIDER=openvino" >> "$GITHUB_ENV"
+          echo "VIRTIO_ACCEL_PYTHON_TEST_DEVICE=cpu" >> "$GITHUB_ENV"
       - name: Install and exercise wheel
         shell: bash
         run: |
+          python python/scripts/check_release.py artifacts dist
+          python -m twine check --strict dist/*
           python -m pip install dist/*.whl
+          python python/scripts/check_release.py installed
           python -c "from virtio_accel._native import build_tosa; assert callable(build_tosa)"
           if [ "${{ matrix.runtime }}" = "openvino" ]; then
             python -c "import virtio_accel as va; assert va.devices('cpu', provider='openvino')"
           fi
           python -m unittest discover -s python/tests -v
 
+
+  source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: dtolnay/rust-toolchain@stable
+      - run: python -m pip install "maturin>=1.16,<2" "twine>=6,<7"
+      - run: python -m unittest discover -s python/scripts -p 'test_*.py' -v
+      - run: maturin sdist --manifest-path python/Cargo.toml --out dist
+      - run: python python/scripts/check_release.py artifacts dist
+      - run: python -m twine check --strict dist/*
+      - name: Build and test the standalone source archive
+        run: |
+          python -m pip wheel --no-deps dist/*.tar.gz --wheel-dir rebuilt
+          python -m pip install rebuilt/*.whl
+          python python/scripts/check_release.py installed
+          python -m unittest discover -s python/tests -v

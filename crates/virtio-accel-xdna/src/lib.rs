@@ -6,12 +6,14 @@
 //! decision tickets (#82 numerical tier, #83 crate layout, #84 compiler helper, #85 execution
 //! model), whose resolution records live on their respective ticket branches.
 //!
-//! The native modules (`ffi`, `native`) compile only when the build script finds a complete
+//! By default the native modules (`ffi`, `native`) compile when the build script finds a complete
 //! amdxdna-native HRX prefix (`VIRTIO_ACCEL_HRX_DIR`/`HRX_DIR`, or the `VIRTIO_ACCEL_HRX_LIB_DIR`
 //! escape hatch) and sets the `va_xdna` cfg; `VIRTIO_ACCEL_XDNA` forces the probe on (`1`, failing
 //! loudly) or off (`0`). Hosts without HRX build the portable admission surface (`lower`), the
 //! artifact codec, the offline compiler driver (`compile_artifact`, unix), and a placeholder —
-//! and compile no `unsafe` at all.
+//! and compile no `unsafe` at all. The opt-in `runtime-loading` feature enables the native
+//! adapter on Linux without SDK probing/linking, resolving the pinned ABI at runtime.
+//! `VIRTIO_ACCEL_XDNA=0` still forces the placeholder.
 //!
 //! **Scope today:** the full `Accelerator` lifecycle — the HRX device/stream owner, `hrx_buffer`
 //! primitives (persistent mapping, range flush/invalidate, release), and the serialized dispatch

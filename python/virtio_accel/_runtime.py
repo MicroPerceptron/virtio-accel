@@ -1,6 +1,9 @@
 """Portable device selection and synchronous native execution with explicit host copies."""
 from dataclasses import asdict, dataclass
+import importlib.util
 import json
+import os
+from pathlib import Path
 import math
 import re
 from threading import RLock
@@ -41,8 +44,30 @@ def _timeout(value):
     return float(value)
 
 
+def _openvino_library():
+    # Respect explicit process configuration. Do not mutate environment variables
+    # while native worker threads may be reading them.
+    if any(name in os.environ for name in (
+        'VIRTIO_ACCEL_OPENVINO_LIBRARY', 'VIRTIO_ACCEL_OPENVINO_LIB_DIR',
+    )):
+        return None
+    try:
+        spec = importlib.util.find_spec('openvino')
+    except (ImportError, ValueError):
+        return None
+    if spec is None or not spec.submodule_search_locations:
+        return None
+    candidates = set()
+    for location in spec.submodule_search_locations:
+        directory = Path(location) / 'libs'
+        for pattern in ('libopenvino_c.so*', 'libopenvino_c*.dylib', 'openvino_c.dll'):
+            candidates.update(path.resolve() for path in directory.glob(pattern) if path.is_file())
+    # Refuse ambiguous package contents instead of choosing a version arbitrarily.
+    return str(next(iter(candidates))) if len(candidates) == 1 else None
+
+
 def _discovery():
-    return json.loads(_native().discover_devices())
+    return json.loads(_native().discover_devices(_openvino_library()))
 
 
 def devices(kind=None, *, provider=None):

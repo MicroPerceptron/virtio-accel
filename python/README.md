@@ -12,13 +12,16 @@ python -m venv .venv
 python -m pip install maturin
 # On macOS, build/tag for the Core ML backend's minimum supported OS:
 # export MACOSX_DEPLOYMENT_TARGET=14.0
-python -m pip install ./python
+python -m pip install .
 ```
 
 Building requires Rust 1.85+ and access to Cargo dependencies. The Python extension is
 an isolated Cargo workspace: PyO3 does not become a dependency of any portable crate.
-The package has not been published to PyPI. Prebuilt distribution wheels and source
-distribution validation remain release work; CI builds and tests wheels from checkout.
+The package has not yet been published to PyPI. The release workflow builds CPython
+3.10+ stable-ABI wheels for Linux (glibc 2.28+), macOS 14+, and Windows, on both x86-64
+and ARM64, plus a standalone source archive. See [first publication](releasing.md).
+Prebuilt wheels do not require Rust. Source builds do; macOS source builds also require
+a macOS 26 SDK, and Windows ARM64 Hexagon builds require QAIRT development headers.
 
 ## Familiar functions, explicit execution
 
@@ -94,27 +97,42 @@ crates are testing/integration infrastructure, not additional physical providers
 | --- | --- | --- | --- |
 | Core ML | NPU, GPU, hybrid CPU/GPU/ANE | macOS 14+ | FP16/FP32; CPU participation; no CAST |
 | Vulkan | GPU, macOS/Linux/Windows | Vulkan loader and GPU driver (MoltenVK on macOS) | FP16/FP32; software CPU devices excluded |
-| OpenVINO | CPU/GPU/NPU | OpenVINO C runtime present **when building the wheel**, plus device plugins/drivers | FP16/FP32, subject to plugin admission; no floating-tier CAST; exact named device, no AUTO/HETERO |
+| OpenVINO | CPU/GPU/NPU | OpenVINO 2026.3 C runtime and device plugins/drivers at execution time | FP16/FP32, subject to plugin admission; no floating-tier CAST; exact named device, no AUTO/HETERO |
 | Hexagon | NPU, Windows ARM64 | Complete QAIRT/QNN SDK at build time and HTP runtime | FP16; FP32 rejected without downconversion |
-| XDNA | NPU, Linux | Pinned HRX at build time, AMD driver and aiecc compiler toolchain | BF16 identity and batch-1 BF16→FP32 MATMUL; backend shape restrictions apply |
+| XDNA | NPU, Linux | Pinned HRX 0.1.0, AMD driver and aiecc compiler toolchain at execution time | BF16 identity and batch-1 BF16→FP32 MATMUL; backend shape restrictions apply |
 
-All five adapters are default Cargo features; SDK-free builds retain explicit unavailable
-placeholders. Installing a vendor SDK after building a wheel does not enable its native
-backend: rebuild with the backend's documented environment. See the build instructions
-for [OpenVINO](../crates/virtio-accel-openvino/README.md),
-[Hexagon](../crates/virtio-accel-hexagon/README.md) and
-[XDNA](../crates/virtio-accel-xdna/README.md). Force-on variables
-`VIRTIO_ACCEL_OPENVINO=1`, `VIRTIO_ACCEL_HEXAGON=1`, and `VIRTIO_ACCEL_XDNA=1`
-make missing build prerequisites fail loudly. The OpenVINO CI lane uses a native Linux wheel
-linked to its installed runtime, without bundling vendor libraries. For an equivalent local build:
+All five adapters are default Cargo features, enabled on their supported platforms.
+Release wheels contain the adapters, not vendor SDKs, drivers, or runtime libraries.
+Missing runtimes appear in `va.device_diagnostics()`; importing, tracing, and TOSA
+export still work. Installing a compatible runtime enables its compiled adapter
+without rebuilding the wheel. A custom build that disables an adapter still needs a rebuild.
+
+OpenVINO and XDNA use runtime loading in Python wheels; their Rust crates retain
+build-time linking by default. OpenVINO can use the optional Python dependency:
 
 ```sh
-maturin build --release --manifest-path python/Cargo.toml --out dist --compatibility linux --auditwheel skip
-python -m pip install dist/*.whl
+# From checkout, before the first PyPI release:
+python -m pip install '.[openvino]'
+# After publication:
+# python -m pip install --pre 'virtio-accel[openvino]'
 ```
 
-This is a machine-local wheel, not a portable manylinux distribution. Vendor-library
-redistribution and release-wheel packaging remain separate release work.
+The SDK locates the C library in the installed `openvino` package without importing it.
+Explicit environment settings take precedence. Configure them before discovery:
+
+| Runtime | Runtime library selection (highest priority first) |
+| --- | --- |
+| OpenVINO | `VIRTIO_ACCEL_OPENVINO_LIBRARY` full path; `VIRTIO_ACCEL_OPENVINO_LIB_DIR`; installed Python `openvino` package; OS loader |
+| Hexagon | `VIRTIO_ACCEL_QNN_LIBRARY` full path; `VIRTIO_ACCEL_QNN_LIB_DIR`; `VIRTIO_ACCEL_QNN_SDK_ROOT` / `QNN_SDK_ROOT`; OS DLL search |
+| XDNA | `VIRTIO_ACCEL_HRX_LIBRARY` full path; `VIRTIO_ACCEL_HRX_LIB_DIR`; `VIRTIO_ACCEL_HRX_DIR` / `HRX_DIR` plus `/lib` |
+
+Libraries and native handles are retained for the process lifetime. Restart Python to
+switch an already loaded runtime. XDNA also requires the pinned compiler environment
+and `VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN`; Hexagon needs its HTP/DSP support libraries and
+`ADSP_LIBRARY_PATH` as described in the backend guides. GPU/NPU drivers remain host
+prerequisites. See [OpenVINO](../crates/virtio-accel-openvino/README.md),
+[Hexagon](../crates/virtio-accel-hexagon/README.md), and
+[XDNA](../crates/virtio-accel-xdna/README.md).
 
 Providers can expose the same physical accelerator. Discovery reports provider endpoints,
 not a deduplicated physical-device count. To choose a provider explicitly, filter discovery
@@ -267,7 +285,7 @@ VIRTIO_ACCEL_PYTHON_TEST_DEVICE=hybrid VIRTIO_ACCEL_PYTHON_TEST_PROVIDER=coreml 
 
 A requested but unavailable device fails these tests; it is never silently skipped.
 Wheel CI checks installed wheels on Linux, macOS and Windows. An additional Linux lane builds
-against the pinned OpenVINO runtime and executes the installed wheel's FP16/FP32 tests and
+without a vendor SDK, installs the OpenVINO Python runtime afterward, and executes the wheel's FP16/FP32 tests and
 examples on the CPU plugin; missing runtime/device is a failure. SDK-free Linux Rust tests
 also run the frontend's BF16 fixtures through XDNA's real admission code. These checks do
 not themselves prove Intel NPU/GPU, Qualcomm HTP, or AMD NPU execution; the opt-in hardware suite
@@ -327,3 +345,20 @@ It does not install drivers or modify the SDK. The printed `hexagon-results.zip`
 contains only logs and `report.json`, including failed preflight/build steps; relay
 that report and the relevant failure logs. Windows CI validates PowerShell 5.1 syntax
 and the wrong-architecture diagnostic path, not HTP execution.
+
+## Distribution portability validation
+
+The initial `0.1.0a1` runtime-loading build was exercised with 47 Python tests per
+endpoint. Mac M4 Core ML GPU/NPU/hybrid passed 45 with 2 skips each. The portable
+`manylinux_2_28_x86_64` wheel built on Gigatron passed OpenVINO CPU/GPU (45 passed,
+2 skipped), NPU (44 passed, 3 skipped), and Intel Vulkan (45 passed, 2 skipped).
+That same wheel, without rebuilding on AMD, passed XDNA (42 passed, 5 skipped) and
+AMD Vulkan (45 passed, 2 skipped). Skips reflect provider/operator/dtype admission.
+The new tests also prove import and TOSA export survive missing vendor libraries.
+
+The Mac source archive was extracted outside the checkout and rebuilt successfully;
+wheel metadata/license checks and installed-adapter checks pass on Mac and Linux.
+These are packaging-portability checks, separate from the earlier Qualcomm execution
+results above. The changed Windows runtime-path loader still requires the configured
+QAIRT runner (or the updated relay script) before release. Hosted CI covers the
+remaining wheel build targets; no six-platform release or PyPI upload is claimed here.

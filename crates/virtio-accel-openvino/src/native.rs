@@ -63,6 +63,7 @@ unsafe impl Sync for CoreHandle {}
 /// accelerator instance shares this core; contexts, buffers, programs, queues, and events remain
 /// per-instance state.
 fn shared_core() -> Result<Arc<CoreHandle>, InitError> {
+    ffi::ensure_loaded()?;
     static CORE: OnceLock<Result<Arc<CoreHandle>, InitError>> = OnceLock::new();
     CORE.get_or_init(|| CoreHandle::create().map(Arc::new))
         .clone()
@@ -72,7 +73,7 @@ impl CoreHandle {
     fn create() -> Result<Self, InitError> {
         let mut core = ptr::null_mut();
         // SAFETY: `core` is a valid out-pointer; the runtime initializes it only on OK.
-        let status = unsafe { ffi::ov_core_create(&mut core) };
+        let status = unsafe { (ffi::api().ov_core_create)(&mut core) };
         if status != ffi::OV_STATUS_OK {
             return Err(InitError::CoreCreationFailed);
         }
@@ -93,8 +94,9 @@ impl CoreHandle {
         };
         // SAFETY: the core is live and `devices` is a valid out-structure the runtime fills on
         // OK; on failure it stays in its zeroed state and must not be freed.
-        let status =
-            unsafe { ffi::ov_core_get_available_devices(self.as_const_ptr(), &mut devices) };
+        let status = unsafe {
+            (ffi::api().ov_core_get_available_devices)(self.as_const_ptr(), &mut devices)
+        };
         if status != ffi::OV_STATUS_OK {
             return Err(InitError::DeviceEnumerationFailed);
         }
@@ -108,7 +110,7 @@ impl CoreHandle {
                     names.push(CStr::from_ptr(name).to_string_lossy().into_owned());
                 }
             }
-            ffi::ov_available_devices_free(&mut devices);
+            (ffi::api().ov_available_devices_free)(&mut devices);
         }
         Ok(names)
     }
@@ -117,7 +119,7 @@ impl CoreHandle {
 impl Drop for CoreHandle {
     fn drop(&mut self) {
         // SAFETY: the handle owns exactly one core reference and is dropped exactly once.
-        unsafe { ffi::ov_core_free(self.core.as_ptr()) }
+        unsafe { (ffi::api().ov_core_free)(self.core.as_ptr()) }
     }
 }
 
@@ -332,7 +334,7 @@ impl OwnedShape {
         // SAFETY: `dims` is a live slice and `shape` a valid out-structure; the runtime copies
         // the dims into its own allocation, released exactly once in `Drop`.
         check_status(unsafe {
-            ffi::ov_shape_create(dims.len() as i64, dims.as_ptr(), &mut shape)
+            (ffi::api().ov_shape_create)(dims.len() as i64, dims.as_ptr(), &mut shape)
         })?;
         Ok(Self { shape })
     }
@@ -346,7 +348,7 @@ impl OwnedShape {
 impl Drop for OwnedShape {
     fn drop(&mut self) {
         // SAFETY: `shape` was initialized by `ov_shape_create` and is freed exactly once.
-        let _ = unsafe { ffi::ov_shape_free(&mut self.shape) };
+        let _ = unsafe { (ffi::api().ov_shape_free)(&mut self.shape) };
     }
 }
 
@@ -368,7 +370,7 @@ impl TensorHandle {
         // shape/element pair (validated by the caller), and the runtime wraps it without
         // ownership.
         check_status(unsafe {
-            ffi::ov_tensor_create_from_host_ptr(element, shape, data, &mut tensor)
+            (ffi::api().ov_tensor_create_from_host_ptr)(element, shape, data, &mut tensor)
         })?;
         NonNull::new(tensor)
             .map(|tensor| Self { tensor })
@@ -386,7 +388,7 @@ impl TensorHandle {
 impl Drop for TensorHandle {
     fn drop(&mut self) {
         // SAFETY: this handle owns one tensor reference and is dropped exactly once.
-        unsafe { ffi::ov_tensor_free(self.tensor.as_ptr()) }
+        unsafe { (ffi::api().ov_tensor_free)(self.tensor.as_ptr()) }
     }
 }
 
@@ -531,7 +533,7 @@ struct ModelHandle {
 impl Drop for ModelHandle {
     fn drop(&mut self) {
         // SAFETY: this handle owns one model reference and is dropped exactly once.
-        unsafe { ffi::ov_model_free(self.model.as_ptr()) }
+        unsafe { (ffi::api().ov_model_free)(self.model.as_ptr()) }
     }
 }
 
@@ -549,7 +551,7 @@ impl CompiledModelHandle {
 impl Drop for CompiledModelHandle {
     fn drop(&mut self) {
         // SAFETY: this handle owns one compiled-model reference and is dropped exactly once.
-        unsafe { ffi::ov_compiled_model_free(self.compiled.as_ptr()) }
+        unsafe { (ffi::api().ov_compiled_model_free)(self.compiled.as_ptr()) }
     }
 }
 
@@ -564,7 +566,7 @@ fn read_model(
     // synchronous call; the created model shares the weights memory, which the caller keeps
     // resident for as long as the model lives.
     let status = unsafe {
-        ffi::ov_core_read_model_from_memory_buffer(
+        (ffi::api().ov_core_read_model_from_memory_buffer)(
             core.as_const_ptr(),
             xml.as_ptr().cast(),
             xml.len(),
@@ -611,13 +613,13 @@ fn compile_with_accuracy(
     // arguments (one key/value pair contributes two) per the documented convention pinned by a
     // unit test; the key symbol and value stay valid for the duration of the call.
     let status = unsafe {
-        ffi::ov_core_compile_model(
+        (ffi::api().ov_core_compile_model)(
             core.as_const_ptr(),
             model.model.as_ptr(),
             device.as_ptr(),
             2,
             &mut compiled,
-            ffi::ov_property_key_hint_execution_mode,
+            ffi::execution_mode_property(),
             c"ACCURACY".as_ptr(),
         )
     };
@@ -823,7 +825,7 @@ impl OpenVinoEvent {
             let mut tensor = ptr::null_mut();
             // SAFETY: the request is live; the runtime returns one owned tensor reference.
             check_status(unsafe {
-                ffi::ov_infer_request_get_output_tensor_by_index(
+                (ffi::api().ov_infer_request_get_output_tensor_by_index)(
                     self.request.as_ptr(),
                     bound.output_io_index,
                     &mut tensor,
@@ -836,7 +838,7 @@ impl OpenVinoEvent {
             let probe = TensorHandle { tensor };
             let mut data = ptr::null_mut();
             // SAFETY: the probe tensor is live and `data` is a valid out-pointer.
-            check_status(unsafe { ffi::ov_tensor_data(probe.as_const_ptr(), &mut data) })?;
+            check_status(unsafe { (ffi::api().ov_tensor_data)(probe.as_const_ptr(), &mut data) })?;
             if data != bound.expected_output {
                 return Ok(false);
             }
@@ -854,14 +856,14 @@ impl Drop for OpenVinoEvent {
             // SAFETY: the request is live; cancel and wait are ordinary request entry points and
             // their statuses are deliberately ignored (any terminal outcome suffices).
             unsafe {
-                let _ = ffi::ov_infer_request_cancel(self.request.as_ptr());
-                let _ = ffi::ov_infer_request_wait(self.request.as_ptr());
+                let _ = (ffi::api().ov_infer_request_cancel)(self.request.as_ptr());
+                let _ = (ffi::api().ov_infer_request_wait)(self.request.as_ptr());
             }
         }
         // SAFETY: this handle owns the request reference and frees it exactly once; the bound
         // tensors are dropped only after this call, then the already-terminal backing guards are
         // released. This ordering also applies to a pre-start rejection.
-        unsafe { ffi::ov_infer_request_free(self.request.as_ptr()) };
+        unsafe { (ffi::api().ov_infer_request_free)(self.request.as_ptr()) };
         self.recycle_metadata();
     }
 }
@@ -888,6 +890,14 @@ impl std::fmt::Debug for OpenVinoAccelerator {
 }
 
 impl OpenVinoAccelerator {
+    /// Initialize runtime loading from an installed library (for example a Python
+    /// OpenVINO wheel). The first successful load is retained for the process
+    /// lifetime. Call before discovery; this never replaces an active runtime.
+    #[cfg(feature = "runtime-loading")]
+    pub fn load_runtime_from(path: &std::path::Path) -> Result<(), InitError> {
+        ffi::load_from(path)
+    }
+
     /// Enumerate concrete runtime endpoints without choosing a default device.
     pub fn available_devices() -> Result<Vec<String>, InitError> {
         shared_core()?.available_devices()
@@ -951,6 +961,7 @@ impl OpenVinoAccelerator {
     /// The runtime's build number (`ov_get_openvino_version`), the version a captured compiled
     /// blob must be bound to.
     pub fn runtime_version() -> Result<String, InitError> {
+        ffi::ensure_loaded()?;
         let mut version = ffi::ov_version_t {
             build_number: ptr::null(),
             description: ptr::null(),
@@ -958,7 +969,7 @@ impl OpenVinoAccelerator {
         // SAFETY: `version` is a valid out-structure; on success the runtime owns both strings
         // until `ov_version_free`, and they are copied before that release.
         unsafe {
-            if ffi::ov_get_openvino_version(&mut version) != ffi::OV_STATUS_OK
+            if (ffi::api().ov_get_openvino_version)(&mut version) != ffi::OV_STATUS_OK
                 || version.build_number.is_null()
             {
                 return Err(InitError::RuntimeUnavailable);
@@ -966,7 +977,7 @@ impl OpenVinoAccelerator {
             let build = CStr::from_ptr(version.build_number)
                 .to_string_lossy()
                 .into_owned();
-            ffi::ov_version_free(&mut version);
+            (ffi::api().ov_version_free)(&mut version);
             Ok(build)
         }
     }
@@ -987,7 +998,7 @@ impl OpenVinoAccelerator {
         // SAFETY: the compiled model is live for the program's lifetime and `path` is a valid
         // NUL-terminated string for the duration of the call.
         unsafe {
-            check_status(ffi::ov_compiled_model_export_model(
+            check_status((ffi::api().ov_compiled_model_export_model)(
                 program.compiled.as_const_ptr(),
                 path.as_ptr(),
             ))
@@ -1056,7 +1067,8 @@ impl OpenVinoAccelerator {
             return state;
         }
         // SAFETY: the request is live; a zero timeout is a non-blocking readiness probe.
-        let mut status = unsafe { ffi::ov_infer_request_wait_for(event.request.as_ptr(), 0) };
+        let mut status =
+            unsafe { (ffi::api().ov_infer_request_wait_for)(event.request.as_ptr(), 0) };
         if status == ffi::OV_STATUS_RESULT_NOT_READY {
             let expired = event
                 .deadline
@@ -1067,8 +1079,8 @@ impl OpenVinoAccelerator {
             event.cancel_issued.set(true);
             // SAFETY: cancel on a live request; the follow-up probe observes the outcome.
             unsafe {
-                let _ = ffi::ov_infer_request_cancel(event.request.as_ptr());
-                status = ffi::ov_infer_request_wait_for(event.request.as_ptr(), 0);
+                let _ = (ffi::api().ov_infer_request_cancel)(event.request.as_ptr());
+                status = (ffi::api().ov_infer_request_wait_for)(event.request.as_ptr(), 0);
             }
             if status == ffi::OV_STATUS_RESULT_NOT_READY {
                 return EventState::Pending;
@@ -1327,11 +1339,11 @@ impl Accelerator for OpenVinoAccelerator {
         let (mut model_inputs, mut model_outputs) = (0usize, 0usize);
         // SAFETY: the compiled model is live and the out-pointers are valid.
         unsafe {
-            check_status(ffi::ov_compiled_model_inputs_size(
+            check_status((ffi::api().ov_compiled_model_inputs_size)(
                 compiled.as_const_ptr(),
                 &mut model_inputs,
             ))?;
-            check_status(ffi::ov_compiled_model_outputs_size(
+            check_status((ffi::api().ov_compiled_model_outputs_size)(
                 compiled.as_const_ptr(),
                 &mut model_outputs,
             ))?;
@@ -1440,7 +1452,7 @@ impl Accelerator for OpenVinoAccelerator {
         let mut request = ptr::null_mut();
         // SAFETY: the compiled model is live and `request` is a valid out-pointer.
         let status = unsafe {
-            ffi::ov_compiled_model_create_infer_request(
+            (ffi::api().ov_compiled_model_create_infer_request)(
                 program.compiled.as_const_ptr(),
                 &mut request,
             )
@@ -1476,12 +1488,14 @@ impl Accelerator for OpenVinoAccelerator {
             // SAFETY: request and tensor are live; the runtime retains its own tensor reference.
             let status = unsafe {
                 match plan.role {
-                    LoweredFeatureRole::Input => ffi::ov_infer_request_set_input_tensor_by_index(
+                    LoweredFeatureRole::Input => (ffi::api()
+                        .ov_infer_request_set_input_tensor_by_index)(
                         event.request.as_ptr(),
                         plan.io_index,
                         tensor.as_const_ptr(),
                     ),
-                    LoweredFeatureRole::Output => ffi::ov_infer_request_set_output_tensor_by_index(
+                    LoweredFeatureRole::Output => (ffi::api()
+                        .ov_infer_request_set_output_tensor_by_index)(
                         event.request.as_ptr(),
                         plan.io_index,
                         tensor.as_const_ptr(),
@@ -1502,14 +1516,14 @@ impl Accelerator for OpenVinoAccelerator {
         drop(metadata);
 
         // SAFETY: the request is live with every boundary tensor bound.
-        let status = unsafe { ffi::ov_infer_request_start_async(event.request.as_ptr()) };
+        let status = unsafe { (ffi::api().ov_infer_request_start_async)(event.request.as_ptr()) };
         if status != ffi::OV_STATUS_OK {
             // Defense in depth: even though a failed start is specified not to have started,
             // join the request before the event drop releases the guards and tensors.
             // SAFETY: cancel and wait on a live request; statuses are deliberately ignored.
             unsafe {
-                let _ = ffi::ov_infer_request_cancel(event.request.as_ptr());
-                let _ = ffi::ov_infer_request_wait(event.request.as_ptr());
+                let _ = (ffi::api().ov_infer_request_cancel)(event.request.as_ptr());
+                let _ = (ffi::api().ov_infer_request_wait)(event.request.as_ptr());
             }
             return Err(SubmitFailure::Rejected(backend_error_from_status(status)));
         }
@@ -1547,7 +1561,13 @@ mod tests {
     fn backend() -> Option<OpenVinoAccelerator> {
         match OpenVinoAccelerator::new() {
             Ok(backend) => Some(backend),
-            Err(InitError::DeviceUnavailable) => None,
+            Err(InitError::DeviceUnavailable | InitError::RuntimeUnavailable)
+                if std::env::var("VIRTIO_ACCEL_OPENVINO_REQUIRE_HARDWARE").as_deref()
+                    != Ok("1")
+                    && std::env::var("VIRTIO_ACCEL_OPENVINO").as_deref() != Ok("1") =>
+            {
+                None
+            }
             Err(error) => panic!("backend initialization failed: {error}"),
         }
     }

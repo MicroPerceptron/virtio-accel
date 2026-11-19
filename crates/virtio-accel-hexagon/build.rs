@@ -93,10 +93,6 @@ fn main() {
         .flag_if_supported("-std=c++17")
         .warnings(true)
         .compile("virtio_accel_qnn_bridge");
-    println!(
-        "cargo:rustc-env=VIRTIO_ACCEL_QNN_SDK_ROOT={}",
-        root.display()
-    );
     println!("cargo::rustc-cfg=va_hexagon");
     println!("cargo::metadata=native=1");
 }

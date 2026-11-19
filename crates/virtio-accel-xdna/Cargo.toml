@@ -14,11 +14,13 @@ links = "virtio_accel_xdna"
 
 [features]
 default = []
+runtime-loading = ["dep:libloading"]
 # Deterministic, one-shot device-loss injection for the on-metal fault-path suite. Production
 # builds leave this off and contain no fault trigger.
 test-control = []
 
 [dependencies]
+libloading = { version = "0.8", optional = true }
 virtio-accel-core.workspace = true
 virtio-accel-tosa.workspace = true
 

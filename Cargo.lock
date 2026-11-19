@@ -313,6 +313,7 @@ dependencies = [
 name = "virtio-accel-openvino"
 version = "0.4.1"
 dependencies = [
+ "libloading",
  "pkg-config",
  "virtio-accel-conformance",
  "virtio-accel-core",
@@ -381,6 +382,7 @@ name = "virtio-accel-xdna"
 version = "0.4.1"
 dependencies = [
  "blake3",
+ "libloading",
  "virtio-accel-conformance",
  "virtio-accel-core",
  "virtio-accel-tosa",

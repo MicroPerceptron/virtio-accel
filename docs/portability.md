@@ -48,6 +48,15 @@ lowering utilities, while the macOS native job executes its real model and seman
 tests. An accessible Apple Neural Engine is required to construct the real backend; macOS runners
 without one skip execution after checking that availability through Core ML.
 
+Python distribution wheels opt into the OpenVINO and XDNA `runtime-loading` features.
+These compile host adapters without vendor SDKs or hard link dependencies. Discovery
+loads all required symbols before creating handles, retaining the library for the process
+lifetime. Runtime absence leaves Python import/tracing/export usable and yields a provider
+diagnostic. The default Rust linking modes below remain available. Hexagon still requires
+QAIRT headers on the Windows ARM64 build runner, but resolves its DLL path at execution
+time. No vendor SDK/runtime binaries are bundled. See [Python releases](../python/releasing.md)
+for wheel targets, source-archive rebuild checks, and host runtime prerequisites.
+
 The OpenVINO crate's boundary is a build environment rather than a target operating system: its
 build script probes pkg-config for `openvino` and compiles the native FFI modules only on success.
 `VIRTIO_ACCEL_OPENVINO=1` turns a missing runtime into a loud build failure, `=0` forces the

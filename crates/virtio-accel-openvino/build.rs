@@ -21,6 +21,15 @@ fn main() {
         Err(_) => false,
     };
 
+    if std::env::var_os("CARGO_FEATURE_RUNTIME_LOADING").is_some() {
+        let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+        if matches!(target_os.as_str(), "linux" | "windows" | "macos") {
+            println!("cargo::rustc-cfg=va_openvino");
+            println!("cargo::metadata=native=1");
+        }
+        return;
+    }
+
     // Escape hatch for archive or wheel installs that ship no pkg-config metadata.
     if let Ok(dir) = std::env::var("VIRTIO_ACCEL_OPENVINO_LIB_DIR") {
         println!("cargo:rustc-link-search=native={dir}");

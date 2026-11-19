@@ -8,11 +8,13 @@
 //! from host pointers; output execution is accepted only when the runtime uses the same
 //! allocation as its output tensor.
 //!
-//! The native modules compile only when the build script detects an OpenVINO C runtime
+//! By default, the native modules compile when the build script detects an OpenVINO C runtime
 //! (`libopenvino_c`) via pkg-config or the `VIRTIO_ACCEL_OPENVINO_LIB_DIR` override; the
 //! `VIRTIO_ACCEL_OPENVINO` variable forces the probe on (`1`, failing loudly when the runtime is
 //! missing) or off (`0`). Builds without the runtime keep the portable lowering module and an
-//! unsupported-runtime placeholder.
+//! unsupported-runtime placeholder. The opt-in `runtime-loading` feature compiles the native
+//! adapter without linking a vendor library; discovery resolves the C API at runtime.
+//! `VIRTIO_ACCEL_OPENVINO=0` still disables it.
 
 #![cfg_attr(not(va_openvino), forbid(unsafe_code))]
 
@@ -56,7 +58,7 @@ pub const REQUIRED_RESIDENT_BYTES: u64 = u64::MAX;
 /// Failure to initialize an OpenVINO backend instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InitError {
-    /// The crate was built without an OpenVINO C runtime (`libopenvino_c`).
+    /// No compatible OpenVINO C runtime (`libopenvino_c`) is available.
     RuntimeUnavailable,
     /// The OpenVINO core object could not be created.
     CoreCreationFailed,
@@ -91,6 +93,12 @@ pub struct OpenVinoAccelerator;
 
 #[cfg(not(va_openvino))]
 impl OpenVinoAccelerator {
+    /// Runtime loading is unavailable on this build target.
+    #[cfg(feature = "runtime-loading")]
+    pub fn load_runtime_from(_path: &std::path::Path) -> Result<(), InitError> {
+        Err(InitError::RuntimeUnavailable)
+    }
+
     /// Report that no OpenVINO runtime was detected when this crate was built.
     pub fn new() -> Result<Self, InitError> {
         Err(InitError::RuntimeUnavailable)

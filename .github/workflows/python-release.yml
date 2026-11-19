@@ -1,0 +1,214 @@
+name: Release Python SDK
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      destination:
+        description: Build artifacts, publish to TestPyPI, or publish a tagged PyPI release
+        type: choice
+        options: [artifacts, testpypi, pypi]
+        default: artifacts
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'python-v')
+    runs-on: ubuntu-24.04
+    outputs:
+      destination: ${{ steps.release.outputs.destination }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # Never run unmerged PR code on the persistent QAIRT host.
+      - name: Require a reviewed commit on the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: git merge-base --is-ancestor HEAD "origin/$DEFAULT_BRANCH"
+      - name: Validate release version and destination
+        id: release
+        env:
+          DESTINATION: ${{ inputs.destination || 'pypi' }}
+        run: |
+          python python/scripts/check_release.py ref --destination "$DESTINATION" --ref "$GITHUB_REF"
+          echo "destination=$DESTINATION" >> "$GITHUB_OUTPUT"
+
+  wheels:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            name: linux-x64
+          - os: ubuntu-24.04-arm
+            name: linux-arm64
+          - os: macos-26
+            name: macos-arm64
+          - os: macos-26-intel
+            name: macos-x64
+          - os: windows-latest
+            name: windows-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: dtolnay/rust-toolchain@stable
+      - run: python -m pip install "maturin[zig]>=1.16,<2" "twine>=6,<7"
+      - name: Build portable Linux wheel
+        if: runner.os == 'Linux'
+        run: maturin build --release --locked --manifest-path python/Cargo.toml --out dist --strip --zig --compatibility manylinux_2_28 --auditwheel check
+      - name: Build macOS or Windows wheel
+        if: runner.os != 'Linux'
+        run: maturin build --release --locked --manifest-path python/Cargo.toml --out dist --strip
+      - name: Verify and test installed wheel
+        shell: bash
+        run: |
+          python python/scripts/check_release.py artifacts dist
+          python -m twine check --strict dist/*
+          python -m pip install dist/*.whl
+          python python/scripts/check_release.py installed
+          python -m unittest discover -s python/tests -v
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-dist-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  hexagon:
+    needs: prepare
+    runs-on: [self-hosted, Windows, ARM64, qairt-2.49]
+    timeout-minutes: 60
+    env:
+      VIRTIO_ACCEL_HEXAGON: "1"
+      VIRTIO_ACCEL_PYTHON_TEST_PROVIDER: hexagon
+      VIRTIO_ACCEL_PYTHON_TEST_DEVICE: npu
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check the preinstalled native toolchain
+        shell: pwsh
+        run: |
+          python -c "import platform, sys; assert platform.machine().lower() in ('arm64', 'aarch64'); assert sys.version_info >= (3, 10)"
+          rustc -vV
+          if ($LASTEXITCODE) { throw 'Rust is required' }
+          $sdk = $env:VIRTIO_ACCEL_QNN_SDK_ROOT
+          if (-not $sdk) { $sdk = $env:QNN_SDK_ROOT }
+          if (-not $sdk -or -not (Test-Path "$sdk/include/QNN/QnnInterface.h")) {
+            throw 'Set VIRTIO_ACCEL_QNN_SDK_ROOT to the installed QAIRT 2.49 SDK'
+          }
+          if (-not (Test-Path "$sdk/lib/aarch64-windows-msvc/QnnHtp.dll")) { throw 'Missing ARM64 HTP runtime' }
+      - name: Build and test all Windows ARM64 adapters
+        shell: pwsh
+        run: |
+          # A fresh venv keeps the persistent runner's Python environment untouched.
+          python -m venv .release-venv
+          $python = Join-Path $PWD '.release-venv/Scripts/python.exe'
+          & $python -m pip install 'maturin>=1.16,<2' 'twine>=6,<7'
+          if ($LASTEXITCODE) { throw 'Build dependency installation failed' }
+          & $python -m maturin build --release --locked --manifest-path python/Cargo.toml --out dist --strip
+          if ($LASTEXITCODE) { throw 'Wheel build failed' }
+          & $python python/scripts/check_release.py artifacts dist
+          if ($LASTEXITCODE) { throw 'Artifact validation failed' }
+          & $python -m twine check --strict (Get-ChildItem dist/*.whl).FullName
+          if ($LASTEXITCODE) { throw 'Metadata validation failed' }
+          & $python -m pip install (Get-ChildItem dist/*.whl).FullName
+          if ($LASTEXITCODE) { throw 'Wheel installation failed' }
+          & $python python/scripts/check_release.py installed
+          if ($LASTEXITCODE) { throw 'Installed adapter validation failed' }
+          # Exercise explicit runtime selection independently of the build SDK root.
+          $sdk = $env:VIRTIO_ACCEL_QNN_SDK_ROOT
+          if (-not $sdk) { $sdk = $env:QNN_SDK_ROOT }
+          $env:VIRTIO_ACCEL_QNN_LIBRARY = Join-Path $sdk 'lib/aarch64-windows-msvc/QnnHtp.dll'
+          $env:VIRTIO_ACCEL_QNN_SDK_ROOT = Join-Path $env:RUNNER_TEMP 'absent-runtime-sdk-root'
+          & $python -m unittest discover -s python/tests -v
+          if ($LASTEXITCODE) { throw 'Qualcomm hardware tests failed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-dist-windows-arm64
+          path: dist/*
+          if-no-files-found: error
+
+  source:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: dtolnay/rust-toolchain@stable
+      - run: python -m pip install "maturin>=1.16,<2" "twine>=6,<7"
+      - run: maturin sdist --manifest-path python/Cargo.toml --out dist
+      - run: python python/scripts/check_release.py artifacts dist
+      - run: python -m twine check --strict dist/*
+      - name: Rebuild and install solely from the source archive
+        run: |
+          python -m pip wheel --no-deps dist/*.tar.gz --wheel-dir rebuilt
+          python -m pip install rebuilt/*.whl
+          python python/scripts/check_release.py installed
+          python -m unittest discover -s python/tests -v
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-dist-source
+          path: dist/*
+          if-no-files-found: error
+
+  verify:
+    needs: [wheels, hexagon, source]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: python-dist-*
+          merge-multiple: true
+          path: dist
+      - run: python python/scripts/check_release.py artifacts dist --complete
+
+  publish:
+    needs: [prepare, verify]
+    if: needs.prepare.outputs.destination != 'artifacts'
+    runs-on: ubuntu-24.04
+    environment:
+      name: ${{ needs.prepare.outputs.destination }}
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: python-dist-*
+          merge-multiple: true
+          path: dist
+      - name: Publish to TestPyPI
+        if: needs.prepare.outputs.destination == 'testpypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+      - name: Publish to PyPI
+        if: needs.prepare.outputs.destination == 'pypi'
+        uses: pypa/gh-action-pypi-publish@release/v1

@@ -39,7 +39,7 @@ $report = [ordered]@{
 }
 $environmentNames = @('PATH', 'PYTHONPATH', 'CARGO_TARGET_DIR', 'CARGO_BUILD_TARGET',
     'CARGO_INCREMENTAL', 'VIRTIO_ACCEL_HEXAGON', 'VIRTIO_ACCEL_QNN_SDK_ROOT',
-    'VIRTIO_ACCEL_QNN_LIB_DIR', 'ADSP_LIBRARY_PATH', 'VIRTIO_ACCEL_PYTHON_TEST_DEVICE',
+    'VIRTIO_ACCEL_QNN_LIB_DIR', 'VIRTIO_ACCEL_QNN_LIBRARY', 'ADSP_LIBRARY_PATH', 'VIRTIO_ACCEL_PYTHON_TEST_DEVICE',
     'VIRTIO_ACCEL_PYTHON_TEST_PROVIDER')
 $savedEnvironment = @{}
 foreach ($name in $environmentNames) {
@@ -121,9 +121,9 @@ try {
     $report.commit = (Get-Content (Join-Path $logs '06-revision.log') -Raw).Trim()
     Invoke-Logged '07-venv' $pythonExe @('-m', 'venv', (Join-Path $WorkDirectory 'venv'))
     $venvPython = Join-Path $WorkDirectory 'venv\Scripts\python.exe'
-    Invoke-Logged '08-build-tools' $venvPython @('-m', 'pip', 'install', 'maturin>=1.8,<2')
+    Invoke-Logged '08-build-tools' $venvPython @('-m', 'pip', 'install', 'maturin>=1.16,<2')
     $dist = Join-Path $WorkDirectory 'dist'
-    Invoke-Logged '09-wheel' $venvPython @('-m', 'maturin', 'build', '--release', '--manifest-path', 'python/Cargo.toml', '--interpreter', $venvPython, '--target', 'aarch64-pc-windows-msvc', '--no-default-features', '--features', 'python,hexagon', '--out', $dist)
+    Invoke-Logged '09-wheel' $venvPython @('-m', 'maturin', 'build', '--release', '--manifest-path', 'python/Cargo.toml', '--interpreter', $venvPython, '--target', 'aarch64-pc-windows-msvc', '--locked', '--out', $dist)
     $wheels = @(Get-ChildItem -LiteralPath $dist -Filter '*.whl')
     if ($wheels.Count -ne 1) { throw "Expected one built wheel, found $($wheels.Count)." }
     Invoke-Logged '10-install' $venvPython @('-m', 'pip', 'install', $wheels[0].FullName)
@@ -131,6 +131,12 @@ try {
     Invoke-Logged '12-discovery' $venvPython @('-c', "import virtio_accel as va; print(va.devices()); print(va.device_diagnostics()); assert va.devices('npu', provider='hexagon'), 'Required Hexagon NPU unavailable'")
     Invoke-Logged '13-rust-tests' 'cargo' @('test', '-p', 'virtio-accel-hexagon', '--all-targets', '--', '--test-threads=1') -AllowFailure
     Invoke-Logged '14-python-tests' $venvPython @('-m', 'unittest', 'discover', '-s', 'python/tests', '-v') -AllowFailure
+    Invoke-Logged '15-release-artifacts' $venvPython @('python/scripts/check_release.py', 'artifacts', $dist)
+    Invoke-Logged '16-installed-adapters' $venvPython @('python/scripts/check_release.py', 'installed')
+    # Prove runtime selection works with no valid SDK root after compilation.
+    $env:VIRTIO_ACCEL_QNN_LIBRARY = Join-Path $env:VIRTIO_ACCEL_QNN_SDK_ROOT 'lib/aarch64-windows-msvc/QnnHtp.dll'
+    $env:VIRTIO_ACCEL_QNN_SDK_ROOT = Join-Path $WorkDirectory 'absent-runtime-sdk-root'
+    Invoke-Logged '17-runtime-override' $venvPython @('-m', 'unittest', 'discover', '-s', 'python/tests', '-v') -AllowFailure
     if (@($report.steps.Values | Where-Object { $_.exit_code -ne 0 }).Count -ne 0) {
         throw 'One or more test suites failed. Both Rust and Python logs were retained.'
     }

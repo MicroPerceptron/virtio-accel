@@ -51,7 +51,7 @@ fn openvino_kind(name: &str) -> Option<&'static str> {
     }
 }
 
-pub fn discover() -> Discovery {
+pub fn discover(_openvino_library: Option<&str>) -> Discovery {
     let mut result = Discovery::default();
     #[cfg(va_python_coreml)]
     match virtio_accel_coreml::CoreMlAccelerator::new_tosa() {
@@ -122,24 +122,34 @@ pub fn discover() -> Discovery {
         Err(error) => result.diagnostics.push(format!("Core ML All: {error}")),
     }
     #[cfg(va_python_openvino)]
-    match virtio_accel_openvino::OpenVinoAccelerator::available_devices() {
-        Ok(mut names) => {
-            names.sort();
-            names.dedup();
-            for name in names {
-                let Some(kind) = openvino_kind(&name) else {
-                    result
-                        .diagnostics
-                        .push(format!("OpenVINO: excluded non-concrete endpoint {name:?}"));
-                    continue;
-                };
-                match virtio_accel_openvino::OpenVinoAccelerator::with_device(&name) {
-                    Ok(_) => result.add(kind, "openvino", name, kind == "cpu"),
-                    Err(e) => result.diagnostics.push(format!("OpenVINO {name:?}: {e}")),
+    {
+        let configured = match _openvino_library {
+            Some(path) => virtio_accel_openvino::OpenVinoAccelerator::load_runtime_from(
+                std::path::Path::new(path),
+            ),
+            None => Ok(()),
+        };
+        match configured
+            .and_then(|_| virtio_accel_openvino::OpenVinoAccelerator::available_devices())
+        {
+            Ok(mut names) => {
+                names.sort();
+                names.dedup();
+                for name in names {
+                    let Some(kind) = openvino_kind(&name) else {
+                        result
+                            .diagnostics
+                            .push(format!("OpenVINO: excluded non-concrete endpoint {name:?}"));
+                        continue;
+                    };
+                    match virtio_accel_openvino::OpenVinoAccelerator::with_device(&name) {
+                        Ok(_) => result.add(kind, "openvino", name, kind == "cpu"),
+                        Err(e) => result.diagnostics.push(format!("OpenVINO {name:?}: {e}")),
+                    }
                 }
             }
+            Err(e) => result.diagnostics.push(format!("OpenVINO: {e}")),
         }
-        Err(e) => result.diagnostics.push(format!("OpenVINO: {e}")),
     }
     #[cfg(va_python_hexagon)]
     match virtio_accel_hexagon::HexagonAccelerator::new() {
@@ -672,9 +682,24 @@ mod python {
     }
 
     #[pyfunction]
-    fn discover_devices(py: Python<'_>) -> PyResult<String> {
-        py.detach(|| serde_json::to_string(&discover()))
+    #[pyo3(signature = (openvino_library=None))]
+    fn discover_devices(py: Python<'_>, openvino_library: Option<String>) -> PyResult<String> {
+        py.detach(|| serde_json::to_string(&discover(openvino_library.as_deref())))
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    #[pyfunction]
+    fn compiled_backends() -> Vec<&'static str> {
+        [
+            ("coreml", cfg!(va_python_coreml)),
+            ("vulkan", cfg!(va_python_vulkan)),
+            ("openvino", cfg!(va_python_openvino)),
+            ("hexagon", cfg!(va_python_hexagon)),
+            ("xdna", cfg!(va_python_xdna)),
+        ]
+        .into_iter()
+        .filter_map(|(name, built)| built.then_some(name))
+        .collect()
     }
 
     #[pyclass]
@@ -734,6 +759,7 @@ mod python {
 
     pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module.add_function(wrap_pyfunction!(discover_devices, module)?)?;
+        module.add_function(wrap_pyfunction!(compiled_backends, module)?)?;
         module.add_class::<NativeExecutable>()?;
         Ok(())
     }

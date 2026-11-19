@@ -36,6 +36,15 @@ fn main() {
         Err(_) => false,
     };
 
+    if std::env::var_os("CARGO_FEATURE_RUNTIME_LOADING").is_some() {
+        let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+        if target_os == "linux" {
+            println!("cargo::rustc-cfg=va_xdna");
+            println!("cargo::metadata=native=1");
+        }
+        return;
+    }
+
     // Escape hatch: a bare lib directory with no accompanying headers (e.g. a relocated library).
     if let Ok(dir) = std::env::var(LIB_ENV) {
         println!("cargo:rustc-link-search=native={dir}");

@@ -114,3 +114,13 @@ cargo test -p virtio-accel-hexagon --all-targets
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 [MIT license](LICENSE-MIT) at your option.
+
+## Relocatable runtime selection
+
+The build still needs QAIRT headers, but no build-machine SDK root is embedded in
+the adapter. At execution time, selection is `VIRTIO_ACCEL_QNN_LIBRARY` (full DLL
+path), then `VIRTIO_ACCEL_QNN_LIB_DIR`, then `VIRTIO_ACCEL_QNN_SDK_ROOT` /
+`QNN_SDK_ROOT` plus `lib/aarch64-windows-msvc`, then the Windows DLL search path.
+Explicit paths support Unicode and load dependencies relative to the selected DLL.
+Configure the matching HTP/DSP support libraries and `ADSP_LIBRARY_PATH` before
+starting Python. Python release wheels include the compiled bridge, not QAIRT files.

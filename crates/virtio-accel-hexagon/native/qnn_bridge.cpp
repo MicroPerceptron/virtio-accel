@@ -894,8 +894,22 @@ extern "C" uint64_t va_qnn_runtime_create(const char *library_path,
   *info = {};
   try {
     auto runtime = std::make_unique<VaQnnRuntime>();
-    runtime->library = LoadLibraryExA(
-        library_path == nullptr ? "QnnHtp.dll" : library_path, nullptr,
+    std::wstring wide_path;
+    if (library_path != nullptr) {
+      const int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                             library_path, -1, nullptr, 0);
+      if (length == 0) {
+        set_message(message, message_size, "invalid UTF-8 QNN runtime path");
+        return VA_QNN_ERROR_INVALID_ARGUMENT;
+      }
+      wide_path.resize(static_cast<size_t>(length));
+      if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, library_path, -1,
+                             wide_path.data(), length) == 0) {
+        return VA_QNN_ERROR_INVALID_ARGUMENT;
+      }
+    }
+    runtime->library = LoadLibraryExW(
+        library_path == nullptr ? L"QnnHtp.dll" : wide_path.c_str(), nullptr,
         library_path == nullptr ? 0 : LOAD_WITH_ALTERED_SEARCH_PATH);
     if (runtime->library == nullptr) {
       set_message(message, message_size, "QnnHtp.dll could not be loaded");

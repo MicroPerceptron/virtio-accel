@@ -236,3 +236,16 @@ ID.
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 [MIT license](LICENSE-MIT) at your option.
+
+## Runtime loading for distribution
+
+The opt-in Cargo feature `runtime-loading` compiles the Linux adapter without HRX
+headers or a link dependency. Python wheels use this mode. Set
+`VIRTIO_ACCEL_HRX_LIBRARY` to the pinned runtime library, or use
+`VIRTIO_ACCEL_HRX_LIB_DIR`, `VIRTIO_ACCEL_HRX_DIR`, or `HRX_DIR`. The latter two
+select the install prefix and append `lib`. Generic system library paths are never
+scanned. All required ABI symbols resolve before any HRX handle is created, and the
+library stays loaded for the process lifetime. Missing libraries return
+`RuntimeUnavailable`. The AMD driver and pinned compiler environment remain required
+for execution. `VIRTIO_ACCEL_XDNA=0` disables compilation even in this mode.
+The default Rust build retains the linked SDK probe described above.
