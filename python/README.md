@@ -272,3 +272,23 @@ examples on the CPU plugin; missing runtime/device is a failure. SDK-free Linux 
 also run the frontend's BF16 fixtures through XDNA's real admission code. These checks do
 not themselves prove Intel NPU/GPU, Qualcomm HTP, or AMD NPU execution; the opt-in hardware suite
 contains provider-specific Hexagon and XDNA cases for those machines.
+
+
+### Hardware validation
+
+Installed-wheel results on 2026-11-19, using the mandatory provider/device selectors
+above. Each invocation runs 45 tests; skips reflect another provider's tier or examples
+outside the selected NPU tier, not a missing requested device.
+
+| Hardware and runtime | Endpoint | Result |
+| --- | --- | --- |
+| Apple M4, macOS 27.0.1 | Core ML CPU/GPU, CPU/ANE, All (each) | 43 passed, 2 skipped |
+| Intel Lunar Lake, Linux 7.0.0-44, OpenVINO 2026.3.0 | CPU and GPU (each) | 43 passed, 2 skipped |
+| Same Intel host/runtime | NPU | 42 passed, 3 skipped; FP16 runtime workloads |
+| Intel Lunar Lake, Mesa ANV 26.0.8 | Vulkan GPU | 43 passed, 2 skipped |
+| AMD Radeon 860M, Linux 7.3.3-200.fc44, Mesa RADV 26.2.6 | Vulkan GPU | 43 passed, 2 skipped |
+| AMD XDNA2 1022:17f0 rev 0x20, firmware 1.1.2.64; pinned amdxdna-hrx-v2026.08 toolchain | XDNA NPU | 40 passed, 5 skipped; BF16 identity and BF16-to-FP32 MATMUL |
+
+Core ML results validate the selected policy and numerical outputs, not per-operation
+engine attribution or simultaneous GPU/ANE activity. FP32 graphs follow the precision
+policy described above. Qualcomm HTP execution of this Python frontend remains pending.
