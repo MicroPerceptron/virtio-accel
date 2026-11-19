@@ -1,0 +1,31 @@
+{
+  "version": 2,
+  "nodes": [
+    {
+      "op": "input",
+      "shape": [
+        1024
+      ],
+      "dtype": "bfloat16",
+      "inputs": [],
+      "attrs": {}
+    },
+    {
+      "op": "identity",
+      "shape": [
+        1024
+      ],
+      "dtype": "bfloat16",
+      "inputs": [
+        0
+      ],
+      "attrs": {}
+    }
+  ],
+  "inputs": [
+    0
+  ],
+  "outputs": [
+    1
+  ]
+}

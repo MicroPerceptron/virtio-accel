@@ -5,6 +5,7 @@ import math
 import operator
 
 import numpy as np
+from ml_dtypes import bfloat16
 
 MAX_RANK = 6
 MAX_BYTES = 256 * 1024 * 1024
@@ -13,8 +14,8 @@ MAX_NODES = 4096
 
 def checked_dtype(dtype):
     dtype = np.dtype(dtype)
-    if dtype not in (np.dtype("float16"), np.dtype("float32")):
-        raise TypeError("only float16 and float32 are supported; request an explicit cast")
+    if dtype not in (np.dtype("float16"), np.dtype("float32"), np.dtype(bfloat16)):
+        raise TypeError("only float16, bfloat16 and float32 are supported; request an explicit cast")
     return dtype
 
 
@@ -32,7 +33,7 @@ def checked_shape(shape, dtype=np.float32):
 
 @dataclass(frozen=True, eq=False)
 class Array:
-    """FP16/FP32 value. Eager values use NumPy; symbolic values belong to one trace.
+    """FP16/BF16/FP32 value. Eager values use NumPy; symbolic values belong to one trace.
 
     Use ``to_numpy()`` for an explicit, independent host copy. No device allocation
     or acceleration is implied by the reference implementation.
@@ -184,7 +185,9 @@ def promote(a, b):
         b = host_array(b, a.dtype)
     else:
         a, b = host_array(a), host_array(b)
-    dtype = checked_dtype(np.promote_types(a.dtype, b.dtype))
+    # NumPy does not define promotion between BF16 and FP16. Both widen to
+    # FP32 when mixed, preserving each format's precision and exponent range.
+    dtype = a.dtype if a.dtype == b.dtype else np.dtype("float32")
     return cast(a, dtype), cast(b, dtype)
 
 

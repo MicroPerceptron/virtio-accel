@@ -44,7 +44,7 @@ class Lowered:
         bound = self._signature.bind(*args, **kwargs)
         bound.apply_defaults()
         supplied = tuple(host_array(v) for v in bound.arguments.values())
-        if tuple((a.shape, a.dtype.str) for a in supplied) != self._specs:
+        if tuple((a.shape, a.dtype.name) for a in supplied) != self._specs:
             raise ValueError("inputs do not match this graph's shapes and dtypes")
         doc = self.to_dict()
         inputs = dict(zip(doc["inputs"], supplied))
@@ -101,7 +101,7 @@ class CompiledFunction:
         arrays = tuple(host_array(v) for v in bound.arguments.values())
         if any(a._graph is not None for a in arrays):
             raise TypeError("nested jit calls are not supported in this iteration")
-        specs = tuple((a.shape, a.dtype.str) for a in arrays)
+        specs = tuple((a.shape, a.dtype.name) for a in arrays)
         with self._lock:
             if specs in self._cache:
                 self._cache.move_to_end(specs)
@@ -116,8 +116,10 @@ class CompiledFunction:
                 raise TypeError("a traced function must return at least one array")
             for output in outputs:
                 output = graph.lift(host_array(output))
-                # Give every graph output a distinct producer, including input passthrough.
-                output = primitive("identity", (output,), output.shape)
+                # Inputs and duplicate outputs need distinct producers. Existing operation
+                # outputs are already distinct; avoid imposing redundant backend operators.
+                if graph.nodes[output._id]['op'] == 'input' or output._id in graph.outputs:
+                    output = primitive("identity", (output,), output.shape)
                 graph.outputs.append(output._id)
             lowered = Lowered(graph, self._signature, specs, multiple)
             self._cache[specs] = lowered

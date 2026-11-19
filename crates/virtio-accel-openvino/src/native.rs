@@ -888,6 +888,11 @@ impl std::fmt::Debug for OpenVinoAccelerator {
 }
 
 impl OpenVinoAccelerator {
+    /// Enumerate concrete runtime endpoints without choosing a default device.
+    pub fn available_devices() -> Result<Vec<String>, InitError> {
+        shared_core()?.available_devices()
+    }
+
     /// Open the preferred available inference device: NPU, then GPU, then CPU.
     pub fn new() -> Result<Self, InitError> {
         let core = shared_core()?;
@@ -907,10 +912,16 @@ impl OpenVinoAccelerator {
     /// Open one specific device, by enumerated name (`"GPU.1"`) or class prefix (`"NPU"`).
     pub fn with_device(device: &str) -> Result<Self, InitError> {
         let core = shared_core()?;
-        let resolved = core
-            .available_devices()?
+        let devices = core.available_devices()?;
+        // An enumerated endpoint must win over a class-prefix match.
+        let resolved = devices
             .iter()
-            .find(|available| matches_device(available, device))
+            .find(|available| available.as_str() == device)
+            .or_else(|| {
+                devices
+                    .iter()
+                    .find(|available| matches_device(available, device))
+            })
             .cloned()
             .ok_or(InitError::DeviceUnavailable)?;
         Self::with_selected(core, resolved)

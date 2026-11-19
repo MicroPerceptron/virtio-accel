@@ -1,4 +1,4 @@
-"""A deliberately small NumPy-style FP16/FP32 namespace.
+"""A deliberately small NumPy-style FP16/BF16/FP32 namespace.
 
 Eager calls are an explicit CPU reference implementation. Traced calls construct
 TOSA-compatible primitives. Unsupported functions are not forwarded to NumPy.
@@ -7,12 +7,13 @@ TOSA-compatible primitives. Unsupported functions are not forwarded to NumPy.
 import math
 import operator
 import numpy as _np
+from ml_dtypes import bfloat16
 
 from ._array import Array, cast, checked_dtype, checked_shape, host_array, primitive, promote
 
 float16 = _np.float16
 float32 = _np.float32
-__all__ = ["float16", "float32", "asarray", "array", "zeros", "ones", "full", "add",
+__all__ = ["float16", "bfloat16", "float32", "asarray", "array", "zeros", "ones", "full", "add",
            "subtract", "multiply", "maximum", "minimum", "negative", "abs",
            "exp", "log", "tanh", "sin", "cos", "matmul", "reshape",
            "transpose", "astype", "sum", "mean"]
@@ -143,14 +144,19 @@ def transpose(a, axes=None):
 
 def matmul(a, b):
     a, b = promote(a, b)
-    if a.ndim != 2 or b.ndim != 2:
-        raise NotImplementedError("this iteration supports 2D matmul only")
-    m, k = a.shape
-    kb, n = b.shape
-    if k != kb:
+    if a.ndim != b.ndim or a.ndim not in (2, 3):
+        raise NotImplementedError("matmul requires two 2D or matching-batch 3D arrays")
+    if a.shape[-1] != b.shape[-2]:
         raise ValueError("matmul inner dimensions do not match")
+    dtype = float32 if a.dtype == _np.dtype(bfloat16) else a.dtype
+    if a.ndim == 3:
+        if a.shape[0] != b.shape[0]:
+            raise ValueError("matmul batch dimensions must match")
+        return primitive("matmul", (a, b), (a.shape[0], a.shape[1], b.shape[2]), dtype=dtype)
+    m, k = a.shape
+    _, n = b.shape
     value = primitive("matmul", (reshape(a, (1, m, k)), reshape(b, (1, k, n))),
-                      (1, m, n))
+                      (1, m, n), dtype=dtype)
     return reshape(value, (m, n))
 
 

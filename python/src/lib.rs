@@ -37,6 +37,8 @@ struct Node {
 enum ElementType {
     #[serde(rename = "float16")]
     Float16,
+    #[serde(rename = "bfloat16")]
+    BFloat16,
     #[serde(rename = "float32")]
     Float32,
 }
@@ -45,15 +47,36 @@ impl ElementType {
     fn tosa(self) -> DType {
         match self {
             Self::Float16 => DType::FP16,
+            Self::BFloat16 => DType::BF16,
             Self::Float32 => DType::FP32,
         }
     }
 
     fn bytes(self) -> usize {
         match self {
-            Self::Float16 => 2,
+            Self::Float16 | Self::BFloat16 => 2,
             Self::Float32 => 4,
         }
+    }
+}
+
+impl Document {
+    fn target(&self) -> Target {
+        let extensions = if self
+            .nodes
+            .iter()
+            .any(|n| matches!(n.dtype, ElementType::BFloat16))
+        {
+            ExtensionSet::BF16
+        } else {
+            ExtensionSet::NONE
+        };
+        Target::new(
+            Version::TOSA_1_0,
+            ProfileSet::FLOATING_POINT,
+            Level::Level8K,
+            extensions,
+        )
     }
 }
 
@@ -118,18 +141,13 @@ pub fn compile_json(json: &str) -> Result<Vec<u8>, String> {
         let result = lower_node(&mut graph, index, node, &doc.nodes);
         result.map_err(|e| format!("node {index} ({}): {e}", node.op))?;
     }
+    let target = doc.target();
     for index in doc.inputs {
         graph.push_input(name(index));
     }
     for index in doc.outputs {
         graph.push_output(name(index));
     }
-    let target = Target::new(
-        Version::TOSA_1_0,
-        ProfileSet::FLOATING_POINT,
-        Level::Level8K,
-        ExtensionSet::NONE,
-    );
     graph
         .build(target)
         .map_err(|e| format!("TOSA validation failed: {e:?}"))
@@ -335,6 +353,24 @@ mod tests {
         assert!(compile_json(&g.to_string()).is_ok());
         g["nodes"][0]["dtype"] = json!("float64");
         assert!(compile_json(&g.to_string()).is_err());
+    }
+
+    #[test]
+    fn bf16_fixtures_select_bf16_target() {
+        for json in [
+            include_str!("../tests/data/bf16_identity.json"),
+            include_str!("../tests/data/bf16_matmul.json"),
+        ] {
+            let doc: Document = serde_json::from_str(json).unwrap();
+            assert_eq!(doc.target().extensions, ExtensionSet::BF16);
+            let bytes = compile_json(json).unwrap();
+            virtio_accel_tosa::parse(&bytes)
+                .unwrap()
+                .analyze_for(doc.target())
+                .unwrap();
+            #[cfg(all(feature = "xdna", target_os = "linux"))]
+            assert!(virtio_accel_xdna::admit(&bytes, doc.target()).is_ok());
+        }
     }
 
     #[test]

@@ -28,6 +28,8 @@ def _native():
 
 
 def _selector(value):
+    if isinstance(value, Device):
+        return value
     if not isinstance(value, str) or re.fullmatch(r'(cpu|gpu|npu)(?::(?:0|[1-9][0-9]*))?', value) is None:
         raise ValueError('device must be cpu, gpu, npu, or an indexed form such as gpu:0')
     return value if ':' in value else value + ':0'
@@ -43,15 +45,19 @@ def _discovery():
     return json.loads(_native().discover_devices())
 
 
-def devices(kind=None):
+def devices(kind=None, *, provider=None):
     """Discover usable native endpoints. Indices belong to this discovery snapshot.
 
-    Core ML supplies npu endpoints with possible CPU participation. Vulkan supplies
-    gpu endpoints, excluding software CPU devices and ambiguous duplicate names.
+    Filter by kind or provider, and pass a returned Device to jit/compile to select
+    that endpoint. Multiple providers may expose the same physical accelerator.
     """
     if kind not in (None, 'cpu', 'gpu', 'npu'):
         raise ValueError('kind must be cpu, gpu, npu, or None')
-    return tuple(Device(**d) for d in _discovery()['devices'] if kind is None or d['kind'] == kind)
+    if provider not in (None, 'coreml', 'vulkan', 'openvino', 'hexagon', 'xdna'):
+        raise ValueError('unknown device provider')
+    return tuple(Device(**d) for d in _discovery()['devices']
+                 if (kind is None or d['kind'] == kind)
+                 and (provider is None or d['provider'] == provider))
 
 
 def device_diagnostics():
@@ -63,9 +69,9 @@ def _resolve(selector, strict):
     identifier = _selector(selector)
     discovery = _discovery()
     for entry in discovery['devices']:
-        if entry['id'] == identifier:
-            device = Device(**entry)
-            if strict and device.cpu_participation:
+        device = Device(**entry)
+        if (device == identifier if isinstance(identifier, Device) else device.id == identifier):
+            if strict and device.kind != 'cpu' and device.cpu_participation:
                 raise RuntimeError(f'{identifier} via {device.provider} cannot guarantee exclusive {device.kind} placement')
             return device
     reasons = '; '.join(discovery['diagnostics'])
@@ -95,7 +101,7 @@ class Executable:
             bound = self._lowered._signature.bind(*args, **kwargs)
             bound.apply_defaults()
             arrays = tuple(host_array(v) for v in bound.arguments.values())
-            if tuple((a.shape, a.dtype.str) for a in arrays) != self._lowered._specs:
+            if tuple((a.shape, a.dtype.name) for a in arrays) != self._lowered._specs:
                 raise ValueError("inputs do not match this graph's shapes and dtypes")
             payloads = [a.to_numpy().astype(a.dtype.newbyteorder('<'), copy=False).tobytes() for a in arrays]
             outputs = self._native.run(payloads, self._timeout)

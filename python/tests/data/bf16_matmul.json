@@ -1,0 +1,48 @@
+{
+  "version": 2,
+  "nodes": [
+    {
+      "op": "input",
+      "shape": [
+        1,
+        32,
+        32
+      ],
+      "dtype": "bfloat16",
+      "inputs": [],
+      "attrs": {}
+    },
+    {
+      "op": "input",
+      "shape": [
+        1,
+        32,
+        32
+      ],
+      "dtype": "bfloat16",
+      "inputs": [],
+      "attrs": {}
+    },
+    {
+      "op": "matmul",
+      "shape": [
+        1,
+        32,
+        32
+      ],
+      "dtype": "float32",
+      "inputs": [
+        0,
+        1
+      ],
+      "attrs": {}
+    }
+  ],
+  "inputs": [
+    0,
+    1
+  ],
+  "outputs": [
+    2
+  ]
+}

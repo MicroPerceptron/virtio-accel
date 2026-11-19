@@ -1,8 +1,8 @@
 # Portable device selection
 
-Status: `npu`/`npu:0` through Core ML and `gpu`/`gpu:N` through Vulkan are implemented.
-`cpu` is reserved and currently unavailable. OpenVINO, Hexagon and XDNA remain unbound.
-The remaining design work is described below; [README](README.md) covers execution and lifetimes.
+Status: Core ML, Vulkan, OpenVINO, Hexagon and XDNA adapters are implemented.
+`cpu` selects native OpenVINO CPU execution. Vendor SDK/runtime detection and the
+selected provider's advertised tier determine availability; see [README](README.md).
 
 The public execution API selects a device class, with an optional instance index:
 
@@ -21,7 +21,7 @@ and remote/virtual adapters can make multiple instances useful.
 
 Provider selection belongs below this API. Users should not need to choose `coreml`,
 `openvino`, `hexagon`, `xdna`, or `vulkan` for ordinary code. Keep provider names visible
-in diagnostic/device records and optionally available as an advanced override later.
+in diagnostic/device records and available through `va.devices(provider=...)`; pass the returned `Device` to `jit` or `compile`.
 
 ## Resolution and numerical contracts
 
@@ -38,15 +38,15 @@ NPU must not silently select a CPU or GPU. Any future fallback policy must be ex
 `backend="reference"` remains a test/oracle execution mode and must not appear in real
 device discovery as `cpu:0` or `npu:0`.
 
-## Structural frictions in the current implementation
+## Provider boundaries
 
-| Area | Current behavior | Adapter work needed |
+| Area | Current behavior | Boundary preserved by Python |
 | --- | --- | --- |
-| Core ML | `CPUAndNeuralEngine` allows mixed per-operator placement; the backend reports a fixed NPU identity | Distinguish an NPU-capable runtime from proven exclusive NPU execution |
-| OpenVINO | Enumerates devices and supports `with_device`; default preference is NPU, GPU, CPU | Use explicit resolved device names so a requested NPU never takes the generic default fallback path |
-| Vulkan | Enumerates devices by name; a physical GPU can also be visible through OpenVINO | Deduplicate using verified physical identity, not provider names alone |
-| XDNA | Current HRX device index is fixed to zero; advertised BF16/FP8/INT8 tiers do not include FP16 arithmetic | Expose discovery/index selection before claiming multiple instances; report FP16 admission failures |
-| Hexagon | Runtime/build availability is platform-gated; current identity is not a complete discovery inventory | Probe actual runtime availability and preserve hardware evidence limits |
+| Core ML | `CPUAndNeuralEngine` allows mixed per-operator placement; the backend reports a fixed NPU identity | Reports CPU participation and rejects strict placement |
+| OpenVINO | Enumerates devices and supports `with_device`; default preference is NPU, GPU, CPU | Opens exact enumerated names; rejects AUTO/HETERO/MULTI endpoints |
+| Vulkan | Enumerates devices by name; a physical GPU can also be visible through OpenVINO | Reports distinct provider endpoints; makes no physical deduplication claim |
+| XDNA | Current HRX device index is fixed to zero; advertised BF16/FP8/INT8 tiers do not include FP16 arithmetic | Exposes one HRX endpoint; supports explicit BF16 graphs and rejects FP16/FP32 inputs |
+| Hexagon | Runtime/build availability is platform-gated; current identity is not a complete discovery inventory | Probes QNN HTP; exposes one endpoint and keeps its FP16 precision boundary |
 | Portable identity | No assigned CPU class; several UUID/vendor fields are synthetic or fixed | Keep richer host-side discovery metadata; do not assign new protocol values implicitly |
 
 In particular, `device="npu"` cannot truthfully mean "every operation runs only on the
@@ -55,8 +55,8 @@ provider, with its possible CPU participation reported in placement metadata. Th
 `strict=True` option rejects Core ML because exclusive placement cannot be guaranteed.
 The frontend does not infer exclusive placement from `AcceleratorClass::NPU` alone.
 
-Discovery also needs stable ordering and a policy for physical devices exposed through
-multiple providers. The existing UUIDs are insufficient for universal deduplication.
+Discovery uses fixed provider order (Core ML, Vulkan, OpenVINO, Hexagon, XDNA) and
+sorted native names. Indices are allocated per class across providers. The existing UUIDs are insufficient for universal deduplication.
 Prefer platform/PCI identities where available, and report ambiguity rather than claiming
 that two provider endpoints definitely represent two separate physical accelerators.
 
