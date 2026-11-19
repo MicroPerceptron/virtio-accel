@@ -66,13 +66,13 @@ class Lowered:
 class CompiledFunction:
     """Trace a pure function, specializing on input shapes and dtypes.
 
-    Select device="npu" or "gpu" for native execution, or backend="reference"
+    Select device="cpu", "npu", "gpu", or a discovered Device for native execution, or backend="reference"
     for the CPU oracle. Programs and buffers are cached with each specialization.
     """
 
     def __init__(self, function, *, backend=None, device=None, cache_size=16, timeout=30.0, strict=False):
         if backend not in (None, "reference"):
-            raise NotImplementedError("backend accepts only 'reference'; use device='npu' or device='gpu' for native execution")
+            raise NotImplementedError("backend accepts only 'reference'; use device= for native execution")
         from ._runtime import _selector, _timeout
         if device is not None and backend is not None:
             raise ValueError('device and backend are mutually exclusive')

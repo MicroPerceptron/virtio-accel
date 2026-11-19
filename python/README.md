@@ -105,7 +105,16 @@ for [OpenVINO](../crates/virtio-accel-openvino/README.md),
 [Hexagon](../crates/virtio-accel-hexagon/README.md) and
 [XDNA](../crates/virtio-accel-xdna/README.md). Force-on variables
 `VIRTIO_ACCEL_OPENVINO=1`, `VIRTIO_ACCEL_HEXAGON=1`, and `VIRTIO_ACCEL_XDNA=1`
-make missing build prerequisites fail loudly. Vendor libraries are not bundled by this project.
+make missing build prerequisites fail loudly. The OpenVINO CI lane uses a native Linux wheel
+linked to its installed runtime, without bundling vendor libraries. For an equivalent local build:
+
+```sh
+maturin build --release --manifest-path python/Cargo.toml --out dist --compatibility linux --auditwheel skip
+python -m pip install dist/*.whl
+```
+
+This is a machine-local wheel, not a portable manylinux distribution. Vendor-library
+redistribution and release-wheel packaging remain separate release work.
 
 Providers can expose the same physical accelerator. Discovery reports provider endpoints,
 not a deduplicated physical-device count. To choose a provider explicitly, filter discovery
