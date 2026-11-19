@@ -57,6 +57,27 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Validate the Windows hardware runner
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "$PWD/python/scripts/test-hexagon.ps1", [ref]$tokens, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
+          # Hosted Windows is x64. Verify a wrong-architecture invocation fails
+          # before cloning/building and still produces the promised report/log ZIP.
+          $testDir = Join-Path $env:RUNNER_TEMP ('hexagon-preflight-' + [guid]::NewGuid().ToString('N'))
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File python/scripts/test-hexagon.ps1 `
+            -WorkDirectory $testDir -Python (Get-Command python).Source
+          if ($LASTEXITCODE -ne 1) { throw 'Expected wrong-architecture preflight to fail' }
+          $report = Get-Content "$testDir/logs/report.json" -Raw | ConvertFrom-Json
+          if ($report.status -ne 'failed' -or $report.error -notlike '*Native ARM64 Python is required*') {
+            throw ($report | ConvertTo-Json -Depth 8)
+          }
+          if (-not (Test-Path "$testDir/hexagon-results.zip")) { throw 'Missing diagnostic ZIP' }
+          $global:LASTEXITCODE = 0
       - name: Install OpenVINO for the native CPU execution lane
         if: matrix.runtime == 'openvino'
         shell: bash
