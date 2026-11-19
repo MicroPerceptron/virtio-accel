@@ -29,7 +29,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      # Never run unmerged PR code on the persistent QAIRT host.
+      # Publish only commits already included in the default branch.
       - name: Require a reviewed commit on the default branch
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -92,62 +92,6 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  hexagon:
-    needs: prepare
-    runs-on: [self-hosted, Windows, ARM64, qairt-2.49]
-    timeout-minutes: 60
-    env:
-      VIRTIO_ACCEL_HEXAGON: "1"
-      VIRTIO_ACCEL_PYTHON_TEST_PROVIDER: hexagon
-      VIRTIO_ACCEL_PYTHON_TEST_DEVICE: npu
-      CARGO_INCREMENTAL: "0"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Check the preinstalled native toolchain
-        shell: pwsh
-        run: |
-          python -c "import platform, sys; assert platform.machine().lower() in ('arm64', 'aarch64'); assert sys.version_info >= (3, 10)"
-          rustc -vV
-          if ($LASTEXITCODE) { throw 'Rust is required' }
-          $sdk = $env:VIRTIO_ACCEL_QNN_SDK_ROOT
-          if (-not $sdk) { $sdk = $env:QNN_SDK_ROOT }
-          if (-not $sdk -or -not (Test-Path "$sdk/include/QNN/QnnInterface.h")) {
-            throw 'Set VIRTIO_ACCEL_QNN_SDK_ROOT to the installed QAIRT 2.49 SDK'
-          }
-          if (-not (Test-Path "$sdk/lib/aarch64-windows-msvc/QnnHtp.dll")) { throw 'Missing ARM64 HTP runtime' }
-      - name: Build and test all Windows ARM64 adapters
-        shell: pwsh
-        run: |
-          # A fresh venv keeps the persistent runner's Python environment untouched.
-          python -m venv .release-venv
-          $python = Join-Path $PWD '.release-venv/Scripts/python.exe'
-          & $python -m pip install 'maturin>=1.16,<2' 'twine>=6,<7'
-          if ($LASTEXITCODE) { throw 'Build dependency installation failed' }
-          & $python -m maturin build --release --locked --manifest-path python/Cargo.toml --interpreter $python --target aarch64-pc-windows-msvc --out dist --strip
-          if ($LASTEXITCODE) { throw 'Wheel build failed' }
-          & $python python/scripts/check_release.py artifacts dist
-          if ($LASTEXITCODE) { throw 'Artifact validation failed' }
-          & $python -m twine check --strict (Get-ChildItem dist/*.whl).FullName
-          if ($LASTEXITCODE) { throw 'Metadata validation failed' }
-          & $python -m pip install (Get-ChildItem dist/*.whl).FullName
-          if ($LASTEXITCODE) { throw 'Wheel installation failed' }
-          & $python python/scripts/check_release.py installed
-          if ($LASTEXITCODE) { throw 'Installed adapter validation failed' }
-          # Exercise explicit runtime selection independently of the build SDK root.
-          $sdk = $env:VIRTIO_ACCEL_QNN_SDK_ROOT
-          if (-not $sdk) { $sdk = $env:QNN_SDK_ROOT }
-          $env:VIRTIO_ACCEL_QNN_LIBRARY = Join-Path $sdk 'lib/aarch64-windows-msvc/QnnHtp.dll'
-          $env:VIRTIO_ACCEL_QNN_SDK_ROOT = Join-Path $env:RUNNER_TEMP 'absent-runtime-sdk-root'
-          & $python -m unittest discover -s python/tests -v
-          if ($LASTEXITCODE) { throw 'Qualcomm hardware tests failed' }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: python-dist-windows-arm64
-          path: dist/*
-          if-no-files-found: error
-
   source:
     needs: prepare
     runs-on: ubuntu-24.04
@@ -177,7 +121,7 @@ jobs:
           if-no-files-found: error
 
   verify:
-    needs: [wheels, hexagon, source]
+    needs: [wheels, source]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

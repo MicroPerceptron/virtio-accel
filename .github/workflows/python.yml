@@ -68,7 +68,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Validate the Windows hardware runner
+      - name: Validate the manual Hexagon test script
         if: runner.os == 'Windows'
         shell: powershell
         run: |

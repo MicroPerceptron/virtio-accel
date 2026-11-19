@@ -19,6 +19,9 @@ PLATFORMS = {
     'manylinux_2_28_x86_64', 'manylinux_2_28_aarch64',
     'macosx_14_0_arm64', 'macosx_14_0_x86_64', 'win_amd64', 'win_arm64',
 }
+# Manual QAIRT builds can still be checked, but Windows ARM64 is deferred from
+# the automated release until a suitable build/distribution path is available.
+RELEASE_PLATFORMS = PLATFORMS - {'win_arm64'}
 
 
 def release_version():
@@ -92,8 +95,10 @@ def check_artifacts(directory, complete):
         archives.append(path)
     if not wheels and not archives:
         raise ValueError('No distribution artifacts found')
-    if complete and (platforms != PLATFORMS or len(archives) != 1):
-        raise ValueError(f'Incomplete release: missing platforms {sorted(PLATFORMS - platforms)}, source archives={len(archives)}')
+    if complete and (platforms != RELEASE_PLATFORMS or len(archives) != 1):
+        raise ValueError(f'Incomplete release: missing platforms {sorted(RELEASE_PLATFORMS - platforms)}, '
+                         f'unexpected platforms {sorted(platforms - RELEASE_PLATFORMS)}, '
+                         f'source archives={len(archives)}')
     print(json.dumps({'version': expected, 'platforms': sorted(platforms), 'source_archives': len(archives)}))
 
 
