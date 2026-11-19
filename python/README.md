@@ -19,7 +19,7 @@ Building requires Rust 1.85+ and access to Cargo dependencies. The Python extens
 an isolated Cargo workspace: PyO3 does not become a dependency of any portable crate.
 The package has not yet been published to PyPI. The release workflow builds CPython
 3.10+ stable-ABI wheels for Linux (glibc 2.28+), macOS 14+, and Windows, on both x86-64
-and ARM64, plus a standalone source archive. See [first publication](releasing.md).
+and ARM64, plus a standalone source archive. See [first publication](https://github.com/MicroPerceptron/virtio-accel/blob/main/python/releasing.md).
 Prebuilt wheels do not require Rust. Source builds do; macOS source builds also require
 a macOS 26 SDK, and Windows ARM64 Hexagon builds require QAIRT development headers.
 
@@ -130,9 +130,9 @@ Libraries and native handles are retained for the process lifetime. Restart Pyth
 switch an already loaded runtime. XDNA also requires the pinned compiler environment
 and `VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN`; Hexagon needs its HTP/DSP support libraries and
 `ADSP_LIBRARY_PATH` as described in the backend guides. GPU/NPU drivers remain host
-prerequisites. See [OpenVINO](../crates/virtio-accel-openvino/README.md),
-[Hexagon](../crates/virtio-accel-hexagon/README.md), and
-[XDNA](../crates/virtio-accel-xdna/README.md).
+prerequisites. See [OpenVINO](https://github.com/MicroPerceptron/virtio-accel/blob/main/crates/virtio-accel-openvino/README.md),
+[Hexagon](https://github.com/MicroPerceptron/virtio-accel/blob/main/crates/virtio-accel-hexagon/README.md), and
+[XDNA](https://github.com/MicroPerceptron/virtio-accel/blob/main/crates/virtio-accel-xdna/README.md).
 
 Providers can expose the same physical accelerator. Discovery reports provider endpoints,
 not a deduplicated physical-device count. To choose a provider explicitly, filter discovery
@@ -270,9 +270,9 @@ The wire protocol and existing portable Rust public APIs are unchanged.
 
 ## Examples and device placement
 
-See [examples](examples/README.md) for an MLP classifier, nearest-centroid classification,
+See [examples](https://github.com/MicroPerceptron/virtio-accel/blob/main/python/examples/README.md) for an MLP classifier, nearest-centroid classification,
 and FIR filtering, with independent numerical checks and optional TOSA export.
-See [device placement](device-placement.md) for selector semantics and provider constraints.
+See [device placement](https://github.com/MicroPerceptron/virtio-accel/blob/main/python/device-placement.md) for selector semantics and provider constraints.
 
 Run the opt-in hardware suite against an installed wheel:
 
@@ -323,7 +323,7 @@ This verifies the tested SDK/host combination, not installation portability of a
 
 ### Windows Hexagon runner
 
-Download [test-hexagon.ps1](scripts/test-hexagon.ps1) and run it in PowerShell on the
+Download [test-hexagon.ps1](https://github.com/MicroPerceptron/virtio-accel/blob/main/python/scripts/test-hexagon.ps1) and run it in PowerShell on the
 Snapdragon machine (adjust the SDK path):
 
 ```powershell
