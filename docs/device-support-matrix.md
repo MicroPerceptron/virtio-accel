@@ -77,7 +77,7 @@ The legacy host-path constructor and its target identity remain CPU/ANE only.
 FP32 nearest-centroid, FIR and runtime tests under CPU/GPU, CPU/ANE and All. Native Rust
 tests execute FP16/FP32 MATMUL for the GPU and All policies. These are policy-level
 numerical execution results, not per-operation engine attribution or proof of concurrent
-GPU/ANE activity. See the [Python hardware results](../python/README.md#hardware-validation) for Intel and AMD execution evidence; Qualcomm Python execution remains unvalidated.
+GPU/ANE activity. See the [Python hardware results](../python/README.md#hardware-validation) for Intel, AMD and Qualcomm execution evidence, including the user-relayed Windows ARM64 Hexagon run.
 
 ### Intel OpenVINO (`virtio-accel-openvino`)
 
