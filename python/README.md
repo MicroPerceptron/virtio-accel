@@ -124,12 +124,13 @@ selection is not claimed for these providers.
 
 For XDNA, BF16 is explicit (provided by `ml-dtypes`); neither FP16 nor FP32 inputs are
 silently narrowed. Use rank-3 batch-1 MATMUL to avoid inserting reshape operations outside
-XDNA's advertised tier. The current backend requires tile-compatible dimensions:
+XDNA's advertised tier. The current backend requires M and N multiples of 32,
+K a multiple of 64, and each dimension at most 512:
 
 ```python
 xdna = va.devices("npu", provider="xdna")[0]
-a = np.ones((1, 32, 32), dtype=vnp.bfloat16)
-b = np.ones((1, 32, 32), dtype=vnp.bfloat16)
+a = np.ones((1, 32, 64), dtype=vnp.bfloat16)
+b = np.ones((1, 64, 32), dtype=vnp.bfloat16)
 with va.jit(lambda a, b: a @ b).lower(a, b).compile(xdna, timeout=900) as executable:
     result = executable(a, b)  # FP32 result; compile can invoke aiecc
 ```
