@@ -211,6 +211,9 @@ impl EventBacking {
         }
     }
 
+    // `try_update` is not available on our Rust 1.85 MSRV. Keep the equivalent
+    // `fetch_update` operation until the minimum compiler supports its new name.
+    #[allow(deprecated)]
     fn acquire(&mut self) -> Result<(), BackendError> {
         match self.access {
             BackingAccess::Shared => {
@@ -437,6 +440,9 @@ impl CoreMlAccelerator {
         self.explicit_transfer_bytes.load(Ordering::Relaxed)
     }
 
+    // `try_update` is not available on our Rust 1.85 MSRV. Keep the equivalent
+    // `fetch_update` operation until the minimum compiler supports its new name.
+    #[allow(deprecated)]
     fn next_id(&self) -> Result<u64, BackendError> {
         self.next_id
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {

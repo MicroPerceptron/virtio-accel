@@ -249,6 +249,9 @@ impl EventBacking {
         }
     }
 
+    // `try_update` is not available on our Rust 1.85 MSRV. Keep the equivalent
+    // `fetch_update` operation until the minimum compiler supports its new name.
+    #[allow(deprecated)]
     fn acquire(&mut self) -> Result<(), BackendError> {
         match self.access {
             BackingAccess::Shared => {

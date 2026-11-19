@@ -210,6 +210,9 @@ impl MockAccelerator {
             .map_err(|_| BackendError::Busy)
     }
 
+    // `try_update` is not available on our Rust 1.85 MSRV. Keep the equivalent
+    // `fetch_update` operation until the minimum compiler supports its new name.
+    #[allow(deprecated)]
     fn next_id(&self) -> Result<u64, BackendError> {
         self.next_id
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
