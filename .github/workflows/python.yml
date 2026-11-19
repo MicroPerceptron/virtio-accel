@@ -67,16 +67,19 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/intel-openvino.list
           sudo apt-get update
           sudo apt-get install -y openvino-libraries-dev-2026.3.0
-          pc_file="$(find /opt/intel /usr/lib /usr/share -name 'openvino.pc' 2>/dev/null | head -n1)"
-          test -n "$pc_file"
-          echo "PKG_CONFIG_PATH=$(dirname "$pc_file")" >> "$GITHUB_ENV"
+          pkg-config --modversion openvino
           echo "VIRTIO_ACCEL_OPENVINO=1" >> "$GITHUB_ENV"
           echo "VIRTIO_ACCEL_PYTHON_TEST_DEVICE=cpu" >> "$GITHUB_ENV"
       - run: python -m pip install "maturin>=1.8,<2"
       - run: cargo fmt --manifest-path python/Cargo.toml -- --check
       - run: cargo test --manifest-path python/Cargo.toml
       - run: cargo clippy --manifest-path python/Cargo.toml --all-targets -- -D warnings
-      - run: maturin build --release --manifest-path python/Cargo.toml --out dist
+      - name: Build the platform wheel
+        if: matrix.runtime != 'openvino'
+        run: maturin build --release --manifest-path python/Cargo.toml --out dist
+      - name: Build against the installed OpenVINO runtime without bundling vendor libraries
+        if: matrix.runtime == 'openvino'
+        run: maturin build --release --manifest-path python/Cargo.toml --out dist --compatibility linux --auditwheel skip
       - name: Install and exercise wheel
         shell: bash
         run: |

@@ -103,7 +103,7 @@ class HardwareTests(unittest.TestCase):
         if self.record.provider == 'xdna':
             self.skipTest('XDNA uses the BF16 admission and execution tests')
         rng = np.random.default_rng(2)
-        dtypes = (np.float16,) if self.record.provider == 'hexagon' else (np.float16, np.float32)
+        dtypes = (np.float16,) if self.record.provider == 'hexagon' or (self.record.provider == 'openvino' and self.record.kind == 'npu') else (np.float16, np.float32)
         for dtype in dtypes:
             x = rng.normal(size=(4, 8)).astype(dtype)
             w = rng.normal(size=(8, 3)).astype(dtype)
@@ -122,7 +122,7 @@ class HardwareTests(unittest.TestCase):
     def test_tuple_noncontiguous_inputs_and_threaded_reuse(self):
         if self.record.provider == 'xdna':
             self.skipTest('XDNA does not admit elementwise tuple graphs')
-        dtype = np.float16 if self.record.provider == 'hexagon' else np.float32
+        dtype = np.float16 if self.record.provider == 'hexagon' or (self.record.provider == 'openvino' and self.record.kind == 'npu') else np.float32
         x = np.arange(16, dtype=dtype).reshape(4, 4)[:, ::-1]
         lowered = va.jit(lambda x: (x + 1, x * 2)).lower(x)
         with lowered.compile(self.device) as executable:
