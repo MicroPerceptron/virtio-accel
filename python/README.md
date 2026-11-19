@@ -288,10 +288,20 @@ outside the selected NPU tier, not a missing requested device.
 | Intel Lunar Lake, Mesa ANV 26.0.8 | Vulkan GPU | 43 passed, 2 skipped |
 | AMD Radeon 860M, Linux 7.3.3-200.fc44, Mesa RADV 26.2.6 | Vulkan GPU | 43 passed, 2 skipped |
 | AMD XDNA2 1022:17f0 rev 0x20, firmware 1.1.2.64; pinned amdxdna-hrx-v2026.08 toolchain | XDNA NPU | 40 passed, 5 skipped; BF16 identity and BF16-to-FP32 MATMUL |
+| Qualcomm HTP v73, Windows ARM64 build 26300, QAIRT 2.49.0.260730, Python 3.14.10 | Hexagon NPU | 42 passed, 3 skipped; FP16 execution and explicit FP32 rejection |
 
 Core ML results validate the selected policy and numerical outputs, not per-operation
 engine attribution or simultaneous GPU/ANE activity. FP32 graphs follow the precision
-policy described above. Qualcomm HTP execution of this Python frontend remains pending.
+policy described above.
+
+The user-relayed Qualcomm run tested commit `41999d5d7175c29490c7aae10aaa09725c2ce3b3`
+on 2026-11-19. Its installed ARM64 wheel discovered a real Hexagon endpoint and passed
+FP16 projection/repeated execution, tuple outputs and threaded reuse, and explicit FP32
+rejection. The three Python skips cover the generic examples, another provider's CAST
+boundary, and XDNA-specific tests. The native Hexagon Rust suite also passed 15 unit and
+13 integration tests, with one ignored test. The supplied `hexagon-results.zip` has
+SHA-256 `8c6d6cdedfae71eb1efb31a1677003aff03486cff50481c9d2aa0a8bd164268a`.
+This verifies the tested SDK/host combination, not installation portability of a published wheel.
 
 ### Windows Hexagon runner
 
