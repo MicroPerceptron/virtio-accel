@@ -292,3 +292,28 @@ outside the selected NPU tier, not a missing requested device.
 Core ML results validate the selected policy and numerical outputs, not per-operation
 engine attribution or simultaneous GPU/ANE activity. FP32 graphs follow the precision
 policy described above. Qualcomm HTP execution of this Python frontend remains pending.
+
+### Windows Hexagon runner
+
+Download [test-hexagon.ps1](scripts/test-hexagon.ps1) and run it in PowerShell on the
+Snapdragon machine (adjust the SDK path):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\test-hexagon.ps1 `
+  -QnnSdkRoot 'C:\Qualcomm\AIStack\QAIRT\2.49.0.260730'
+```
+
+It requires Git, Rust 1.85+, the `aarch64-pc-windows-msvc` Rust target, native ARM64
+Python 3.10+, Visual Studio ARM64 C++ build tools, and the complete QAIRT SDK. Pass
+`-Python 'C:\path\to\ARM64\python.exe'` if `python` selects an x64 interpreter.
+Existing `VIRTIO_ACCEL_QNN_SDK_ROOT` / `QNN_SDK_ROOT` and `ADSP_LIBRARY_PATH` settings
+are accepted; `-AdspLibraryPath` overrides the DSP path, otherwise v73 is the default.
+
+The runner clones the current PR 208 head into a fresh temporary directory, records
+the exact revision, builds and installs a Hexagon-only wheel in an isolated venv,
+requires real Hexagon discovery, and runs both the native Rust backend and Python
+tests. `-Revision` can pin a commit; `-WorkDirectory` must name a new directory.
+It does not install drivers or modify the SDK. The printed `hexagon-results.zip`
+contains only logs and `report.json`, including failed preflight/build steps; relay
+that report and the relevant failure logs. Windows CI validates PowerShell 5.1 syntax
+and the wrong-architecture diagnostic path, not HTP execution.
