@@ -1,10 +1,12 @@
 [package]
 name = "virtio-accel-python"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 publish = false
+description = "NumPy-style Python API for portable accelerator execution"
+repository = "https://github.com/MicroPerceptron/virtio-accel"
 
 # Keep Python's build/dependency policy out of the portable workspace.
 [workspace]
@@ -23,14 +25,14 @@ hexagon = ["dep:virtio-accel-hexagon"]
 xdna = ["dep:virtio-accel-xdna"]
 
 [dependencies]
-pyo3 = { version = "0.27", optional = true }
+pyo3 = { version = "0.27", optional = true, features = ["abi3-py310"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 virtio-accel-tosa = { path = "../crates/virtio-accel-tosa" }
 virtio-accel-tosa-build = { path = "../crates/virtio-accel-tosa-build" }
 
 
-virtio-accel-openvino = { path = "../crates/virtio-accel-openvino", optional = true }
+virtio-accel-openvino = { path = "../crates/virtio-accel-openvino", optional = true, features = ["runtime-loading"] }
 virtio-accel-hexagon = { path = "../crates/virtio-accel-hexagon", optional = true }
 
 virtio-accel-core = { path = "../crates/virtio-accel-core" }
@@ -42,4 +44,4 @@ virtio-accel-coreml = { path = "../crates/virtio-accel-coreml", optional = true 
 virtio-accel-vulkan = { path = "../crates/virtio-accel-vulkan", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-virtio-accel-xdna = { path = "../crates/virtio-accel-xdna", optional = true }
+virtio-accel-xdna = { path = "../crates/virtio-accel-xdna", optional = true, features = ["runtime-loading"] }

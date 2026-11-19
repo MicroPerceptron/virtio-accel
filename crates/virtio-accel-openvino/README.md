@@ -99,3 +99,18 @@ project claims no Virtio device ID.
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 [MIT license](LICENSE-MIT) at your option.
+
+## Runtime loading for distribution
+
+The opt-in Cargo feature `runtime-loading` compiles the adapter on Linux, macOS, and
+Windows without a build-time SDK or a link dependency on OpenVINO. Python wheels use
+this mode. Set `VIRTIO_ACCEL_OPENVINO_LIBRARY` to a C library path, or
+`VIRTIO_ACCEL_OPENVINO_LIB_DIR` to its directory; otherwise the OS loader is used. The
+Python wrapper can also locate the library in the optional `openvino` Python package.
+On Windows, an explicit DLL path also supplies the dependency search directory.
+All required symbols must resolve before discovery, and the loaded library is retained
+for the process lifetime. Missing libraries return `RuntimeUnavailable`. Restart the
+process to switch runtimes. `VIRTIO_ACCEL_OPENVINO=0` still disables compilation;
+`=1` with runtime loading selects the adapter without requiring a build-time runtime.
+Use `VIRTIO_ACCEL_OPENVINO_REQUIRE_HARDWARE=1` to make execution tests mandatory.
+The default Rust build continues to use the linked mode described above.

@@ -61,3 +61,14 @@ FP16/BOOL/INT32 operator and exact INT8/INT32 numerical execution, the reusable 
 direct-binding diagnostics, stable terminal polling, pre-admission timeout rejection, live-event
 graph retention, and ordered teardown on the pinned HTP runtime. Unsupported hosts compile without
 either native module.
+
+## Installed-runtime discovery
+
+The runtime DLL path is resolved from process configuration, never from the SDK path
+on the build machine. The Rust wrapper passes either an owned NUL-terminated UTF-8
+absolute path or NULL to use the loader search path. The bridge converts explicit
+paths with `MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS)` into owned UTF-16 storage
+and calls `LoadLibraryExW`. Conversion failure is rejected. DLL handles and provider
+function tables retain their existing ownership and release ordering; this does not
+change buffer or callback lifetimes. The complete QAIRT headers remain build inputs,
+while the installed runtime is discovered when constructing a backend.

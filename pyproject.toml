@@ -1,0 +1,38 @@
+[build-system]
+requires = ["maturin>=1.16,<2"]
+build-backend = "maturin"
+
+[project]
+name = "virtio-accel"
+version = "0.1.0a1"
+description = "NumPy-style tracing, TOSA export and explicit native execution for virtio-accel"
+readme = "python/README.md"
+requires-python = ">=3.10"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
+dependencies = ["numpy>=2.0,<3", "ml-dtypes>=0.5,<1"]
+
+[project.optional-dependencies]
+openvino = ["openvino>=2026.3,<2027"]
+
+[project.urls]
+Homepage = "https://github.com/MicroPerceptron/virtio-accel"
+Repository = "https://github.com/MicroPerceptron/virtio-accel"
+Documentation = "https://github.com/MicroPerceptron/virtio-accel/tree/main/python"
+Issues = "https://github.com/MicroPerceptron/virtio-accel/issues"
+
+[tool.maturin]
+manifest-path = "python/Cargo.toml"
+python-source = "python"
+module-name = "virtio_accel._native"
+features = ["pyo3/extension-module"]
+
+# Include the enclosing workspace, including inherited Cargo metadata.
+sdist-generator = "cargo"
+include = [{path = "src/**/*", format = "sdist"}, {path = "crates/**/*", format = "sdist"}, {path = "conformance/**/*", format = "sdist"}]
+
+[tool.maturin.target.aarch64-apple-darwin]
+macos-deployment-target = "14.0"
+
+[tool.maturin.target.x86_64-apple-darwin]
+macos-deployment-target = "14.0"

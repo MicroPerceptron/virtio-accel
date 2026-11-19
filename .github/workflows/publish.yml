@@ -17,6 +17,7 @@ env:
 
 jobs:
   publish:
+    if: ${{ !startsWith(github.event.release.tag_name, 'python-v') }}
     name: publish-crates-io
     runs-on: ubuntu-latest
     timeout-minutes: 120

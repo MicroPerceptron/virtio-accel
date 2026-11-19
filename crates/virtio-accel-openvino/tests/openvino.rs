@@ -69,7 +69,12 @@ impl ByteSink for VecSink {
 fn backend() -> Option<OpenVinoAccelerator> {
     match OpenVinoAccelerator::new() {
         Ok(backend) => Some(backend),
-        Err(InitError::DeviceUnavailable) => None,
+        Err(InitError::DeviceUnavailable | InitError::RuntimeUnavailable)
+            if std::env::var("VIRTIO_ACCEL_OPENVINO_REQUIRE_HARDWARE").as_deref() != Ok("1")
+                && std::env::var("VIRTIO_ACCEL_OPENVINO").as_deref() != Ok("1") =>
+        {
+            None
+        }
         Err(error) => panic!("backend initialization failed: {error}"),
     }
 }

@@ -75,18 +75,18 @@ fn check(status: ffi::hrx_status_t) -> Result<(), BackendError> {
     }
     // SAFETY: `status` is a non-NULL status just returned by an HRX call; reading its code and
     // ignoring it are the documented consume operations and are valid exactly once.
-    let code = unsafe { ffi::hrx_status_code(status) };
+    let code = unsafe { (ffi::api().hrx_status_code)(status) };
     // SAFETY: out-pointers are valid locals; `hrx_status_to_string` returns its own status which we
     // ignore, and any produced message is freed with `hrx_status_free_message`.
     unsafe {
         let mut message: *mut core::ffi::c_char = ptr::null_mut();
         let mut length: usize = 0;
-        let string_status = ffi::hrx_status_to_string(status, &mut message, &mut length);
+        let string_status = (ffi::api().hrx_status_to_string)(status, &mut message, &mut length);
         if !message.is_null() {
-            ffi::hrx_status_free_message(message);
+            (ffi::api().hrx_status_free_message)(message);
         }
-        ffi::hrx_status_ignore(string_status);
-        ffi::hrx_status_ignore(status);
+        (ffi::api().hrx_status_ignore)(string_status);
+        (ffi::api().hrx_status_ignore)(status);
     }
     Err(backend_error_from_code(code))
 }
@@ -126,6 +126,7 @@ unsafe impl Send for SharedDevice {}
 unsafe impl Sync for SharedDevice {}
 
 fn shared_device() -> Result<&'static SharedDevice, InitError> {
+    ffi::ensure_loaded()?;
     use std::sync::OnceLock;
     static DEVICE: OnceLock<Result<SharedDevice, InitError>> = OnceLock::new();
     DEVICE
@@ -133,15 +134,15 @@ fn shared_device() -> Result<&'static SharedDevice, InitError> {
             // SAFETY: HRX GPU initialization is process-wide and idempotent under the OnceLock;
             // the out-pointers are valid locals and every returned status is consumed by `check`.
             unsafe {
-                check(ffi::hrx_gpu_initialize(0)).map_err(|_| InitError::Initialization)?;
+                check((ffi::api().hrx_gpu_initialize)(0)).map_err(|_| InitError::Initialization)?;
                 let mut count: core::ffi::c_int = 0;
-                check(ffi::hrx_gpu_device_count(&mut count))
+                check((ffi::api().hrx_gpu_device_count)(&mut count))
                     .map_err(|_| InitError::Initialization)?;
                 if count < 1 {
                     return Err(InitError::DeviceUnavailable);
                 }
                 let mut device: ffi::hrx_device_t = ptr::null_mut();
-                check(ffi::hrx_gpu_device_get(0, &mut device))
+                check((ffi::api().hrx_gpu_device_get)(0, &mut device))
                     .map_err(|_| InitError::Initialization)?;
                 NonNull::new(device)
                     .map(SharedDevice)
@@ -164,7 +165,7 @@ impl Drop for Stream {
         // SAFETY: the lane owns exactly one stream reference. A normal teardown joins the worker;
         // a detached tier-2 worker itself holds the last lane Arc, so this Drop still cannot run
         // until its HRX call has returned and no dispatch is in progress.
-        unsafe { ffi::hrx_stream_release(self.0.as_ptr()) };
+        unsafe { (ffi::api().hrx_stream_release)(self.0.as_ptr()) };
     }
 }
 
@@ -499,7 +500,7 @@ impl Lane {
         // this call; the bindings slice is valid for `binding_count`; the config is a valid local;
         // constants are unused on this path.
         let dispatch = unsafe {
-            ffi::hrx_stream_dispatch(
+            (ffi::api().hrx_stream_dispatch)(
                 stream.0.as_ptr(),
                 program.executable.as_ptr(),
                 program.ordinal,
@@ -513,7 +514,7 @@ impl Lane {
         };
         let result = check(dispatch).and_then(|()| {
             // SAFETY: the stream is live; flush submits the recorded work without waiting.
-            check(unsafe { ffi::hrx_stream_flush(stream.0.as_ptr()) })?;
+            check(unsafe { (ffi::api().hrx_stream_flush)(stream.0.as_ptr()) })?;
             // The flushed batch's timeline value is assigned asynchronously: a position read
             // before the dispatch (or immediately after the flush, on an unlucky schedule) still
             // reports the previous batch's target, and waiting on that retires this job early --
@@ -529,7 +530,7 @@ impl Lane {
                 };
                 // SAFETY: the stream is live; the out-pointer is a valid local.
                 check(unsafe {
-                    ffi::hrx_stream_get_timeline_position(stream.0.as_ptr(), &mut position)
+                    (ffi::api().hrx_stream_get_timeline_position)(stream.0.as_ptr(), &mut position)
                 })?;
                 if position.value > *last_target {
                     *last_target = position.value;
@@ -571,10 +572,10 @@ impl Lane {
             // SAFETY: `position.semaphore` is the live stream timeline semaphore (see above); the
             // status is consumed.
             let status = unsafe {
-                ffi::hrx_semaphore_wait(position.semaphore, position.value, WAIT_SLICE_NS)
+                (ffi::api().hrx_semaphore_wait)(position.semaphore, position.value, WAIT_SLICE_NS)
             };
-            let code = unsafe { ffi::hrx_status_code(status) };
-            unsafe { ffi::hrx_status_ignore(status) };
+            let code = unsafe { (ffi::api().hrx_status_code)(status) };
+            unsafe { (ffi::api().hrx_status_ignore)(status) };
             match code {
                 code::OK => break Ok(()),
                 code::DEADLINE_EXCEEDED => {
@@ -594,7 +595,7 @@ impl Lane {
             for &(buffer, offset, len) in &job.outputs {
                 // SAFETY: each output buffer is live and persistently mapped; the range was
                 // validated at submit; invalidate makes device writes host-visible.
-                check(unsafe { ffi::hrx_buffer_invalidate_range(buffer, offset, len) })?;
+                check(unsafe { (ffi::api().hrx_buffer_invalidate_range)(buffer, offset, len) })?;
             }
             Ok(())
         });
@@ -706,7 +707,7 @@ impl XdnaAccelerator {
         let mut stream: ffi::hrx_stream_t = ptr::null_mut();
         // SAFETY: `device.0` is the live process-wide device; the out-pointer is a valid local and
         // the returned status is consumed by `check`.
-        let status = unsafe { ffi::hrx_stream_create(device.0.as_ptr(), 0, &mut stream) };
+        let status = unsafe { (ffi::api().hrx_stream_create)(device.0.as_ptr(), 0, &mut stream) };
         check(status).map_err(|_| InitError::Initialization)?;
         let stream = NonNull::new(stream).ok_or(InitError::Initialization)?;
 
@@ -933,8 +934,9 @@ fn build_executable(
     // SAFETY: the device is live; every span/record referenced by `params` is borrowed from
     // `parsed`, which outlives this call; the out-pointer is a valid local; status consumed. HRX
     // copies what it needs and the borrows may be released after return.
-    let status =
-        unsafe { ffi::hrx_amdxdna_executable_create(device.0.as_ptr(), &params, &mut executable) };
+    let status = unsafe {
+        (ffi::api().hrx_amdxdna_executable_create)(device.0.as_ptr(), &params, &mut executable)
+    };
     check(status)?;
     let executable = NonNull::new(executable).ok_or(BackendError::External {
         domain: XDNA_ERROR_DOMAIN,
@@ -949,7 +951,7 @@ fn build_executable(
             // SAFETY: the executable is live; `entry_c` is a valid NUL-terminated string; the
             // out-pointer is a valid local; status consumed.
             let status = unsafe {
-                ffi::hrx_executable_lookup_export_by_name(
+                (ffi::api().hrx_executable_lookup_export_by_name)(
                     executable.as_ptr(),
                     entry_c.as_ptr(),
                     &mut ordinal,
@@ -961,7 +963,7 @@ fn build_executable(
         Ok(ordinal) => ordinal,
         Err(error) => {
             // SAFETY: the executable is live and owned here; release it before returning.
-            unsafe { ffi::hrx_executable_release(executable.as_ptr()) };
+            unsafe { (ffi::api().hrx_executable_release)(executable.as_ptr()) };
             return Err(error);
         }
     };
@@ -1018,7 +1020,7 @@ impl Drop for ProgramInner {
     fn drop(&mut self) {
         // SAFETY: this is the last owner of the executable reference (the caller unloaded it and no
         // in-flight job still holds a clone); release drops exactly one reference.
-        unsafe { ffi::hrx_executable_release(self.executable.as_ptr()) };
+        unsafe { (ffi::api().hrx_executable_release)(self.executable.as_ptr()) };
         ResourceTracker::decrement(&self.resources.programs);
     }
 }
@@ -1058,7 +1060,7 @@ impl Drop for BufferInner {
     fn drop(&mut self) {
         // SAFETY: this is the last `Arc` owning one buffer reference. The persistent mapping is
         // released together with the buffer (the fork never unmaps first).
-        unsafe { ffi::hrx_buffer_release(self.buffer.as_ptr()) };
+        unsafe { (ffi::api().hrx_buffer_release)(self.buffer.as_ptr()) };
         ResourceTracker::decrement(&self.resources.buffers);
     }
 }
@@ -1130,7 +1132,7 @@ impl Accelerator for XdnaAccelerator {
         let status = {
             let stream = self.lane.stream.lock().expect("stream mutex");
             unsafe {
-                ffi::hrx_buffer_allocate(
+                (ffi::api().hrx_buffer_allocate)(
                     stream.0.as_ptr(),
                     size,
                     ffi::HRX_MEMORY_TYPE_HOST_LOCAL | ffi::HRX_MEMORY_TYPE_DEVICE_VISIBLE,
@@ -1149,7 +1151,7 @@ impl Accelerator for XdnaAccelerator {
         // SAFETY: `buffer` is the just-allocated live buffer; the out-pointer is a valid local; the
         // status is consumed. Mapping does not touch the stream.
         let status = unsafe {
-            ffi::hrx_buffer_map_with_mode(
+            (ffi::api().hrx_buffer_map_with_mode)(
                 buffer.as_ptr(),
                 ffi::HRX_MAPPING_MODE_PERSISTENT,
                 ffi::HRX_MAP_READ | ffi::HRX_MAP_WRITE,
@@ -1168,7 +1170,7 @@ impl Accelerator for XdnaAccelerator {
             Err(error) => {
                 // SAFETY: `buffer` is live and owned here; release its only reference on the error
                 // path before the handle is discarded.
-                unsafe { ffi::hrx_buffer_release(buffer.as_ptr()) };
+                unsafe { (ffi::api().hrx_buffer_release)(buffer.as_ptr()) };
                 return Err(error);
             }
         };
@@ -1182,7 +1184,7 @@ impl Accelerator for XdnaAccelerator {
         )
         .inspect_err(|_| {
             // SAFETY: the buffer is live and owned; release its only reference before returning.
-            unsafe { ffi::hrx_buffer_release(buffer.as_ptr()) };
+            unsafe { (ffi::api().hrx_buffer_release)(buffer.as_ptr()) };
         })?;
 
         self.resources.buffers.fetch_add(1, Ordering::AcqRel);
@@ -1229,7 +1231,7 @@ impl Accelerator for XdnaAccelerator {
         data.read_at(0, dst)?;
         // SAFETY: the buffer is live and currently mapped; the range is validated; status consumed.
         check(unsafe {
-            ffi::hrx_buffer_flush_range(buffer.inner.buffer.as_ptr(), start, end - start)
+            (ffi::api().hrx_buffer_flush_range)(buffer.inner.buffer.as_ptr(), start, end - start)
         })?;
         // Count only completed transfers, so the diagnostics never include a failed write.
         self.explicit_transfer_bytes
@@ -1253,7 +1255,11 @@ impl Accelerator for XdnaAccelerator {
         let (start, end) = buffer.checked_range(offset, len)?;
         // SAFETY: the buffer is live and currently mapped; the range is validated; status consumed.
         check(unsafe {
-            ffi::hrx_buffer_invalidate_range(buffer.inner.buffer.as_ptr(), start, end - start)
+            (ffi::api().hrx_buffer_invalidate_range)(
+                buffer.inner.buffer.as_ptr(),
+                start,
+                end - start,
+            )
         })?;
         // SAFETY: the mapping is valid for `buffer.len` bytes and `[start,end)` is within it; the
         // shared borrow with the in-flight gate rules out concurrent device writes.

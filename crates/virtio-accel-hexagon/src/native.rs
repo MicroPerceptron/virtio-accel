@@ -76,10 +76,24 @@ fn c_array(array: &[core::ffi::c_char]) -> String {
         .into_owned()
 }
 
-fn qnn_library_path() -> Result<CString, InitError> {
-    let root = Path::new(env!("VIRTIO_ACCEL_QNN_SDK_ROOT"));
-    let path = root.join("lib/aarch64-windows-msvc/QnnHtp.dll");
-    CString::new(path.to_string_lossy().as_bytes()).map_err(|_| InitError::RuntimeUnavailable)
+fn qnn_library_path() -> Result<Option<CString>, InitError> {
+    let path = std::env::var_os("VIRTIO_ACCEL_QNN_LIBRARY")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("VIRTIO_ACCEL_QNN_LIB_DIR")
+                .map(|dir| Path::new(&dir).join("QnnHtp.dll"))
+        })
+        .or_else(|| {
+            std::env::var_os("VIRTIO_ACCEL_QNN_SDK_ROOT")
+                .or_else(|| std::env::var_os("QNN_SDK_ROOT"))
+                .map(|root| Path::new(&root).join("lib/aarch64-windows-msvc/QnnHtp.dll"))
+        });
+    path.map(|path| {
+        let absolute = std::path::absolute(path).map_err(|_| InitError::RuntimeUnavailable)?;
+        let utf8 = absolute.to_str().ok_or(InitError::RuntimeUnavailable)?;
+        CString::new(utf8).map_err(|_| InitError::RuntimeUnavailable)
+    })
+    .transpose()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,7 +119,7 @@ impl RuntimeHandle {
         // path and initializes either a complete owned runtime or a null output.
         let status = unsafe {
             ffi::va_qnn_runtime_create(
-                library.as_ptr(),
+                library.as_ref().map_or(ptr::null(), |path| path.as_ptr()),
                 &mut raw,
                 &mut native_info,
                 message.as_mut_ptr(),

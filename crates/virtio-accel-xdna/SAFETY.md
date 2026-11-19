@@ -148,3 +148,20 @@ bit-exact against an integer oracle, rejected ownership paths, exact lifecycle a
 device-loss tiers — all against a live NPU. `tests/conformance.rs` runs the shared
 `virtio-accel-conformance` semantic suite on the device, including resource accounting and the
 direct-binding copy-path diagnostics case. Unsupported hosts compile no native module.
+
+## Optional runtime loading
+
+The opt-in `runtime-loading` feature compiles the existing native boundary without
+linking a vendor library into the process at startup. `ffi.rs` has one declaration
+list for linked symbols and typed function pointers. `libloading` resolves the full
+required ABI before any native initialization; a missing library or symbol returns
+`RuntimeUnavailable`. The caller still supplies a compatible vendor implementation
+of the audited C ABI. No function is called through an unresolved table.
+
+A process-wide `OnceLock` retains the successful table and its `Library` for the
+process lifetime. Native handles, asynchronous work and quarantined resources can
+therefore never outlive their function pointers. Concurrent successful loads retain
+one table; unused library references are dropped without replacing the live runtime.
+Failed library loads are not cached, so configuration can be corrected before retry.
+The existing one-time native initialization and all buffer/event ownership rules are
+unchanged. Loader work occurs during initialization, not on the submission path.

@@ -2,7 +2,7 @@
 //!
 //! This module is the crate's only foreign ABI boundary. Every declaration is transcribed from the
 //! pinned release headers (`include/hrx/hrx_runtime.h`, `libhrx.so.0.1.0`, version 0.1.0) and is
-//! audited in `SAFETY.md`. It contains type, constant, and `extern` declarations only; ownership
+//! audited in `SAFETY.md`. It contains types and a process-lifetime symbol table; ownership
 //! rules and every call live in `native.rs`.
 //!
 //! Scope is the status, device/stream, buffer, executable, and dispatch subset the native
@@ -154,7 +154,57 @@ pub(crate) struct hrx_amdxdna_executable_create_params_t {
     pub entry_point_count: usize,
 }
 
-unsafe extern "C" {
+// Keep one typed declaration list for linked and runtime-loaded builds. The latter
+// resolves every symbol before publishing the table, and retains the library for
+// the process lifetime so handles and asynchronous work never outlive its code.
+macro_rules! native_api {
+    ($( $(#[$attr:meta])* pub(crate) fn $name:ident($($args:tt)*) $(-> $ret:ty)?; )*) => {
+        #[cfg(not(feature = "runtime-loading"))]
+        unsafe extern "C" {
+            $( $(#[$attr])* pub(crate) fn $name($($args)*) $(-> $ret)?; )*
+        }
+
+        pub(crate) struct Api {
+            $(pub(crate) $name: unsafe extern "C" fn($($args)*) $(-> $ret)?,)*
+            #[cfg(feature = "runtime-loading")]
+            _library: libloading::Library,
+        }
+
+        #[cfg(not(feature = "runtime-loading"))]
+        pub(crate) fn api() -> &'static Api {
+            static API: Api = Api { $($name,)* };
+            &API
+        }
+
+        #[cfg(feature = "runtime-loading")]
+        static API: std::sync::OnceLock<Api> = std::sync::OnceLock::new();
+
+        #[cfg(feature = "runtime-loading")]
+        pub(crate) fn api() -> &'static Api {
+            API.get().expect("native runtime must be initialized before use")
+        }
+
+        #[cfg(feature = "runtime-loading")]
+        fn load(path: &std::path::Path) -> Result<Api, libloading::Error> {
+            // SAFETY: loading executes the selected vendor library's initialization.
+            // Candidates are an explicitly configured runtime or the OS loader's
+            // search name. The ABI is the same audited C ABI as the linked build.
+            let library = unsafe { libloading::Library::new(path) }?;
+            Ok(Api {
+                // SAFETY: signatures are transcribed from the pinned C headers.
+                // All required symbols must resolve; the retained library outlives
+                // every copied function pointer and all native resources.
+                $($name: unsafe { *library.get::<unsafe extern "C" fn($($args)*) $(-> $ret)?>(
+                    concat!(stringify!($name), "\0").as_bytes()
+                )? },)*
+                _library: library,
+            })
+        }
+    };
+}
+
+native_api! {
+
     // Status.
     pub(crate) fn hrx_status_code(status: hrx_status_t) -> hrx_status_code_t;
     pub(crate) fn hrx_status_to_string(
@@ -242,4 +292,41 @@ unsafe extern "C" {
         value: u64,
         timeout_ns: u64,
     ) -> hrx_status_t;
+}
+
+/// Resolve the complete ABI before any native initialization. Failed loads are not
+/// cached: callers may configure a runtime and retry. A successful load is immutable.
+pub(crate) fn ensure_loaded() -> Result<(), crate::InitError> {
+    #[cfg(feature = "runtime-loading")]
+    if API.get().is_none() {
+        for path in library_candidates() {
+            if let Ok(api) = load(&path) {
+                // Another thread may have published a table while we loaded. Its
+                // table wins; dropping this unused library reference is safe.
+                let _ = API.set(api);
+                return Ok(());
+            }
+        }
+        return Err(crate::InitError::RuntimeUnavailable);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "runtime-loading")]
+fn library_candidates() -> Vec<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os("VIRTIO_ACCEL_HRX_LIBRARY") {
+        return vec![path.into()];
+    }
+    let directory = std::env::var_os("VIRTIO_ACCEL_HRX_LIB_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("VIRTIO_ACCEL_HRX_DIR")
+                .or_else(|| std::env::var_os("HRX_DIR"))
+                .map(|root| std::path::PathBuf::from(root).join("lib"))
+        });
+    // Preserve explicit selection of the pinned HRX install. Do not accidentally
+    // open an unrelated system libhrx from the generic loader search path.
+    directory
+        .map(|dir| vec![dir.join("libhrx.so.0.1.0"), dir.join("libhrx.so")])
+        .unwrap_or_default()
 }
