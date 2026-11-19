@@ -24,6 +24,8 @@ class ExampleTests(unittest.TestCase):
         from virtio_accel._runtime import _resolve
         device = os.environ['VIRTIO_ACCEL_PYTHON_TEST_DEVICE']
         provider = _resolve(device, False).provider
+        if provider in ('hexagon', 'xdna'):
+            self.skipTest('provider-specific numerical tiers are exercised in test_runtime')
         for name in ('mlp_classifier', 'nearest_centroid', 'fir_filter'):
             spec = importlib.util.spec_from_file_location(name, Path(__file__).parents[1] / 'examples' / (name + '.py'))
             module = importlib.util.module_from_spec(spec)

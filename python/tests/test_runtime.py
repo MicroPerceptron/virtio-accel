@@ -26,6 +26,19 @@ class DeviceTests(unittest.TestCase):
                 _runtime._resolve('gpu:1', False)
             self.assertEqual(va.devices('cpu'), ())
 
+    def test_provider_selection_and_stale_device_rejection(self):
+        cpu = dict(id='cpu:0', kind='cpu', provider='openvino', name='CPU', cpu_participation=True)
+        npu = dict(id='npu:1', kind='npu', provider='hexagon', name='QNN HTP', cpu_participation=False)
+        with patch.object(_runtime, '_discovery', return_value=dict(devices=[NPU, GPU, cpu, npu], diagnostics=[])):
+            self.assertEqual(va.devices(provider='hexagon'), (_runtime.Device(**npu),))
+            self.assertEqual(_runtime._resolve('cpu', True).provider, 'openvino')
+            self.assertEqual(_runtime._resolve(_runtime.Device(**npu), True).provider, 'hexagon')
+            stale = _runtime.Device(**dict(npu, id='npu:0'))
+            with self.assertRaisesRegex(RuntimeError, 'no fallback'):
+                _runtime._resolve(stale, False)
+            with self.assertRaises(ValueError):
+                va.devices(provider='unknown')
+
     def test_unavailable_device_reports_probe_failure(self):
         with patch.object(_runtime, '_discovery', return_value=dict(devices=[], diagnostics=['loader absent'])):
             self.assertEqual(va.device_diagnostics(), ('loader absent',))
@@ -72,8 +85,8 @@ class DeviceTests(unittest.TestCase):
     @unittest.skipUnless(importlib.util.find_spec('virtio_accel._native'), 'native extension not built')
     def test_native_discovery_and_unavailable_index(self):
         for device in va.devices():
-            self.assertIn(device.provider, ('coreml', 'vulkan'))
-            self.assertIn(device.kind, ('npu', 'gpu'))
+            self.assertIn(device.provider, ('coreml', 'vulkan', 'openvino', 'hexagon', 'xdna'))
+            self.assertIn(device.kind, ('npu', 'gpu', 'cpu'))
         lowered = va.jit(lambda x: x + 1).lower(np.ones(2, np.float32))
         with self.assertRaisesRegex(RuntimeError, 'unavailable'):
             lowered.compile('gpu:999999')
@@ -87,8 +100,11 @@ class HardwareTests(unittest.TestCase):
         self.record = _runtime._resolve(self.device, False)
 
     def test_projection_both_precisions_and_repeated_calls(self):
+        if self.record.provider == 'xdna':
+            self.skipTest('XDNA uses the BF16 admission and execution tests')
         rng = np.random.default_rng(2)
-        for dtype in (np.float16, np.float32):
+        dtypes = (np.float16,) if self.record.provider == 'hexagon' else (np.float16, np.float32)
+        for dtype in dtypes:
             x = rng.normal(size=(4, 8)).astype(dtype)
             w = rng.normal(size=(8, 3)).astype(dtype)
             b = rng.normal(size=3).astype(dtype)
@@ -104,7 +120,10 @@ class HardwareTests(unittest.TestCase):
                 f.clear_cache()
 
     def test_tuple_noncontiguous_inputs_and_threaded_reuse(self):
-        x = np.arange(16, dtype=np.float32).reshape(4, 4)[:, ::-1]
+        if self.record.provider == 'xdna':
+            self.skipTest('XDNA does not admit elementwise tuple graphs')
+        dtype = np.float16 if self.record.provider == 'hexagon' else np.float32
+        x = np.arange(16, dtype=dtype).reshape(4, 4)[:, ::-1]
         lowered = va.jit(lambda x: (x + 1, x * 2)).lower(x)
         with lowered.compile(self.device) as executable:
             with ThreadPoolExecutor(max_workers=3) as pool:
@@ -130,3 +149,23 @@ class HardwareTests(unittest.TestCase):
             va.jit(lambda x: x).lower(x).compile(self.device, strict=True)
         with va.jit(lambda x: x + 1).lower(x).compile(self.device) as executable:
             np.testing.assert_allclose(executable(x).to_numpy(), x + 1)
+
+    def test_xdna_bf16_identity_matmul_and_no_downcast(self):
+        if self.record.provider != 'xdna':
+            self.skipTest('XDNA-specific BF16 tier')
+        x = np.arange(1024, dtype=np.float32).astype(vnp.bfloat16)
+        with va.jit(lambda x: x).lower(x).compile(self.device, timeout=900, strict=True) as executable:
+            np.testing.assert_array_equal(executable(x).to_numpy().view(np.uint16), x.view(np.uint16))
+        a = np.ones((1, 32, 32), dtype=vnp.bfloat16)
+        b = np.ones((1, 32, 32), dtype=vnp.bfloat16)
+        with va.jit(lambda a, b: a @ b).lower(a, b).compile(self.device, timeout=900, strict=True) as executable:
+            np.testing.assert_array_equal(executable(a, b).to_numpy(), np.full((1, 32, 32), 32, np.float32))
+        for dtype in (np.float16, np.float32):
+            with self.assertRaisesRegex(RuntimeError, 'target'):
+                va.jit(lambda x: x).lower(np.ones(1024, dtype)).compile(self.device)
+
+    def test_hexagon_rejects_fp32_without_downcast(self):
+        if self.record.provider != 'hexagon':
+            self.skipTest('Hexagon-specific precision boundary')
+        with self.assertRaises(RuntimeError):
+            va.jit(lambda x: x).lower(np.ones(4, np.float32)).compile(self.device)

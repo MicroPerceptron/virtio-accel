@@ -8,7 +8,7 @@ use virtio_accel_core::{
     Timeout,
 };
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Device {
     pub id: String,
     pub kind: String,
@@ -23,17 +23,43 @@ pub struct Discovery {
     pub diagnostics: Vec<String>,
 }
 
+impl Discovery {
+    fn add(&mut self, kind: &str, provider: &str, name: String, cpu_participation: bool) {
+        let index = self.devices.iter().filter(|d| d.kind == kind).count();
+        self.devices.push(Device {
+            id: format!("{kind}:{index}"),
+            kind: kind.into(),
+            provider: provider.into(),
+            name,
+            cpu_participation,
+        });
+    }
+}
+
+// Only concrete OpenVINO endpoints are selectable. Never admit AUTO/HETERO/MULTI.
+fn openvino_kind(name: &str) -> Option<&'static str> {
+    let (class, index) = name.split_once('.').unwrap_or((name, ""));
+    if name.contains('.') && (index.is_empty() || !index.bytes().all(|c| c.is_ascii_digit())) {
+        return None;
+    }
+    match class {
+        "CPU" => Some("cpu"),
+        "GPU" => Some("gpu"),
+        "NPU" => Some("npu"),
+        _ => None,
+    }
+}
+
 pub fn discover() -> Discovery {
     let mut result = Discovery::default();
     #[cfg(all(feature = "coreml", target_os = "macos"))]
     match virtio_accel_coreml::CoreMlAccelerator::new_tosa() {
-        Ok(_) => result.devices.push(Device {
-            id: "npu:0".into(),
-            kind: "npu".into(),
-            provider: "coreml".into(),
-            name: "Apple Neural Engine (Core ML CPUAndNeuralEngine)".into(),
-            cpu_participation: true,
-        }),
+        Ok(_) => result.add(
+            "npu",
+            "coreml",
+            "Apple Neural Engine (Core ML CPUAndNeuralEngine)".into(),
+            true,
+        ),
         Err(error) => result.diagnostics.push(format!("Core ML: {error}")),
     }
     #[cfg(all(
@@ -57,14 +83,7 @@ pub fn discover() -> Discovery {
                         Ok(info)
                             if info.identity.class == virtio_accel_core::AcceleratorClass::GPU =>
                         {
-                            let index = result.devices.iter().filter(|d| d.kind == "gpu").count();
-                            result.devices.push(Device {
-                                id: format!("gpu:{index}"),
-                                kind: "gpu".into(),
-                                provider: "vulkan".into(),
-                                name: name.clone(),
-                                cpu_participation: false,
-                            });
+                            result.add("gpu", "vulkan", name.clone(), false);
                         }
                         Ok(_) => result
                             .diagnostics
@@ -78,6 +97,36 @@ pub fn discover() -> Discovery {
             }
         }
         Err(error) => result.diagnostics.push(format!("Vulkan: {error}")),
+    }
+    #[cfg(feature = "openvino")]
+    match virtio_accel_openvino::OpenVinoAccelerator::available_devices() {
+        Ok(mut names) => {
+            names.sort();
+            names.dedup();
+            for name in names {
+                let Some(kind) = openvino_kind(&name) else {
+                    result
+                        .diagnostics
+                        .push(format!("OpenVINO: excluded non-concrete endpoint {name:?}"));
+                    continue;
+                };
+                match virtio_accel_openvino::OpenVinoAccelerator::with_device(&name) {
+                    Ok(_) => result.add(kind, "openvino", name, kind == "cpu"),
+                    Err(e) => result.diagnostics.push(format!("OpenVINO {name:?}: {e}")),
+                }
+            }
+        }
+        Err(e) => result.diagnostics.push(format!("OpenVINO: {e}")),
+    }
+    #[cfg(feature = "hexagon")]
+    match virtio_accel_hexagon::HexagonAccelerator::new() {
+        Ok(_) => result.add("npu", "hexagon", "Qualcomm Hexagon (QNN HTP)".into(), false),
+        Err(e) => result.diagnostics.push(format!("Hexagon: {e}")),
+    }
+    #[cfg(all(feature = "xdna", target_os = "linux"))]
+    match virtio_accel_xdna::XdnaAccelerator::new() {
+        Ok(_) => result.add("npu", "xdna", "AMD XDNA (HRX device 0)".into(), false),
+        Err(e) => result.diagnostics.push(format!("XDNA: {e}")),
     }
     result
 }
@@ -176,12 +225,7 @@ impl<A: Accelerator + virtio_accel_tosa::TosaCapabilityProvider> Session<A> {
         );
         let context = self.context.as_ref().unwrap();
         let model = virtio_accel_tosa::parse(&bytes).map_err(|e| error("parse", e))?;
-        let target = virtio_accel_tosa::Target::new(
-            virtio_accel_tosa::Version::TOSA_1_0,
-            virtio_accel_tosa::ProfileSet::FLOATING_POINT,
-            virtio_accel_tosa::Level::Level8K,
-            virtio_accel_tosa::ExtensionSet::NONE,
-        );
+        let target = doc.target();
         let analysis = model.analyze_for(target).map_err(|e| error("analyze", e))?;
         let tier = self
             .backend
@@ -441,7 +485,7 @@ impl Worker {
             .name("virtio-accel-executor".into())
             .spawn(move || {
                 #[cfg(all(feature = "coreml", target_os = "macos"))]
-                if device.provider == "coreml" && device.kind == "npu" && device.id == "npu:0" {
+                if device.provider == "coreml" && device.kind == "npu" {
                     match virtio_accel_coreml::CoreMlAccelerator::new_tosa() {
                         Ok(backend) => serve(backend, json, receiver, ready),
                         Err(e) => {
@@ -468,6 +512,46 @@ impl Worker {
                         }
                         Err(e) => {
                             let _ = ready.send(Err(error("Vulkan initialization", e)));
+                        }
+                    }
+                    return;
+                }
+                #[cfg(feature = "openvino")]
+                if device.provider == "openvino"
+                    && openvino_kind(&device.name) == Some(device.kind.as_str())
+                {
+                    // Recheck exact membership; class selectors must never select another endpoint.
+                    match virtio_accel_openvino::OpenVinoAccelerator::available_devices() {
+                        Ok(names) if names.contains(&device.name) => {}
+                        other => {
+                            let _ = ready.send(Err(error("OpenVINO endpoint unavailable", other)));
+                            return;
+                        }
+                    }
+                    match virtio_accel_openvino::OpenVinoAccelerator::with_device(&device.name) {
+                        Ok(backend) => serve(backend, json, receiver, ready),
+                        Err(e) => {
+                            let _ = ready.send(Err(error("OpenVINO initialization", e)));
+                        }
+                    }
+                    return;
+                }
+                #[cfg(feature = "hexagon")]
+                if device.provider == "hexagon" && device.kind == "npu" {
+                    match virtio_accel_hexagon::HexagonAccelerator::new() {
+                        Ok(backend) => serve(backend, json, receiver, ready),
+                        Err(e) => {
+                            let _ = ready.send(Err(error("Hexagon initialization", e)));
+                        }
+                    }
+                    return;
+                }
+                #[cfg(all(feature = "xdna", target_os = "linux"))]
+                if device.provider == "xdna" && device.kind == "npu" {
+                    match virtio_accel_xdna::XdnaAccelerator::new() {
+                        Ok(backend) => serve(backend, json, receiver, ready),
+                        Err(e) => {
+                            let _ = ready.send(Err(error("XDNA initialization", e)));
                         }
                     }
                     return;
@@ -619,6 +703,49 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
     use virtio_accel_core::{AllocatedBuffer, ArtifactRef, ByteSink, ByteSource, DeviceInfo};
+
+    #[test]
+    fn endpoints_are_class_indexed_across_providers() {
+        let mut discovery = Discovery::default();
+        discovery.add("npu", "coreml", "ANE".into(), true);
+        discovery.add("gpu", "vulkan", "GPU".into(), false);
+        discovery.add("npu", "openvino", "NPU.0".into(), false);
+        discovery.add("cpu", "openvino", "CPU".into(), true);
+        discovery.add("npu", "hexagon", "HTP".into(), false);
+        discovery.add("npu", "xdna", "HRX device 0".into(), false);
+        assert_eq!(
+            discovery
+                .devices
+                .iter()
+                .map(|d| d.id.as_str())
+                .collect::<Vec<_>>(),
+            ["npu:0", "gpu:0", "npu:1", "cpu:0", "npu:2", "npu:3"]
+        );
+    }
+
+    #[test]
+    fn openvino_accepts_only_concrete_endpoints() {
+        for (name, kind) in [
+            ("CPU", "cpu"),
+            ("GPU.0", "gpu"),
+            ("NPU", "npu"),
+            ("NPU.1", "npu"),
+        ] {
+            assert_eq!(openvino_kind(name), Some(kind));
+        }
+        for name in [
+            "AUTO",
+            "AUTO:NPU,CPU",
+            "HETERO:NPU,CPU",
+            "MULTI:GPU",
+            "GPU.",
+            "GPU.-1",
+            "GPU.0.1",
+            "OTHER",
+        ] {
+            assert_eq!(openvino_kind(name), None);
+        }
+    }
 
     #[derive(Clone, Copy, PartialEq)]
     enum Mode {

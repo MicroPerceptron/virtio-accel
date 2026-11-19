@@ -14,10 +14,13 @@ name = "_native"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["python", "coreml", "vulkan"]
+default = ["python", "coreml", "vulkan", "openvino", "hexagon", "xdna"]
 coreml = ["dep:virtio-accel-coreml"]
 vulkan = ["dep:virtio-accel-vulkan"]
 python = ["dep:pyo3"]
+openvino = ["dep:virtio-accel-openvino"]
+hexagon = ["dep:virtio-accel-hexagon"]
+xdna = ["dep:virtio-accel-xdna"]
 
 [dependencies]
 pyo3 = { version = "0.27", optional = true }
@@ -27,6 +30,9 @@ virtio-accel-tosa = { path = "../crates/virtio-accel-tosa" }
 virtio-accel-tosa-build = { path = "../crates/virtio-accel-tosa-build" }
 
 
+virtio-accel-openvino = { path = "../crates/virtio-accel-openvino", optional = true }
+virtio-accel-hexagon = { path = "../crates/virtio-accel-hexagon", optional = true }
+
 virtio-accel-core = { path = "../crates/virtio-accel-core" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -34,3 +40,6 @@ virtio-accel-coreml = { path = "../crates/virtio-accel-coreml", optional = true 
 
 [target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))'.dependencies]
 virtio-accel-vulkan = { path = "../crates/virtio-accel-vulkan", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+virtio-accel-xdna = { path = "../crates/virtio-accel-xdna", optional = true }

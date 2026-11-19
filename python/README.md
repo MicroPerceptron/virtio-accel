@@ -1,8 +1,8 @@
 # Experimental Python / NumPy frontend
 
-`virtio_accel.numpy` provides immutable FP16/FP32 arrays, static tracing, validated
-TOSA export, and synchronous native execution through Core ML (NPU-capable) and
-Vulkan (GPU). NumPy remains an explicit CPU reference. No speedup is claimed.
+`virtio_accel.numpy` provides immutable FP16/BF16/FP32 arrays, static tracing, validated
+TOSA export, and synchronous native execution through Core ML, Vulkan, OpenVINO,
+Hexagon and XDNA. NumPy remains an explicit CPU reference. No speedup is claimed.
 
 ## Build from this repository
 
@@ -49,12 +49,12 @@ np.testing.assert_allclose(
 ```
 
 The exported artifact is static TOSA 1.0 Floating Point, Level 8K, with no optional
-extensions. Validation is not a claim of admission by every backend. Backend dtype,
+extensions for FP16/FP32; BF16 graphs explicitly declare the BF16 extension. Validation is not a claim of admission by every backend. Backend dtype,
 operator, shape, and runtime requirements still apply. Unsupported graphs fail admission;
 there is no automatic provider, dtype, or CPU fallback.
 
 Eager `vnp` operations run on NumPy as a CPU reference. Calling a decorated function
-requires explicit `device="npu"` / `device="gpu"` or `backend="reference"`;
+requires explicit `device="npu"` / `device="gpu"` / `device="cpu"` or `backend="reference"`;
 a plain `@va.jit` supports `.lower()` and refuses execution. The reference evaluator
 executes the normalized graph, not the original Python function.
 
@@ -85,11 +85,58 @@ def gpu_project(x, weight):
 # gpu_project.clear_cache() releases cached programs/buffers and retraces on next use.
 ```
 
-`npu` and `gpu` alias `npu:0` and `gpu:0`. Indices describe the current discovery
-snapshot; they are not persistent hardware identities. `cpu` is reserved but has no
-native provider in this iteration. `backend="reference"` does not appear as a device.
-The Python build includes Core ML on macOS and dynamically loaded Vulkan on macOS,
-Linux and Windows. OpenVINO, Hexagon and XDNA bindings are subsequent work.
+`cpu`, `npu` and `gpu` alias index zero of their class. Indices describe the current
+discovery snapshot, not persistent hardware identities. `backend="reference"` is an
+explicit NumPy oracle and never appears as a native device. Mock and vAccel wrapper
+crates are testing/integration infrastructure, not additional physical providers.
+
+| Provider | Endpoints | Build/runtime requirements | Python admission boundary |
+| --- | --- | --- | --- |
+| Core ML | NPU-capable, macOS | macOS 14+ | FP16/FP32; CPU participation; no CAST |
+| Vulkan | GPU, macOS/Linux/Windows | Vulkan loader and GPU driver (MoltenVK on macOS) | FP16/FP32; software CPU devices excluded |
+| OpenVINO | CPU/GPU/NPU | OpenVINO C runtime present **when building the wheel**, plus device plugins/drivers | FP16/FP32, subject to plugin admission; exact named device, no AUTO/HETERO |
+| Hexagon | NPU, Windows ARM64 | Complete QAIRT/QNN SDK at build time and HTP runtime | FP16; FP32 rejected without downconversion |
+| XDNA | NPU, Linux | Pinned HRX at build time, AMD driver and aiecc compiler toolchain | BF16 identity and batch-1 BF16→FP32 MATMUL; backend shape restrictions apply |
+
+All five adapters are default Cargo features; SDK-free builds retain explicit unavailable
+placeholders. Installing a vendor SDK after building a wheel does not enable its native
+backend: rebuild with the backend's documented environment. See the build instructions
+for [OpenVINO](../crates/virtio-accel-openvino/README.md),
+[Hexagon](../crates/virtio-accel-hexagon/README.md) and
+[XDNA](../crates/virtio-accel-xdna/README.md). Force-on variables
+`VIRTIO_ACCEL_OPENVINO=1`, `VIRTIO_ACCEL_HEXAGON=1`, and `VIRTIO_ACCEL_XDNA=1`
+make missing build prerequisites fail loudly. Vendor libraries are not bundled by this project.
+
+Providers can expose the same physical accelerator. Discovery reports provider endpoints,
+not a deduplicated physical-device count. To choose a provider explicitly, filter discovery
+and pass its immutable record to `jit` or `compile`:
+
+```python
+cpu = va.devices("cpu", provider="openvino")[0]
+with lowered.compile(cpu, strict=True) as executable:
+    result = executable(x, weight, bias)
+```
+
+A stale or changed record fails resolution instead of silently selecting a different endpoint.
+`strict=True` accepts an explicitly selected CPU; it rejects possible CPU participation in an
+accelerator request. Hexagon and XDNA expose one backend endpoint each; multi-device
+selection is not claimed for these providers.
+
+For XDNA, BF16 is explicit (provided by `ml-dtypes`); neither FP16 nor FP32 inputs are
+silently narrowed. Use rank-3 batch-1 MATMUL to avoid inserting reshape operations outside
+XDNA's advertised tier. The current backend requires tile-compatible dimensions:
+
+```python
+xdna = va.devices("npu", provider="xdna")[0]
+a = np.ones((1, 32, 32), dtype=vnp.bfloat16)
+b = np.ones((1, 32, 32), dtype=vnp.bfloat16)
+with va.jit(lambda a, b: a @ b).lower(a, b).compile(xdna, timeout=900) as executable:
+    result = executable(a, b)  # FP32 result; compile can invoke aiecc
+```
+
+BF16 identity requires a positive multiple of 1024 elements on the current XDNA backend.
+Other BF16 operations can trace/export only when TOSA permits them; backend admission
+still rejects unsupported graphs. FP8 and integer frontend APIs remain outside this change.
 
 Core ML uses **CPUAndNeuralEngine**. This selects an NPU-capable provider, not proven
 ANE-only execution; `strict=True` rejects it. Vulkan selects a GPU endpoint and excludes
@@ -119,12 +166,12 @@ requiring hard cancellation should isolate device execution in their own process
 | Creation | `asarray`, `array`, `zeros`, `ones`, `full` |
 | Arithmetic | `add`, `subtract`, `multiply`, `negative`, operators `+ - * @` |
 | Elementwise | `abs`, `maximum`, `minimum`, `exp`, `log`, `tanh`, `sin`, `cos` |
-| Matrix product | 2D `matmul`, lowered to rank-3 TOSA MATMUL |
+| Matrix product | 2D or matching-batch 3D `matmul`; BF16 returns FP32 |
 | Reductions | `sum`, `mean`; static axis/axis tuple, `keepdims`, FP32 accumulation |
 | Shapes | `reshape` with one inferred dimension, `transpose`, `.T` |
 | Inspection | `shape`, `dtype`, `ndim`, `size`; explicit `to_numpy()` |
 
-FP16 and FP32 are implemented, including `astype` and `Array.astype`. Python literals default to FP32; in binary operations with an array they adopt its dtype. Mixed FP16/FP32 arrays promote to FP32 through explicit graph casts. Existing NumPy arrays and
+FP16, BF16 and FP32 are implemented, including `astype` and `Array.astype`. Python literals default to FP32; in binary operations with an array they adopt its dtype. Mixed floating dtypes promote to FP32 through explicit graph casts. Existing NumPy arrays and
 scalars preserve their declared dtype: unsupported dtypes raise, unless the caller
 explicitly requests `dtype=vnp.float16` or `dtype=vnp.float32`. There is no implicit FP64 narrowing. Noncontiguous
 host inputs are copied into owned contiguous storage. Host reads return independent
@@ -132,7 +179,7 @@ copies. Creation inside a traced function currently creates host constants which
 embedded when used in the trace; device-native creation is future work.
 
 Arrays are immutable. Mutation, `out=`, comparison/Boolean arrays, division, slicing,
-dynamic shapes, zero-sized dimensions, arbitrary strides on device, FP8/BF16,
+dynamic shapes, zero-sized dimensions, arbitrary strides on device, FP8,
 integer arithmetic, autograd, DLPack, and standard NumPy dispatch are not implemented.
 Unsupported functions and keywords fail rather than forwarding to NumPy. In particular,
 `np.asarray(array)` is refused; use `array.to_numpy()` explicitly.
@@ -171,7 +218,7 @@ is importable before running the suite, so missing native integration cannot sil
 
 ## Next iterations
 
-1. Add OpenVINO/Hexagon/XDNA discovery and execution adapters with device-specific admission tests.
+1. Extend per-provider hardware evidence and add FP8/integer frontend APIs.
 2. Add Core ML CAST support with numerical evidence, provider-level reset/recovery, and aggregate
    memory budgets before exposing asynchronous or resident-array APIs.
 3. Validate source distributions, produce release wheels, and benchmark cold compilation,
@@ -194,4 +241,9 @@ VIRTIO_ACCEL_PYTHON_TEST_DEVICE=npu python -m unittest discover -s python/tests 
 ```
 
 A requested but unavailable device fails these tests; it is never silently skipped.
-Wheel CI checks discovery and explicit unavailable-device failures without requiring hardware.
+Wheel CI checks installed wheels on Linux, macOS and Windows. An additional Linux lane builds
+against the pinned OpenVINO runtime and executes the installed wheel's FP16/FP32 tests and
+examples on the CPU plugin; missing runtime/device is a failure. SDK-free Linux Rust tests
+also run the frontend's BF16 fixtures through XDNA's real admission code. These checks do
+not prove Intel NPU/GPU, Qualcomm HTP, or AMD NPU execution; the opt-in hardware suite
+contains provider-specific Hexagon and XDNA cases for those machines.

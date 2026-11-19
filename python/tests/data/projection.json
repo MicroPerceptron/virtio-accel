@@ -179,17 +179,6 @@
         13
       ],
       "attrs": {}
-    },
-    {
-      "op": "identity",
-      "shape": [
-        4
-      ],
-      "dtype": "float32",
-      "inputs": [
-        14
-      ],
-      "attrs": {}
     }
   ],
   "inputs": [
@@ -198,6 +187,6 @@
     2
   ],
   "outputs": [
-    15
+    14
   ]
 }
