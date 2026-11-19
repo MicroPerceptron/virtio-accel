@@ -210,10 +210,7 @@ impl BufferDesc {
     ) -> Result<Self, BackendError> {
         let bytes = NonZeroU64::new(bytes).ok_or(BackendError::InvalidArgument)?;
         let alignment = NonZeroU64::new(alignment).ok_or(BackendError::InvalidArgument)?;
-        if !alignment.get().is_power_of_two()
-            || usage.is_empty()
-            || !BufferUsage::all().contains(usage)
-        {
+        if !alignment.is_power_of_two() || usage.is_empty() || !BufferUsage::all().contains(usage) {
             return Err(BackendError::InvalidArgument);
         }
         Ok(Self {
@@ -297,7 +294,7 @@ impl BufferInfo {
             return Err(BackendError::InvalidArgument);
         }
         if allocation_bytes.get() < desc.bytes()
-            || !alignment.get().is_power_of_two()
+            || !alignment.is_power_of_two()
             || alignment.get() < desc.alignment()
         {
             return Err(BackendError::Incompatible);
