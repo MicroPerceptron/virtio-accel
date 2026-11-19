@@ -105,13 +105,11 @@ impl Operand {
     fn to_units(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(OPERAND_BYTES as usize);
         for chunk in 0..CHUNKS {
-            for row in 0..8 {
-                for lane in 0..8 {
-                    bytes.push(self.mantissa[row][chunk * 8 + lane] as u8);
-                }
+            for row in &self.mantissa {
+                bytes.extend(row[chunk * 8..chunk * 8 + 8].iter().map(|lane| *lane as u8));
             }
-            for row in 0..8 {
-                bytes.push(self.scale[row][chunk / 4]);
+            for row in &self.scale {
+                bytes.push(row[chunk / 4]);
             }
         }
         bytes
@@ -304,12 +302,12 @@ fn accumulation_order_contract_holds_on_the_npu() {
             mantissa: [[0i8; K]; 8],
             scale: [[0u8; GROUPS]; 8],
         };
-        for row in 0..8 {
-            for lane in 0..K {
-                operand.mantissa[row][lane] = next();
+        for (mantissa, scale) in operand.mantissa.iter_mut().zip(&mut operand.scale) {
+            for lane in mantissa {
+                *lane = next();
             }
-            for group in 0..GROUPS {
-                operand.scale[row][group] = if group == 0 { 130 } else { 118 };
+            for (group, exponent) in scale.iter_mut().enumerate() {
+                *exponent = if group == 0 { 130 } else { 118 };
             }
         }
         operand
