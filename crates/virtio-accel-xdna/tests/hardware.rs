@@ -174,7 +174,13 @@ impl PassthroughResources {
 
 /// Construct a backend, or skip when the complete native runtime is unavailable on this host.
 fn backend() -> Option<XdnaAccelerator> {
-    match XdnaAccelerator::new() {
+    available_backend(XdnaAccelerator::new())
+}
+
+fn available_backend(
+    result: Result<XdnaAccelerator, virtio_accel_xdna::InitError>,
+) -> Option<XdnaAccelerator> {
+    match result {
         Ok(backend) => Some(backend),
         Err(error) => {
             assert!(
@@ -733,13 +739,14 @@ fn pending_releases_return_the_same_live_resources_for_retry() {
     // A deterministic pending window: the worker holds this dispatch for 300ms, so the release
     // rejections below never race real completion (which pipelined dispatch made fast enough to
     // win occasionally).
-    let backend = XdnaAccelerator::new_for_testing(XdnaTestConfig {
+    let Some(backend) = available_backend(XdnaAccelerator::new_for_testing(XdnaTestConfig {
         watchdog_timeout: Duration::from_secs(2),
         fault: XdnaTestFault::HoldDispatch {
             hold: Duration::from_millis(300),
         },
-    })
-    .expect("hold-controlled backend");
+    })) else {
+        return;
+    };
     let PassthroughResources {
         context,
         queue,
@@ -803,11 +810,12 @@ fn pending_releases_return_the_same_live_resources_for_retry() {
 #[cfg(feature = "test-control")]
 #[test]
 fn tier1_device_loss_latches_failure_and_releases_every_resource_once() {
-    let backend = XdnaAccelerator::new_for_testing(XdnaTestConfig {
+    let Some(backend) = available_backend(XdnaAccelerator::new_for_testing(XdnaTestConfig {
         watchdog_timeout: Duration::from_secs(2),
         fault: XdnaTestFault::Tier1,
-    })
-    .expect("fault-controlled backend");
+    })) else {
+        return;
+    };
     let resources = PassthroughResources::create(&backend);
     let event = backend
         .submit(
@@ -838,13 +846,14 @@ fn tier1_device_loss_latches_failure_and_releases_every_resource_once() {
 #[cfg(feature = "test-control")]
 #[test]
 fn tier2_watchdog_reports_device_loss_and_discard_never_blocks() {
-    let backend = XdnaAccelerator::new_for_testing(XdnaTestConfig {
+    let Some(backend) = available_backend(XdnaAccelerator::new_for_testing(XdnaTestConfig {
         watchdog_timeout: Duration::from_millis(50),
         fault: XdnaTestFault::Tier2 {
             stall: Duration::from_secs(1),
         },
-    })
-    .expect("fault-controlled backend");
+    })) else {
+        return;
+    };
     let resources = PassthroughResources::create(&backend);
     let event = backend
         .submit(

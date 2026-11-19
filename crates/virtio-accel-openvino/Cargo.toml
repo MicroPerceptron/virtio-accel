@@ -17,7 +17,7 @@ default = []
 runtime-loading = ["dep:libloading"]
 
 [dependencies]
-libloading = { version = "0.8", optional = true }
+libloading = { workspace = true, optional = true }
 virtio-accel-core.workspace = true
 virtio-accel-tosa.workspace = true
 
