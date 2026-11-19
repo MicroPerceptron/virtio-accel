@@ -1025,14 +1025,14 @@ impl Drop for ProgramInner {
     }
 }
 
-/// A loaded program: a cheap handle over the shared [`ProgramInner`], tagged with its context.
+/// A loaded program: a cheap handle over the shared program storage, tagged with its context.
 #[derive(Debug)]
 pub struct XdnaProgram {
     inner: Arc<ProgramInner>,
     context_id: u64,
 }
 
-/// A submission event: a handle over one preallocated [`EventSlot`].
+/// A submission event: a handle over one preallocated event slot.
 #[derive(Debug)]
 pub struct XdnaEvent {
     slot: Arc<EventSlot>,
