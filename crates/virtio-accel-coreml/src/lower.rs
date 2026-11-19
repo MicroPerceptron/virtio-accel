@@ -146,6 +146,8 @@ pub(crate) struct LoweredModel {
     pub bytes: Vec<u8>,
     pub features: Vec<LoweredFeature>,
     pub execution: LoweredExecution,
+    /// FP32 anywhere in a NeuralNetwork graph requires exclusion of ANE arithmetic.
+    pub requires_fp32: bool,
 }
 
 /// Backend-local execution choice for a verified TOSA program.
@@ -252,6 +254,9 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, L
         bytes: encoded,
         features,
         execution,
+        requires_fp32: analysis.values().iter().any(|value| {
+            matches!(value.kind(), AnalyzedValueKind::Tensor(tensor) if tensor.dtype() == DType::FP32)
+        }),
     })
 }
 

@@ -18,7 +18,8 @@ use virtio_accel_core::{
 };
 use virtio_accel_coreml::{
     ARTIFACT_FORMAT, COREML_TOSA_INTEGER_TARGET, COREML_TOSA_TARGET, CoreMlAccelerator,
-    CoreMlArtifact, CoreMlEvent, InitError, REQUIRED_RESIDENT_BYTES, TARGET_IDENTITY,
+    CoreMlArtifact, CoreMlComputeUnits, CoreMlEvent, InitError, REQUIRED_RESIDENT_BYTES,
+    TARGET_IDENTITY,
 };
 use virtio_accel_tosa::{Target, parse};
 
@@ -158,6 +159,16 @@ fn run_tosa_bytes(
         Err(InitError::NeuralEngineUnavailable) => return None,
         Err(error) => panic!("Core ML backend initialization failed: {error}"),
     };
+    run_tosa_bytes_on(&backend, artifact, target, inputs, output_bytes)
+}
+
+fn run_tosa_bytes_on(
+    backend: &CoreMlAccelerator,
+    artifact: &[u8],
+    target: Target,
+    inputs: &[&[u8]],
+    output_bytes: usize,
+) -> Option<Vec<u8>> {
     let context = backend.create_context(ContextDesc::default()).unwrap();
     let mut input_buffers = Vec::with_capacity(inputs.len());
     for bytes in inputs {
@@ -228,7 +239,7 @@ fn run_tosa_bytes(
         .submit(&queue, &program, &bindings, Timeout::Infinite)
         .unwrap();
     assert_eq!(
-        wait_for_terminal(&backend, &event).unwrap(),
+        wait_for_terminal(backend, &event).unwrap(),
         EventState::Complete
     );
     backend.destroy_event(event).unwrap();
@@ -364,6 +375,83 @@ fn lowers_and_executes_device_neutral_tosa() {
     backend.free_buffer(output).unwrap();
     backend.free_buffer(input).unwrap();
     backend.destroy_context(context).unwrap();
+}
+
+#[test]
+fn gpu_policy_reports_gpu_identity_and_executes_tosa() {
+    check_compute_policy(
+        CoreMlComputeUnits::CpuAndGpu,
+        virtio_accel_core::AcceleratorClass::GPU,
+        "VIRTIO_ACCEL_COREML_REQUIRE_GPU",
+    );
+}
+
+#[test]
+fn all_policy_reports_other_identity_and_executes_tosa() {
+    check_compute_policy(
+        CoreMlComputeUnits::All,
+        virtio_accel_core::AcceleratorClass::OTHER,
+        "VIRTIO_ACCEL_COREML_REQUIRE_ALL",
+    );
+}
+
+fn check_compute_policy(
+    units: CoreMlComputeUnits,
+    class: virtio_accel_core::AcceleratorClass,
+    require_env: &str,
+) {
+    let backend = match CoreMlAccelerator::new_tosa_with_compute_units(units) {
+        Ok(backend) => backend,
+        Err(InitError::GpuUnavailable | InitError::NeuralEngineUnavailable)
+            if std::env::var_os(require_env).is_none() =>
+        {
+            return;
+        }
+        Err(error) => panic!("Core ML {units:?} initialization failed: {error}"),
+    };
+    assert_eq!(backend.device_info().unwrap().identity.class, class);
+    let inputs = MATMUL_FP32
+        .inputs
+        .iter()
+        .map(|tensor| float_bytes(tensor.values.iter().copied()))
+        .collect::<Vec<_>>();
+    let bytes = run_tosa_bytes_on(
+        &backend,
+        MATMUL_FP32.artifact,
+        COREML_TOSA_TARGET,
+        &inputs.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+        MATMUL_FP32.outputs[0].values.len() * 4,
+    )
+    .unwrap();
+    let actual = bytes
+        .chunks_exact(4)
+        .map(|b| f32::from_ne_bytes(b.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert!(MATMUL_FP32.output_matches(0, &actual));
+    let inputs = MATMUL_FP16
+        .inputs
+        .iter()
+        .map(|tensor| {
+            tensor
+                .bits
+                .iter()
+                .flat_map(|b| b.to_ne_bytes())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let bytes = run_tosa_bytes_on(
+        &backend,
+        MATMUL_FP16.artifact,
+        COREML_TOSA_TARGET,
+        &inputs.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+        MATMUL_FP16.outputs[0].bits.len() * 2,
+    )
+    .unwrap();
+    let actual = bytes
+        .chunks_exact(2)
+        .map(|b| u16::from_ne_bytes(b.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert!(MATMUL_FP16.output_matches(0, &actual));
 }
 
 #[test]

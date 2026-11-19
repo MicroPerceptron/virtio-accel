@@ -178,6 +178,7 @@ pub(crate) fn lower_integer_tosa(
         bytes: encoded,
         features,
         execution: LoweredExecution::CoreMl,
+        requires_fp32: false,
     })
 }
 

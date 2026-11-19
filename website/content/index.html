@@ -548,15 +548,17 @@ footer { padding-block: 44px 52px; }
     <div class="backends">
       <div class="backend">
         <div class="backend-top">
-          <span class="bk-id"><b>Apple Core ML / ANE</b><span class="bk-crate">virtio-accel-coreml</span></span>
+          <span class="bk-id"><b>Apple Core ML / GPU / ANE</b><span class="bk-crate">virtio-accel-coreml</span></span>
           <span class="tag tag-ok">macOS 14+</span>
         </div>
         <p>Lowers TOSA into Core ML and predicts against buffers the caller already owns, accepting
           a result only when Core ML wrote into that same allocation. Core ML places each operator
-          on the ANE or the CPU as it sees fit. Direct INT8 boundaries need macOS&nbsp;26+ and cover
+          within an explicit CPU/ANE, CPU/GPU or combined policy. Combined mode permits both
+          accelerators without promising simultaneous use. FP32 NeuralNetwork graphs exclude ANE
+          to preserve precision; FP16 retains the selected policy. Direct INT8 boundaries need macOS&nbsp;26+ and cover
           identity plus zero-point-aware MATMUL; the INT4 that Core ML advertises is compressed
           weight storage, not INT4 tensor execution.</p>
-        <p class="bk-device"><b>Apple Neural Engine + CPU</b>validated on Apple M4 / macOS 26.5.2</p>
+        <p class="bk-device"><b>Apple GPU + Neural Engine + CPU</b>policy-level numerical tests on Apple M4; per-operation placement is runtime-selected</p>
         <p class="bk-label">Program dtypes</p>
         <ul class="bk-dtypes">
           <li class="dt on">FP32<span class="sr-only"> supported</span></li>
@@ -688,7 +690,7 @@ footer { padding-block: 44px 52px; }
       <div class="crate-row"><div>virtio-accel-tosa</div><div class="tier">core + alloc</div><div class="role">Bounded zero-copy TOSA 1.0 validation and lowering analysis</div></div>
       <div class="crate-row"><div>virtio-accel-tosa-build</div><div class="tier">core + alloc</div><div class="role">Borrowed and owned static TOSA 1.0 authoring</div></div>
       <div class="crate-row"><div>virtio-accel-vaccel</div><div class="tier">core</div><div class="role">Adapter seam for native provider contracts</div></div>
-      <div class="crate-row"><div>virtio-accel-coreml</div><div class="tier">macOS std</div><div class="role">TOSA-to-Core ML lowering and ANE-capable prediction</div></div>
+      <div class="crate-row"><div>virtio-accel-coreml</div><div class="tier">macOS std</div><div class="role">TOSA-to-Core ML lowering and GPU/ANE-capable prediction</div></div>
       <div class="crate-row"><div>virtio-accel-openvino</div><div class="tier">Linux std</div><div class="role">TOSA-to-OpenVINO IR lowering and NPU/GPU/CPU inference</div></div>
       <div class="crate-row"><div>virtio-accel-hexagon</div><div class="tier">Windows ARM64 std</div><div class="role">Strict FP16/INT8 TOSA-to-QNN lowering</div></div>
       <div class="crate-row"><div>virtio-accel-xdna</div><div class="tier">std</div><div class="role">AMD XDNA2 NPU backend over HRX with BF16/FP8/INT8 TOSA tiers</div></div>

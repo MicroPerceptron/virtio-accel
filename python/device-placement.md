@@ -14,7 +14,7 @@ def infer(x, weight):
 devices = va.devices("npu") # runtime discovery, not a platform-name heuristic
 ```
 
-Recognize `cpu`, `gpu`, `npu`, and indexed forms such as `gpu:1` and `npu:0`. An index is
+Recognize `cpu`, `gpu`, `npu`, `hybrid`, and indexed forms such as `gpu:1` and `npu:0`. An index is
 relative to the current discovery snapshot, not a persistent hardware identity. Keep
 the indexed form even on single-NPU laptops: discrete accelerators, passthrough devices,
 and remote/virtual adapters can make multiple instances useful.
@@ -42,7 +42,7 @@ device discovery as `cpu:0` or `npu:0`.
 
 | Area | Current behavior | Boundary preserved by Python |
 | --- | --- | --- |
-| Core ML | `CPUAndNeuralEngine` allows mixed per-operator placement; the backend reports a fixed NPU identity | Reports CPU participation and rejects strict placement |
+| Core ML | CPU/ANE, CPU/GPU, and All policies expose NPU, GPU, and hybrid endpoints | Reports CPU participation and rejects strict placement; hybrid is not an exclusive device |
 | OpenVINO | Enumerates devices and supports `with_device`; default preference is NPU, GPU, CPU | Opens exact enumerated names; rejects AUTO/HETERO/MULTI endpoints |
 | Vulkan | Enumerates devices by name; a physical GPU can also be visible through OpenVINO | Reports distinct provider endpoints; makes no physical deduplication claim |
 | XDNA | Current HRX device index is fixed to zero; advertised BF16/FP8/INT8 tiers do not include FP16 arithmetic | Exposes one HRX endpoint; supports explicit BF16 graphs and rejects FP16/FP32 inputs |
@@ -55,7 +55,7 @@ provider, with its possible CPU participation reported in placement metadata. Th
 `strict=True` option rejects Core ML because exclusive placement cannot be guaranteed.
 The frontend does not infer exclusive placement from `AcceleratorClass::NPU` alone.
 
-Discovery uses fixed provider order (Core ML, Vulkan, OpenVINO, Hexagon, XDNA) and
+Discovery orders Core ML NPU first, then Vulkan GPU, Core ML GPU/hybrid, OpenVINO, Hexagon and XDNA, with
 sorted native names. Indices are allocated per class across providers. The existing UUIDs are insufficient for universal deduplication.
 Prefer platform/PCI identities where available, and report ambiguity rather than claiming
 that two provider endpoints definitely represent two separate physical accelerators.
@@ -78,6 +78,12 @@ API must expose physical-device identity to support multiple identically named G
 Discovery diagnostics include missing loaders and initialization failures. No installation
 or environment mutation is performed automatically.
 
-Core ML and OpenVINO currently lack CAST in their advertised floating-point tiers. FP16 graph support
+Core ML, OpenVINO and the Vulkan base tier currently lack CAST in their advertised floating-point tiers. FP16 graph support
 does not imply that graphs mixing FP16 and FP32 will be admitted. This is a provider
 limitation, separate from the portable selector syntax.
+
+Core ML's `hybrid` endpoint permits CPU, GPU and ANE in one model without promising
+simultaneous execution. It requires both accelerators at discovery. FP32 NeuralNetwork
+graphs narrow the permitted set to CPUOnly for the NPU policy or CPUAndGPU for hybrid,
+since ANE may otherwise reduce intermediate precision. FP16 retains the selected policy.
+These are host-side choices; hybrid maps to the existing OTHER class without new wire values.

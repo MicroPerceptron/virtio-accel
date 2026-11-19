@@ -21,9 +21,9 @@ class ExampleTests(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get('VIRTIO_ACCEL_PYTHON_TEST_DEVICE'), 'hardware examples are opt-in')
     def test_native_examples(self):
-        from virtio_accel._runtime import _resolve
-        device = os.environ['VIRTIO_ACCEL_PYTHON_TEST_DEVICE']
-        record = _resolve(device, False)
+        from hardware_support import requested_device
+        device = requested_device()
+        record = device
         provider = record.provider
         if provider in ('hexagon', 'xdna') or (provider == 'openvino' and record.kind == 'npu'):
             self.skipTest('provider-specific numerical tiers are exercised in test_runtime')
@@ -33,7 +33,7 @@ class ExampleTests(unittest.TestCase):
             spec.loader.exec_module(module)
             for dtype in ('float16', 'float32'):
                 with self.subTest(example=name, dtype=dtype):
-                    if provider in ('coreml', 'openvino') and name == 'nearest_centroid' and dtype == 'float16':
+                    if provider in ('coreml', 'openvino', 'vulkan') and name == 'nearest_centroid' and dtype == 'float16':
                         with self.assertRaisesRegex(RuntimeError, 'CAST'):
                             module.demo(dtype=dtype, device=device)
                     else:

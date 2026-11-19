@@ -55,7 +55,14 @@ struct va_coreml_binding {
 
 typedef void (*va_coreml_release_context_fn)(void *context);
 
-int va_coreml_has_neural_engine(void);
+enum va_coreml_compute_units {
+    VA_COREML_CPU_AND_NEURAL_ENGINE = 0,
+    VA_COREML_CPU_AND_GPU = 1,
+    VA_COREML_ALL = 2,
+    VA_COREML_CPU_ONLY = 3,
+};
+
+int va_coreml_has_compute_device(uint32_t compute_units);
 
 int va_coreml_supports_int8(void);
 
@@ -63,12 +70,14 @@ void *va_coreml_model_load(const uint8_t *path,
                            size_t path_len,
                            const struct va_coreml_feature_mapping *mappings,
                            size_t mapping_count,
+                           uint32_t compute_units,
                            struct va_coreml_error *error);
 
 void *va_coreml_model_load_memory(const uint8_t *bytes,
                                   size_t bytes_len,
                                   const struct va_coreml_feature_mapping *mappings,
                                   size_t mapping_count,
+                                  uint32_t compute_units,
                                   struct va_coreml_error *error);
 
 void va_coreml_model_release(void *model);

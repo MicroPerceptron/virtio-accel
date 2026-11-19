@@ -30,8 +30,8 @@ def _native():
 def _selector(value):
     if isinstance(value, Device):
         return value
-    if not isinstance(value, str) or re.fullmatch(r'(cpu|gpu|npu)(?::(?:0|[1-9][0-9]*))?', value) is None:
-        raise ValueError('device must be cpu, gpu, npu, or an indexed form such as gpu:0')
+    if not isinstance(value, str) or re.fullmatch(r'(cpu|gpu|npu|hybrid)(?::(?:0|[1-9][0-9]*))?', value) is None:
+        raise ValueError('device must be cpu, gpu, npu, hybrid, or an indexed form such as gpu:0')
     return value if ':' in value else value + ':0'
 
 
@@ -51,8 +51,8 @@ def devices(kind=None, *, provider=None):
     Filter by kind or provider, and pass a returned Device to jit/compile to select
     that endpoint. Multiple providers may expose the same physical accelerator.
     """
-    if kind not in (None, 'cpu', 'gpu', 'npu'):
-        raise ValueError('kind must be cpu, gpu, npu, or None')
+    if kind not in (None, 'cpu', 'gpu', 'npu', 'hybrid'):
+        raise ValueError('kind must be cpu, gpu, npu, hybrid, or None')
     if provider not in (None, 'coreml', 'vulkan', 'openvino', 'hexagon', 'xdna'):
         raise ValueError('unknown device provider')
     return tuple(Device(**d) for d in _discovery()['devices']

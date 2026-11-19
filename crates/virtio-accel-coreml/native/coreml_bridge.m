@@ -4,6 +4,7 @@
 #import <CoreML/MLModel+MLComputeDevice.h>
 #import <CoreML/MLModel+MLModelCompilation.h>
 #import <CoreML/MLNeuralEngineComputeDevice.h>
+#import <CoreML/MLGPUComputeDevice.h>
 #import <Foundation/Foundation.h>
 #import <dispatch/dispatch.h>
 #include <stdatomic.h>
@@ -119,11 +120,14 @@ static struct VAEvent *va_event_create(struct va_coreml_error *error) {
     return event;
 }
 
-int va_coreml_has_neural_engine(void) {
+int va_coreml_has_compute_device(uint32_t compute_units) {
     @autoreleasepool {
         if (va_macos_at_least(14, 0, 0)) {
             for (id device in MLModel.availableComputeDevices) {
-                if ([device isKindOfClass:MLNeuralEngineComputeDevice.class]) {
+                if (((compute_units == VA_COREML_CPU_AND_NEURAL_ENGINE || compute_units == VA_COREML_ALL) &&
+                     [device isKindOfClass:MLNeuralEngineComputeDevice.class]) ||
+                    (compute_units == VA_COREML_CPU_AND_GPU &&
+                     [device isKindOfClass:MLGPUComputeDevice.class])) {
                     return 1;
                 }
             }
@@ -242,10 +246,14 @@ void *va_coreml_model_load(const uint8_t *path,
                            size_t path_len,
                            const struct va_coreml_feature_mapping *mappings,
                            size_t mapping_count,
+                           uint32_t compute_units,
                            struct va_coreml_error *error) {
     @autoreleasepool {
         va_set_error(error, VA_COREML_OK, 0, 0);
-        if (mappings == NULL || mapping_count == 0) {
+        if (mappings == NULL || mapping_count == 0 ||
+            (compute_units != VA_COREML_CPU_AND_NEURAL_ENGINE &&
+             compute_units != VA_COREML_CPU_AND_GPU &&
+             compute_units != VA_COREML_ALL && compute_units != VA_COREML_CPU_ONLY)) {
             va_set_error(error, VA_COREML_INVALID_ARGUMENT, VA_COREML_BRIDGE_DOMAIN, 6);
             return NULL;
         }
@@ -275,7 +283,22 @@ void *va_coreml_model_load(const uint8_t *path,
             }
 
             MLModelConfiguration *configuration = [MLModelConfiguration new];
-            configuration.computeUnits = MLComputeUnitsCPUAndNeuralEngine;
+            switch (compute_units) {
+                case VA_COREML_CPU_AND_NEURAL_ENGINE:
+                    configuration.computeUnits = MLComputeUnitsCPUAndNeuralEngine;
+                    break;
+                case VA_COREML_CPU_AND_GPU:
+                    configuration.computeUnits = MLComputeUnitsCPUAndGPU;
+                    break;
+                case VA_COREML_ALL:
+                    configuration.computeUnits = MLComputeUnitsAll;
+                    break;
+                case VA_COREML_CPU_ONLY:
+                    configuration.computeUnits = MLComputeUnitsCPUOnly;
+                    break;
+            }
+            // Preserve the declared accumulation precision on the GPU path.
+            configuration.allowLowPrecisionAccumulationOnGPU = NO;
             if (va_macos_at_least(14, 4, 0)) {
                 MLOptimizationHints *hints = [MLOptimizationHints new];
                 hints.reshapeFrequency = MLReshapeFrequencyHintInfrequent;
@@ -405,6 +428,7 @@ void *va_coreml_model_load_memory(const uint8_t *bytes,
                                   size_t bytes_len,
                                   const struct va_coreml_feature_mapping *mappings,
                                   size_t mapping_count,
+                                  uint32_t compute_units,
                                   struct va_coreml_error *error) {
     @autoreleasepool {
         va_set_error(error, VA_COREML_OK, 0, 0);
@@ -443,6 +467,7 @@ void *va_coreml_model_load_memory(const uint8_t *bytes,
                                              strlen(path),
                                              mappings,
                                              mapping_count,
+                                             compute_units,
                                              error);
             }
             return model;

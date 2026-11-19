@@ -1,10 +1,11 @@
-//! Core ML host backend for Apple Neural Engine capable Macs.
+//! Core ML host backend for GPU and Apple Neural Engine capable Macs.
 //!
 //! The production path accepts device-neutral TOSA 1.0 FlatBuffers, validates and analyzes them
 //! with `virtio-accel-tosa`, and lowers supported static floating-point and exact INT8 graphs
-//! inside this host-native crate. Core ML models are configured with `CPUAndNeuralEngine`: supported
-//! operations may execute on the ANE, while Core ML remains free to place unsupported operations
-//! on the CPU. Program buffers are page-aligned allocations wrapped directly by `MLMultiArray`;
+//! inside this host-native crate. Core ML models use an explicit CPU-and-accelerator policy:
+//! `CPUAndNeuralEngine` by default, `CPUAndGPU`, or `All` when requested. All permit CPU
+//! participation. FP32 NeuralNetwork graphs exclude ANE to preserve their precision.
+//! Program buffers are page-aligned allocations wrapped directly by `MLMultiArray`;
 //! output execution is accepted only when Core ML uses the same allocation as its output backing.
 
 #![cfg_attr(not(target_os = "macos"), forbid(unsafe_code))]
@@ -63,6 +64,34 @@ pub const TARGET_IDENTITY: TargetIdentity = TargetIdentity([
 /// policy accordingly when admitting a Core ML program.
 pub const REQUIRED_RESIDENT_BYTES: u64 = u64::MAX;
 
+/// Explicit Core ML placement policy. All policies permit CPU participation;
+/// none promises exclusive or simultaneous execution on the selected accelerators.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CoreMlComputeUnits {
+    /// CPU and Neural Engine; excludes GPU execution. The compatibility default.
+    #[default]
+    CpuAndNeuralEngine = 0,
+    /// CPU and GPU; excludes Neural Engine execution.
+    CpuAndGpu = 1,
+    /// CPU, GPU and Neural Engine; Core ML chooses placement within the allowed set.
+    All = 2,
+}
+
+impl CoreMlComputeUnits {
+    // NeuralNetwork models do not carry typed intermediates: ANE may narrow FP32
+    // arithmetic. Keep FP32 programs within a precision-preserving subset of the
+    // explicitly selected policy. This is load-time placement, never a retry.
+    #[cfg(target_os = "macos")]
+    fn native_policy(self, requires_fp32: bool) -> u32 {
+        match (self, requires_fp32) {
+            (Self::CpuAndNeuralEngine, true) => 3, // private bridge CPUOnly
+            (Self::All, true) => Self::CpuAndGpu as u32,
+            _ => self as u32,
+        }
+    }
+}
+
 /// Failure to initialize a Core ML backend instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InitError {
@@ -72,6 +101,8 @@ pub enum InitError {
     InvalidModelRoot,
     /// Core ML does not report an accessible Apple Neural Engine.
     NeuralEngineUnavailable,
+    /// Core ML does not report an accessible GPU.
+    GpuUnavailable,
 }
 
 impl std::fmt::Display for InitError {
@@ -103,6 +134,11 @@ impl CoreMlAccelerator {
 
     /// Report that the native TOSA-to-Core ML execution path is unavailable on this target.
     pub fn new_tosa() -> Result<Self, InitError> {
+        Self::new_tosa_with_compute_units(CoreMlComputeUnits::default())
+    }
+
+    /// Report that the requested Core ML placement policy is unavailable on this target.
+    pub fn new_tosa_with_compute_units(_units: CoreMlComputeUnits) -> Result<Self, InitError> {
         Err(InitError::UnsupportedPlatform)
     }
 }

@@ -1,13 +1,22 @@
 # virtio-accel-coreml
 
 A host-native [`virtio_accel_core::Accelerator`](https://docs.rs/virtio-accel-core)
-implementation for Apple's Core ML runtime and Neural Engine.
+implementation for Apple's Core ML runtime, GPU and Neural Engine.
 
-The backend requires macOS 14 or newer and refuses construction when Core ML does not report an
-accessible `MLNeuralEngineComputeDevice`. Models are loaded with
-`MLComputeUnitsCPUAndNeuralEngine`, which gives Core ML access to the ANE without permitting GPU
-placement. Apple still decides placement per operation; a model containing unsupported ANE
-operations can fall back to the CPU.
+The backend requires macOS 14 or newer. `CoreMlAccelerator::new_tosa()` preserves the
+`CpuAndNeuralEngine` default. `new_tosa_with_compute_units(CoreMlComputeUnits::CpuAndGpu)`
+allows CPU/GPU placement, and `CoreMlComputeUnits::All` allows CPU/GPU/ANE placement.
+Discovery requires the selected accelerator (both GPU and ANE for `All`). Device identity
+reports NPU, GPU, or OTHER respectively; these are policy endpoints, not separate chips.
+Core ML decides per-operation placement, with no promise of exclusive accelerator use or
+simultaneous GPU/ANE activity. The legacy host-path constructor remains CPU/ANE only.
+
+The floating-point NeuralNetwork format does not enforce intermediate precision on ANE.
+To preserve FP32 graph arithmetic, programs containing FP32 tensors use CPUOnly under
+the CPU/ANE policy, and CPUAndGPU under `All`. FP16 programs retain the full selected
+policy. GPU low-precision accumulation is disabled. This selection happens before model
+loading within the permitted compute units; it never retries a failed program elsewhere.
+Exact integer ML Programs retain their explicit types and selected policy.
 
 **Portability tier:** `host-native` — the real implementation is macOS-only. Other targets compile
 a placeholder constructor that returns `InitError::UnsupportedPlatform`, keeping workspace and
