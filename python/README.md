@@ -92,7 +92,7 @@ crates are testing/integration infrastructure, not additional physical providers
 
 | Provider | Endpoints | Build/runtime requirements | Python admission boundary |
 | --- | --- | --- | --- |
-| Core ML | NPU-capable, macOS | macOS 14+ | FP16/FP32; CPU participation; no CAST |
+| Core ML | NPU, GPU, hybrid CPU/GPU/ANE | macOS 14+ | FP16/FP32; CPU participation; no CAST |
 | Vulkan | GPU, macOS/Linux/Windows | Vulkan loader and GPU driver (MoltenVK on macOS) | FP16/FP32; software CPU devices excluded |
 | OpenVINO | CPU/GPU/NPU | OpenVINO C runtime present **when building the wheel**, plus device plugins/drivers | FP16/FP32, subject to plugin admission; no floating-tier CAST; exact named device, no AUTO/HETERO |
 | Hexagon | NPU, Windows ARM64 | Complete QAIRT/QNN SDK at build time and HTP runtime | FP16; FP32 rejected without downconversion |
@@ -148,11 +148,24 @@ BF16 identity requires a positive multiple of 1024 elements on the current XDNA 
 Other BF16 operations can trace/export only when TOSA permits them; backend admission
 still rejects unsupported graphs. FP8 and integer frontend APIs remain outside this change.
 
-Core ML uses **CPUAndNeuralEngine**. This selects an NPU-capable provider, not proven
-ANE-only execution; `strict=True` rejects it. Vulkan selects a GPU endpoint and excludes
-software CPU devices. Core ML and OpenVINO's existing floating tiers have no `CAST`: mixed FP16/FP32 arithmetic,
-FP16 reductions (which widen to FP32), and explicit casts can export TOSA but are rejected
-by these providers. FP32 nearest-centroid and FP16/FP32 MLP/FIR are admitted by both.
+Core ML exposes three explicit policies: `npu` uses **CPUAndNeuralEngine**, `gpu`
+uses **CPUAndGPU**, and `hybrid` uses **All** (CPU/GPU/ANE). Core ML chooses placement;
+`All` permits both accelerators but does not guarantee simultaneous use. All three
+report CPU participation and are rejected by `strict=True`. To preserve precision,
+FP32 NeuralNetwork graphs exclude ANE: the NPU policy uses CPUOnly, while hybrid uses
+CPUAndGPU. FP16 graphs retain the full selected policy. GPU low-precision accumulation
+is disabled. The host-path Rust API retains its original CPU/ANE policy.
+
+```python
+combined = va.devices("hybrid", provider="coreml")[0]
+with lowered.compile(combined) as executable:
+    result = executable(x, weight)
+```
+
+Vulkan selects a GPU endpoint and excludes software CPU devices. Core ML, OpenVINO,
+and Vulkan's base floating tiers have no `CAST`: mixed FP16/FP32 arithmetic, FP16
+reductions (which widen to FP32), and explicit casts can export TOSA but are rejected
+by these tiers. FP32 nearest-centroid and FP16/FP32 MLP/FIR are admitted.
 
 Native handles remain on one worker thread per compiled specialization. Calls serialize,
 release the GIL while waiting, explicitly copy inputs into reusable native allocations,
@@ -247,7 +260,9 @@ Run the opt-in hardware suite against an installed wheel:
 
 ```sh
 VIRTIO_ACCEL_PYTHON_TEST_DEVICE=npu python -m unittest discover -s python/tests -v
-# Or VIRTIO_ACCEL_PYTHON_TEST_DEVICE=gpu on a Vulkan GPU host.
+# Select a provider when more than one exposes the same device class:
+VIRTIO_ACCEL_PYTHON_TEST_DEVICE=hybrid VIRTIO_ACCEL_PYTHON_TEST_PROVIDER=coreml \
+  python -m unittest discover -s python/tests -v
 ```
 
 A requested but unavailable device fails these tests; it is never silently skipped.
@@ -255,5 +270,5 @@ Wheel CI checks installed wheels on Linux, macOS and Windows. An additional Linu
 against the pinned OpenVINO runtime and executes the installed wheel's FP16/FP32 tests and
 examples on the CPU plugin; missing runtime/device is a failure. SDK-free Linux Rust tests
 also run the frontend's BF16 fixtures through XDNA's real admission code. These checks do
-not prove Intel NPU/GPU, Qualcomm HTP, or AMD NPU execution; the opt-in hardware suite
+not themselves prove Intel NPU/GPU, Qualcomm HTP, or AMD NPU execution; the opt-in hardware suite
 contains provider-specific Hexagon and XDNA cases for those machines.

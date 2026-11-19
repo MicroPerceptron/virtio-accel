@@ -33,3 +33,13 @@ bridge validates scalar alignment before exposing a bound pointer and verifies t
 pointer, element type, shape, and strides before reporting completion. A different Objective-C
 wrapper over the same storage is safe; declining the exact proposed output storage is an execution
 failure.
+
+The model-loading ABI also takes a scalar `va_coreml_compute_units` tag. Rust's closed
+`CoreMlComputeUnits` enum maps CPU/ANE, CPU/GPU and All to explicit bridge values.
+The private CPUOnly value is used for FP32 NeuralNetwork graphs under CPU/ANE; under
+All those graphs use CPU/GPU. This preserves FP32 arithmetic without expanding the
+selected policy. Discovery checks the required compute-device classes (both for All).
+The policy is immutable per backend and mapped at each TOSA model load, including
+in-memory compilation. It changes placement permissions only, not pointer ownership or
+event lifetimes. The legacy host-path constructor retains its ANE target identity and
+policy. The bridge rejects invalid tags and disables low-precision GPU accumulation.

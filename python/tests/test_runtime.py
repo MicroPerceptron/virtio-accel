@@ -39,6 +39,24 @@ class DeviceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 va.devices(provider='unknown')
 
+    def test_coreml_gpu_has_explicit_cpu_participation(self):
+        gpu = dict(GPU, provider='coreml', cpu_participation=True, name='Core ML CPUAndGPU')
+        with patch.object(_runtime, '_discovery', return_value=dict(devices=[gpu], diagnostics=[])):
+            self.assertEqual(va.devices('gpu', provider='coreml'), (_runtime.Device(**gpu),))
+            self.assertEqual(_runtime._resolve('gpu', False).provider, 'coreml')
+            with self.assertRaisesRegex(RuntimeError, 'exclusive gpu'):
+                _runtime._resolve('gpu', True)
+
+    def test_coreml_all_is_an_explicit_hybrid_endpoint(self):
+        hybrid = dict(id='hybrid:0', kind='hybrid', provider='coreml',
+                      name='Apple GPU + Neural Engine (Core ML All)', cpu_participation=True)
+        with patch.object(_runtime, '_discovery', return_value=dict(devices=[NPU, GPU, hybrid], diagnostics=[])):
+            self.assertEqual(va.devices('hybrid', provider='coreml'), (_runtime.Device(**hybrid),))
+            self.assertEqual(_runtime._resolve('hybrid', False).id, 'hybrid:0')
+            self.assertEqual(_runtime._resolve('npu', False).id, 'npu:0')
+            with self.assertRaisesRegex(RuntimeError, 'exclusive hybrid'):
+                _runtime._resolve('hybrid', True)
+
     def test_unavailable_device_reports_probe_failure(self):
         with patch.object(_runtime, '_discovery', return_value=dict(devices=[], diagnostics=['loader absent'])):
             self.assertEqual(va.device_diagnostics(), ('loader absent',))
@@ -86,7 +104,7 @@ class DeviceTests(unittest.TestCase):
     def test_native_discovery_and_unavailable_index(self):
         for device in va.devices():
             self.assertIn(device.provider, ('coreml', 'vulkan', 'openvino', 'hexagon', 'xdna'))
-            self.assertIn(device.kind, ('npu', 'gpu', 'cpu'))
+            self.assertIn(device.kind, ('npu', 'gpu', 'cpu', 'hybrid'))
         lowered = va.jit(lambda x: x + 1).lower(np.ones(2, np.float32))
         with self.assertRaisesRegex(RuntimeError, 'unavailable'):
             lowered.compile('gpu:999999')
@@ -95,9 +113,10 @@ class DeviceTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get('VIRTIO_ACCEL_PYTHON_TEST_DEVICE'), 'set VIRTIO_ACCEL_PYTHON_TEST_DEVICE for hardware tests')
 class HardwareTests(unittest.TestCase):
     def setUp(self):
-        self.device = os.environ['VIRTIO_ACCEL_PYTHON_TEST_DEVICE']
+        from hardware_support import requested_device
+        self.device = requested_device()
         # Requested hardware is mandatory: discovery/admission failures must fail this suite.
-        self.record = _runtime._resolve(self.device, False)
+        self.record = self.device
 
     def test_projection_both_precisions_and_repeated_calls(self):
         if self.record.provider == 'xdna':
@@ -138,8 +157,8 @@ class HardwareTests(unittest.TestCase):
         executable.close()
 
     def test_unsupported_cast_is_explicit_and_recoverable(self):
-        if self.record.provider not in ('coreml', 'openvino'):
-            self.skipTest('Core ML/OpenVINO floating-tier CAST boundary')
+        if self.record.provider not in ('coreml', 'openvino', 'vulkan'):
+            self.skipTest('Base floating-tier CAST boundary')
         x = np.ones((2, 2), np.float16)
         lowered = va.jit(lambda x: x.astype(vnp.float32)).lower(x)
         for _ in range(2):

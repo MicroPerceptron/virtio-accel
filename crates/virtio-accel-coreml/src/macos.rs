@@ -4,7 +4,9 @@ use crate::artifact::{DecodeError, FeatureRole, MAX_ARTIFACT_BYTES, decode};
 use crate::lower::{
     LoweredExecution, LoweredFeature, LoweredFeatureRole, LoweringError, lower_tosa,
 };
-use crate::{ARTIFACT_FORMAT, InitError, REQUIRED_RESIDENT_BYTES, TARGET_IDENTITY};
+use crate::{
+    ARTIFACT_FORMAT, CoreMlComputeUnits, InitError, REQUIRED_RESIDENT_BYTES, TARGET_IDENTITY,
+};
 use core::ffi::c_void;
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::cell::RefCell;
@@ -88,13 +90,14 @@ struct SlotPlan {
 type NativeReleaseContext = unsafe extern "C" fn(*mut c_void);
 
 unsafe extern "C" {
-    fn va_coreml_has_neural_engine() -> std::ffi::c_int;
+    fn va_coreml_has_compute_device(compute_units: u32) -> std::ffi::c_int;
     fn va_coreml_supports_int8() -> std::ffi::c_int;
     fn va_coreml_model_load(
         path: *const u8,
         path_len: usize,
         mappings: *const NativeFeatureMapping,
         mapping_count: usize,
+        compute_units: u32,
         error: *mut NativeError,
     ) -> *mut c_void;
     fn va_coreml_model_load_memory(
@@ -102,6 +105,7 @@ unsafe extern "C" {
         bytes_len: usize,
         mappings: *const NativeFeatureMapping,
         mapping_count: usize,
+        compute_units: u32,
         error: *mut NativeError,
     ) -> *mut c_void;
     fn va_coreml_model_release(model: *mut c_void);
@@ -371,6 +375,7 @@ impl Drop for CoreMlEvent {
 #[derive(Debug)]
 pub struct CoreMlAccelerator {
     model_root: Option<PathBuf>,
+    compute_units: CoreMlComputeUnits,
     next_id: AtomicU64,
     direct_binding_admissions: AtomicU64,
     explicit_transfer_bytes: AtomicU64,
@@ -380,7 +385,13 @@ pub struct CoreMlAccelerator {
 impl CoreMlAccelerator {
     /// Construct a backend with the production TOSA-to-Core ML path and require an accessible ANE.
     pub fn new_tosa() -> Result<Self, InitError> {
-        Self::with_model_root(None)
+        Self::new_tosa_with_compute_units(CoreMlComputeUnits::default())
+    }
+
+    /// Construct the TOSA backend with an explicit CPU-and-accelerator placement policy.
+    /// The selected accelerator must be reported by Core ML; CPU participation is permitted.
+    pub fn new_tosa_with_compute_units(units: CoreMlComputeUnits) -> Result<Self, InitError> {
+        Self::with_model_root(None, units)
     }
 
     /// Construct a backend with TOSA lowering plus the legacy host-path artifact escape hatch.
@@ -395,23 +406,43 @@ impl CoreMlAccelerator {
         if !model_root.is_dir() || model_root.to_str().is_none() {
             return Err(InitError::InvalidModelRoot);
         }
-        Self::with_model_root(Some(model_root))
+        Self::with_model_root(Some(model_root), CoreMlComputeUnits::default())
     }
 
-    fn with_model_root(model_root: Option<PathBuf>) -> Result<Self, InitError> {
-        // SAFETY: the function has no pointer arguments and returns a scalar availability result.
-        if unsafe { va_coreml_has_neural_engine() } == 0 {
-            return Err(InitError::NeuralEngineUnavailable);
+    fn with_model_root(
+        model_root: Option<PathBuf>,
+        compute_units: CoreMlComputeUnits,
+    ) -> Result<Self, InitError> {
+        // SAFETY: the closed enum supplies a valid scalar policy; there are no pointer arguments.
+        if unsafe { va_coreml_has_compute_device(compute_units as u32) } == 0 {
+            return Err(match compute_units {
+                CoreMlComputeUnits::CpuAndNeuralEngine | CoreMlComputeUnits::All => {
+                    InitError::NeuralEngineUnavailable
+                }
+                CoreMlComputeUnits::CpuAndGpu => InitError::GpuUnavailable,
+            });
         }
+        // SAFETY: the GPU probe takes only a valid scalar policy, with no pointers.
+        if compute_units == CoreMlComputeUnits::All
+            && unsafe { va_coreml_has_compute_device(CoreMlComputeUnits::CpuAndGpu as u32) } == 0
+        {
+            return Err(InitError::GpuUnavailable);
+        }
+        let (uuid, class) = match compute_units {
+            CoreMlComputeUnits::CpuAndNeuralEngine => (*b"apple-coreml-ane", AcceleratorClass::NPU),
+            CoreMlComputeUnits::CpuAndGpu => (*b"apple-coreml-gpu", AcceleratorClass::GPU),
+            CoreMlComputeUnits::All => (*b"apple-coreml-all", AcceleratorClass::OTHER),
+        };
         Ok(Self {
             model_root,
+            compute_units,
             next_id: AtomicU64::new(1),
             direct_binding_admissions: AtomicU64::new(0),
             explicit_transfer_bytes: AtomicU64::new(0),
             info: DeviceInfo {
                 identity: DeviceIdentity {
-                    uuid: *b"apple-coreml-ane",
-                    class: AcceleratorClass::NPU,
+                    uuid,
+                    class,
                     vendor_id: 0x106b,
                     device_id: 0,
                 },
@@ -814,6 +845,7 @@ impl Accelerator for CoreMlAccelerator {
                             lowered.bytes.len(),
                             mappings.as_ptr(),
                             mappings.len(),
+                            self.compute_units.native_policy(lowered.requires_fp32),
                             &mut error,
                         )
                     };
@@ -875,6 +907,7 @@ impl Accelerator for CoreMlAccelerator {
                 path.len(),
                 mappings.as_ptr(),
                 mappings.len(),
+                self.compute_units as u32,
                 &mut error,
             )
         };

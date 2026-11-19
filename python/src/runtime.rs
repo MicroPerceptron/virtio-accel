@@ -96,6 +96,31 @@ pub fn discover() -> Discovery {
         }
         Err(error) => result.diagnostics.push(format!("Vulkan: {error}")),
     }
+    // Keep existing Vulkan GPU indices stable; Core ML is another provider endpoint.
+    #[cfg(va_python_coreml)]
+    match virtio_accel_coreml::CoreMlAccelerator::new_tosa_with_compute_units(
+        virtio_accel_coreml::CoreMlComputeUnits::CpuAndGpu,
+    ) {
+        Ok(_) => result.add(
+            "gpu",
+            "coreml",
+            "Apple GPU (Core ML CPUAndGPU)".into(),
+            true,
+        ),
+        Err(error) => result.diagnostics.push(format!("Core ML GPU: {error}")),
+    }
+    #[cfg(va_python_coreml)]
+    match virtio_accel_coreml::CoreMlAccelerator::new_tosa_with_compute_units(
+        virtio_accel_coreml::CoreMlComputeUnits::All,
+    ) {
+        Ok(_) => result.add(
+            "hybrid",
+            "coreml",
+            "Apple GPU + Neural Engine (Core ML All)".into(),
+            true,
+        ),
+        Err(error) => result.diagnostics.push(format!("Core ML All: {error}")),
+    }
     #[cfg(va_python_openvino)]
     match virtio_accel_openvino::OpenVinoAccelerator::available_devices() {
         Ok(mut names) => {
@@ -498,8 +523,16 @@ impl Worker {
             .name("virtio-accel-executor".into())
             .spawn(move || {
                 #[cfg(va_python_coreml)]
-                if device.provider == "coreml" && device.kind == "npu" {
-                    match virtio_accel_coreml::CoreMlAccelerator::new_tosa() {
+                if device.provider == "coreml"
+                    && matches!(device.kind.as_str(), "npu" | "gpu" | "hybrid")
+                {
+                    let units = match device.kind.as_str() {
+                        "gpu" => virtio_accel_coreml::CoreMlComputeUnits::CpuAndGpu,
+                        "hybrid" => virtio_accel_coreml::CoreMlComputeUnits::All,
+                        _ => virtio_accel_coreml::CoreMlComputeUnits::CpuAndNeuralEngine,
+                    };
+                    match virtio_accel_coreml::CoreMlAccelerator::new_tosa_with_compute_units(units)
+                    {
                         Ok(backend) => serve(backend, json, receiver, ready),
                         Err(e) => {
                             let _ = ready.send(Err(error("Core ML initialization", e)));

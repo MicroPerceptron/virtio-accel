@@ -32,7 +32,7 @@ try; it does not promise the program admits, the numerics match, or the performa
 | -------------------------------------------------------------------------------- | ----------------------- | ---------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Apple Neural Engine**, Apple silicon (M-series)                                | NPU                     | `coreml`   | macOS 14+                             | **Validated** — Apple M4, macOS 26.5.2 ([performance.md](performance.md#core-ml-provider-evidence))                                                                                                                                                                                                                                                                                                                                                                                        |
 | **Apple CPU**, as Core ML per-operator placement                                 | CPU                     | `coreml`   | macOS 14+                             | **Reachable** — see [Core ML](#apple-core-ml-virtio-accel-coreml)                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| **Apple GPU**                                                                    | GPU                     | `coreml`   | macOS 14+                             | **One change away** — compute units are pinned                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| **Apple GPU**                                                                    | GPU                     | `coreml`   | macOS 14+                             | **Validated** — CPU/GPU policy; Apple M4 Python FP16/FP32 suite                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | **Intel Mac** (CPU, AMD/Intel GPU)                                               | CPU / GPU               | `coreml`   | macOS 14+                             | **One change away** — ANE gate refuses construction                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | **Intel NPU**, Core Ultra (Meteor Lake / Lunar Lake / Arrow Lake / Panther Lake) | NPU                     | `openvino` | Any host with the runtime             | **Validated** — arch 5010 (Panther Lake), OpenVINO 2026.4: the FP8 tier's graphs compile and FP8 movement round-trips bit-exactly, 2026-09-18 ([ADR 0009](adr/0009-fp8-operator-tier.md)). Arch 40XX (Lunar Lake) refuses FP8 outright and the withholding is pinned the same day: the suite passes with the tier absent and the refusal asserted, so the backend probes at open rather than branding by arch; the float and INT8 tiers remain first device preference on every generation |
 | **Intel GPU**, integrated Xe/UHD and discrete Arc                                | GPU                     | `openvino` | Any host with the runtime             | **Reachable** — including indexed `GPU.1`                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -60,48 +60,24 @@ try; it does not promise the program admits, the numerics match, or the performa
 
 ### Apple Core ML (`virtio-accel-coreml`)
 
-**What selects the device.** Nothing does, explicitly. The backend hands Core ML a fixed compute
-budget and Core ML places each operator itself:
+**Explicit policy selection.** `CoreMlAccelerator::new_tosa()` keeps CPUAndNeuralEngine.
+`new_tosa_with_compute_units` also accepts CpuAndGpu and All. They report NPU, GPU and
+OTHER respectively. Python exposes these as `npu`, `gpu` and `hybrid` provider endpoints.
+All requires both GPU and ANE at discovery; CPU/GPU requires only a GPU, so the ANE gate
+no longer excludes GPU-capable Intel Macs (execution on Intel Macs remains unvalidated).
 
-```objc
-configuration.computeUnits = MLComputeUnitsCPUAndNeuralEngine;
-```
+**Placement and precision.** Every policy permits CPU participation. Core ML decides
+per-operation placement, and All permits both GPU and ANE without promising simultaneous
+activity. FP32 NeuralNetwork graphs exclude ANE to prevent intermediate narrowing:
+CPU/ANE uses CPUOnly, while All uses CPUAndGPU. FP16 graphs retain the selected policy;
+low-precision GPU accumulation is disabled. Exact INT8 ML Programs retain typed arithmetic.
+The legacy host-path constructor and its target identity remain CPU/ANE only.
 
-— [`coreml_bridge.m:277`](../crates/virtio-accel-coreml/native/coreml_bridge.m#L277)
-
-That constant is the whole device policy. It grants the ANE and the CPU, and withholds the GPU.
-
-**The CPU is already in play.** Because `MLComputeUnitsCPUAndNeuralEngine` includes the CPU, a
-model containing operators the ANE declines runs those operators on the CPU — silently, inside a
-submission that `device_info()` reports as `AcceleratorClass::NPU`. This is not a defect; it is
-Core ML's documented placement model, and the crate README states it. It does mean **the project's
-first non-NPU execution path already exists and already ships**, and that per-submission device
-attribution is not observable through the `Accelerator` contract.
-
-**What excludes everything else.** Construction refuses any host without an ANE:
-
-```rust
-if unsafe { va_coreml_has_neural_engine() } == 0 {
-    return Err(InitError::NeuralEngineUnavailable);
-}
-```
-
-— [`macos.rs:383`](../crates/virtio-accel-coreml/src/macos.rs#L383), backed by a
-`MLNeuralEngineComputeDevice` scan at
-[`coreml_bridge.m:121`](../crates/virtio-accel-coreml/native/coreml_bridge.m#L121)
-
-This gate, not the framework, is what excludes Intel Macs — Core ML runs there, it simply has no
-ANE. It also excludes ANE-less VMs, which is why the CI example on `macos-latest` skips rather than
-fails.
-
-**The two changes.**
-
-- *Apple GPU:* switch the constant to `MLComputeUnitsAll`. One line. It widens placement to the
-  GPU without adding a device to select, so nothing above the bridge changes.
-- *Intel Macs and ANE-less hosts:* soften the ANE gate to a capability probe. Larger than it looks
-  — `identity.uuid` (`apple-coreml-ane`) and `identity.class` (`NPU`) are compile-time constants at
-  [`macos.rs:393`](../crates/virtio-accel-coreml/src/macos.rs#L393) and would have to become
-  runtime-derived to stay truthful.
+**Hardware evidence.** On Apple M4, the installed Python wheel passes FP16/FP32 MLP,
+FP32 nearest-centroid, FIR and runtime tests under CPU/GPU, CPU/ANE and All. Native Rust
+tests execute FP16/FP32 MATMUL for the GPU and All policies. These are policy-level
+numerical execution results, not per-operation engine attribution or proof of concurrent
+GPU/ANE activity. Qualcomm and AMD Python execution require separate host validation.
 
 ### Intel OpenVINO (`virtio-accel-openvino`)
 
