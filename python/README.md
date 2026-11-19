@@ -94,7 +94,7 @@ crates are testing/integration infrastructure, not additional physical providers
 | --- | --- | --- | --- |
 | Core ML | NPU-capable, macOS | macOS 14+ | FP16/FP32; CPU participation; no CAST |
 | Vulkan | GPU, macOS/Linux/Windows | Vulkan loader and GPU driver (MoltenVK on macOS) | FP16/FP32; software CPU devices excluded |
-| OpenVINO | CPU/GPU/NPU | OpenVINO C runtime present **when building the wheel**, plus device plugins/drivers | FP16/FP32, subject to plugin admission; exact named device, no AUTO/HETERO |
+| OpenVINO | CPU/GPU/NPU | OpenVINO C runtime present **when building the wheel**, plus device plugins/drivers | FP16/FP32, subject to plugin admission; no floating-tier CAST; exact named device, no AUTO/HETERO |
 | Hexagon | NPU, Windows ARM64 | Complete QAIRT/QNN SDK at build time and HTP runtime | FP16; FP32 rejected without downconversion |
 | XDNA | NPU, Linux | Pinned HRX at build time, AMD driver and aiecc compiler toolchain | BF16 identity and batch-1 BF16→FP32 MATMUL; backend shape restrictions apply |
 
@@ -150,9 +150,9 @@ still rejects unsupported graphs. FP8 and integer frontend APIs remain outside t
 
 Core ML uses **CPUAndNeuralEngine**. This selects an NPU-capable provider, not proven
 ANE-only execution; `strict=True` rejects it. Vulkan selects a GPU endpoint and excludes
-software CPU devices. Core ML's existing tier has no `CAST`: mixed FP16/FP32 arithmetic,
+software CPU devices. Core ML and OpenVINO's existing floating tiers have no `CAST`: mixed FP16/FP32 arithmetic,
 FP16 reductions (which widen to FP32), and explicit casts can export TOSA but are rejected
-by this provider. FP32 nearest-centroid, and FP16/FP32 MLP/FIR examples run through Core ML.
+by these providers. FP32 nearest-centroid and FP16/FP32 MLP/FIR are admitted by both.
 
 Native handles remain on one worker thread per compiled specialization. Calls serialize,
 release the GIL while waiting, explicitly copy inputs into reusable native allocations,
