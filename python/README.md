@@ -18,8 +18,10 @@ python -m pip install .
 Building requires Rust 1.85+ and access to Cargo dependencies. The Python extension is
 an isolated Cargo workspace: PyO3 does not become a dependency of any portable crate.
 The package has not yet been published to PyPI. The release workflow builds CPython
-3.10+ stable-ABI wheels for Linux (glibc 2.28+), macOS 14+, and Windows, on both x86-64
-and ARM64, plus a standalone source archive. See [first publication](https://github.com/MicroPerceptron/virtio-accel/blob/main/python/releasing.md).
+3.10+ stable-ABI wheels for Linux (glibc 2.28+) and macOS 14+ on x86-64/ARM64,
+and Windows x86-64, plus a standalone source archive. Windows ARM64 wheels and
+Qualcomm hardware CI are deferred, tracked in [#209](https://github.com/MicroPerceptron/virtio-accel/issues/209); Hexagon remains available through QAIRT-enabled
+source builds. See [first publication](https://github.com/MicroPerceptron/virtio-accel/blob/main/python/releasing.md).
 Prebuilt wheels do not require Rust. Source builds do; macOS source builds also require
 a macOS 26 SDK, and Windows ARM64 Hexagon builds require QAIRT development headers.
 
@@ -98,7 +100,7 @@ crates are testing/integration infrastructure, not additional physical providers
 | Core ML | NPU, GPU, hybrid CPU/GPU/ANE | macOS 14+ | FP16/FP32; CPU participation; no CAST |
 | Vulkan | GPU, macOS/Linux/Windows | Vulkan loader and GPU driver (MoltenVK on macOS) | FP16/FP32; software CPU devices excluded |
 | OpenVINO | CPU/GPU/NPU | OpenVINO 2026.3 C runtime and device plugins/drivers at execution time | FP16/FP32, subject to plugin admission; no floating-tier CAST; exact named device, no AUTO/HETERO |
-| Hexagon | NPU, Windows ARM64 | Complete QAIRT/QNN SDK at build time and HTP runtime | FP16; FP32 rejected without downconversion |
+| Hexagon | NPU, Windows ARM64 | Source/local wheel builds require the complete QAIRT/QNN SDK and HTP runtime; no prebuilt release wheel yet | FP16; FP32 rejected without downconversion |
 | XDNA | NPU, Linux | Pinned HRX 0.1.0, AMD driver and aiecc compiler toolchain at execution time | BF16 identity and batch-1 BF16→FP32 MATMUL; backend shape restrictions apply |
 
 All five adapters are default Cargo features, enabled on their supported platforms.
@@ -359,6 +361,7 @@ The new tests also prove import and TOSA export survive missing vendor libraries
 The Mac source archive was extracted outside the checkout and rebuilt successfully;
 wheel metadata/license checks and installed-adapter checks pass on Mac and Linux.
 These are packaging-portability checks, separate from the earlier Qualcomm execution
-results above. The changed Windows runtime-path loader still requires the configured
-QAIRT runner (or the updated relay script) before release. Hosted CI covers the
-remaining wheel build targets; no six-platform release or PyPI upload is claimed here.
+results above. The changed Windows runtime-path loader still needs manual validation
+on a QAIRT-configured machine before restoring the Windows ARM64 release wheel.
+The first release defers that wheel and its hardware CI; hosted CI covers the other
+five wheel targets. No PyPI upload is claimed here.

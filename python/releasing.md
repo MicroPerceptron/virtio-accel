@@ -30,38 +30,33 @@ Rust crates and the protocol. Nothing has been uploaded by adding this workflow.
    desired. The workflow uses GitHub's short-lived identity to publish; no PyPI
    API token or repository publishing secret is required.
 
-## Windows ARM64 / Qualcomm runner
+## Deferred Windows ARM64 distribution
 
-The Windows ARM64 release wheel must contain Hexagon, OpenVINO, and Vulkan adapters.
-It builds on the tested Snapdragon host, with the complete QAIRT **2.49** SDK
-already installed. SDK files are never included in release artifacts.
+Follow-up: [#209 — Windows ARM64 wheels and Qualcomm release validation](https://github.com/MicroPerceptron/virtio-accel/issues/209).
 
-1. Open **Settings → Actions → Runners → New self-hosted runner** in this repository.
-   Select Windows / ARM64 and follow GitHub's generated registration commands on
-   the Snapdragon machine. Add the custom label **`qairt-2.49`**. The workflow also
-   requires the default `self-hosted`, `Windows`, and `ARM64` labels.
-2. Run the runner under the account that passed the hardware tests. Its environment
-   must provide PowerShell 7 (`pwsh`), native ARM64 CPython (3.14 recommended), stable
-   Rust for `aarch64-pc-windows-msvc`, Git, and the Visual Studio ARM64 C++ tools.
-   Confirm `python` and `rustc` resolve in that account's runner environment.
-3. Set `VIRTIO_ACCEL_QNN_SDK_ROOT` (or `QNN_SDK_ROOT`) to the complete SDK, for example
-   `C:\Qualcomm\AIStack\QAIRT\2.49.0.260730`. Preserve the working HTP/DSP runtime
-   setup, including `ADSP_LIBRARY_PATH` and any required driver configuration.
-   Restart the runner after changing its environment.
-4. Keep build-time SDK paths out of runtime override variables unless intentional.
-   The adapter resolves `VIRTIO_ACCEL_QNN_LIBRARY`, `VIRTIO_ACCEL_QNN_LIB_DIR`, and
-   the SDK root at **execution time**, so the wheel can run on another installation.
+The first automated release contains five wheels: Linux x86-64/ARM64, macOS
+x86-64/ARM64, and Windows x86-64. Windows ARM64 wheels and Qualcomm hardware
+checks are deferred. No self-hosted runner is required or used by this workflow.
 
-The workflow force-enables Hexagon and runs its mandatory FP16 hardware suite.
-It fails if the SDK, compiled adapter, runtime, or NPU is missing. It does not run
-on pull requests: a hosted preparation job first requires the selected commit to
-be on the default branch. The runner has no registry credentials.
+Hexagon remains implemented in the SDK and included in the source archive. Native
+Windows ARM64 builds still require the complete QAIRT SDK, ARM64 Python and Rust,
+and Visual Studio ARM64 C++ tools. Use [the manual test script](scripts/test-hexagon.ps1)
+on the Snapdragon machine to build a local wheel and relay its test results.
+It validates all Windows adapters and runtime DLL selection without registering
+that machine as a GitHub Actions runner. These local wheels are not automatically
+included in the PyPI release. On Windows ARM64, force a native Hexagon source build
+with `VIRTIO_ACCEL_HEXAGON=1` and the documented QAIRT setup; installing the source
+archive without the SDK cannot enable Hexagon.
+
+Restoring a prebuilt Windows ARM64 wheel requires a suitable QAIRT build path and
+validation of the current runtime loader. The earlier successful Qualcomm hardware
+tests remain recorded in the README; they do not validate the subsequent loader changes.
 
 ## First rehearsal and publication
 
-1. Merge the reviewed packaging work after PR CI passes and register the runner.
+1. Merge the reviewed packaging work after PR CI passes.
 2. Open **Actions → Release Python SDK → Run workflow** on `main`, choosing
-   **artifacts**. This builds and tests all six wheels and the source archive,
+   **artifacts**. This builds and tests all five wheels and the source archive,
    without uploading to a package registry. Download the `python-dist-*` artifacts
    for any additional hardware checks.
 3. Run the same workflow on `main` with **testpypi**. TestPyPI is a separate registry;
@@ -78,7 +73,7 @@ be on the default branch. The runner has no registry credentials.
 4. For production, create a GitHub release from the reviewed `main` commit with
    tag **`python-v0.1.0a1`**. Mark this initial alpha as a prerelease. Publishing
    that GitHub release triggers the workflow. It publishes only after all builds,
-   installed-wheel tests, Qualcomm hardware tests, source rebuild, and artifact
+   installed-wheel tests, source rebuild, and artifact
    completeness checks pass. The crates.io workflow ignores `python-v` releases.
 5. Confirm the workflow succeeds and the files appear on the PyPI project page.
    In a fresh environment, test `python -m pip install --pre virtio-accel`.
@@ -86,8 +81,8 @@ be on the default branch. The runner has no registry credentials.
    on platforms/Python versions supported by Intel's package. Drivers and other
    vendor runtimes remain host prerequisites.
 
-The six wheel targets are Linux x86-64/ARM64 (glibc 2.28+), macOS x86-64/ARM64
-(macOS 14+), and Windows x86-64/ARM64. They use CPython's `cp310-abi3` ABI for
+The five wheel targets are Linux x86-64/ARM64 (glibc 2.28+), macOS x86-64/ARM64
+(macOS 14+), and Windows x86-64. They use CPython's `cp310-abi3` ABI for
 ordinary CPython 3.10 and newer. This does not promise PyPy, free-threaded CPython,
 musl Linux, or accelerator hardware on every architecture. Each wheel includes
 only the providers supported on its operating system; discovery still requires
@@ -117,6 +112,6 @@ Build Linux release wheels with `maturin build --release --locked
 --manifest-path python/Cargo.toml --out dist --zig --compatibility manylinux_2_28
 --auditwheel check --strip`. On macOS and Windows omit the Linux-specific flags.
 `python python/scripts/check_release.py artifacts dist --complete` requires the
-whole six-wheel release plus its source archive. `installed` verifies that the
+whole five-wheel release plus its source archive. `installed` verifies that the
 active environment imports the installed wheel and contains the expected native
 adapters. Full hardware regression tests remain necessary when native code changes.

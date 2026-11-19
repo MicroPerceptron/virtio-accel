@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 import check_release as release
@@ -35,6 +36,31 @@ class ReleaseChecks(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             release.check_artifacts(self.root, False)
         with self.assertRaisesRegex(ValueError, 'Incomplete release'):
+            release.check_artifacts(self.root, True)
+
+    def test_complete_release_requires_five_hosted_wheels_and_source(self):
+        platforms = ('manylinux_2_28_x86_64', 'manylinux_2_28_aarch64',
+                     'macosx_14_0_arm64', 'macosx_14_0_x86_64', 'win_amd64')
+        wheels = [self.wheel(platform) for platform in platforms]
+        archive = self.root / f'virtio_accel-{self.version}.tar.gz'
+        archive.touch()
+        # Source contents are independently checked by the real sdist rebuild in CI.
+        with patch.object(release, 'check_sdist'), contextlib.redirect_stdout(io.StringIO()):
+            release.check_artifacts(self.root, True)
+            for wheel in wheels:
+                held = wheel.with_suffix('.held')
+                wheel.rename(held)
+                with self.subTest(wheel=wheel.name), self.assertRaisesRegex(ValueError, 'missing platforms'):
+                    release.check_artifacts(self.root, True)
+                held.rename(wheel)
+            archive.unlink()
+            with self.assertRaisesRegex(ValueError, 'source archives=0'):
+                release.check_artifacts(self.root, True)
+
+    def test_manual_arm64_wheel_is_valid_but_not_part_of_automated_release(self):
+        wheel = self.wheel('win_arm64')
+        self.assertEqual(release.check_wheel(wheel, self.version), {'win_arm64'})
+        with self.assertRaisesRegex(ValueError, "unexpected platforms \\['win_arm64'\\]"):
             release.check_artifacts(self.root, True)
 
     def test_rejects_nonportable_tag_and_wrong_abi(self):
