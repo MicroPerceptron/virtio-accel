@@ -125,7 +125,7 @@ jobs:
           $python = Join-Path $PWD '.release-venv/Scripts/python.exe'
           & $python -m pip install 'maturin>=1.16,<2' 'twine>=6,<7'
           if ($LASTEXITCODE) { throw 'Build dependency installation failed' }
-          & $python -m maturin build --release --locked --manifest-path python/Cargo.toml --out dist --strip
+          & $python -m maturin build --release --locked --manifest-path python/Cargo.toml --interpreter $python --target aarch64-pc-windows-msvc --out dist --strip
           if ($LASTEXITCODE) { throw 'Wheel build failed' }
           & $python python/scripts/check_release.py artifacts dist
           if ($LASTEXITCODE) { throw 'Artifact validation failed' }
