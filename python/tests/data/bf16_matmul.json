@@ -6,7 +6,7 @@
       "shape": [
         1,
         32,
-        32
+        64
       ],
       "dtype": "bfloat16",
       "inputs": [],
@@ -16,7 +16,7 @@
       "op": "input",
       "shape": [
         1,
-        32,
+        64,
         32
       ],
       "dtype": "bfloat16",

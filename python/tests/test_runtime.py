@@ -156,10 +156,10 @@ class HardwareTests(unittest.TestCase):
         x = np.arange(1024, dtype=np.float32).astype(vnp.bfloat16)
         with va.jit(lambda x: x).lower(x).compile(self.device, timeout=900, strict=True) as executable:
             np.testing.assert_array_equal(executable(x).to_numpy().view(np.uint16), x.view(np.uint16))
-        a = np.ones((1, 32, 32), dtype=vnp.bfloat16)
-        b = np.ones((1, 32, 32), dtype=vnp.bfloat16)
+        a = np.ones((1, 32, 64), dtype=vnp.bfloat16)
+        b = np.ones((1, 64, 32), dtype=vnp.bfloat16)
         with va.jit(lambda a, b: a @ b).lower(a, b).compile(self.device, timeout=900, strict=True) as executable:
-            np.testing.assert_array_equal(executable(a, b).to_numpy(), np.full((1, 32, 32), 32, np.float32))
+            np.testing.assert_array_equal(executable(a, b).to_numpy(), np.full((1, 32, 32), 64, np.float32))
         for dtype in (np.float16, np.float32):
             with self.assertRaisesRegex(RuntimeError, 'target'):
                 va.jit(lambda x: x).lower(np.ones(1024, dtype)).compile(self.device)

@@ -369,8 +369,23 @@ mod tests {
                 .analyze_for(doc.target())
                 .unwrap();
             #[cfg(all(feature = "xdna", target_os = "linux"))]
-            assert!(virtio_accel_xdna::admit(&bytes, doc.target()).is_ok());
+            virtio_accel_xdna::admit(&bytes, doc.target())
+                .expect("frontend fixture must fit XDNA admission");
         }
+    }
+
+    #[cfg(all(feature = "xdna", target_os = "linux"))]
+    #[test]
+    fn xdna_rejects_bf16_matmul_outside_its_tile_contract() {
+        let mut graph: Value =
+            serde_json::from_str(include_str!("../tests/data/bf16_matmul.json")).unwrap();
+        graph["nodes"][0]["shape"][2] = json!(32);
+        graph["nodes"][1]["shape"][1] = json!(32);
+        let bytes = compile_json(&graph.to_string()).unwrap();
+        assert_eq!(
+            virtio_accel_xdna::admit(&bytes, virtio_accel_xdna::XDNA_TOSA_TARGET),
+            Err(virtio_accel_xdna::AdmitError::Unsupported)
+        );
     }
 
     #[test]

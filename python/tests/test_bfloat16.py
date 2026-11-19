@@ -36,7 +36,7 @@ class BFloat16Tests(unittest.TestCase):
     def test_shared_xdna_fixtures(self):
         for name, fn, args in (
             ('bf16_identity', lambda x: x, (np.ones(1024, vnp.bfloat16),)),
-            ('bf16_matmul', lambda a, b: a @ b, (np.ones((1, 32, 32), vnp.bfloat16),) * 2),
+            ('bf16_matmul', lambda a, b: a @ b, (np.ones((1, 32, 64), vnp.bfloat16), np.ones((1, 64, 32), vnp.bfloat16))),
         ):
             fixture = json.loads((Path(__file__).parent / 'data' / (name + '.json')).read_text())
             self.assertEqual(va.jit(fn).lower(*args).to_dict(), fixture)
@@ -45,6 +45,6 @@ class BFloat16Tests(unittest.TestCase):
     def test_native_bf16_export(self):
         for fn, args in (
             (lambda x: x, (np.ones(1024, vnp.bfloat16),)),
-            (lambda a, b: a @ b, (np.ones((1, 32, 32), vnp.bfloat16),) * 2),
+            (lambda a, b: a @ b, (np.ones((1, 32, 64), vnp.bfloat16), np.ones((1, 64, 32), vnp.bfloat16))),
         ):
             self.assertEqual(va.jit(fn).lower(*args).to_tosa()[4:8], b'TOSA')
