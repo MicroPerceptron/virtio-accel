@@ -10,6 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 description = "macOS Core ML and Apple Neural Engine backend for virtio-accel"
 readme = "README.md"
+links = "virtio_accel_coreml"
 
 [dependencies]
 virtio-accel-core.workspace = true

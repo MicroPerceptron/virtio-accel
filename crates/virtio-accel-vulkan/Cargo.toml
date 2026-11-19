@@ -10,6 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 description = "Vendor-neutral Vulkan compute host backend for virtio-accel"
 readme = "README.md"
+links = "virtio_accel_vulkan"
 
 [dependencies]
 virtio-accel-core.workspace = true

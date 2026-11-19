@@ -10,6 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 description = "AMD XDNA (Ryzen AI NPU) host backend for virtio-accel"
 readme = "README.md"
+links = "virtio_accel_xdna"
 
 [features]
 default = []

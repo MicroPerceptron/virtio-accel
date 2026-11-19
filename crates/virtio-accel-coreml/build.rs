@@ -52,6 +52,7 @@ fn main() {
     );
     std::fs::rename(aligned_archive, archive).expect("failed to install aligned bridge archive");
 
+    println!("cargo::metadata=native=1");
     println!("cargo:rustc-link-lib=framework=CoreML");
     println!("cargo:rustc-link-lib=framework=Foundation");
 }
