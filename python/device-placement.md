@@ -78,6 +78,6 @@ API must expose physical-device identity to support multiple identically named G
 Discovery diagnostics include missing loaders and initialization failures. No installation
 or environment mutation is performed automatically.
 
-Core ML currently lacks CAST in its advertised floating-point tier. FP16 graph support
+Core ML and OpenVINO currently lack CAST in their advertised floating-point tiers. FP16 graph support
 does not imply that graphs mixing FP16 and FP32 will be admitted. This is a provider
 limitation, separate from the portable selector syntax.

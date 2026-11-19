@@ -137,16 +137,17 @@ class HardwareTests(unittest.TestCase):
             executable(x)
         executable.close()
 
-    def test_coreml_unsupported_cast_is_explicit_and_recoverable(self):
-        if self.record.provider != 'coreml':
-            self.skipTest('Core ML-specific admission boundary')
+    def test_unsupported_cast_is_explicit_and_recoverable(self):
+        if self.record.provider not in ('coreml', 'openvino'):
+            self.skipTest('Core ML/OpenVINO floating-tier CAST boundary')
         x = np.ones((2, 2), np.float16)
         lowered = va.jit(lambda x: x.astype(vnp.float32)).lower(x)
         for _ in range(2):
             with self.assertRaisesRegex(RuntimeError, 'CAST'):
                 lowered.compile(self.device)
-        with self.assertRaisesRegex(RuntimeError, 'exclusive'):
-            va.jit(lambda x: x).lower(x).compile(self.device, strict=True)
+        if self.record.provider == 'coreml':
+            with self.assertRaisesRegex(RuntimeError, 'exclusive'):
+                va.jit(lambda x: x).lower(x).compile(self.device, strict=True)
         with va.jit(lambda x: x + 1).lower(x).compile(self.device) as executable:
             np.testing.assert_allclose(executable(x).to_numpy(), x + 1)
 
