@@ -26,6 +26,7 @@ fn main() {
     let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if SUPPORTED_TARGETS.contains(&os.as_str()) {
         println!("cargo::rustc-cfg=va_vulkan");
+        println!("cargo::metadata=native=1");
     } else {
         assert!(
             !forced,

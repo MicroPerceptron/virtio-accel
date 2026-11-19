@@ -98,6 +98,7 @@ fn main() {
         root.display()
     );
     println!("cargo::rustc-cfg=va_hexagon");
+    println!("cargo::metadata=native=1");
 }
 
 fn has_import_library(directory: &Path, stem: &str) -> bool {

@@ -37,6 +37,7 @@ impl Discovery {
 }
 
 // Only concrete OpenVINO endpoints are selectable. Never admit AUTO/HETERO/MULTI.
+#[cfg(any(va_python_openvino, test))]
 fn openvino_kind(name: &str) -> Option<&'static str> {
     let (class, index) = name.split_once('.').unwrap_or((name, ""));
     if name.contains('.') && (index.is_empty() || !index.bytes().all(|c| c.is_ascii_digit())) {
@@ -52,7 +53,7 @@ fn openvino_kind(name: &str) -> Option<&'static str> {
 
 pub fn discover() -> Discovery {
     let mut result = Discovery::default();
-    #[cfg(all(feature = "coreml", target_os = "macos"))]
+    #[cfg(va_python_coreml)]
     match virtio_accel_coreml::CoreMlAccelerator::new_tosa() {
         Ok(_) => result.add(
             "npu",
@@ -62,10 +63,7 @@ pub fn discover() -> Discovery {
         ),
         Err(error) => result.diagnostics.push(format!("Core ML: {error}")),
     }
-    #[cfg(all(
-        feature = "vulkan",
-        any(target_os = "macos", target_os = "linux", target_os = "windows")
-    ))]
+    #[cfg(va_python_vulkan)]
     match virtio_accel_vulkan::VulkanAccelerator::available_devices() {
         Ok(mut names) => {
             names.sort();
@@ -98,7 +96,7 @@ pub fn discover() -> Discovery {
         }
         Err(error) => result.diagnostics.push(format!("Vulkan: {error}")),
     }
-    #[cfg(feature = "openvino")]
+    #[cfg(va_python_openvino)]
     match virtio_accel_openvino::OpenVinoAccelerator::available_devices() {
         Ok(mut names) => {
             names.sort();
@@ -118,15 +116,28 @@ pub fn discover() -> Discovery {
         }
         Err(e) => result.diagnostics.push(format!("OpenVINO: {e}")),
     }
-    #[cfg(feature = "hexagon")]
+    #[cfg(va_python_hexagon)]
     match virtio_accel_hexagon::HexagonAccelerator::new() {
         Ok(_) => result.add("npu", "hexagon", "Qualcomm Hexagon (QNN HTP)".into(), false),
         Err(e) => result.diagnostics.push(format!("Hexagon: {e}")),
     }
-    #[cfg(all(feature = "xdna", target_os = "linux"))]
+    #[cfg(va_python_xdna)]
     match virtio_accel_xdna::XdnaAccelerator::new() {
         Ok(_) => result.add("npu", "xdna", "AMD XDNA (HRX device 0)".into(), false),
         Err(e) => result.diagnostics.push(format!("XDNA: {e}")),
+    }
+    for (provider, built) in [
+        ("Core ML", cfg!(va_python_coreml)),
+        ("Vulkan", cfg!(va_python_vulkan)),
+        ("OpenVINO", cfg!(va_python_openvino)),
+        ("Hexagon", cfg!(va_python_hexagon)),
+        ("XDNA", cfg!(va_python_xdna)),
+    ] {
+        if !built {
+            result.diagnostics.push(format!(
+                "{provider}: native backend not built (feature, target or SDK unavailable)"
+            ));
+        }
     }
     result
 }
@@ -271,7 +282,9 @@ impl<A: Accelerator + virtio_accel_tosa::TosaCapabilityProvider> Session<A> {
             } else {
                 BufferUsage::PROGRAM_OUTPUT | BufferUsage::TRANSFER_SOURCE
             };
-            let desc = BufferDesc::new(*size as u64, 16 * 1024, domain, usage)
+            // Host transfers impose no extra alignment. Each provider applies its own
+            // native allocation requirements; do not impose macOS page size on HRX.
+            let desc = BufferDesc::new(*size as u64, 1, domain, usage)
                 .map_err(|e| error("buffer description", e))?;
             let (buffer, _) = self
                 .backend
@@ -484,7 +497,7 @@ impl Worker {
         std::thread::Builder::new()
             .name("virtio-accel-executor".into())
             .spawn(move || {
-                #[cfg(all(feature = "coreml", target_os = "macos"))]
+                #[cfg(va_python_coreml)]
                 if device.provider == "coreml" && device.kind == "npu" {
                     match virtio_accel_coreml::CoreMlAccelerator::new_tosa() {
                         Ok(backend) => serve(backend, json, receiver, ready),
@@ -494,10 +507,7 @@ impl Worker {
                     }
                     return;
                 }
-                #[cfg(all(
-                    feature = "vulkan",
-                    any(target_os = "macos", target_os = "linux", target_os = "windows")
-                ))]
+                #[cfg(va_python_vulkan)]
                 if device.provider == "vulkan" && device.kind == "gpu" {
                     match virtio_accel_vulkan::VulkanAccelerator::with_device(&device.name) {
                         Ok(backend) => {
@@ -516,7 +526,7 @@ impl Worker {
                     }
                     return;
                 }
-                #[cfg(feature = "openvino")]
+                #[cfg(va_python_openvino)]
                 if device.provider == "openvino"
                     && openvino_kind(&device.name) == Some(device.kind.as_str())
                 {
@@ -536,7 +546,7 @@ impl Worker {
                     }
                     return;
                 }
-                #[cfg(feature = "hexagon")]
+                #[cfg(va_python_hexagon)]
                 if device.provider == "hexagon" && device.kind == "npu" {
                     match virtio_accel_hexagon::HexagonAccelerator::new() {
                         Ok(backend) => serve(backend, json, receiver, ready),
@@ -546,7 +556,7 @@ impl Worker {
                     }
                     return;
                 }
-                #[cfg(all(feature = "xdna", target_os = "linux"))]
+                #[cfg(va_python_xdna)]
                 if device.provider == "xdna" && device.kind == "npu" {
                     match virtio_accel_xdna::XdnaAccelerator::new() {
                         Ok(backend) => serve(backend, json, receiver, ready),

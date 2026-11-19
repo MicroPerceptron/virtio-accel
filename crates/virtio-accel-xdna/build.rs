@@ -41,6 +41,7 @@ fn main() {
         println!("cargo:rustc-link-search=native={dir}");
         println!("cargo:rustc-link-lib=dylib=hrx");
         println!("cargo::rustc-cfg=va_xdna");
+        println!("cargo::metadata=native=1");
         return;
     }
 
@@ -76,6 +77,7 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=dylib=hrx");
     println!("cargo::rustc-cfg=va_xdna");
+    println!("cargo::metadata=native=1");
 }
 
 /// Reject an older libhrx generation whose amdxdna header predates the native executable API.

@@ -26,6 +26,7 @@ fn main() {
         println!("cargo:rustc-link-search=native={dir}");
         println!("cargo:rustc-link-lib=dylib=openvino_c");
         println!("cargo::rustc-cfg=va_openvino");
+        println!("cargo::metadata=native=1");
         return;
     }
 
@@ -42,6 +43,7 @@ fn main() {
             }
             println!("cargo:rustc-link-lib=dylib=openvino_c");
             println!("cargo::rustc-cfg=va_openvino");
+            println!("cargo::metadata=native=1");
         }
         Err(error) => {
             assert!(
