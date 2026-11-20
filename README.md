@@ -40,40 +40,48 @@ a booted Linux integration test and vendor runtimes kept on the host.
 
 This table is organized by program and dtype. For the physical devices behind it — which parts are validated on hardware, which are merely reachable, and which still need implementation, including the non-NPU CPU and GPU paths Core ML and OpenVINO already expose — see the [device support matrix](docs/device-support-matrix.md).
 
-| Backend                                     | Status                                    | Program admission                                            | FP32                              | FP16                                   | FP8 E4M3/E5M2               | INT8                            | Packed INT4     | Program-visible buffers            |
-| ------------------------------------------- | ----------------------------------------- | ------------------------------------------------------------ | --------------------------------- | -------------------------------------- | --------------------------- | ------------------------------- | --------------- | ---------------------------------- |
-| Apple Core ML / GPU / ANE (`virtio-accel-coreml`) | Implemented; macOS 14+                    | Static TOSA 1.0 FP; INT8 tier on macOS 26+                   | Supported                         | Supported                              | Not implemented             | Identity + MATMUL               | Not implemented | Direct host/shared bindings        |
-| Intel OpenVINO (`virtio-accel-openvino`)    | Implemented; OpenVINO 2026.x              | Static TOSA 1.0 FP + INT8 tier; FP8 tier                     | Supported                         | Supported                              | Widened tier (ADR 0009)     | Identity + MATMUL               | Not implemented | Direct host/shared bindings        |
-| AMD XDNA (`virtio-accel-xdna`)              | Experimental; HRX on XDNA2                | Static BF16 TOSA + explicit FP8 storage CAST + INT8 tier     | Accumulator outputs only          | Not implemented                        | E4M3/E5M2 → BF16 CAST       | Identity + MATMUL + RESCALE     | Not implemented | Direct host/shared bindings        |
-| Qualcomm Hexagon (`virtio-accel-hexagon`)   | Experimental; QAIRT 2.49 on Windows ARM64 | Static TOSA 1.0 FP16 + BOOL/INT32 auxiliaries; INT8 tier     | Blocked by v73 precision evidence | 41/42 shared operators (`ERF` blocked) | Blocked: ambiguous encoding | Identity + MATMUL               | Not implemented | Direct host/shared bindings        |
-| Vulkan (`virtio-accel-vulkan`)              | Experimental; Vulkan 1.3 loader           | Static TOSA 1.0 FP32/FP16 + BOOL/INT32 auxiliaries; FP8 tier | Supported                         | Supported                              | 11-operator tier (ADR 0009) | Target declared, not advertised | Not implemented | Direct host/shared/device bindings |
+| Backend | Status / program admission | FP32 | FP16 | BF16 | FP8 E4M3/E5M2 | INT8 / INT32 | Program-visible buffers |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Apple Core ML / GPU / ANE (`virtio-accel-coreml`) | macOS 14+ floating tier; macOS 26+ integer, FP8 and mixed tiers | Supported | Supported | Not implemented | Packed storage, casts and widened MATMUL | Identity + bounded MATMUL → INT32 | Direct host/shared bindings |
+| Intel OpenVINO (`virtio-accel-openvino`) | OpenVINO 2026.x; static TOSA floating, integer, FP8 and mixed tiers | Supported, device dependent | Supported | Not advertised | Storage, casts and widened tier; device-probed | Identity + bounded MATMUL → INT32 | Direct host/shared bindings |
+| AMD XDNA (`virtio-accel-xdna`) | Experimental; HRX on XDNA2 | Accumulator outputs only | Not implemented | Identity, MATMUL → FP32, MAX_POOL2D | E4M3/E5M2 → BF16 CAST | Identity + MATMUL → INT32 + RESCALE | Direct host/shared bindings |
+| Qualcomm Hexagon (`virtio-accel-hexagon`) | Experimental; QAIRT 2.49 on Windows ARM64 | Blocked by v73 precision evidence | 41/42 shared operators (`ERF` blocked) | Not implemented | Blocked: ambiguous encoding | Identity + MATMUL → INT32 | Direct host/shared bindings |
+| Vulkan (`virtio-accel-vulkan`) | Experimental; Vulkan 1.3 loader | Supported | Supported | Not implemented | 11-operator tier (ADR 0009) | INT32 auxiliaries; INT8 target not advertised | Direct host/shared/device bindings |
+
+Low-bit weight formats have separate execution and storage contracts:
+
+| Backend | Constant INT4/INT8 weights, FP16 activations | Four-bit palette weights | Runtime NVFP4 E2M1 weights + E4M3 block scales |
+| --- | --- | --- | --- |
+| Core ML (macOS 26+) | Native compressed constants; policy-dependent placement | FP16 palettes via native lookup compression | FP16/FP32 projections; packed inputs, graph decoding |
+| OpenVINO | GPU compressed INT4/INT8 path; CPU/NPU predecode constants to FP16 | Not implemented | FP16/FP32 on CPU/GPU; FP16 on validated Lunar Lake NPU |
+| XDNA | Not implemented | Not implemented | Not implemented |
+| Hexagon | Not implemented | Not implemented | Not implemented |
+| Vulkan | Not implemented | Not implemented | Not implemented |
+
+Constant weight formats require program reload when weights or scales change. NVFP4
+weights/scales can change per invocation; packed inputs do not promise native FP4
+arithmetic or compressed resident intermediates. TOSA INT4 tensor execution remains
+unimplemented across these backends. Core ML/OpenVINO integer MATMUL admission bounds
+the worst-case absolute dot-product sum to 2**24 to preserve exact results (K <= 1024
+with zero zero-points); compressed FP16 weight projections are a separate tier.
 
 ### Core ML (_Apple GPU and Neural Engine_)
 
 - **Execution:** Explicit CPU/ANE, CPU/GPU and combined CPU/GPU/ANE policies. Core ML chooses per-operation placement; combined mode does not guarantee simultaneous GPU/ANE use. FP32 NeuralNetwork graphs exclude ANE to preserve precision (CPUOnly under CPU/ANE, CPU/GPU under combined mode). FP16 retains the full policy. The support table refers to model-boundary dtypes; restricted INT32 outputs are also available.
-- **INT8:** Direct INT8 model boundaries require macOS 26+ and currently support identity plus zero-point-aware MATMUL.
-- **Explicit limits:** FP8, unsupported INT8 operators, and packed INT4 graphs are rejected rather than dequantized. Core ML's INT4 support is compressed-weight storage, not TOSA INT4 execution.
+- **INT8:** Direct INT8 model boundaries require macOS 26+ and support identity plus zero-point-aware MATMUL with INT32 output, subject to the exactness bound above.
+- **FP8 and packed weights:** macOS 26+ adds E4M3/E5M2 storage/casts, widened MATMUL, explicit NVFP4 projections, and immutable INT4/INT8 or palette weight compression. FP8 storage uses byte carriers; decoding stays in the submitted graph. See [ADR 0014](docs/adr/0014-packed-quantized-inference.md) and [ADR 0016](docs/adr/0016-coreml-compressed-weights.md).
+- **Explicit limits:** TOSA INT4 tensors and unsupported integer operators are rejected. Compression and compute-policy selection do not guarantee GPU/ANE placement or speedup.
 
 See the [`virtio-accel-coreml` support boundary](crates/virtio-accel-coreml/README.md#low-precision-boundary).
 
 ### OpenVINO (_Intel NPU/GPU/CPU_)
 
 - **Execution:** The backend compiles separately for each available device—NPU, then GPU, then CPU by default—using OpenVINO's accuracy-preserving mode. A submission completes only after the runtime writes into the caller's output allocation.
-- **INT8:** Direct INT8 model boundaries are supported; MATMUL uses explicit INT32 zero-point legalization. Restricted INT32 outputs are also available.
-- **FP8 tier (ADR 0009):** both encodings at the model boundary, on the same target the Vulkan tier
-  uses, so a graph admitted by one backend is admitted by the other. FP8 data movement is bit-exact;
-  `MATMUL` widens its operands to binary16, which is TOSA's own accumulator type for FP8 `MATMUL`,
-  so nothing narrows back; `MAX_POOL2D` widens around the window only. The widening is not a
-  preference — the NPU compiler's IE dialect declares `MatMul` operands without the FP8 types, so
-  MLIR's verifier rejects a raw FP8 `MatMul` before the hardware is consulted. What is native is the
-  FP8 _boundary_: parameters stay FP8 through compilation, so nothing converts on the host.
-  The tier is **advertised per device, not per backend**: FP8 support turned out to be arch-gated —
-  Intel NPU arch 5010 (Panther Lake) compiles FP8 while arch 40XX (Lunar Lake) refuses even an FP8
-  `IDENTITY` — so each instance compiles a one-element FP8 graph at open and withholds the
-  descriptor when the device rejects it. There is no property to read instead:
-  `OPTIMIZATION_CAPABILITIES` omits FP8 on 5010, where it works.
+- **INT8:** Direct INT8 model boundaries are supported; MATMUL uses explicit INT32 zero-point legalization and the exactness bound above. Restricted INT32 outputs are also available.
+- **FP8 tier:** E4M3/E5M2 storage, activations and weight constants are supported on devices that pass the native compilation probe. CPU/GPU pass the activation/cache tests; the validated Lunar Lake NPU withholds this tier. Sharing a TOSA target with another backend does not imply identical graph admission. MATMUL widens operands to FP16; pooling widens around the window. Exact FP32 casts, cache windows and pure storage graphs use byte carriers, preserving storage bits without host-side conversion. See [ADR 0009](docs/adr/0009-fp8-operator-tier.md) and [ADR 0014](docs/adr/0014-packed-quantized-inference.md).
+- **Packed weights:** Constant INT4/INT8 projections keep FP16 activations. GPU compilation can retain compressed weights; CPU/NPU expand constants once at load time with explicit FP16 rounding. Runtime NVFP4 uses separate packed E2M1 weights, E4M3 block scales and a tensor scale; CPU/GPU support FP32 and FP16, while the validated Lunar Lake NPU supports the FP16 variant.
 - **Runtime:** NPU and GPU require their Intel Level Zero driver or compute runtime. The CPU plugin is exercised in CI.
-- **Explicit limits:** unsupported INT8 operators and packed INT4 graphs are rejected rather than dequantized. FP8 arithmetic beyond `MATMUL` is not reachable: TOSA admits no FP8 elementwise operator at all.
+- **Explicit limits:** TOSA INT4 tensors and unsupported integer operators remain rejected. FP8 elementwise arithmetic requires explicit widening; CPU/NPU constant expansion carries no compressed-residency claim.
 
 See the [`virtio-accel-openvino` support boundary](crates/virtio-accel-openvino/README.md#low-precision-boundary).
 
@@ -170,7 +178,7 @@ barriers between dependent dispatches. Buffers are dedicated directly bound stor
 
 ### TOSA 1.0
 
-Independently of backend execution, `virtio-accel-tosa` validates the TOSA 1.0 profiles and extensions for all five dtype columns, and `virtio-accel-conformance` ships shared fixtures and oracles for them. `virtio-accel-tosa-build` provides matching borrowed and incrementally owned safe authoring paths for static single-block graphs and validates every result through that ingestion boundary. The byte-oriented `virtio-accel-mock` backend remains test infrastructure rather than a typed hardware implementation.
+Independently of backend execution, `virtio-accel-tosa` validates the declared TOSA 1.0 profiles and dtype extensions, and `virtio-accel-conformance` ships shared fixtures and oracles for them. `virtio-accel-tosa-build` provides matching borrowed and incrementally owned safe authoring paths for static single-block graphs and validates every result through that ingestion boundary. The byte-oriented `virtio-accel-mock` backend remains test infrastructure rather than a typed hardware implementation.
 
 ## Workspace
 
@@ -236,10 +244,14 @@ The transport crate exposes reset-scoped chain identities, flattened direction/l
 ## Python SDK
 
 The experimental Python SDK provides NumPy-style tracing, TOSA export and explicit
-native execution across the available accelerator backends.
+native execution across the available accelerator backends. It exposes FP16/BF16/FP32,
+FP8 E4M3FN/E5M2 and INT8/INT32 storage, with explicit operation limits. The
+[`virtio_accel.quantized` API](https://virtio-accel.org/python/api/quantized.html)
+authors INT4/INT8, palette and runtime NVFP4 projections through the same `jit` and
+execution interface. Python authoring support does not expand a backend's admission tier.
 
 ```sh
-python -m pip install virtio-accel==0.1.0a1
+python -m pip install virtio-accel==0.1.0a2
 ```
 
 Start with the [Python guide](python/README.md) and
@@ -251,23 +263,23 @@ a source build with QAIRT rather than a PyPI wheel.
 
 ```toml
 [dependencies]
-virtio-accel = "0.4"
+virtio-accel = "0.5"
 ```
 
 The facade is `no_std`. Add the reference backend as a dev-dependency to run the example below:
 
 ```toml
 [dev-dependencies]
-virtio-accel-mock = "0.4"
+virtio-accel-mock = "0.5"
 ```
 
 Host backends are separate dependencies and are never re-exported by the portable facade. Add
-`virtio-accel-coreml = "0.4"` on an ANE-capable Mac, `virtio-accel-openvino = "0.4"` on a host
-with OpenVINO 2026.x, or `virtio-accel-vulkan = "0.4"` on a supported host with a Vulkan 1.3
+`virtio-accel-coreml = "0.5"` on an ANE-capable Mac, `virtio-accel-openvino = "0.5"` on a host
+with OpenVINO 2026.x, or `virtio-accel-vulkan = "0.5"` on a supported host with a Vulkan 1.3
 loader and compute device. Each accepts the device-neutral TOSA 1.0 program format and owns its
 provider-specific validation, lowering, and execution path.
 
-For portable adapter-boundary validation while the native vAccel path is wired, add `virtio-accel-vaccel = "0.4"`. The crate exposes a vAccel seam with an in-repo representative conformance recipe and explicit copy-path diagnostics.
+For portable adapter-boundary validation while the native vAccel path is wired, add `virtio-accel-vaccel = "0.5"`. The crate exposes a vAccel seam with an in-repo representative conformance recipe and explicit copy-path diagnostics.
 
 ## Adapter profiles
 
@@ -279,17 +291,17 @@ For portable adapter-boundary validation while the native vAccel path is wired, 
   `virtio-accel-hexagon`, `virtio-accel-xdna`, and/or `virtio-accel-vulkan` instead of any mock
   backend once provider licensing and native runtime availability are in place.
 
-`virtio-accel-hexagon = "0.4"` exposes the separate Qualcomm adapter. A complete QAIRT/QNN SDK on Windows ARM64 enables its HTP backend; SDK-free builds validate its strict FP16 graph planner and constructors return `RuntimeUnavailable`.
+`virtio-accel-hexagon = "0.5"` exposes the separate Qualcomm adapter. A complete QAIRT/QNN SDK on Windows ARM64 enables its HTP backend; SDK-free builds validate its strict FP16 graph planner and constructors return `RuntimeUnavailable`.
 
-`virtio-accel-vulkan = "0.4"` loads the platform Vulkan loader at run time. It admits the shared
+`virtio-accel-vulkan = "0.5"` loads the platform Vulkan loader at run time. It admits the shared
 FP32 and FP16 operator tiers (with `BOOL`/`INT32` auxiliaries) and a separate eleven-operator FP8
 tier. It returns `RuntimeUnavailable` or
 `DeviceUnavailable` when no suitable Vulkan 1.3 compute path exists; it does not silently fall
 back to the mock backend.
 
-Add `virtio-accel-tosa = "0.4"` separately to validate TOSA 1.0 artifacts, inspect safe borrowed graph and typed-attribute views, enforce complete stable-op semantics for a declared target, and construct the device-neutral TOSA artifact envelope. `Model::analyze_for` also produces bounded dense IDs, topological order, liveness, runtime obligations, and specialization keys for Core ML, OpenVINO, or another provider. It is intentionally not re-exported by the facade.
+Add `virtio-accel-tosa = "0.5"` separately to validate TOSA 1.0 artifacts, inspect safe borrowed graph and typed-attribute views, enforce complete stable-op semantics for a declared target, and construct the device-neutral TOSA artifact envelope. `Model::analyze_for` also produces bounded dense IDs, topological order, liveness, runtime obligations, and specialization keys for Core ML, OpenVINO, or another provider. It is intentionally not re-exported by the facade.
 
-Add `virtio-accel-tosa-build = "0.4"` to produce static single-block TOSA artifacts through typed tensor and operator definitions. Borrowed definitions suit graph literals; owned definitions let compiler frontends assemble runtime-discovered metadata without a parallel owned-to-borrowed adapter, while existing constant storage can remain borrowed. Both surfaces pass the same parser and target validator providers use at admission.
+Add `virtio-accel-tosa-build = "0.5"` to produce static single-block TOSA artifacts through typed tensor and operator definitions. Borrowed definitions suit graph literals; owned definitions let compiler frontends assemble runtime-discovered metadata without a parallel owned-to-borrowed adapter, while existing constant storage can remain borrowed. Both surfaces pass the same parser and target validator providers use at admission.
 
 ## Production backend examples
 
