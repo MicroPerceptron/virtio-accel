@@ -76,6 +76,10 @@ def main():
     p.add_argument("--samples", type=int, default=101)
     p.add_argument("--warmups", type=int, default=5)
     p.add_argument(
+        "--duration", type=float, default=1.0, help="minimum measured seconds per batch"
+    )
+    p.add_argument("--warmup-seconds", type=float, default=1.0)
+    p.add_argument(
         "--frames",
         type=int,
         default=0,
@@ -88,8 +92,12 @@ def main():
         or not 3 <= args.samples <= 10000
         or not 1 <= args.warmups <= 100
         or not 0 <= args.frames <= 240
+        or not 0 <= args.duration <= 60
+        or not 0 <= args.warmup_seconds <= 60
     ):
-        p.error("output must be new; samples 3..10000, warmups 1..100, frames 0..240")
+        p.error(
+            "output must be new; samples 3..10000, warmups 1..100, frames 0..240, durations 0..60 seconds"
+        )
     if len(set(args.batch)) != len(args.batch):
         p.error("batch sizes must be unique")
     for batch in [*args.batch, args.frame_batch]:
@@ -135,7 +143,10 @@ def main():
         git_commit=capture(["git", "rev-parse", "HEAD"]),
         git_status=capture(["git", "status", "--porcelain=v1"]),
         timing_boundary="synchronous SDK call, host input copy/upload, execution/wait, output download and host copy",
-        warmups=args.warmups,
+        minimum_warmups=args.warmups,
+        minimum_warmup_seconds=args.warmup_seconds,
+        minimum_samples=args.samples,
+        minimum_sample_seconds=args.duration,
         in_flight=1,
         dtype="float16",
         cases=[],
@@ -161,16 +172,31 @@ def main():
                         validate(executable(x).to_numpy(), ref)
                         for x, ref in zip(inputs, expected)
                     ]
-                    for index in range(args.warmups):
-                        executable(inputs[index % 3]).to_numpy()
+                    warmups = 0
+                    warmup_start = time.perf_counter()
+                    while (
+                        warmups < args.warmups
+                        or time.perf_counter() - warmup_start < args.warmup_seconds
+                    ):
+                        executable(inputs[warmups % 3]).to_numpy()
+                        warmups += 1
                     samples = []
-                    for index in range(args.samples):
+                    sample_start = time.perf_counter()
+                    while (
+                        len(samples) < args.samples
+                        or time.perf_counter() - sample_start < args.duration
+                    ):
+                        if len(samples) == 100000:
+                            raise RuntimeError(
+                                "sample cap reached before minimum duration"
+                            )
                         start = time.perf_counter_ns()
-                        result = executable(inputs[index % 3]).to_numpy()
+                        result = executable(inputs[len(samples) % 3]).to_numpy()
                         samples.append(time.perf_counter_ns() - start)
-                    errors.append(validate(result, expected[(args.samples - 1) % 3]))
+                    errors.append(validate(result, expected[(len(samples) - 1) % 3]))
                 case = dict(
                     batch=batch,
+                    warmups=warmups,
                     trace_ms=trace_ns / 1e6,
                     compile_ms=compile_ns / 1e6,
                     input_sha256=[

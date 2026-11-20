@@ -36,7 +36,8 @@ the optional training command below. Output directories must be new.
 second, separate tracing/compilation times, device/runtime versions, source
 hashes, checkpoint hash, inputs and numerical error. Each batch compiles once,
 validates three deterministic inputs against an independent NumPy reference,
-warms up, then measures synchronous SDK calls with **one invocation in flight**.
+warms up for at least one second and five calls, then measures at least one
+second and 101 synchronous SDK calls with **one invocation in flight**.
 Each sample includes input copying/upload, execution/wait and output download
 plus the final NumPy copy. Training, reference computation, compilation and
 frame rendering are excluded. Throughput is batch size divided by median
