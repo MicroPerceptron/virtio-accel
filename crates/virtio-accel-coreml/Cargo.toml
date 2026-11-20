@@ -13,7 +13,7 @@ readme = "README.md"
 links = "virtio_accel_coreml"
 
 [dependencies]
-half = { version = "2.7", default-features = false }
+half.workspace = true
 virtio-accel-core.workspace = true
 virtio-accel-tosa.workspace = true
 

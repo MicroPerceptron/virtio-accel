@@ -1608,6 +1608,31 @@ fn compressed_palette_weights_preserve_arbitrary_entries() {
         .map(|i| ((2 * i) % 16) as u8 | (((2 * i + 1) % 16) as u8) << 4)
         .collect::<Vec<_>>();
     let graph = quantized::palette4_matmul_fp16(m, n, k, group, &packed, &lut).unwrap();
+    use virtio_accel_tosa_build::{Graph, Operator, OperatorKind, Tensor};
+    let dense_bytes = (0..k * n)
+        .flat_map(|i| {
+            let pos = (i % n) * k + i / n;
+            lut[(pos / group) * 16 + pos % 16].to_le_bytes()
+        })
+        .collect::<Vec<_>>();
+    let a_shape = [1, m as i32, k as i32];
+    let b_shape = [1, k as i32, n as i32];
+    let out_shape = [1, m as i32, n as i32];
+    let f = virtio_accel_tosa::DType::FP16;
+    let tensors = [
+        Tensor::new("a", &a_shape, f),
+        Tensor::constant("b", &b_shape, f, &dense_bytes),
+        Tensor::constant("z", &[1], f, &[0, 0]),
+        Tensor::new("out", &out_shape, f),
+    ];
+    let ops = [
+        Operator::new(OperatorKind::Const, &[], &["b"]),
+        Operator::new(OperatorKind::Const, &[], &["z"]),
+        Operator::new(OperatorKind::MatMul, &["a", "b", "z", "z"], &["out"]),
+    ];
+    let dense = Graph::new("dense", &tensors, &ops, &["a"], &["out"])
+        .build(quantized::TARGET)
+        .unwrap();
     let x = (0..m * k)
         .flat_map(|i| (if i / k == i % k { 0x3c00u16 } else { 0 }).to_le_bytes())
         .collect::<Vec<_>>();
@@ -1637,6 +1662,12 @@ fn compressed_palette_weights_preserve_arbitrary_entries() {
             continue;
         }
         let out = run_tosa_bytes_on(&backend, &graph, quantized::TARGET, &[&x], m * n * 2).unwrap();
+        let dense_out =
+            run_tosa_bytes_on(&backend, &dense, quantized::TARGET, &[&x], m * n * 2).unwrap();
+        assert_eq!(
+            out, dense_out,
+            "compressed and dense linear must agree for {units:?}"
+        );
         for (i, b) in out.chunks_exact(2).enumerate() {
             let pos = (i % n) * k + i / n;
             let expected = lut[(pos / group) * 16 + pos % 16];

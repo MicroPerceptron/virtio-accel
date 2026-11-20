@@ -14,7 +14,9 @@ these recommendations do not guarantee placement for every shape or palette geom
 No wire bytes, assigned dtype numbers, target identities or boundary layouts change.
 On the existing macOS 26+ mixed integer/float tier, recognize constant weight
 `CAST(INT8 -> FP16) * FP16 group_scale`, reshape and RHS transpose before FP16 MATMUL.
-Emit a typed FP16 `linear` with two-dimensional compressed constants. GPU/All policies
+Emit a typed FP16 `linear` with two-dimensional compressed constants. Dense FP16
+constant RHS tensors in the same mixed tier also lower to `linear`, with an exact
+load-time transpose; matched controls therefore share the native operation and model format. GPU/All policies
 use `constexpr_blockwise_shift_scale`, packing to signed int4 only when every value
 fits [-8,7], otherwise keeping int8. CPU/ANE uses a 16-entry FP16 palette for int4
 values; each entry is rounded exactly as the original FP16 multiplication requires.

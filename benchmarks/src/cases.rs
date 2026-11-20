@@ -261,21 +261,14 @@ fn projection(m: usize, n: usize, k: usize, format: ProjectionWeights) -> Worklo
                 Operator::new(OperatorKind::MatMul, &["a", "b", "zero", "zero"], &["out"]),
             ];
             Graph::new("projection", &tensors, &ops, &["a"], &["out"])
-                .build(target(ExtensionSet::NONE))
+                .build(quantized::TARGET)
                 .unwrap()
         }
     };
     Workload {
         name: String::new(),
         artifact,
-        target: if matches!(
-            format,
-            ProjectionWeights::F16 | ProjectionWeights::F16Channel
-        ) {
-            target(ExtensionSet::NONE)
-        } else {
-            quantized::TARGET
-        },
+        target: quantized::TARGET,
         inputs: vec![encode(&a, d)],
         expected: encode(&expected, d),
         output_dtype: d,
