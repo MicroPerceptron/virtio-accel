@@ -135,6 +135,18 @@ class QuantizedHardwareTests(unittest.TestCase):
             np.testing.assert_array_equal(f(x, w, s).to_numpy(), [[32]])
             self.assertEqual(len(f._executables), 1)
 
+    def test_short_nvfp4_lookup_tails(self):
+        # One to four block-scale indices exercised the CPU plugin's broken
+        # batched Gather tail. Check both precisions and unchanged byte inputs.
+        dtypes = (np.float16,) if self.device.kind == 'npu' and self.device.provider == 'openvino' else (np.float16, np.float32)
+        for dtype in dtypes:
+            for n in (1, 2, 3, 4):
+                x = np.ones((1, 16), dtype)
+                w = np.full((1, n * 8), 0x22, np.int8)
+                s = np.ones((1, n), vnp.float8_e4m3fn).view(np.int8)
+                self.execute(lambda x, w, s: q.nvfp4_matmul(x, w, s),
+                             (x, w, s), np.full((1, n), 16, dtype))
+
     def test_fp8_decode_and_integer_accumulator(self):
         if self.device.provider == 'openvino' and self.device.kind == 'npu':
             self.skipTest('OpenVINO NPU mixed FP16 tier only')
