@@ -3,11 +3,11 @@ use super::*;
 
 /// Build an FP16 projection with immutable, symmetric signed four-bit weights.
 ///
-/// `packed_weights` is row-major [N,K], low nibble first, two's-complement [-8,7].
+/// `packed_weights` is row-major `[N,K]`, low nibble first, two's-complement `[-8,7]`.
 /// N*K must be even; the packed byte slice must have exactly N*K/2 bytes.
-/// `scale_bits` contains positive finite binary16 scales [N,K/group_size].
+/// `scale_bits` contains positive finite binary16 scales `[N,K/group_size]`.
 /// Each weight is converted to FP16 then multiplied by its group's scale before
-/// MATMUL. Slots are 0: FP16 activations [1,M,K], 1: FP16 output [1,M,N].
+/// MATMUL. Slots are 0: FP16 activations `[1,M,K]`, 1: FP16 output `[1,M,N]`.
 ///
 /// TOSA 1.0 has no INT4-to-float CAST. The portable artifact therefore serializes
 /// these exact values as INT8 constants, using one byte per weight. OpenVINO can
@@ -33,7 +33,7 @@ pub fn int4_matmul_fp16(
     build(m, n, k, group_size, &weights, scale_bits)
 }
 
-/// As [`int4_matmul_fp16`], with signed eight-bit constant weights [N,K].
+/// As [`int4_matmul_fp16`], with signed eight-bit constant weights `[N,K]`.
 /// Values are represented exactly; the backend may losslessly use narrower
 /// storage when all values fit. This is W8A16, not integer-profile INT8 MATMUL.
 pub fn int8_matmul_fp16(
