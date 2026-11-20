@@ -44,11 +44,19 @@ jobs:
       - name: Install guest kernel and build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y linux-image-generic linux-headers-generic busybox-static cpio ninja-build libglib2.0-dev python3-venv
-          kernel=$(ls /boot/vmlinuz-*-generic | sort -V | tail -1)
-          sudo cp "$kernel" "$RUNNER_TEMP/vmlinuz"
-          sudo chmod a+r "$RUNNER_TEMP/vmlinuz"
-          echo "KDIR=/lib/modules/${kernel#/boot/vmlinuz-}/build" >> "$GITHUB_ENV"
+          headers=$(apt-cache depends linux-headers-generic | awk '$1 == "Depends:" && $2 ~ /^linux-headers-[0-9].*-generic$/ {print $2; exit}')
+          test -n "$headers"
+          sudo apt-get install -y --no-install-recommends "$headers" busybox-static cpio ninja-build libglib2.0-dev python3-venv
+          # This VM uses built-in virtio drivers and our own initramfs. Installing
+          # linux-image-generic pulls hundreds of MB of unused firmware/modules
+          # and runs host boot-loader hooks. Extract only the matching image.
+          version=${headers#linux-headers-}
+          mkdir -p "$RUNNER_TEMP/guest-kernel"
+          cd "$RUNNER_TEMP/guest-kernel"
+          apt-get download "linux-image-$version"
+          dpkg-deb --extract linux-image-"$version"_*.deb extracted
+          cp "extracted/boot/vmlinuz-$version" "$RUNNER_TEMP/vmlinuz"
+          echo "KDIR=/usr/src/$headers" >> "$GITHUB_ENV"
       - name: Compile Linux driver with extra warnings
         run: make -C guest/linux W=1
       - name: Build experimental QEMU for x86 microvm
