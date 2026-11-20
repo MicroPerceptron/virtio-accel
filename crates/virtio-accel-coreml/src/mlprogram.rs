@@ -343,7 +343,7 @@ fn tensor<'a>(
     }
 }
 
-fn unary_operation(
+pub(crate) fn unary_operation(
     kind: &str,
     inputs: &[(&str, &str)],
     output: &str,
@@ -364,15 +364,15 @@ fn unary_operation(
     operation
 }
 
-fn const_string(name: &str, value: &str) -> Vec<u8> {
+pub(crate) fn const_string(name: &str, value: &str) -> Vec<u8> {
     const_operation(name, MIL_STRING, &string_value(value))
 }
 
-fn const_int32(name: &str, value: i32) -> Vec<u8> {
+pub(crate) fn const_int32(name: &str, value: i32) -> Vec<u8> {
     const_operation(name, MIL_INT32, &int32_value(value))
 }
 
-fn const_bool(name: &str, value: bool) -> Vec<u8> {
+pub(crate) fn const_bool(name: &str, value: bool) -> Vec<u8> {
     const_operation(name, MIL_BOOL, &bool_value(value))
 }
 
@@ -389,7 +389,7 @@ fn const_operation(name: &str, dtype: u64, value: &[u8]) -> Vec<u8> {
     operation
 }
 
-fn argument_entry(key: &str, name: &str) -> Vec<u8> {
+pub(crate) fn argument_entry(key: &str, name: &str) -> Vec<u8> {
     let mut binding = Vec::new();
     field_string(&mut binding, 1, name);
     let mut argument = Vec::new();
@@ -397,25 +397,25 @@ fn argument_entry(key: &str, name: &str) -> Vec<u8> {
     map_entry(key, &argument)
 }
 
-fn attribute_entry(key: &str, value: &[u8]) -> Vec<u8> {
+pub(crate) fn attribute_entry(key: &str, value: &[u8]) -> Vec<u8> {
     map_entry(key, value)
 }
 
-fn map_entry(key: &str, value: &[u8]) -> Vec<u8> {
+pub(crate) fn map_entry(key: &str, value: &[u8]) -> Vec<u8> {
     let mut entry = Vec::new();
     field_string(&mut entry, 1, key);
     field_message(&mut entry, 2, value);
     entry
 }
 
-fn named_value_type(name: &str, dtype: u64, shape: &[i32]) -> Vec<u8> {
+pub(crate) fn named_value_type(name: &str, dtype: u64, shape: &[i32]) -> Vec<u8> {
     let mut named = Vec::new();
     field_string(&mut named, 1, name);
     field_message(&mut named, 2, &value_type(dtype, shape));
     named
 }
 
-fn value_type(dtype: u64, shape: &[i32]) -> Vec<u8> {
+pub(crate) fn value_type(dtype: u64, shape: &[i32]) -> Vec<u8> {
     let mut tensor = Vec::new();
     field_varint(&mut tensor, 1, dtype);
     if !shape.is_empty() {
@@ -433,7 +433,7 @@ fn value_type(dtype: u64, shape: &[i32]) -> Vec<u8> {
     value_type
 }
 
-fn string_value(value: &str) -> Vec<u8> {
+pub(crate) fn string_value(value: &str) -> Vec<u8> {
     let mut repeated = Vec::new();
     field_string(&mut repeated, 1, value);
     immediate_tensor_value(MIL_STRING, 4, &repeated)
@@ -466,26 +466,26 @@ fn immediate_tensor_value(dtype: u64, tensor_field: u32, repeated: &[u8]) -> Vec
     value
 }
 
-fn field_varint(target: &mut Vec<u8>, field: u32, value: u64) {
+pub(crate) fn field_varint(target: &mut Vec<u8>, field: u32, value: u64) {
     varint(target, u64::from(field) << 3);
     varint(target, value);
 }
 
-fn field_string(target: &mut Vec<u8>, field: u32, value: &str) {
+pub(crate) fn field_string(target: &mut Vec<u8>, field: u32, value: &str) {
     field_bytes(target, field, value.as_bytes());
 }
 
-fn field_message(target: &mut Vec<u8>, field: u32, message: &[u8]) {
+pub(crate) fn field_message(target: &mut Vec<u8>, field: u32, message: &[u8]) {
     field_bytes(target, field, message);
 }
 
-fn field_bytes(target: &mut Vec<u8>, field: u32, bytes: &[u8]) {
+pub(crate) fn field_bytes(target: &mut Vec<u8>, field: u32, bytes: &[u8]) {
     varint(target, (u64::from(field) << 3) | 2);
     varint(target, bytes.len() as u64);
     target.extend_from_slice(bytes);
 }
 
-fn varint(target: &mut Vec<u8>, mut value: u64) {
+pub(crate) fn varint(target: &mut Vec<u8>, mut value: u64) {
     while value >= 0x80 {
         target.push((value as u8) | 0x80);
         value >>= 7;

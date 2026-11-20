@@ -601,26 +601,47 @@ fn device_accepts_fp8(core: &CoreHandle, device: &CStr) -> bool {
     accepted
 }
 
-/// The only C-variadic call site: compile with the `ACCURACY` execution-mode hint so plugins may
-/// not silently run a declared-FP32 model at reduced precision.
+fn device_accepts_quantized_fp32(core: &CoreHandle, device: &CStr) -> bool {
+    let probe = crate::lower::fp32_probe_document();
+    let Ok(model) = read_model(core, &probe.xml, None) else {
+        return false;
+    };
+    compile_with_precision(core, &model, device, true).is_ok()
+}
+
+/// Compile existing native tiers with the ACCURACY hint. Quantized FP32 paths use
+/// `compile_with_precision` because the hint alone does not guarantee FP32 on every plugin.
 fn compile_with_accuracy(
     core: &CoreHandle,
     model: &ModelHandle,
     device: &CStr,
 ) -> Result<CompiledModelHandle, BackendError> {
+    compile_with_precision(core, model, device, false)
+}
+
+fn compile_with_precision(
+    core: &CoreHandle,
+    model: &ModelHandle,
+    device: &CStr,
+    fp32: bool,
+) -> Result<CompiledModelHandle, BackendError> {
     let mut compiled = ptr::null_mut();
     // SAFETY: core, model, and device are live; `property_args_size` counts the variadic
     // arguments (one key/value pair contributes two) per the documented convention pinned by a
-    // unit test; the key symbol and value stay valid for the duration of the call.
+    // unit test. All keys/values are static C strings (or the retained runtime key).
+    // The optional precision pair is read only when the count is four; extra variadic
+    // arguments are valid when the count is two. Every pointer outlives this call.
     let status = unsafe {
         (ffi::api().ov_core_compile_model)(
             core.as_const_ptr(),
             model.model.as_ptr(),
             device.as_ptr(),
-            2,
+            if fp32 { 4 } else { 2 },
             &mut compiled,
             ffi::execution_mode_property(),
             c"ACCURACY".as_ptr(),
+            c"INFERENCE_PRECISION_HINT".as_ptr(),
+            c"f32".as_ptr(),
         )
     };
     check_status(status)?;
@@ -878,6 +899,7 @@ pub struct OpenVinoAccelerator {
     info: DeviceInfo,
     /// Whether this device's compiler accepts FP8, probed once at open.
     fp8: bool,
+    quantized_fp32: bool,
 }
 
 impl std::fmt::Debug for OpenVinoAccelerator {
@@ -941,6 +963,7 @@ impl OpenVinoAccelerator {
         let info = device_info_for(&device);
         let device = CString::new(device).map_err(|_| InitError::DeviceUnavailable)?;
         let fp8 = device_accepts_fp8(&core, &device);
+        let quantized_fp32 = device_accepts_quantized_fp32(&core, &device);
         Ok(Self {
             core,
             device,
@@ -949,6 +972,7 @@ impl OpenVinoAccelerator {
             explicit_transfer_bytes: AtomicU64::new(0),
             info,
             fp8,
+            quantized_fp32,
         })
     }
 
@@ -1105,10 +1129,11 @@ impl OpenVinoAccelerator {
 
 impl TosaCapabilityProvider for OpenVinoAccelerator {
     fn tosa_capabilities(&self) -> &'static [CapabilityDescriptor] {
-        if self.fp8 {
-            crate::TOSA_CAPABILITIES_WITH_FP8
-        } else {
-            crate::TOSA_CAPABILITIES
+        match (self.fp8, self.quantized_fp32) {
+            (true, true) => crate::TOSA_CAPABILITIES_WITH_FP8,
+            (false, true) => crate::TOSA_CAPABILITIES,
+            (true, false) => crate::TOSA_CAPABILITIES_FP16_WITH_FP8,
+            (false, false) => crate::TOSA_CAPABILITIES_FP16,
         }
     }
 }
@@ -1311,6 +1336,12 @@ impl Accelerator for OpenVinoAccelerator {
             }
         };
         let lowered = lower_tosa(bytes, target).map_err(Self::lowering_error)?;
+        let require_fp32 = (target == crate::OPENVINO_TOSA_QUANTIZED_TARGET
+            || target == crate::OPENVINO_TOSA_FP8_TARGET)
+            && lowered.requires_fp32;
+        if require_fp32 && !self.quantized_fp32 {
+            return Err(BackendError::Unsupported);
+        }
         let slots = build_slot_plan(&lowered.features)?;
         let inputs = lowered
             .features
@@ -1331,7 +1362,7 @@ impl Accelerator for OpenVinoAccelerator {
         };
 
         let model = read_model(&self.core, &lowered.xml, weights_tensor.as_ref())?;
-        let compiled = compile_with_accuracy(&self.core, &model, &self.device)?;
+        let compiled = compile_with_precision(&self.core, &model, &self.device, require_fp32)?;
         drop(model);
 
         // Emission order defined the model I/O indices; verify the compiled counts agree before

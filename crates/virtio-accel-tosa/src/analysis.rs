@@ -451,6 +451,67 @@ impl<'a> TosaAnalysis<'a> {
         &self.conditions
     }
 
+    /// Prove an index check for the exact byte-lookup idiom `CAST(INT8 -> INT32) + 128`.
+    ///
+    /// The signed byte widens exactly into [-128, 127]; adding 128 cannot overflow and
+    /// yields [0, 255]. No tensor contents, names, or external promises are trusted.
+    /// This deliberately proves no arbitrary gather/scatter index or other runtime condition.
+    pub fn proves_byte_lookup_bounds(&self, condition: &RuntimeCondition<'_>) -> bool {
+        let RuntimeCondition::IndicesInRange {
+            indices,
+            upper_bound,
+            ..
+        } = condition
+        else {
+            return false;
+        };
+        if *upper_bound < 256 {
+            return false;
+        }
+        let Some(add) = self.value(*indices).producer() else {
+            return false;
+        };
+        if self.operator(add).op() != Op::ADD {
+            return false;
+        }
+        let inputs = self.operator_inputs(add);
+        for (cast, offset) in [(inputs[0], inputs[1]), (inputs[1], inputs[0])] {
+            let AnalyzedValueKind::Tensor(offset_tensor) = self.value(offset).kind() else {
+                continue;
+            };
+            if offset_tensor.dtype() != DType::INT32 {
+                continue;
+            }
+            let Some(bytes) = self.serialized_constant(offset) else {
+                continue;
+            };
+            if bytes.is_empty()
+                || bytes.len() % 4 != 0
+                || bytes.chunks_exact(4).any(|b| b != 128i32.to_le_bytes())
+            {
+                continue;
+            }
+            let AnalyzedValueKind::Tensor(cast_tensor) = self.value(cast).kind() else {
+                continue;
+            };
+            if cast_tensor.dtype() != DType::INT32 {
+                continue;
+            }
+            let Some(cast_op) = self.value(cast).producer() else {
+                continue;
+            };
+            if self.operator(cast_op).op() != Op::CAST {
+                continue;
+            }
+            let source = self.operator_inputs(cast_op)[0];
+            if matches!(self.value(source).kind(), AnalyzedValueKind::Tensor(t) if t.dtype() == DType::INT8)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn value(&self, id: ValueId) -> &AnalyzedValue<'a> {
         &self.values[id.index()]
     }

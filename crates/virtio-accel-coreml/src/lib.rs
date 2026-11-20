@@ -11,8 +11,13 @@
 #![cfg_attr(not(target_os = "macos"), forbid(unsafe_code))]
 
 mod artifact;
+mod fp8;
 mod lower;
 mod mlprogram;
+pub use fp8::{
+    COREML_TOSA_FP8_CAPABILITY, COREML_TOSA_FP8_TARGET, COREML_TOSA_QUANTIZED_CAPABILITY,
+    COREML_TOSA_QUANTIZED_TARGET,
+};
 
 pub use artifact::{ArtifactBuildError, CoreMlArtifact, FeatureRole};
 pub use lower::{
@@ -28,8 +33,12 @@ use virtio_accel_tosa::TosaCapabilityProvider;
 #[cfg(target_os = "macos")]
 const FLOAT_CAPABILITIES: &[CapabilityDescriptor] = &[COREML_TOSA_CAPABILITY];
 #[cfg(target_os = "macos")]
-const ALL_CAPABILITIES: &[CapabilityDescriptor] =
-    &[COREML_TOSA_CAPABILITY, COREML_TOSA_INTEGER_CAPABILITY];
+const ALL_CAPABILITIES: &[CapabilityDescriptor] = &[
+    COREML_TOSA_CAPABILITY,
+    COREML_TOSA_INTEGER_CAPABILITY,
+    COREML_TOSA_FP8_CAPABILITY,
+    COREML_TOSA_QUANTIZED_CAPABILITY,
+];
 #[cfg(not(target_os = "macos"))]
 const NO_CAPABILITIES: &[CapabilityDescriptor] = &[];
 

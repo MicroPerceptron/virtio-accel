@@ -16,6 +16,8 @@
 // encoder, but only the native runtime modules call it from `load_program`.
 #![cfg_attr(not(va_openvino), allow(dead_code))]
 
+mod packed_fp8;
+
 use std::fmt;
 use std::fmt::Write as _;
 
@@ -54,6 +56,51 @@ pub const OPENVINO_TOSA_FP8_TARGET: Target = Target::new(
     ExtensionSet::FP8E4M3.union(ExtensionSet::FP8E5M2),
 );
 
+/// Mixed integer/float target for explicitly packed-storage graphs (including NVFP4).
+pub const OPENVINO_TOSA_QUANTIZED_TARGET: Target = Target::new(
+    Version::TOSA_1_0,
+    ProfileSet::FLOATING_POINT.union(ProfileSet::INTEGER),
+    Level::Level8K,
+    ExtensionSet::NONE,
+);
+pub const OPENVINO_TOSA_QUANTIZED_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
+    target: OPENVINO_TOSA_QUANTIZED_TARGET,
+    dtypes: &[
+        DTypeCapability::new(DType::INT8, ValueRoles::ALL),
+        DTypeCapability::new(DType::INT32, ValueRoles::ALL),
+        DTypeCapability::new(DType::FP32, ValueRoles::ALL),
+        DTypeCapability::new(DType::FP16, ValueRoles::ALL),
+    ],
+    operators: &[
+        OperatorCapability::new(Op::CONST),
+        OperatorCapability::new(Op::CONST_SHAPE),
+        OperatorCapability::new(Op::CAST),
+        OperatorCapability::new(Op::ADD),
+        OperatorCapability::constrained(Op::MUL, OperatorConstraints::ZERO_SHIFT),
+        OperatorCapability::new(Op::GATHER),
+        OperatorCapability::new(Op::CONCAT),
+        OperatorCapability::constrained(Op::SLICE, OperatorConstraints::CONSTANT_PARAMETERS),
+        OperatorCapability::new(Op::RESHAPE),
+        OperatorCapability::new(Op::TRANSPOSE),
+        OperatorCapability::constrained(Op::MATMUL, OperatorConstraints::ZERO_ZERO_POINTS),
+    ],
+    graph: GraphCapabilities {
+        max_regions: 1,
+        max_blocks: 1,
+        dynamic_shapes: false,
+        runtime_conditions: RuntimeConditionSupport::ProvenByteLookup,
+    },
+};
+
+/// Same packed-storage operations, with an explicitly FP16 numerical contract.
+pub const OPENVINO_TOSA_QUANTIZED_FP16_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
+    dtypes: &[
+        DTypeCapability::new(DType::INT8, ValueRoles::ALL),
+        DTypeCapability::new(DType::INT32, ValueRoles::ALL),
+        DTypeCapability::new(DType::FP16, ValueRoles::ALL),
+    ],
+    ..OPENVINO_TOSA_QUANTIZED_CAPABILITY
+};
 const FLOAT_DTYPES: &[DTypeCapability] = &[
     DTypeCapability::new(DType::FP16, ValueRoles::ALL),
     DTypeCapability::new(DType::FP32, ValueRoles::ALL),
@@ -137,7 +184,9 @@ const CAST_CAPABILITY: OperatorCapability = OperatorCapability::new(Op::CAST);
 /// Vulkan FP8 tier also carries. Built from [`FLOAT_OPERATORS`] rather than restated, so the two
 /// envelopes cannot drift.
 const FLOAT8_OPERATORS: &[OperatorCapability] = &{
-    let mut extended = [CAST_CAPABILITY; FLOAT_OPERATORS.len() + 1];
+    let mut extended = [CAST_CAPABILITY; FLOAT_OPERATORS.len() + 2];
+    extended[FLOAT_OPERATORS.len() + 1] =
+        OperatorCapability::constrained(Op::SLICE, OperatorConstraints::CONSTANT_PARAMETERS);
     let mut index = 0;
     while index < FLOAT_OPERATORS.len() {
         extended[index] = FLOAT_OPERATORS[index];
@@ -147,14 +196,36 @@ const FLOAT8_OPERATORS: &[OperatorCapability] = &{
 };
 
 /// The FP8 tier's dtypes: both encodings in every role, plus FP16 because TOSA's FP8 `MATMUL`
-/// accumulates into it and INT32 because `ARGMAX` indexes with it. Mirrors the Vulkan tier's
-/// `FLOAT8_DTYPES` so a graph admitted by one backend is admitted by the other.
+/// produces an FP16 result, INT32 for ARGMAX, and FP32 for explicit activation conversion.
+/// Exact activation conversion requires the device's explicit FP32 precision policy.
 const FLOAT8_DTYPES: &[DTypeCapability] = &[
     DTypeCapability::new(DType::FP8E4M3, ValueRoles::ALL),
     DTypeCapability::new(DType::FP8E5M2, ValueRoles::ALL),
     DTypeCapability::new(DType::FP16, ValueRoles::ALL),
     DTypeCapability::new(DType::INT32, ValueRoles::ALL),
+    DTypeCapability::new(DType::FP32, ValueRoles::ALL),
+    DTypeCapability::constrained(
+        DType::INT8,
+        ValueRoles::CONSTANT,
+        DTypeConstraints::PARAMETER_ONLY,
+    ),
 ];
+
+// Native FP8 devices without an explicit FP32 policy retain the original FP16 envelope.
+pub(crate) const OPENVINO_TOSA_FP8_FP16_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
+    dtypes: &[
+        DTypeCapability::new(DType::FP8E4M3, ValueRoles::ALL),
+        DTypeCapability::new(DType::FP8E5M2, ValueRoles::ALL),
+        DTypeCapability::new(DType::FP16, ValueRoles::ALL),
+        DTypeCapability::new(DType::INT32, ValueRoles::ALL),
+        DTypeCapability::constrained(
+            DType::INT8,
+            ValueRoles::CONSTANT,
+            DTypeConstraints::PARAMETER_ONLY,
+        ),
+    ],
+    ..OPENVINO_TOSA_FP8_CAPABILITY
+};
 
 const INTEGER_OPERATORS: &[OperatorCapability] = &[
     OperatorCapability::new(Op::CONST),
@@ -217,6 +288,8 @@ fn capability_for(target: Target) -> Option<&'static CapabilityDescriptor> {
         Some(&OPENVINO_TOSA_CAPABILITY)
     } else if target == OPENVINO_TOSA_INTEGER_TARGET {
         Some(&OPENVINO_TOSA_INTEGER_CAPABILITY)
+    } else if target == OPENVINO_TOSA_QUANTIZED_TARGET {
+        Some(&OPENVINO_TOSA_QUANTIZED_CAPABILITY)
     } else if target == OPENVINO_TOSA_FP8_TARGET {
         Some(&OPENVINO_TOSA_FP8_CAPABILITY)
     } else {
@@ -349,6 +422,7 @@ pub(crate) struct LoweredFeature {
 
 #[derive(Clone, Debug)]
 pub(crate) struct LoweredModel {
+    pub requires_fp32: bool,
     pub xml: Vec<u8>,
     pub weights: Vec<u8>,
     pub features: Vec<LoweredFeature>,
@@ -362,7 +436,12 @@ pub(crate) struct LoweredModel {
 /// keep correct. FP8E4M3 stands in for both encodings: a compiler with no FP8 support at all
 /// rejects the type, and one that supports the extension supports both halves of it.
 pub(crate) fn fp8_probe_document() -> LoweredModel {
-    const ELEMENT: OvElement = OvElement::F8E4M3;
+    probe_document(OvElement::F8E4M3)
+}
+pub(crate) fn fp32_probe_document() -> LoweredModel {
+    probe_document(OvElement::F32)
+}
+fn probe_document(element: OvElement) -> LoweredModel {
     const DIMS: &[i64] = &[1];
     // Three layers and two values: inside every bound `IrBuilder::new` checks.
     let mut builder = IrBuilder::new(2).expect("a three-layer document is always within bounds");
@@ -370,17 +449,17 @@ pub(crate) fn fp8_probe_document() -> LoweredModel {
         "Parameter",
         "opset1",
         "fp8_probe_input",
-        &format!("shape=\"1\" element_type=\"{}\"", ELEMENT.element_type()),
+        &format!("shape=\"1\" element_type=\"{}\"", element.element_type()),
         &[],
-        &[(ELEMENT, DIMS)],
+        &[(element, DIMS)],
     )[0];
     let identity = builder.emit_layer(
         "Convert",
         "opset1",
         "fp8_probe_identity",
-        &format!("destination_type=\"{}\"", ELEMENT.element_type()),
+        &format!("destination_type=\"{}\"", element.element_type()),
         &[(parameter, DIMS)],
-        &[(ELEMENT, DIMS)],
+        &[(element, DIMS)],
     )[0];
     builder.emit_layer(
         "Result",
@@ -421,6 +500,7 @@ struct PortRef {
 
 /// Incremental IR v11 document builder.
 struct IrBuilder {
+    packed_fp8: bool,
     layers: String,
     edges: String,
     weights: Vec<u8>,
@@ -437,12 +517,21 @@ impl IrBuilder {
             .map_err(|_| LoweringError::ResourceLimit)?;
         sources.resize(values, None);
         Ok(Self {
+            packed_fp8: false,
             layers: String::new(),
             edges: String::new(),
             weights: Vec::new(),
             next_layer: 0,
             sources,
         })
+    }
+
+    fn element(&self, dtype: DType) -> Result<OvElement, LoweringError> {
+        if self.packed_fp8 && matches!(dtype, DType::FP8E4M3 | DType::FP8E5M2) {
+            Ok(OvElement::I8)
+        } else {
+            OvElement::for_dtype(dtype)
+        }
     }
 
     fn source(&self, value: ValueId) -> Result<PortRef, LoweringError> {
@@ -587,6 +676,7 @@ impl IrBuilder {
         document.push_str("</edges>");
         document.push_str("</net>");
         LoweredModel {
+            requires_fp32: false,
             xml: document.into_bytes(),
             weights: self.weights,
             features: Vec::new(),
@@ -612,7 +702,9 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, L
     validate_target_types(&analysis, target)?;
     if analysis.regions().len() != 1
         || analysis.blocks().len() != 1
-        || !analysis.conditions().is_empty()
+        || analysis.conditions().iter().any(|c| {
+            target != OPENVINO_TOSA_QUANTIZED_TARGET || !analysis.proves_byte_lookup_bounds(c)
+        })
     {
         return Err(LoweringError::UnsupportedGraph);
     }
@@ -628,6 +720,37 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, L
     }
 
     let mut builder = IrBuilder::new(analysis.values().len())?;
+    // Native Convert rounds through FP16 on some plugins, and GPU Slice rejects FP8.
+    // Graphs needing activation conversion or cache windows use an exact byte carrier.
+    builder.packed_fp8 = target == OPENVINO_TOSA_FP8_TARGET
+        && analysis
+            .execution_order(block)
+            .iter()
+            .any(|id| analysis.operator(*id).op() == Op::SLICE
+                || (analysis.operator(*id).op() == Op::CAST
+                    && analysis.operator_inputs(*id).iter().chain(analysis.operator_outputs(*id))
+                        .any(|v| matches!(analysis.value(*v).kind(), AnalyzedValueKind::Tensor(t) if t.dtype() == DType::FP32))));
+    let packed_fp8 = builder.packed_fp8;
+    if packed_fp8
+        && analysis.execution_order(block).iter().any(|id| {
+            !matches!(
+                analysis.operator(*id).op(),
+                Op::CONST
+                    | Op::CONST_SHAPE
+                    | Op::CAST
+                    | Op::IDENTITY
+                    | Op::MATMUL
+                    | Op::ADD
+                    | Op::MUL
+                    | Op::SLICE
+                    | Op::CONCAT
+                    | Op::RESHAPE
+                    | Op::TRANSPOSE
+            )
+        })
+    {
+        return Err(LoweringError::UnsupportedGraph);
+    }
     let mut features = Vec::new();
     features
         .try_reserve_exact(inputs.len() + outputs.len())
@@ -635,7 +758,11 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, L
 
     for (index, value) in inputs.iter().copied().enumerate() {
         let tensor = tensor(&analysis, value)?;
-        let element = boundary_element(tensor.dtype())?;
+        let element = if packed_fp8 {
+            builder.element(tensor.dtype())?
+        } else {
+            boundary_element(tensor.dtype())?
+        };
         let dims = feature_dims(tensor)?;
         let byte_len = element_byte_len(element, &dims)?;
         let name = format!("input_{index}");
@@ -675,7 +802,11 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, L
 
     for (index, value) in outputs.iter().copied().enumerate() {
         let tensor = tensor(&analysis, value)?;
-        let element = boundary_element(tensor.dtype())?;
+        let element = if packed_fp8 {
+            builder.element(tensor.dtype())?
+        } else {
+            boundary_element(tensor.dtype())?
+        };
         let dims = feature_dims(tensor)?;
         let byte_len = element_byte_len(element, &dims)?;
         let source = builder.source(value)?;
@@ -700,6 +831,15 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, L
 
     let mut lowered = builder.finish();
     lowered.features = features;
+    lowered.requires_fp32 = (packed_fp8
+        && analysis
+            .execution_order(block)
+            .iter()
+            .any(|id| matches!(analysis.operator(*id).op(), Op::CAST | Op::MATMUL)))
+        || analysis
+            .values()
+            .iter()
+            .any(|v| matches!(v.kind(),AnalyzedValueKind::Tensor(t) if t.dtype()==DType::FP32));
     Ok(lowered)
 }
 
@@ -713,19 +853,25 @@ fn validate_target_types(analysis: &TosaAnalysis<'_>, target: Target) -> Result<
             continue;
         };
         let dtype = tensor.dtype();
-        let mismatched = if target == OPENVINO_TOSA_TARGET {
+        let mismatched = if target == OPENVINO_TOSA_QUANTIZED_TARGET {
+            !matches!(
+                dtype,
+                DType::INT8 | DType::INT32 | DType::FP16 | DType::FP32
+            )
+        } else if target == OPENVINO_TOSA_TARGET {
             dtype == DType::INT8
                 && !(analysis.serialized_constant(value.id()).is_some()
                     && constant_is_parameter_only(analysis, value.id()))
         } else if target == OPENVINO_TOSA_FP8_TARGET {
             // The FP8 tier's own dtypes and no others. FP16 is legal here because TOSA's FP8
-            // `MATMUL` accumulates into it and INT32 because `ARGMAX` indexes with it; a graph
-            // carrying FP32 or INT8 belongs to another tier and must not be relabeled into this
-            // one. The float branch above cannot serve: it admits FP32 and FP16 alike.
+            // MATMUL produces an FP16 result, INT32 supports ARGMAX, and FP32 supports
+            // direct activation conversion. INT8 is admitted only for serialized layer parameters.
             !matches!(
                 dtype,
-                DType::FP8E4M3 | DType::FP8E5M2 | DType::FP16 | DType::INT32
-            )
+                DType::FP8E4M3 | DType::FP8E5M2 | DType::FP16 | DType::FP32 | DType::INT32
+            ) && !(dtype == DType::INT8
+                && analysis.serialized_constant(value.id()).is_some()
+                && constant_is_parameter_only(analysis, value.id()))
         } else {
             matches!(dtype, DType::FP16 | DType::FP32)
         };
@@ -824,6 +970,15 @@ fn encode_operator(
             }
             &all_inputs[..1]
         }
+        Op::SLICE => {
+            analysis
+                .serialized_constant(all_inputs[1])
+                .ok_or(LoweringError::UnsupportedGraph)?;
+            analysis
+                .serialized_constant(all_inputs[2])
+                .ok_or(LoweringError::UnsupportedGraph)?;
+            &all_inputs[..1]
+        }
         Op::RESHAPE => {
             analysis
                 .serialized_constant(all_inputs[1])
@@ -846,7 +1001,11 @@ fn encode_operator(
         return encode_tosa_constant(builder, analysis, operator_id, output);
     }
 
-    validate_operator_types(analysis, op, inputs, outputs)?;
+    if capability.target == OPENVINO_TOSA_QUANTIZED_TARGET {
+        validate_quantized_types(analysis, op, inputs, outputs)?;
+    } else {
+        validate_operator_types(analysis, op, inputs, outputs)?;
+    }
     match operator.source().attributes() {
         OpAttributes::Maximum { nan_mode } | OpAttributes::Minimum { nan_mode } => {
             require_propagating_nan(nan_mode)?;
@@ -866,7 +1025,15 @@ fn encode_operator(
     }
 
     let output_tensor = tensor(analysis, outputs[0])?;
-    let output_element = OvElement::for_dtype(output_tensor.dtype())?;
+    if builder.packed_fp8 && op == Op::CAST {
+        let dtype = tensor(analysis, inputs[0])?.dtype();
+        let shape = static_dims(output_tensor)?;
+        let source = builder.source(inputs[0])?;
+        let port = packed_fp8::cast(builder, source, dtype, output_tensor.dtype(), &shape)?;
+        builder.set_source(outputs[0], port);
+        return Ok(());
+    }
+    let output_element = builder.element(output_tensor.dtype())?;
     let output_dims = static_dims(output_tensor)?;
 
     // (layer type, extra `<data .../>` attributes)
@@ -999,6 +1166,55 @@ fn encode_operator(
             builder.set_source(outputs[0], ports[0]);
             return Ok(());
         }
+        Op::SLICE => {
+            let starts = analysis
+                .serialized_constant(all_inputs[1])
+                .ok_or(LoweringError::UnsupportedGraph)?
+                .chunks_exact(8)
+                .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+                .collect::<Vec<_>>();
+            let ends = starts
+                .iter()
+                .zip(&output_dims)
+                .map(|(s, d)| s.checked_add(*d).ok_or(LoweringError::UnsupportedGraph))
+                .collect::<Result<Vec<_>, _>>()?;
+            let rank = starts.len() as i64;
+            let begin = builder.emit_i64_const(&format!("{stem}_begin"), &starts, false)?;
+            let end = builder.emit_i64_const(&format!("{stem}_end"), &ends, false)?;
+            let step =
+                builder.emit_i64_const(&format!("{stem}_step"), &vec![1; starts.len()], false)?;
+            let (source, dims) = value_port_dims(builder, analysis, inputs[0])?;
+            let ports = builder.emit_layer(
+                "Slice",
+                "opset8",
+                &stem,
+                "",
+                &[
+                    (source, &dims),
+                    (begin, &[rank]),
+                    (end, &[rank]),
+                    (step, &[rank]),
+                ],
+                &[(output_element, &output_dims)],
+            );
+            builder.set_source(outputs[0], ports[0]);
+            return Ok(());
+        }
+        Op::GATHER => {
+            let (data, data_dims) = value_port_dims(builder, analysis, inputs[0])?;
+            let (indices, index_dims) = value_port_dims(builder, analysis, inputs[1])?;
+            let axis = builder.emit_i64_const(&format!("{stem}_axis"), &[1], true)?;
+            let ports = builder.emit_layer(
+                "Gather",
+                "opset8",
+                &stem,
+                "batch_dims=\"1\"",
+                &[(data, &data_dims), (indices, &index_dims), (axis, &[])],
+                &[(output_element, &output_dims)],
+            );
+            builder.set_source(outputs[0], ports[0]);
+            return Ok(());
+        }
         Op::TRANSPOSE => {
             let OpAttributes::Transpose { perms } = operator.source().attributes() else {
                 return Err(LoweringError::UnsupportedGraph);
@@ -1024,6 +1240,17 @@ fn encode_operator(
     for (index, value) in inputs.iter().enumerate() {
         let (mut source, dims) = value_port_dims(builder, analysis, *value)?;
         if let Some(widened) = fp8_widening(op, tensor(analysis, *value)?.dtype()) {
+            if builder.packed_fp8 {
+                source = packed_fp8::cast(
+                    builder,
+                    source,
+                    tensor(analysis, *value)?.dtype(),
+                    DType::FP16,
+                    &dims,
+                )?;
+                connected.push((source, dims));
+                continue;
+            }
             source = builder.emit_layer(
                 "Convert",
                 "opset1",
@@ -1359,10 +1586,19 @@ fn encode_tosa_constant(
 ) -> Result<(), LoweringError> {
     let tensor = tensor(analysis, output)?;
     let dtype = tensor.dtype();
-    if !matches!(dtype, DType::FP16 | DType::FP32 | DType::INT8 | DType::BOOL) {
+    if !matches!(
+        dtype,
+        DType::FP16
+            | DType::FP32
+            | DType::INT8
+            | DType::INT32
+            | DType::BOOL
+            | DType::FP8E4M3
+            | DType::FP8E5M2
+    ) {
         return Err(LoweringError::UnsupportedType(dtype));
     }
-    let element = OvElement::for_dtype(dtype)?;
+    let element = builder.element(dtype)?;
     let data = analysis
         .serialized_constant(output)
         .ok_or(LoweringError::InvalidConstant)?;
@@ -1414,6 +1650,32 @@ fn constant_is_parameter_only(analysis: &TosaAnalysis<'_>, value: ValueId) -> bo
 fn fp8_widening(op: Op, dtype: DType) -> Option<OvElement> {
     let is_fp8 = matches!(dtype, DType::FP8E4M3 | DType::FP8E5M2);
     (is_fp8 && op == Op::MATMUL).then_some(OvElement::F16)
+}
+
+fn validate_quantized_types(
+    analysis: &TosaAnalysis<'_>,
+    op: Op,
+    inputs: &[ValueId],
+    outputs: &[ValueId],
+) -> Result<(), LoweringError> {
+    let input = tensor(analysis, inputs[0])?.dtype();
+    let output = tensor(analysis, outputs[0])?.dtype();
+    let float = |d| matches!(d, DType::FP16 | DType::FP32);
+    let valid = match op {
+        Op::CAST => {
+            (input == DType::INT8 && output == DType::INT32) || (float(input) && float(output))
+        }
+        Op::ADD => input == DType::INT32 || float(input),
+        Op::MUL | Op::MATMUL => float(input),
+        Op::GATHER => float(input),
+        Op::RESHAPE | Op::TRANSPOSE | Op::CONCAT | Op::SLICE => true,
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(LoweringError::UnsupportedType(input))
+    }
 }
 
 fn validate_operator_types(
@@ -1469,7 +1731,7 @@ fn validate_operator_types(
         }
         // Data movement and pooling carry FP8 through unchanged: these are the operators whose
         // FP8 form must stay bit-exact, so nothing widens and nothing rounds.
-        Op::CONCAT | Op::RESHAPE | Op::REVERSE | Op::TRANSPOSE | Op::MAX_POOL2D => {
+        Op::CONCAT | Op::RESHAPE | Op::REVERSE | Op::TRANSPOSE | Op::SLICE | Op::MAX_POOL2D => {
             for value in inputs.iter().chain(outputs) {
                 require(*value, is_float_or_fp8)?;
             }
@@ -2046,5 +2308,17 @@ mod tests {
             assert!(!xml.contains('\''));
             assert_eq!(xml.matches('<').count(), xml.matches('>').count());
         }
+    }
+}
+
+#[cfg(test)]
+mod quantized_tests {
+    use super::*;
+    #[test]
+    fn packed_nvfp4_lowering_keeps_byte_boundaries() {
+        let bytes = virtio_accel_tosa_build::quantized::nvfp4_matmul(2, 16, 32, 0.125).unwrap();
+        let lowered = lower_tosa(&bytes, OPENVINO_TOSA_QUANTIZED_TARGET).unwrap();
+        assert_eq!(lowered.features[1].element, OvElement::I8);
+        assert_eq!(lowered.features[2].element, OvElement::I8);
     }
 }

@@ -795,7 +795,10 @@ impl Accelerator for CoreMlAccelerator {
         if artifact.format == virtio_accel_tosa::ARTIFACT_FORMAT {
             let target = virtio_accel_tosa::Target::from_identity(artifact.target)
                 .map_err(|_| BackendError::Incompatible)?;
-            if target == crate::COREML_TOSA_INTEGER_TARGET {
+            if target == crate::COREML_TOSA_INTEGER_TARGET
+                || target == crate::COREML_TOSA_FP8_TARGET
+                || target == crate::COREML_TOSA_QUANTIZED_TARGET
+            {
                 // SAFETY: this query takes no pointers and reports the Foundation runtime's
                 // operating-system version check. INT8 model boundaries are unavailable before
                 // macOS 26 even though this binary weak-links the newer SDK declarations.

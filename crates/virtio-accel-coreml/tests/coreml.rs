@@ -1237,3 +1237,395 @@ fn measures_warm_submission_and_completion_latency() {
     backend.free_buffer(input).unwrap();
     backend.destroy_context(context).unwrap();
 }
+
+fn fp8_cast_graph(
+    input: virtio_accel_tosa::DType,
+    output: virtio_accel_tosa::DType,
+    count: usize,
+) -> Vec<u8> {
+    use virtio_accel_tosa_build::{Graph, Operator, OperatorKind, Tensor};
+    let shape = [1, count as i32];
+    let tensors = [
+        Tensor::new("x", &shape, input),
+        Tensor::new("y", &shape, output),
+    ];
+    Graph::new(
+        "main",
+        &tensors,
+        &[Operator::new(OperatorKind::Cast, &["x"], &["y"])],
+        &["x"],
+        &["y"],
+    )
+    .build(virtio_accel_coreml::COREML_TOSA_FP8_TARGET)
+    .unwrap()
+}
+
+#[test]
+fn fp8_packed_casts_preserve_values_and_round_ties() {
+    use virtio_accel_coreml::COREML_TOSA_FP8_TARGET as target;
+    use virtio_accel_tosa::{DType, TosaCapabilityProvider, fp8e4m3_to_f32, fp8e5m2_to_f32};
+    for units in [
+        CoreMlComputeUnits::CpuAndNeuralEngine,
+        CoreMlComputeUnits::CpuAndGpu,
+        CoreMlComputeUnits::All,
+    ] {
+        let backend = match CoreMlAccelerator::new_tosa_with_compute_units(units) {
+            Ok(b) => b,
+            Err(InitError::GpuUnavailable | InitError::NeuralEngineUnavailable)
+                if std::env::var_os("VIRTIO_ACCEL_COREML_REQUIRE_QUANTIZED").is_none() =>
+            {
+                continue;
+            }
+            Err(e) => panic!("{units:?}: {e}"),
+        };
+        if !backend
+            .tosa_capabilities()
+            .iter()
+            .any(|c| c.target == target)
+        {
+            continue;
+        }
+        for (dtype, decode) in [
+            (DType::FP8E4M3, fp8e4m3_to_f32 as fn(u8) -> f32),
+            (DType::FP8E5M2, fp8e5m2_to_f32 as fn(u8) -> f32),
+        ] {
+            let input = (0..=255u8).collect::<Vec<_>>();
+            let graph = fp8_cast_graph(dtype, DType::FP32, 256);
+            let bytes = run_tosa_bytes_on(&backend, &graph, target, &[&input], 1024).unwrap();
+            for (i, b) in bytes.chunks_exact(4).enumerate() {
+                let got = f32::from_le_bytes(b.try_into().unwrap());
+                let want = decode(i as u8);
+                if want.is_nan() {
+                    assert!(got.is_nan(), "{units:?} {dtype:?} {i}")
+                } else {
+                    assert_eq!(got.to_bits(), want.to_bits(), "{units:?} {dtype:?} {i}");
+                }
+            }
+            let mut values = Vec::new();
+            let mut expected = Vec::new();
+            for i in 0..=255u8 {
+                let f = decode(i);
+                if !f.is_nan() {
+                    values.push(f);
+                    expected.push(i);
+                }
+            }
+            let max = if dtype == DType::FP8E4M3 {
+                126u8
+            } else {
+                123u8
+            };
+            for i in 0..max {
+                let midpoint = (decode(i) + decode(i + 1)) * 0.5;
+                for (f, e) in [
+                    (f32::from_bits(midpoint.to_bits() - 1), i),
+                    (midpoint, if i % 2 == 0 { i } else { i + 1 }),
+                    (f32::from_bits(midpoint.to_bits() + 1), i + 1),
+                ] {
+                    values.push(f);
+                    expected.push(e);
+                    values.push(-f);
+                    expected.push(e | 128);
+                }
+            }
+            let edges: &[(f32, u8)] = if dtype == DType::FP8E4M3 {
+                &[
+                    (464.0, 126),
+                    (f32::from_bits(464.0f32.to_bits() + 1), 127),
+                    (-f32::from_bits(464.0f32.to_bits() + 1), 255),
+                    (f32::INFINITY, 127),
+                    (f32::NEG_INFINITY, 255),
+                    (f32::NAN, 127),
+                ]
+            } else {
+                &[
+                    (61440.0, 124),
+                    (f32::from_bits(61440.0f32.to_bits() - 1), 123),
+                    (f32::MAX, 124),
+                    (f32::INFINITY, 124),
+                    (f32::NEG_INFINITY, 252),
+                    (f32::NAN, 126),
+                ]
+            };
+            for &(value, code) in edges {
+                values.push(value);
+                expected.push(code);
+            }
+            let input = values
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<_>>();
+            let graph = fp8_cast_graph(DType::FP32, dtype, values.len());
+            let got = run_tosa_bytes_on(&backend, &graph, target, &[&input], values.len()).unwrap();
+            for (i, (got, want)) in got.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    got, want,
+                    "{units:?} {dtype:?} value {:?} at {i}",
+                    values[i]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn nvfp4_projection_decodes_packed_weights_and_block_scales() {
+    use virtio_accel_coreml::COREML_TOSA_QUANTIZED_TARGET;
+    use virtio_accel_tosa::TosaCapabilityProvider;
+    let (m, n, k) = (2, 16, 32);
+    let graph = virtio_accel_tosa_build::quantized::nvfp4_matmul(m, n, k, 0.125).unwrap();
+    let weights = (0..=255u8).collect::<Vec<_>>();
+    let scale_codes = [0u8, 1, 8, 0x38, 0x40, 0x7e];
+    let scales = (0..n * k / 16)
+        .map(|i| scale_codes[i % scale_codes.as_slice().len()])
+        .collect::<Vec<_>>();
+    let x = (0..m * k)
+        .map(|i| (i as i32 % 9 - 4) as f32 * 0.25)
+        .collect::<Vec<_>>();
+    let bytes = x.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<_>>();
+    let lut = [
+        0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+    ];
+    let mut expected = vec![0f32; m * n];
+    for row in 0..m {
+        for col in 0..n {
+            for j in 0..k {
+                let index = col * k + j;
+                let nibble = (weights[index / 2] >> ((index % 2) * 4)) & 15;
+                let scale = virtio_accel_tosa::fp8e4m3_to_f32(scales[index / 16]);
+                expected[row * n + col] += x[row * k + j] * (lut[nibble as usize] * scale);
+            }
+            expected[row * n + col] *= 0.125;
+        }
+    }
+    for units in [
+        CoreMlComputeUnits::CpuAndNeuralEngine,
+        CoreMlComputeUnits::CpuAndGpu,
+        CoreMlComputeUnits::All,
+    ] {
+        let backend = match CoreMlAccelerator::new_tosa_with_compute_units(units) {
+            Ok(b) => b,
+            Err(InitError::GpuUnavailable | InitError::NeuralEngineUnavailable)
+                if std::env::var_os("VIRTIO_ACCEL_COREML_REQUIRE_QUANTIZED").is_none() =>
+            {
+                continue;
+            }
+            Err(e) => panic!("{units:?}: {e}"),
+        };
+        if !backend
+            .tosa_capabilities()
+            .iter()
+            .any(|c| c.target == COREML_TOSA_QUANTIZED_TARGET)
+        {
+            continue;
+        }
+        let out = run_tosa_bytes_on(
+            &backend,
+            &graph,
+            COREML_TOSA_QUANTIZED_TARGET,
+            &[&bytes, &weights, &scales],
+            m * n * 4,
+        )
+        .unwrap();
+        for (i, b) in out.chunks_exact(4).enumerate() {
+            let got = f32::from_le_bytes(b.try_into().unwrap());
+            assert!(
+                (got - expected[i]).abs() <= 0.0001,
+                "{units:?} {i}: {got} != {}",
+                expected[i]
+            );
+        }
+    }
+}
+
+#[test]
+fn nvfp4_fp16_projection_obeys_explicit_rounding() {
+    let graph = virtio_accel_tosa_build::quantized::nvfp4_matmul_fp16(2, 16, 32, 0x3000).unwrap();
+    let weights = (0..=255u8).collect::<Vec<_>>();
+    let codes = [0u8, 1, 8, 0x38, 0x40, 0x7e];
+    let scales = (0..32).map(|i| codes[i % 6]).collect::<Vec<_>>();
+    let xb = [
+        0xbc00u16, 0xba00, 0xb800, 0xb400, 0, 0x3400, 0x3800, 0x3a00, 0x3c00,
+    ];
+    let x = (0..64)
+        .flat_map(|i| xb[i % 9].to_le_bytes())
+        .collect::<Vec<_>>();
+    // Independent binary64 dot products, rounded to binary16 before and after scale=1/8.
+    // Generated with Python's struct.pack('<e'), including every E2M1 pattern and
+    // zero/subnormal/normal/max-finite E4M3 block scales across row boundaries.
+    let expected = [
+        0xe00u16, 0x3104, 0x52fe, 0xa00, 0x2bb0, 0xb880, 0x8800, 0xb254, 0x5543, 0xf00, 0x340e,
+        0x57e9, 0x1100, 0x361e, 0x5a2a, 0x1480, 0x9660, 0xba22, 0xdd24, 0x95a0, 0xb962, 0xdc44,
+        0x9460, 0xb6c3, 0xdd94, 0x96a0, 0xbae2, 0xde3c, 0x9760, 0xbbe2, 0xdf54, 0x98b0,
+    ];
+    use virtio_accel_tosa::TosaCapabilityProvider;
+    for units in [
+        CoreMlComputeUnits::CpuAndNeuralEngine,
+        CoreMlComputeUnits::CpuAndGpu,
+        CoreMlComputeUnits::All,
+    ] {
+        let backend = match CoreMlAccelerator::new_tosa_with_compute_units(units) {
+            Ok(b) => b,
+            Err(InitError::GpuUnavailable | InitError::NeuralEngineUnavailable)
+                if std::env::var_os("VIRTIO_ACCEL_COREML_REQUIRE_QUANTIZED").is_none() =>
+            {
+                continue;
+            }
+            Err(e) => panic!("{units:?}: {e}"),
+        };
+        let target = virtio_accel_coreml::COREML_TOSA_QUANTIZED_TARGET;
+        if !backend
+            .tosa_capabilities()
+            .iter()
+            .any(|c| c.target == target)
+        {
+            continue;
+        }
+        let out =
+            run_tosa_bytes_on(&backend, &graph, target, &[&x, &weights, &scales], 64).unwrap();
+        for (i, b) in out.chunks_exact(2).enumerate() {
+            let bits = u16::from_le_bytes(b.try_into().unwrap());
+            assert_eq!(bits, expected[i], "FP16 output {i}");
+        }
+    }
+}
+
+#[test]
+fn fp8_cache_append_and_window_preserve_every_storage_bit() {
+    use virtio_accel_tosa::{DType, TosaCapabilityProvider};
+    use virtio_accel_tosa_build::{Graph, Operator, OperatorKind, Shape, Tensor};
+    for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+        let tensors = [
+            Tensor::new("cache", &[1, 128], dtype),
+            Tensor::new("append", &[1, 128], dtype),
+            Tensor::new("joined", &[1, 256], dtype),
+            Tensor::new("window", &[1, 128], dtype),
+        ];
+        let shapes = [Shape::new("start", &[0, 64]), Shape::new("size", &[1, 128])];
+        let ops = [
+            Operator::new(OperatorKind::ConstShape, &[], &["start"]),
+            Operator::new(OperatorKind::ConstShape, &[], &["size"]),
+            Operator::new(
+                OperatorKind::Concat { axis: 1 },
+                &["cache", "append"],
+                &["joined"],
+            ),
+            Operator::new(
+                OperatorKind::Slice,
+                &["joined", "start", "size"],
+                &["window"],
+            ),
+        ];
+        let target = virtio_accel_coreml::COREML_TOSA_FP8_TARGET;
+        let graph = Graph::new(
+            "kv_window",
+            &tensors,
+            &ops,
+            &["cache", "append"],
+            &["window"],
+        )
+        .with_shapes(&shapes)
+        .build(target)
+        .unwrap();
+        let bytes = (0..=255u8).collect::<Vec<_>>();
+        for units in [
+            CoreMlComputeUnits::CpuAndNeuralEngine,
+            CoreMlComputeUnits::CpuAndGpu,
+            CoreMlComputeUnits::All,
+        ] {
+            let backend = match CoreMlAccelerator::new_tosa_with_compute_units(units) {
+                Ok(b) => b,
+                Err(InitError::GpuUnavailable | InitError::NeuralEngineUnavailable)
+                    if std::env::var_os("VIRTIO_ACCEL_COREML_REQUIRE_QUANTIZED").is_none() =>
+                {
+                    continue;
+                }
+                Err(e) => panic!("{units:?}: {e}"),
+            };
+            if !backend
+                .tosa_capabilities()
+                .iter()
+                .any(|c| c.target == target)
+            {
+                continue;
+            }
+            let out = run_tosa_bytes_on(
+                &backend,
+                &graph,
+                target,
+                &[&bytes[..128], &bytes[128..]],
+                128,
+            )
+            .unwrap();
+            assert_eq!(out, &bytes[64..192]);
+        }
+    }
+}
+
+fn fp8_constant_projection_graph(dtype: virtio_accel_tosa::DType) -> Vec<u8> {
+    use virtio_accel_tosa::DType;
+    use virtio_accel_tosa_build::{Graph, Operator, OperatorKind, Tensor};
+    let weights = if dtype == DType::FP8E4M3 {
+        [0x38, 0x40, 0x44, 0x48, 0xb8, 0xc0, 0x30, 0x38]
+    } else {
+        [0x3c, 0x40, 0x42, 0x44, 0xbc, 0xc0, 0x38, 0x3c]
+    };
+    let tensors = [
+        Tensor::new("input", &[1, 1, 4], DType::FP32),
+        Tensor::new("activation", &[1, 1, 4], dtype),
+        Tensor::constant("weights", &[1, 4, 2], dtype, &weights),
+        Tensor::constant("zero", &[1], dtype, &[0]),
+        Tensor::new("out", &[1, 1, 2], DType::FP16),
+    ];
+    let ops = [
+        Operator::new(OperatorKind::Const, &[], &["weights"]),
+        Operator::new(OperatorKind::Const, &[], &["zero"]),
+        Operator::new(OperatorKind::Cast, &["input"], &["activation"]),
+        Operator::new(
+            OperatorKind::MatMul,
+            &["activation", "weights", "zero", "zero"],
+            &["out"],
+        ),
+    ];
+    Graph::new("projection", &tensors, &ops, &["input"], &["out"])
+        .build(virtio_accel_coreml::COREML_TOSA_FP8_TARGET)
+        .unwrap()
+}
+
+#[test]
+fn fp8_activation_and_constant_weights_execute_together() {
+    use virtio_accel_coreml::COREML_TOSA_FP8_TARGET;
+    use virtio_accel_tosa::{DType, TosaCapabilityProvider};
+    let input = [1.0f32, 2.0, -1.0, 0.5]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect::<Vec<_>>();
+    for units in [
+        CoreMlComputeUnits::CpuAndNeuralEngine,
+        CoreMlComputeUnits::CpuAndGpu,
+        CoreMlComputeUnits::All,
+    ] {
+        let backend = match CoreMlAccelerator::new_tosa_with_compute_units(units) {
+            Ok(b) => b,
+            Err(InitError::GpuUnavailable | InitError::NeuralEngineUnavailable)
+                if std::env::var_os("VIRTIO_ACCEL_COREML_REQUIRE_QUANTIZED").is_none() =>
+            {
+                continue;
+            }
+            Err(e) => panic!("{units:?}: {e}"),
+        };
+        if !backend
+            .tosa_capabilities()
+            .iter()
+            .any(|c| c.target == COREML_TOSA_FP8_TARGET)
+        {
+            continue;
+        }
+        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+            let graph = fp8_constant_projection_graph(dtype);
+            let out =
+                run_tosa_bytes_on(&backend, &graph, COREML_TOSA_FP8_TARGET, &[&input], 4).unwrap();
+            assert_eq!(out, [0x20, 0x48, 0x40, 0x4a], "{units:?} {dtype:?}");
+        }
+    }
+}

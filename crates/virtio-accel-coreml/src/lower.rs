@@ -173,12 +173,18 @@ pub const fn supports_tosa_operator(op: Op) -> bool {
 pub const fn supports_tosa_dtype(dtype: DType) -> bool {
     COREML_TOSA_CAPABILITY.supports_dtype(dtype, ValueRoles::INPUT)
         || COREML_TOSA_CAPABILITY.supports_dtype(dtype, ValueRoles::OUTPUT)
+        || crate::COREML_TOSA_FP8_CAPABILITY.supports_dtype(dtype, ValueRoles::INPUT)
         || crate::mlprogram::COREML_TOSA_INTEGER_CAPABILITY.supports_dtype(dtype, ValueRoles::INPUT)
         || crate::mlprogram::COREML_TOSA_INTEGER_CAPABILITY
             .supports_dtype(dtype, ValueRoles::OUTPUT)
 }
 
 pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, LoweringError> {
+    if target == crate::fp8::COREML_TOSA_FP8_TARGET
+        || target == crate::fp8::COREML_TOSA_QUANTIZED_TARGET
+    {
+        return crate::fp8::lower(bytes, target);
+    }
     if target == crate::mlprogram::COREML_TOSA_INTEGER_TARGET {
         return crate::mlprogram::lower_integer_tosa(bytes, target);
     }
@@ -288,7 +294,7 @@ fn exact_copy_execution(
     })
 }
 
-fn tensor<'a>(
+pub(crate) fn tensor<'a>(
     analysis: &'a TosaAnalysis<'a>,
     value: ValueId,
 ) -> Result<virtio_accel_tosa::Tensor<'a>, LoweringError> {
@@ -304,11 +310,26 @@ pub(crate) fn encode_feature(
     name: &str,
     tensor: virtio_accel_tosa::Tensor<'_>,
 ) -> Result<(), LoweringError> {
-    let shape = static_shape(tensor)?;
+    encode_array_feature(
+        description,
+        field,
+        name,
+        tensor.dtype(),
+        &static_shape(tensor)?,
+    )
+}
+
+pub(crate) fn encode_array_feature(
+    description: &mut Vec<u8>,
+    field: u32,
+    name: &str,
+    dtype: DType,
+    shape: &[i32],
+) -> Result<(), LoweringError> {
     if shape.is_empty() {
         return Err(LoweringError::UnsupportedGraph);
     }
-    let data_type = coreml_data_type(tensor.dtype())?;
+    let data_type = coreml_data_type(dtype)?;
     let mut array = Vec::new();
     field_packed_varints(
         &mut array,
@@ -643,7 +664,7 @@ fn encode_transpose_layer(
     field_message(network, 1, &layer);
 }
 
-fn constant_is_parameter_only(analysis: &TosaAnalysis<'_>, value: ValueId) -> bool {
+pub(crate) fn constant_is_parameter_only(analysis: &TosaAnalysis<'_>, value: ValueId) -> bool {
     let mut consumed = false;
     for operator in analysis.operators() {
         for (index, input) in analysis.operator_inputs(operator.id()).iter().enumerate() {
@@ -928,8 +949,8 @@ mod tests {
         assert!(supports_tosa_dtype(DType::INT32));
         assert!(supports_tosa_dtype(DType::INT8));
         assert!(!supports_tosa_dtype(DType::INT4));
-        assert!(!supports_tosa_dtype(DType::FP8E4M3));
-        assert!(!supports_tosa_dtype(DType::FP8E5M2));
+        assert!(supports_tosa_dtype(DType::FP8E4M3));
+        assert!(supports_tosa_dtype(DType::FP8E5M2));
     }
 
     #[test]

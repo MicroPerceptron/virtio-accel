@@ -20,6 +20,10 @@ the Level Zero loader on hosts without a vendor driver (observed with ze_loader 
 implementations on that shared handle. The single C-variadic call site,
 `ov_core_compile_model`, passes `property_args_size` as the count of variadic arguments (one
 key/value pair contributes two), pinned by a unit test against the installed runtime.
+Quantized FP32 and exact FP8 activation graphs pass four arguments: execution mode `ACCURACY`
+and inference precision `f32`. Other graphs pass a count of two; the runtime ignores the extra
+variadic pair. All property keys and values remain live throughout the synchronous compile.
+A startup probe with the same precision properties controls FP32 quantized admission.
 
 `AlignedAllocation` owns exactly one `std::alloc::Layout`. Its pointer is non-null, is
 deallocated with the same layout, and is kept alive by `Arc` clones held in event backing
