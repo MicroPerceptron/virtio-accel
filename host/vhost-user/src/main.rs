@@ -52,13 +52,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let backend = backend.ok_or(USAGE)?;
-    let built = match backend.as_str() {
-        "mock" => true,
-        "openvino" => cfg!(feature = "openvino"),
-        "vulkan" => cfg!(feature = "vulkan"),
-        "xdna" => cfg!(feature = "xdna"),
-        _ => false,
-    };
+    let built = [
+        ("mock", true),
+        ("openvino", cfg!(feature = "openvino")),
+        ("vulkan", cfg!(feature = "vulkan")),
+        ("xdna", cfg!(feature = "xdna")),
+    ]
+    .into_iter()
+    .any(|(name, enabled)| name == backend && enabled);
     if !built {
         return Err(format!("backend {backend:?} is unavailable in this build").into());
     }
