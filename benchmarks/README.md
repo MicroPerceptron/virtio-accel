@@ -113,7 +113,7 @@ Keep all three result files together:
 - `run.json`: exact invocation, exit status, UTC times, commit/dirty state and tracked-diff hash,
   lockfile hash, Rust/Cargo, OS/architecture, selected runtime environment and operator version.
 - `cases.jsonl`: hardware identity, compiled target/profile/optimization, workload/input fingerprint,
-  shape/dtype/bytes/logical work, phase boundary, warmups and polling settings.
+  shape/dtype/bytes/logical work, actual buffer properties/alignment, phase boundary, warmups and polling settings.
 
 Only exit code zero is a successful run. Metadata alone is not evidence that execution succeeded.
 Use a clean committed checkout for publishable comparisons; the tracked-diff hash does not capture

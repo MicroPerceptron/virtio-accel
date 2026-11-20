@@ -213,18 +213,18 @@ pub fn measure<A: Accelerator + TosaCapabilityProvider>(
         backend
             .allocate_buffer(
                 &context,
-                BufferDesc::new(len as u64, 16384, MemoryDomain::Shared, usage).unwrap(),
+                BufferDesc::new(len as u64, 1, MemoryDomain::Shared, usage).unwrap(),
             )
             .unwrap()
             .into_parts()
-            .0
     };
-    let inputs = workload
+    // No workload requires extra alignment: providers select their native allocation alignment.
+    let (inputs, input_info): (Vec<_>, Vec<_>) = workload
         .inputs
         .iter()
         .map(|v| allocate(v.len(), true))
-        .collect();
-    let output = allocate(workload.expected.len(), false);
+        .unzip();
+    let (output, output_info) = allocate(workload.expected.len(), false);
     let readback = vec![0; workload.expected.len()];
     let mut fingerprint = blake3::Hasher::new();
     fingerprint.update(&workload.artifact);
@@ -242,6 +242,7 @@ pub fn measure<A: Accelerator + TosaCapabilityProvider>(
         "backend":std::env::var("VA_BENCH_BACKEND").ok(),"requested_device":std::env::var("VA_BENCH_DEVICE").ok(),
         "device_info":format!("{:?}",backend.device_info().unwrap()),"target":format!("{:?}",workload.target),
         "shape":workload.shape,"output_dtype":format!("{:?}",workload.output_dtype),
+        "input_buffer_info":format!("{input_info:?}"),"output_buffer_info":format!("{output_info:?}"),
         "input_bytes":workload.input_bytes(),"output_bytes":workload.expected.len(),
         "logical_flops":workload.logical_flops,"fingerprint":fingerprint.finalize().to_hex().to_string(),
         "warmups":warmups,"poll_wait_us":wait_us,"timeout_seconds":timeout.as_secs(),
