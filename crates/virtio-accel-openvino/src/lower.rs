@@ -1069,6 +1069,48 @@ fn encode_operator(
             &[(greater, &output_dims), (equal, &output_dims)],
             &[(OvElement::Bool, &output_dims)],
         )[0];
+        // Some CPU ISA paths implement unordered comparisons as true. Guard NaNs
+        // explicitly instead of relying on an optimizer's comparison predicate.
+        let left_nan = builder.emit_layer(
+            "IsNaN",
+            "opset10",
+            &format!("{stem}_left_nan"),
+            "",
+            &[(left, &left_dims)],
+            &[(OvElement::Bool, &left_dims)],
+        )[0];
+        let right_nan = builder.emit_layer(
+            "IsNaN",
+            "opset10",
+            &format!("{stem}_right_nan"),
+            "",
+            &[(right, &right_dims)],
+            &[(OvElement::Bool, &right_dims)],
+        )[0];
+        let unordered = builder.emit_layer(
+            "LogicalOr",
+            "opset1",
+            &format!("{stem}_unordered"),
+            "auto_broadcast=\"numpy\"",
+            &[(left_nan, &left_dims), (right_nan, &right_dims)],
+            &[(OvElement::Bool, &output_dims)],
+        )[0];
+        let ordered = builder.emit_layer(
+            "LogicalNot",
+            "opset1",
+            &format!("{stem}_ordered"),
+            "",
+            &[(unordered, &output_dims)],
+            &[(OvElement::Bool, &output_dims)],
+        )[0];
+        let result = builder.emit_layer(
+            "LogicalAnd",
+            "opset1",
+            &format!("{stem}_result"),
+            "auto_broadcast=\"numpy\"",
+            &[(result, &output_dims), (ordered, &output_dims)],
+            &[(OvElement::Bool, &output_dims)],
+        )[0];
         builder.set_source(outputs[0], result);
         return Ok(());
     }
