@@ -12,12 +12,12 @@ import run
 
 
 class RunnerTests(unittest.TestCase):
-    def execute(self, child_exit, emit_case):
+    def execute(self, child_exit, emit_case, console=None):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "result"
 
             class Child:
-                stdout = io.StringIO("framework output\n")
+                stdout = io.StringIO("╰─ framework output\n")
 
                 def wait(self):
                     if emit_case:
@@ -25,11 +25,11 @@ class RunnerTests(unittest.TestCase):
                     return child_exit
 
             args = ["run.py", "--backend", "openvino", "--device", "NPU", "--output", str(output)]
-            with patch.object(sys, "argv", args), patch.object(run, "capture", return_value="test"), patch.object(run.platform, "platform", return_value="test-os"), patch.object(run.subprocess, "Popen", return_value=Child()), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with patch.object(sys, "argv", args), patch.object(run, "capture", return_value="test"), patch.object(run.platform, "platform", return_value="test-os"), patch.object(run.subprocess, "Popen", return_value=Child()), contextlib.redirect_stdout(console or io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 code = run.main()
             meta = json.loads((output / "run.json").read_text())
             self.assertEqual(code, meta["exit_code"])
-            self.assertEqual((output / "report.txt").read_text(), "framework output\n")
+            self.assertEqual((output / "report.txt").read_text(encoding="utf-8"), "╰─ framework output\n")
             return code
 
     def test_empty_hardware_filter_is_failure(self):
@@ -40,6 +40,12 @@ class RunnerTests(unittest.TestCase):
 
     def test_success_requires_executed_case(self):
         self.assertEqual(self.execute(0, True), 0)
+
+    def test_redirected_windows_console_preserves_unicode_report(self):
+        with io.TextIOWrapper(io.BytesIO(), encoding="cp1252") as console:
+            self.assertEqual(self.execute(0, True, console), 0)
+            console.flush()
+            self.assertIn("╰─ framework output", console.buffer.getvalue().decode("utf-8"))
 
     def test_device_is_required_before_building(self):
         with patch.object(sys, "argv", ["run.py", "--backend", "openvino"]), patch.object(run.subprocess, "Popen") as child, contextlib.redirect_stderr(io.StringIO()):

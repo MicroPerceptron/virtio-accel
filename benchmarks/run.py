@@ -15,10 +15,14 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 
 def capture(*args: str) -> str:
-    r = subprocess.run(args, cwd=ROOT, text=True, capture_output=True, check=False)
+    r = subprocess.run(args, cwd=ROOT, text=True, encoding="utf-8", errors="replace", capture_output=True, check=False)
     return r.stdout.strip() if r.returncode == 0 else f"unavailable: {r.stderr.strip()}"
 
 def main() -> int:
+    # Redirected Windows consoles otherwise use cp1252, which cannot encode Divan's tree.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--backend", choices=["portable", "coreml", "openvino", "vulkan", "hexagon", "xdna"], required=True)
     p.add_argument("--device", default="")
@@ -60,7 +64,7 @@ def main() -> int:
         "backend": a.backend, "requested_device": a.device,
         "runtime_version_operator_supplied": a.runtime_version,
         "lockfile_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
-        "environment": {k: env[k] for k in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET", "VA_BENCH_WARMUPS", "VA_BENCH_WAIT_US", "VA_BENCH_TIMEOUT_SECS", "VIRTIO_ACCEL_OPENVINO_LIBRARY", "VIRTIO_ACCEL_HRX_LIBRARY", "VIRTIO_ACCEL_HRX_DIR", "VIRTIO_ACCEL_HRX_LIB_DIR", "HRX_DIR", "VIRTIO_ACCEL_QNN_SDK_ROOT", "VIRTIO_ACCEL_QNN_LIB_DIR", "QNN_SDK_ROOT"] if k in env},
+        "environment": {k: env[k] for k in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET", "VA_BENCH_WARMUPS", "VA_BENCH_WAIT_US", "VA_BENCH_TIMEOUT_SECS", "VIRTIO_ACCEL_OPENVINO_LIBRARY", "VIRTIO_ACCEL_HRX_LIBRARY", "VIRTIO_ACCEL_HRX_DIR", "VIRTIO_ACCEL_HRX_LIB_DIR", "HRX_DIR", "VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN", "VK_DRIVER_FILES", "VK_ICD_FILENAMES", "VIRTIO_ACCEL_QNN_SDK_ROOT", "VIRTIO_ACCEL_QNN_LIB_DIR", "QNN_SDK_ROOT"] if k in env},
         "timing": "Divan host wall-clock statistics; report.txt is authoritative; no custom estimator",
     }
     (out / "run.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
