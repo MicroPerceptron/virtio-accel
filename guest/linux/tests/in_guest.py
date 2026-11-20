@@ -115,19 +115,19 @@ def timeout_contracts():
     )
 
 
-def malformed_chain_completion():
+def malformed_frame_rejection():
     s = v.Session("/dev/virtio-accel0")
     # Header declares a payload absent from the readable descriptors. The host
-    # rejects the frame with used length zero; the driver must lose this fd.
+    # returns a structured protocol rejection, without losing the session.
     data = bytearray(
         v.IOCTL.pack(16, 16, 1000, 0, 0, 0, 0, 0) + v.HEADER.pack(1, 0, 1, 1)
     )
-    expect_errno(errno.EPROTO, lambda: fcntl.ioctl(s.fd, v.EXCHANGE, data, True))
-    expect_errno(errno.ENODEV, lambda: fcntl.ioctl(s.fd, v.INFO, bytearray(32), True))
+    fcntl.ioctl(s.fd, v.EXCHANGE, data, True)
+    assert v.IOCTL.unpack_from(data)[1] == 16
+    assert v.HEADER.unpack_from(data, 32) == (3, 0, 0, 1)
+    assert len(s.request(1, size=76)) == 76
     s.poison()
-    s = v.Session("/dev/virtio-accel0")
-    s.poison()
-    print("PASS: invalid used length poisons the fd before clean reopen", flush=True)
+    print("PASS: malformed frame rejected without losing the session", flush=True)
 
 
 def remove_contracts():
@@ -149,6 +149,6 @@ if __name__ == "__main__":
     if os.environ.get("VA_TEST_BACKEND") != "mock":
         sdk_execution()
     timeout_contracts()
-    malformed_chain_completion()
+    malformed_frame_rejection()
     remove_contracts()
     print("VIRTIO_ACCEL_GUEST_PASS", flush=True)
