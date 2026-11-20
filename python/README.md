@@ -450,9 +450,9 @@ Core ML quantized tiers require macOS 26+. OpenVINO CPU/GPU support FP8 and mixe
 projections; NPU supports the FP16 mixed path, not the FP8 boundary tier. Other
 providers reject unsupported graphs explicitly. The Linux guest adapter uses
 actual dtype byte widths and forwards the same TOSA artifact to its host.
-Core ML integer MATMUL currently requires a single rank-three operation and
-bounds the worst-case absolute dot-product sum to 2**24 (K <= 1024 for zero
-zero-points): its compiler can use FP32 internally for MIL INT32 MATMUL. Larger
+Core ML integer MATMUL currently requires a single rank-three operation.
+Both Core ML and OpenVINO bound the worst-case absolute dot-product sum to 2**24 (K <= 1024 for zero
+zero-points): their compilers can use FP32 internally for INT32 MATMUL. Larger
 integer dots fail admission rather than return rounded integers.
 
 See the [generated quantized API](https://virtio-accel.org/python/api/quantized.html)
