@@ -398,9 +398,7 @@ class VirtioExecutable:
                             timeout=remaining(),
                         )
                 event = s.object(0x500, self.submission, remaining())
-                from ._native import _PollWait
-
-                poll = _PollWait()
+                poll = None
                 while True:
                     state, error, reserved = struct.unpack(
                         "<HHI", s.request(0x501, event, size=8, timeout=remaining())
@@ -414,6 +412,11 @@ class VirtioExecutable:
                         raise ProtocolError("invalid event state")
                     if state:
                         break
+                    if poll is None:
+                        # Already-complete work needs no timer or PyO3 wait object.
+                        from ._native import _PollWait
+
+                        poll = _PollWait()
                     poll.wait(remaining())
                 s.request(0x503, event, timeout=remaining())
                 if state != 1:
