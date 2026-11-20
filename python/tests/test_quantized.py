@@ -107,7 +107,11 @@ class QuantizedHardwareTests(unittest.TestCase):
     def execute(self, fn, args, expected):
         with va.jit(fn, device=self.device) as f:
             for _ in range(2):
-                np.testing.assert_array_equal(f(*args).to_numpy(), expected)
+                actual = f(*args).to_numpy()
+                if actual.dtype in (np.dtype(vnp.float8_e4m3fn), np.dtype(vnp.float8_e5m2)):
+                    np.testing.assert_array_equal(actual.view(np.uint8), expected.view(np.uint8))
+                else:
+                    np.testing.assert_array_equal(actual, expected)
 
     def test_compressed_weights(self):
         x = np.eye(16, dtype=np.float16)

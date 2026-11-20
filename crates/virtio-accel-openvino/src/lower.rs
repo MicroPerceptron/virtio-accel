@@ -1323,21 +1323,31 @@ fn encode_operator(
         Op::GATHER => {
             let (data, data_dims) = value_port_dims(builder, analysis, inputs[0])?;
             let (indices, index_dims) = value_port_dims(builder, analysis, inputs[1])?;
-            // Keep short runtime lookup indices in the plugin's I64 Gather path.
-            let indices = builder.emit_layer(
-                "Convert",
-                "opset1",
-                &format!("{stem}_indices_i64"),
-                "destination_type=\"i64\"",
-                &[(indices, &index_dims)],
-                &[(OvElement::I64, &index_dims)],
-            )[0];
+            // A one-batch TOSA lookup is an ordinary Gather with the leading
+            // index dimension removed. Avoid the CPU plugin's batched Gather
+            // kernel, which corrupts short index tails and can read out of bounds.
+            let (indices, index_dims, batch_dims) = if data_dims[0] == 1 {
+                let dims = vec![index_dims[1]];
+                let pattern =
+                    builder.emit_i64_const(&format!("{stem}_index_shape"), &dims, false)?;
+                let reshaped = builder.emit_layer(
+                    "Reshape",
+                    "opset1",
+                    &format!("{stem}_flat_indices"),
+                    "special_zero=\"false\"",
+                    &[(indices, &index_dims), (pattern, &[1])],
+                    &[(OvElement::I32, &dims)],
+                )[0];
+                (reshaped, dims, "batch_dims=\"0\"")
+            } else {
+                (indices, index_dims, "batch_dims=\"1\"")
+            };
             let axis = builder.emit_i64_const(&format!("{stem}_axis"), &[1], true)?;
             let ports = builder.emit_layer(
                 "Gather",
                 "opset8",
                 &stem,
-                "batch_dims=\"1\"",
+                batch_dims,
                 &[(data, &data_dims), (indices, &index_dims), (axis, &[])],
                 &[(output_element, &output_dims)],
             );
@@ -2374,6 +2384,51 @@ mod tests {
             lower_tosa(IDENTITY_INT8.artifact, OPENVINO_TOSA_TARGET).unwrap_err(),
             LoweringError::UnsupportedType(DType::INT8)
         );
+    }
+
+    #[test]
+    fn rejects_integer_dots_outside_exact_binary32_range() {
+        use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
+        for (k, zero, accepted) in [
+            (1024, 0i8, true),
+            (1025, 0, false),
+            (258, -128, true),
+            (259, -128, false),
+        ] {
+            let mut graph = OwnedGraph::new("integer_dot");
+            for (name, shape, dtype) in [
+                ("a", vec![1, 1, k], DType::INT8),
+                ("b", vec![1, k, 1], DType::INT8),
+                ("out", vec![1, 1, 1], DType::INT32),
+            ] {
+                graph.push_tensor(OwnedTensor::new(name, shape, dtype));
+            }
+            graph.push_tensor(OwnedTensor::constant(
+                "zero",
+                vec![1],
+                DType::INT8,
+                vec![zero as u8],
+            ));
+            graph.push_operator(OwnedOperator::new(
+                OperatorKind::Const,
+                vec![],
+                vec!["zero".into()],
+            ));
+            graph.push_operator(OwnedOperator::new(
+                OperatorKind::MatMul,
+                vec!["a".into(), "b".into(), "zero".into(), "zero".into()],
+                vec!["out".into()],
+            ));
+            graph.push_input("a");
+            graph.push_input("b");
+            graph.push_output("out");
+            let bytes = graph.build(OPENVINO_TOSA_INTEGER_TARGET).unwrap();
+            assert_eq!(
+                lower_tosa(&bytes, OPENVINO_TOSA_INTEGER_TARGET).is_ok(),
+                accepted,
+                "K={k}, zero={zero}"
+            );
+        }
     }
 
     #[test]
