@@ -56,6 +56,9 @@ complete source/build tree, including firmware, separately for each target.
 The key covers the pinned revision, patches, build script, runner architecture,
 compiler and runtime dependencies. Every restored tree is checked and rebuilt
 incrementally before the real QEMU tests run; there are no partial cache restores.
+The script configures out of tree and fingerprints its options, toolchain and GLib
+configuration, retaining object files on repeated invocations. Set
+`QEMU_RECONFIGURE=1` to force configuration after local dependency changes.
 
 The test uses QEMU's ARM `virt` machine under TCG and drives its real MMIO registers and guest
 RAM through qtest. It requires no KVM, elevated privileges, guest image, or accelerator hardware
