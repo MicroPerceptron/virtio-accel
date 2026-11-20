@@ -12,6 +12,7 @@ pub(super) struct Weights {
     data: Storage,
 }
 enum Storage {
+    Dense(Vec<u8>),
     Linear { values: Vec<u8>, scales: Vec<u8> },
     Palette { indices: Vec<u8>, lut: Vec<u8> },
 }
@@ -34,6 +35,26 @@ pub(super) fn plans(a: &TosaAnalysis<'_>) -> Result<Vec<Option<Weights>>, Loweri
             .any(|v| tensor(a, *v).is_ok_and(|t| t.dtype() != DType::FP16))
         {
             continue;
+        }
+        if let Some(bytes) = a.serialized_constant(ins[1]) {
+            let shape = static_shape(tensor(a, ins[1])?)?;
+            if shape.len() == 3 && shape[0] == 1 {
+                let (k, n) = (shape[1], shape[2]);
+                let mut transposed = Vec::with_capacity(bytes.len());
+                for row in 0..n as usize {
+                    for col in 0..k as usize {
+                        let pos = (col * n as usize + row) * 2;
+                        transposed.extend_from_slice(&bytes[pos..pos + 2]);
+                    }
+                }
+                plans[out.get() as usize] = Some(Weights {
+                    n,
+                    k,
+                    group: k,
+                    data: Storage::Dense(transposed),
+                });
+                continue;
+            }
         }
         let Some(tr) = a.value(ins[1]).producer() else {
             continue;
@@ -186,6 +207,7 @@ impl Weights {
         let shape = [self.n, self.k];
         let groups = self.k / self.group;
         match &self.data {
+            Storage::Dense(values) => b.constant(F16, &shape, values),
             Storage::Palette { indices, lut } => self.palette(b, indices, lut),
             Storage::Linear { values, scales } => {
                 let narrow = values.iter().all(|v| (-8..8).contains(&(*v as i8)));
@@ -326,6 +348,47 @@ mod tests {
                 ("palette4-channel", &channel, false),
             ] {
                 let model = lower_with_weights(bytes, quantized::TARGET, palette).unwrap();
+                std::fs::write(dir.join(format!("{name}-m{m}.mlmodel")), model.bytes).unwrap();
+            }
+            for channel in [false, true] {
+                use virtio_accel_tosa_build::{Graph, Operator, OperatorKind, Tensor};
+                let data = (0..k * n)
+                    .flat_map(|i| {
+                        let pos = (i % n) * k + i / n;
+                        let scale = if channel {
+                            if ((pos / k) / 16) % 3 == 0 {
+                                0.125
+                            } else {
+                                0.0625
+                            }
+                        } else {
+                            half::f16::from_bits(scales[pos / group]).to_f32()
+                        };
+                        half::f16::from_f32(f32::from(q[pos]) * scale)
+                            .to_bits()
+                            .to_le_bytes()
+                    })
+                    .collect::<Vec<_>>();
+                let ashape = [1, m as i32, k as i32];
+                let bshape = [1, k as i32, n as i32];
+                let oshape = [1, m as i32, n as i32];
+                let f = DType::FP16;
+                let tensors = [
+                    Tensor::new("a", &ashape, f),
+                    Tensor::constant("b", &bshape, f, &data),
+                    Tensor::constant("zero", &[1], f, &[0, 0]),
+                    Tensor::new("out", &oshape, f),
+                ];
+                let ops = [
+                    Operator::new(OperatorKind::Const, &[], &["b"]),
+                    Operator::new(OperatorKind::Const, &[], &["zero"]),
+                    Operator::new(OperatorKind::MatMul, &["a", "b", "zero", "zero"], &["out"]),
+                ];
+                let bytes = Graph::new("dense", &tensors, &ops, &["a"], &["out"])
+                    .build(quantized::TARGET)
+                    .unwrap();
+                let model = lower_with_weights(&bytes, quantized::TARGET, false).unwrap();
+                let name = if channel { "fp16-channel" } else { "fp16" };
                 std::fs::write(dir.join(format!("{name}-m{m}.mlmodel")), model.bytes).unwrap();
             }
         }

@@ -57,6 +57,7 @@ keywords = ["virtio", "accelerator", "npu", "no-std", "protocol"]
 categories = ["no-std", "hardware-support", "virtualization"]
 
 [workspace.dependencies]
+half = { version = "2.7", default-features = false }
 bitflags = { version = "2.13.1", default-features = false }
 blake3 = { version = "1.8.3", default-features = false }
 cc = "1.4.5"

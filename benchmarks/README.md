@@ -211,6 +211,8 @@ Dedicated hardware measurements remain an explicit operator action.
 K-wide palettes, shared across 16 output channels, expose ANE-compatible table geometry.
 `Int4F16ProjectionBatch` and `F16ProjectionBatch` use M=128 with the original group-128
 weights to test a larger workload. All retain exact reference checks.
+The constant FP16 controls use the same mixed target and typed ML Program `linear`
+operation as compressed weights, avoiding a confound with the older NeuralNetwork format.
 
 ```sh
 python3 benchmarks/run.py --backend coreml --device cpu-gpu --case Int4F16ProjectionBatch
