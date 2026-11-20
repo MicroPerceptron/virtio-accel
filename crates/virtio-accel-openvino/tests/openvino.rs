@@ -877,6 +877,31 @@ fn nvfp4_fp16_projection_obeys_explicit_rounding() {
 
 #[test]
 fn constant_int4_and_int8_weights_execute_with_fp16_activations() {
+    check_integer_weight_projection(
+        [0x3000, 0x3400, 0x3800],
+        &[
+            0xb700, 0x4140, 0xbb00, 0xb700, 0x4140, 0xbb00, 0xb700, 0x4140, 0xbb00, 0xb700, 0x4140,
+            0xbb00, 0xb700, 0x4140, 0xbb00, 0xb700, 0xbcc0, 0xc3c0, 0xc0c0, 0xbcc0, 0xc3c0, 0xc0c0,
+            0xbcc0, 0xc3c0, 0xc0c0, 0xbcc0, 0xc3c0, 0xc0c0, 0xbcc0, 0xc3c0, 0xc0c0, 0xbcc0,
+        ],
+    );
+}
+
+#[test]
+fn fractional_integer_weight_scales_round_before_matmul() {
+    // Non-power-of-two scales expose NPU scale fusion dropping the FP16
+    // intermediate rounding; binary-fraction-only fixtures cannot catch it.
+    check_integer_weight_projection(
+        [0x3555, 0x399a, 0x2e66],
+        &[
+            0xbd59, 0xbc11, 0x440e, 0xbd59, 0xbc11, 0x440e, 0xbd59, 0xbc11, 0x440e, 0xbd59, 0xbc11,
+            0x440e, 0xbd59, 0xbc11, 0x440e, 0xbd59, 0xc267, 0xbc55, 0xc55a, 0xc267, 0xbc55, 0xc55a,
+            0xc267, 0xbc55, 0xc55a, 0xc267, 0xbc55, 0xc55a, 0xc267, 0xbc55, 0xc55a, 0xc267,
+        ],
+    );
+}
+
+fn check_integer_weight_projection(scale_codes: [u16; 3], expected_bits: &[u16]) {
     use virtio_accel_tosa_build::quantized;
     let q = (0..16 * 32)
         .map(|i| ((i % 16) as i8) << 4 >> 4)
@@ -885,9 +910,7 @@ fn constant_int4_and_int8_weights_execute_with_fp16_activations() {
         .chunks_exact(2)
         .map(|p| (p[0] as u8 & 15) | (p[1] as u8 & 15) << 4)
         .collect::<Vec<_>>();
-    let scales = (0..32)
-        .map(|i| [0x3000, 0x3400, 0x3800][i % 3])
-        .collect::<Vec<_>>();
+    let scales = (0..32).map(|i| scale_codes[i % 3]).collect::<Vec<_>>();
     let w8 = q.iter().map(|v| *v * 16).collect::<Vec<_>>();
     let s8 = scales.iter().map(|v| v - 0x1000).collect::<Vec<_>>();
     let graphs = [
@@ -903,14 +926,10 @@ fn constant_int4_and_int8_weights_execute_with_fp16_activations() {
     // Independent binary64 dot products rounded using Python struct.pack('<e').
     // All signed nibbles, varying per-row groups, two activation rows. W8's
     // q*16 and scale/16 represent exactly the same dequantized weights.
-    let expected = [
-        0xb700u16, 0x4140, 0xbb00, 0xb700, 0x4140, 0xbb00, 0xb700, 0x4140, 0xbb00, 0xb700, 0x4140,
-        0xbb00, 0xb700, 0x4140, 0xbb00, 0xb700, 0xbcc0, 0xc3c0, 0xc0c0, 0xbcc0, 0xc3c0, 0xc0c0,
-        0xbcc0, 0xc3c0, 0xc0c0, 0xbcc0, 0xc3c0, 0xc0c0, 0xbcc0, 0xc3c0, 0xc0c0, 0xbcc0,
-    ]
-    .iter()
-    .flat_map(|v| v.to_le_bytes())
-    .collect::<Vec<_>>();
+    let expected = expected_bits
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect::<Vec<_>>();
     for device in devices() {
         for (index, graph) in graphs.iter().enumerate() {
             eprintln!(

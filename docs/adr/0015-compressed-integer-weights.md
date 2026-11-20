@@ -28,6 +28,14 @@ An equivalent two-dimensional weight reshape exposes the compressed-weight patte
 plugin. Only that MatMul's edge changes; other consumers retain their original values.
 Native compilers remain responsible for placement and kernel selection.
 
+CPU and NPU instead evaluate the constant `CAST(INT8 -> FP16) * group_scale` at load
+time, using `half` for binary16 rounding. An INT8-times-FP16 product is exact in FP32
+before rounding once to FP16. This avoids CPU's observed per-inference weight expansion
+and fixes NPU scale fusion losing intermediate FP16 rounding for non-power-of-two scales.
+Only this proven constant pattern is folded; runtime weights/scales remain graph operations.
+FP16 weights consume more resident storage on CPU/NPU. No host computation is added to
+submission, and no different accelerator is selected as a fallback.
+
 OpenVINO CPU/GPU compilation explicitly disables dynamic activation quantization. Probing
 showed that ACCURACY alone inserts DynamicQuantize and changes FP16 activations to INT8.
 The property is not sent to NPU, which does not support it. Existing explicit FP32 policy
@@ -43,11 +51,12 @@ controls at `[M, N, K] = [1 or 16, 1024, 2048]`.
 The compiler diagnostic reads production-generated IR, performs 12 random-input comparisons
 to binary64 reference products rounded to binary16, and retains the execution graph.
 Lunar Lake GPU with OpenVINO 2026.4.1 reports i4 weights with f16 arithmetic and no
-DynamicQuantize. CPU and NPU numerical success does not prove the same kernel selection:
-the CPU report still contains runtime weight conversion, and the NPU report does not expose
-useful weight precision. No whole-model resident-memory or tokens/second claim follows.
+DynamicQuantize. The CPU execution graph contains predecoded FP16 weights without runtime
+dequantization. NPU now passes an additional fractional-scale golden regression, but its
+report does not expose useful weight precision. No whole-model resident-memory or
+tokens/second claim follows.
 
 The portable artifact still costs eight bits per weight. The native IR uses four bits plus
-group scales and alignment, but physical resident memory is plugin-dependent. Runtime
+group scales and alignment on GPU; CPU/NPU intentionally predecode once to FP16. Runtime
 weights, asymmetric INT4, native compressed NVFP4 and exact optimized integer-profile
 MATMUL are separate work; none is silently substituted by this path.

@@ -399,6 +399,7 @@ dependencies = [
 name = "virtio-accel-openvino"
 version = "0.4.1"
 dependencies = [
+ "half",
  "libloading",
  "pkg-config",
  "virtio-accel-core",

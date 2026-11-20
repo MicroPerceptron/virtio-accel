@@ -18,6 +18,7 @@
 
 #[cfg(test)]
 mod compressed_tests;
+mod constant_weights;
 mod packed_fp8;
 
 use std::fmt;
@@ -508,6 +509,7 @@ struct PortRef {
 /// Incremental IR v11 document builder.
 struct IrBuilder {
     packed_fp8: bool,
+    expand_weight_constants: bool,
     layers: String,
     edges: String,
     weights: Vec<u8>,
@@ -525,6 +527,7 @@ impl IrBuilder {
         sources.resize(values, None);
         Ok(Self {
             packed_fp8: false,
+            expand_weight_constants: false,
             layers: String::new(),
             edges: String::new(),
             weights: Vec::new(),
@@ -708,7 +711,16 @@ fn element_byte_len(element: OvElement, dims: &[i64]) -> Result<u64, LoweringErr
     }
 }
 
+#[cfg(test)]
 pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, LoweringError> {
+    lower_tosa_with_weights(bytes, target, false)
+}
+
+pub(crate) fn lower_tosa_with_weights(
+    bytes: &[u8],
+    target: Target,
+    expand_weight_constants: bool,
+) -> Result<LoweredModel, LoweringError> {
     let capability = capability_for(target).ok_or(LoweringError::UnsupportedGraph)?;
     let model = parse(bytes).map_err(LoweringError::Parse)?;
     let analysis = model.analyze_for(target).map_err(LoweringError::Analysis)?;
@@ -733,6 +745,7 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, L
     }
 
     let mut builder = IrBuilder::new(analysis.values().len())?;
+    builder.expand_weight_constants = expand_weight_constants;
     // Native Convert rounds through FP16 on some plugins, and GPU Slice rejects FP8.
     // Graphs needing activation conversion or cache windows use an exact byte carrier.
     builder.packed_fp8 = target == OPENVINO_TOSA_FP8_TARGET
@@ -1027,6 +1040,12 @@ fn encode_operator(
     }
 
     let stem = format!("tosa_{}_{}", operator_id.get(), op.name().unwrap_or("op"));
+    if builder.expand_weight_constants
+        && op == Op::MUL
+        && constant_weights::fold(builder, analysis, inputs, outputs[0], &stem)?
+    {
+        return Ok(());
+    }
     if op == Op::MATMUL
         && matches!(
             tensor(analysis, inputs[0])?.dtype(),

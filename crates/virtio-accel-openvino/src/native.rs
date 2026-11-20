@@ -25,7 +25,7 @@ use virtio_accel_core::{
 };
 use virtio_accel_tosa::{CapabilityDescriptor, TosaCapabilityProvider};
 
-use crate::lower::{LoweredFeature, LoweredFeatureRole, OvElement, lower_tosa};
+use crate::lower::{LoweredFeature, LoweredFeatureRole, OvElement, lower_tosa_with_weights};
 use crate::{InitError, REQUIRED_RESIDENT_BYTES, ffi};
 
 /// Maximal TOSA artifact bytes admitted before parsing.
@@ -1349,7 +1349,13 @@ impl Accelerator for OpenVinoAccelerator {
                 &owned
             }
         };
-        let lowered = lower_tosa(bytes, target).map_err(Self::lowering_error)?;
+        // GPU's compressed kernel preserves the explicit FP16 dequantization.
+        // CPU avoids per-inference expansion; NPU needs a materialized rounded
+        // constant to prevent scale fusion from changing FP16 intermediates.
+        let expand_weights = self.device.to_bytes().starts_with(b"CPU")
+            || self.device.to_bytes().starts_with(b"NPU");
+        let lowered =
+            lower_tosa_with_weights(bytes, target, expand_weights).map_err(Self::lowering_error)?;
         let require_fp32 = (target == crate::OPENVINO_TOSA_QUANTIZED_TARGET
             || target == crate::OPENVINO_TOSA_FP8_TARGET)
             && lowered.requires_fp32;
