@@ -30,7 +30,7 @@ class Device:
     provider: str
     #: Human-readable endpoint name.
     name: str
-    #: Whether the provider permits CPU participation in accelerator work.
+    #: Whether CPU participation is permitted or cannot be excluded by the transport.
     cpu_participation: bool
 
 

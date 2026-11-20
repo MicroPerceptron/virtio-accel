@@ -24,6 +24,10 @@ struct va_config {
 	__le32 request_bytes, response_bytes;
 };
 
+static_assert(sizeof(struct va_config) == 16);
+static_assert(sizeof(struct va_info) == 32);
+static_assert(sizeof(struct va_exchange) == 32);
+
 struct va_device {
 	struct virtio_device *vdev;
 	struct virtqueue *vq;
@@ -184,6 +188,7 @@ static long va_exchange(struct va_device *d, void __user *arg)
 	struct va_exchange x;
 	struct scatterlist *sgs[] = { d->out_sg, d->in_sg };
 	unsigned int length = 0;
+	unsigned long deadline, remaining;
 	void *token;
 	long ret;
 
@@ -213,16 +218,25 @@ static long va_exchange(struct va_device *d, void __user *arg)
 	/* Uninterruptible bounded wait: a signal cannot cause userspace to retry an
 	 * already accepted mutation through the libc/CPython EINTR retry machinery.
 	 */
-	ret = wait_for_completion_timeout(&d->done, msecs_to_jiffies(x.timeout_ms));
-	if (atomic_read(&d->removed)) {
-		ret = -ENODEV;
-		goto poison;
-	}
-	if (!ret) {
-		ret = -ETIMEDOUT;
-		goto poison;
-	}
-	token = virtqueue_get_buf(d->vq, &length);
+	deadline = jiffies + msecs_to_jiffies(x.timeout_ms);
+	do {
+		unsigned long now = jiffies;
+
+		remaining = time_before(now, deadline) ? deadline - now : 0;
+		wait_for_completion_timeout(&d->done, remaining);
+		if (atomic_read(&d->removed)) {
+			ret = -ENODEV;
+			goto poison;
+		}
+		token = virtqueue_get_buf(d->vq, &length);
+		if (!token && (time_after_eq(jiffies, deadline) || virtqueue_is_broken(d->vq))) {
+			ret = virtqueue_is_broken(d->vq) ? -EIO : -ETIMEDOUT;
+			goto poison;
+		}
+		/* A delayed/spurious IRQ is only a wake-up hint. It does not prove
+		 * that this request has a used entry, especially on SMP guests.
+		 */
+	} while (!token);
 	if (token != d || length < 16 || length > x.response_bytes) {
 		ret = -EPROTO;
 		goto poison;

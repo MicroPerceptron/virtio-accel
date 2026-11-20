@@ -115,6 +115,21 @@ def timeout_contracts():
     )
 
 
+def malformed_chain_completion():
+    s = v.Session("/dev/virtio-accel0")
+    # Header declares a payload absent from the readable descriptors. The host
+    # rejects the frame with used length zero; the driver must lose this fd.
+    data = bytearray(
+        v.IOCTL.pack(16, 16, 1000, 0, 0, 0, 0, 0) + v.HEADER.pack(1, 0, 1, 1)
+    )
+    expect_errno(errno.EPROTO, lambda: fcntl.ioctl(s.fd, v.EXCHANGE, data, True))
+    expect_errno(errno.ENODEV, lambda: fcntl.ioctl(s.fd, v.INFO, bytearray(32), True))
+    s.poison()
+    s = v.Session("/dev/virtio-accel0")
+    s.poison()
+    print("PASS: invalid used length poisons the fd before clean reopen", flush=True)
+
+
 def remove_contracts():
     s = v.Session("/dev/virtio-accel0")
     device = next(
@@ -134,5 +149,6 @@ if __name__ == "__main__":
     if os.environ.get("VA_TEST_BACKEND") != "mock":
         sdk_execution()
     timeout_contracts()
+    malformed_chain_completion()
     remove_contracts()
     print("VIRTIO_ACCEL_GUEST_PASS", flush=True)
