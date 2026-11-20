@@ -205,7 +205,9 @@ class CompiledFunction:
                     self._executables[key] = lowered.compile(self._device, timeout=self._timeout, strict=self._strict)
                 self._executables.move_to_end(key)
                 return self._executables[key](*bound.args, **bound.kwargs)
-            return lowered.reference(*bound.args, **bound.kwargs)
+        # Reference execution owns only local snapshots; keep independent NumPy
+        # calls concurrent instead of holding the native-resource cache lock.
+        return lowered.reference(*bound.args, **bound.kwargs)
 
 
 def jit(function=None, *, backend=None, device=None, cache_size=16, resident_cache_size=None, timeout=30.0, strict=False):
