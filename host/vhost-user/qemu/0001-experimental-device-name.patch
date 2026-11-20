@@ -1,0 +1,14 @@
+diff --git a/hw/virtio/virtio.c b/hw/virtio/virtio.c
+--- a/hw/virtio/virtio.c
++++ b/hw/virtio/virtio.c
+@@ -202,6 +202,10 @@
+ static const char *virtio_id_to_name(uint16_t device_id)
+ {
++    /* Local development identity; not an assigned device type. */
++    if (device_id == UINT16_MAX) {
++        return "virtio-experimental";
++    }
+     assert(device_id < G_N_ELEMENTS(virtio_device_names));
+     const char *name = virtio_device_names[device_id];
+     assert(name != NULL);
+     return name;

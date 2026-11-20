@@ -1,0 +1,35 @@
+[package]
+name = "virtio-accel-vhost-user"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Experimental Linux vhost-user host for virtio-accel"
+
+# Host dependencies and publication are independent of the portable crates.
+[workspace]
+
+[features]
+default = []
+openvino = ["dep:virtio-accel-openvino"]
+vulkan = ["dep:virtio-accel-vulkan"]
+xdna = ["dep:virtio-accel-xdna"]
+
+[dependencies]
+vhost = { version = "0.16", features = ["vhost-user-backend"] }
+virtio-queue = "0.17"
+vm-memory = { version = "=0.17.1", features = ["backend-mmap"] }
+nix = { version = "0.30", features = ["poll"] }
+zerocopy = { version = "0.8", features = ["derive"] }
+virtio-accel-core = { path = "../../crates/virtio-accel-core" }
+virtio-accel-device = { path = "../../crates/virtio-accel-device" }
+virtio-accel-proto = { path = "../../crates/virtio-accel-proto" }
+virtio-accel-transport = { path = "../../crates/virtio-accel-transport" }
+virtio-accel-mock = { path = "../../crates/virtio-accel-mock" }
+virtio-accel-openvino = { path = "../../crates/virtio-accel-openvino", optional = true, features = ["runtime-loading"] }
+virtio-accel-vulkan = { path = "../../crates/virtio-accel-vulkan", optional = true }
+virtio-accel-xdna = { path = "../../crates/virtio-accel-xdna", optional = true, features = ["runtime-loading"] }
+
+[dev-dependencies]
+tempfile = "3"

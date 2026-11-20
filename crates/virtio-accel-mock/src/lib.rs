@@ -137,6 +137,7 @@ impl MockInvocation {
 }
 
 pub struct MockAccelerator {
+    complete_on_poll: bool,
     next_id: AtomicU64,
     direct_binding_admissions: AtomicU64,
     info: DeviceInfo,
@@ -145,6 +146,7 @@ pub struct MockAccelerator {
 impl Default for MockAccelerator {
     fn default() -> Self {
         Self {
+            complete_on_poll: false,
             next_id: AtomicU64::new(1),
             direct_binding_admissions: AtomicU64::new(0),
             info: DeviceInfo {
@@ -174,6 +176,18 @@ impl Default for MockAccelerator {
 }
 
 impl MockAccelerator {
+    /// Run pending reference operations on their first poll.
+    ///
+    /// Standalone transport hosts cannot call the test harness's explicit `complete`
+    /// hook. This opt-in mode gives those hosts deterministic progress; `Default`
+    /// retains manual completion for lifecycle and cancellation tests.
+    pub fn completing_on_poll() -> Self {
+        Self {
+            complete_on_poll: true,
+            ..Self::default()
+        }
+    }
+
     /// Cumulative provider-owned bindings admitted without hidden submission staging.
     pub fn direct_binding_admissions(&self) -> u64 {
         self.direct_binding_admissions.load(Ordering::Relaxed)
@@ -547,6 +561,13 @@ impl Accelerator for MockAccelerator {
     }
 
     fn poll_event(&self, event: &Self::Event) -> Result<EventState, BackendError> {
+        if self.complete_on_poll && event.inner.state.load(Ordering::Acquire) == EVENT_PENDING {
+            // A concurrent completion/cancellation may win; observe its state below.
+            match self.complete(event) {
+                Ok(()) | Err(BackendError::Busy) => {}
+                Err(error) => return Err(error),
+            }
+        }
         match event.inner.state.load(Ordering::Acquire) {
             EVENT_PENDING | EVENT_EXECUTING => Ok(EventState::Pending),
             EVENT_COMPLETE => Ok(EventState::Complete),
@@ -668,6 +689,56 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn opt_in_poll_progress_executes_reference_work() {
+        let backend = MockAccelerator::completing_on_poll();
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        let (buffer, _) = backend
+            .allocate_buffer(
+                &context,
+                BufferDesc::new(
+                    4,
+                    4,
+                    MemoryDomain::Host,
+                    BufferUsage::PROGRAM_OUTPUT | BufferUsage::TRANSFER_SOURCE,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .into_parts();
+        let program = load_reference(
+            &backend,
+            &context,
+            &reference::ReferenceArtifact::fill(0, 42),
+        );
+        let queue = backend
+            .create_queue(&context, QueueDesc::default())
+            .unwrap();
+        let event = backend
+            .submit(
+                &queue,
+                &program,
+                &[BindingRef {
+                    slot: 0,
+                    buffer: &buffer,
+                    range: BufferRange::new(0, 4).unwrap(),
+                    access: AccessMode::Write,
+                }],
+                Timeout::Infinite,
+            )
+            .unwrap();
+        assert_eq!(backend.poll_event(&event), Ok(EventState::Complete));
+        assert_eq!(backend.poll_event(&event), Ok(EventState::Complete));
+        backend.destroy_event(event).unwrap();
+        let mut output = [0; 4];
+        backend.read_buffer(&buffer, 0, &mut output).unwrap();
+        assert_eq!(output, [42; 4]);
+        backend.destroy_queue(queue).unwrap();
+        backend.unload_program(program).unwrap();
+        backend.free_buffer(buffer).unwrap();
+        backend.destroy_context(context).unwrap();
     }
 
     #[test]

@@ -28,7 +28,7 @@
   <sub>Demo: NPU-assisted live geodesic ray tracing of a GR wormhole metric</sub>
 </p>
 
-The project claims no Virtio device ID (_yet_). For guest environments, use the `vAccel` adapter; see [crates/virtio-accel-vaccel/README.md](crates/virtio-accel-vaccel/README.md). `virtio-accel` is currently pre-standardization; protocol 1.0 is frozen as a versioned review input for independent implementation — it is stable enough to build against and to disagree with in writing, not an approved Virtio specification.
+An [experimental Linux vhost-user host and QEMU Virtio MMIO binding](docs/vhost-user.md) is available, using development device ID 65535 with a patched QEMU frontend. No official Virtio device ID has been assigned. The [vAccel adapter](crates/virtio-accel-vaccel/README.md) remains available for vAccel environments. `virtio-accel` is currently pre-standardization; protocol 1.0 is frozen as a versioned review input for independent implementation — it is stable enough to build against and to disagree with in writing, not an approved Virtio specification.
 
 ## Backend support
 
