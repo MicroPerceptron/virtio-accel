@@ -160,3 +160,10 @@ provides correctness and interoperability, not a native FP4 throughput guarantee
 ## License
 
 Licensed under Apache-2.0 or MIT, at your option.
+
+`quantized::palette4_matmul_fp16` authors immutable four-bit palette projections:
+packed low-nibble-first indices `[N,K]`, explicit finite binary16 tables
+`[N,K/group_size,16]`, FP16 activations `[1,M,K]` and FP16 output `[1,M,N]`.
+It performs no clustering or quantization. The portable graph uses INT32 index constants
+and GATHER; Core ML repacks the proven constant pattern to native palettes. Other
+providers retain their own admission limits. Use `group_size=K` for per-channel tables.

@@ -7,6 +7,7 @@ use crate::lower::{
     encode_array_feature, static_shape, tensor,
 };
 use crate::mlprogram::*;
+mod weights;
 use virtio_accel_tosa::{
     AnalyzedValueKind, CapabilityDescriptor, DType, DTypeCapability, DTypeConstraints,
     ExtensionSet, GraphCapabilities, Level, Op, OpAttributes, OperatorCapability,
@@ -84,7 +85,7 @@ pub const COREML_TOSA_QUANTIZED_CAPABILITY: CapabilityDescriptor = CapabilityDes
         max_regions: 1,
         max_blocks: 1,
         dynamic_shapes: false,
-        runtime_conditions: RuntimeConditionSupport::ProvenByteLookup,
+        runtime_conditions: RuntimeConditionSupport::ProvenConstantOrByteLookup,
     },
 };
 const F16: u64 = 10;
@@ -294,6 +295,14 @@ fn decode(x: u8, d: DType) -> f32 {
 }
 
 pub(crate) fn lower(bytes: &[u8], target: Target) -> Result<LoweredModel, LoweringError> {
+    lower_with_weights(bytes, target, false)
+}
+
+pub(crate) fn lower_with_weights(
+    bytes: &[u8],
+    target: Target,
+    prefer_palette: bool,
+) -> Result<LoweredModel, LoweringError> {
     let model = parse(bytes).map_err(LoweringError::Parse)?;
     let a = model.analyze_for(target).map_err(LoweringError::Analysis)?;
     let capability = if target == COREML_TOSA_FP8_TARGET {
@@ -305,9 +314,10 @@ pub(crate) fn lower(bytes: &[u8], target: Target) -> Result<LoweredModel, Loweri
     };
     if a.blocks().len() != 1
         || a.regions().len() != 1
-        || a.conditions()
-            .iter()
-            .any(|c| target != COREML_TOSA_QUANTIZED_TARGET || !a.proves_byte_lookup_bounds(c))
+        || a.conditions().iter().any(|c| {
+            target != COREML_TOSA_QUANTIZED_TARGET
+                || !(a.proves_byte_lookup_bounds(c) || a.proves_constant_index_bounds(c))
+        })
     {
         return Err(LoweringError::UnsupportedGraph);
     }
@@ -330,6 +340,8 @@ pub(crate) fn lower(bytes: &[u8], target: Target) -> Result<LoweredModel, Loweri
             }
         }
     }
+    let plans = weights::plans(&a)?;
+    let live = weights::live_values(&a, &plans);
     let mut b = Builder::default();
     let mut names = vec![String::new(); a.values().len()];
     let mut description = Vec::new();
@@ -359,6 +371,9 @@ pub(crate) fn lower(bytes: &[u8], target: Target) -> Result<LoweredModel, Loweri
             continue;
         }
         let out = outputs[0];
+        if !live[out.get() as usize] {
+            continue;
+        }
         let t = tensor(&a, out)?;
         let s = static_shape(t)?;
         let d = mil(t.dtype())?;
@@ -377,7 +392,8 @@ pub(crate) fn lower(bytes: &[u8], target: Target) -> Result<LoweredModel, Loweri
                 let input_dtype = tensor(&a, inputs[0])?.dtype();
                 let float = |d| matches!(d, DType::FP16 | DType::FP32);
                 if target == COREML_TOSA_QUANTIZED_TARGET
-                    && !((input_dtype == DType::INT8 && t.dtype() == DType::INT32)
+                    && !((input_dtype == DType::INT8
+                        && (t.dtype() == DType::INT32 || float(t.dtype())))
                         || (float(input_dtype) && float(t.dtype())))
                 {
                     return Err(LoweringError::UnsupportedType(input_dtype));
@@ -449,6 +465,12 @@ pub(crate) fn lower(bytes: &[u8], target: Target) -> Result<LoweredModel, Loweri
                     if bytes.iter().any(|x| *x != 0) {
                         return Err(LoweringError::UnsupportedGraph);
                     }
+                }
+                if let Some(plan) = &plans[out.get() as usize] {
+                    let w = plan.emit(&mut b, prefer_palette);
+                    let result = b.op("linear", &[("x", &args[0]), ("weight", &w)], F16, &s);
+                    names[out.get() as usize] = result;
+                    continue;
                 }
                 let mut xy = Vec::new();
                 for v in &inputs[..2] {

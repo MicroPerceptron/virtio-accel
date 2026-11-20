@@ -820,7 +820,16 @@ impl Accelerator for CoreMlAccelerator {
                     &owned
                 }
             };
-            let lowered = lower_tosa(bytes, target).map_err(Self::lowering_error)?;
+            let lowered = if target == crate::COREML_TOSA_QUANTIZED_TARGET {
+                crate::fp8::lower_with_weights(
+                    bytes,
+                    target,
+                    self.compute_units == CoreMlComputeUnits::CpuAndNeuralEngine,
+                )
+            } else {
+                lower_tosa(bytes, target)
+            }
+            .map_err(Self::lowering_error)?;
             let slots = build_lowered_slot_plan(&lowered.features);
             let mappings = lowered
                 .features

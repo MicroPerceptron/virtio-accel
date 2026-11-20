@@ -1515,3 +1515,136 @@ fn fp8_activation_and_constant_weights_execute_together() {
         }
     }
 }
+
+#[test]
+fn compressed_integer_weights_preserve_fp16_rounding() {
+    use half::f16;
+    use virtio_accel_tosa::TosaCapabilityProvider;
+    use virtio_accel_tosa_build::quantized;
+    // Basis vectors isolate weight decoding from reduction-order differences.
+    let (m, n, k, group) = (32, 8, 32, 16);
+    let scales = [0x3555u16, 0x399a, 0x2e66, 0x0400];
+    for bits in [4, 8] {
+        let weights = (0..n * k)
+            .map(|i| ((i % 16) as i8 - 8) * if bits == 8 { 16 } else { 1 })
+            .collect::<Vec<_>>();
+        let scales = (0..n * k / group)
+            .map(|i| scales[i % scales.len()])
+            .collect::<Vec<_>>();
+        let graph = if bits == 4 {
+            let packed = weights
+                .chunks_exact(2)
+                .map(|v| (v[0] as u8 & 15) | ((v[1] as u8 & 15) << 4))
+                .collect::<Vec<_>>();
+            quantized::int4_matmul_fp16(m, n, k, group, &packed, &scales).unwrap()
+        } else {
+            quantized::int8_matmul_fp16(m, n, k, group, &weights, &scales).unwrap()
+        };
+        let x = (0..m * k)
+            .flat_map(|i| (if i / k == i % k { 0x3c00u16 } else { 0 }).to_le_bytes())
+            .collect::<Vec<_>>();
+        let expected = (0..m * n)
+            .map(|i| {
+                let offset = (i % n) * k + i / n;
+                f16::from_f32(
+                    f32::from(weights[offset]) * f16::from_bits(scales[offset / group]).to_f32(),
+                )
+                .to_bits()
+            })
+            .collect::<Vec<_>>();
+        for units in [
+            CoreMlComputeUnits::CpuAndGpu,
+            CoreMlComputeUnits::CpuAndNeuralEngine,
+            CoreMlComputeUnits::All,
+        ] {
+            let backend = match CoreMlAccelerator::new_tosa_with_compute_units(units) {
+                Ok(b) => b,
+                Err(InitError::GpuUnavailable | InitError::NeuralEngineUnavailable)
+                    if std::env::var_os("VIRTIO_ACCEL_COREML_REQUIRE_QUANTIZED").is_none() =>
+                {
+                    continue;
+                }
+                Err(e) => panic!("{units:?}: {e}"),
+            };
+            if !backend
+                .tosa_capabilities()
+                .iter()
+                .any(|c| c.target == quantized::TARGET)
+            {
+                assert!(
+                    std::env::var_os("VIRTIO_ACCEL_COREML_REQUIRE_QUANTIZED").is_none(),
+                    "quantized target required"
+                );
+                continue;
+            }
+            let out =
+                run_tosa_bytes_on(&backend, &graph, quantized::TARGET, &[&x], m * n * 2).unwrap();
+            for (i, b) in out.chunks_exact(2).enumerate() {
+                let got = u16::from_le_bytes(b.try_into().unwrap());
+                // Dot products can canonicalize negative zero; every nonzero weight is exact.
+                assert!(
+                    got == expected[i] || (got & 0x7fff == 0 && expected[i] & 0x7fff == 0),
+                    "W{bits} {units:?} [{i}]: {got:04x} != {:04x}",
+                    expected[i]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn compressed_palette_weights_preserve_arbitrary_entries() {
+    use virtio_accel_tosa::TosaCapabilityProvider;
+    use virtio_accel_tosa_build::quantized;
+    let (m, n, k, group) = (32, 8, 32, 16);
+    let entries = [
+        0x0000u16, 0x8000, 0x0001, 0x03ff, 0x0400, 0x3555, 0xb99a, 0x3c00, 0xc123, 0x4555, 0xbc01,
+        0x2e66, 0x1001, 0x8701, 0x3333, 0x3888,
+    ];
+    let lut = (0..n * k / group * 16)
+        .map(|i| entries[(i + i / 16) % 16])
+        .collect::<Vec<_>>();
+    let packed = (0..n * k / 2)
+        .map(|i| ((2 * i) % 16) as u8 | (((2 * i + 1) % 16) as u8) << 4)
+        .collect::<Vec<_>>();
+    let graph = quantized::palette4_matmul_fp16(m, n, k, group, &packed, &lut).unwrap();
+    let x = (0..m * k)
+        .flat_map(|i| (if i / k == i % k { 0x3c00u16 } else { 0 }).to_le_bytes())
+        .collect::<Vec<_>>();
+    for units in [
+        CoreMlComputeUnits::CpuAndGpu,
+        CoreMlComputeUnits::CpuAndNeuralEngine,
+        CoreMlComputeUnits::All,
+    ] {
+        let backend = match CoreMlAccelerator::new_tosa_with_compute_units(units) {
+            Ok(b) => b,
+            Err(InitError::GpuUnavailable | InitError::NeuralEngineUnavailable)
+                if std::env::var_os("VIRTIO_ACCEL_COREML_REQUIRE_QUANTIZED").is_none() =>
+            {
+                continue;
+            }
+            Err(e) => panic!("{units:?}: {e}"),
+        };
+        if !backend
+            .tosa_capabilities()
+            .iter()
+            .any(|c| c.target == quantized::TARGET)
+        {
+            assert!(
+                std::env::var_os("VIRTIO_ACCEL_COREML_REQUIRE_QUANTIZED").is_none(),
+                "quantized target required"
+            );
+            continue;
+        }
+        let out = run_tosa_bytes_on(&backend, &graph, quantized::TARGET, &[&x], m * n * 2).unwrap();
+        for (i, b) in out.chunks_exact(2).enumerate() {
+            let pos = (i % n) * k + i / n;
+            let expected = lut[(pos / group) * 16 + pos % 16];
+            let got = u16::from_le_bytes(b.try_into().unwrap());
+            assert!(
+                got == expected || (got & 0x7fff == 0 && expected & 0x7fff == 0),
+                "palette {units:?} [{i}]: {got:04x} != {expected:04x}"
+            );
+        }
+    }
+}
