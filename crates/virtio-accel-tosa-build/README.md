@@ -106,6 +106,35 @@ operator cannot be smuggled in as a raw number. Multi-block
 control flow, dynamic shapes, variables, external tensor data, and custom
 operators remain outside this authoring boundary.
 
+## Packed NVFP4 projection
+
+```rust
+use virtio_accel_tosa_build::quantized::{nvfp4_matmul, nvfp4_matmul_fp16, TARGET};
+let fp32_graph = nvfp4_matmul(1, 256, 512, 0.125)?;
+let fp16_graph = nvfp4_matmul_fp16(1, 256, 512, 0x3000)?; // binary16 1/8
+# Ok::<(), virtio_accel_tosa_build::quantized::QuantizedBuildError>(())
+```
+
+Both artifacts use TOSA 1.0 FLOATING_POINT | INTEGER, Level8K, no extensions (`TARGET`).
+Select a Core ML or OpenVINO mixed quantized capability before loading.
+
+| Slot | Shape | Storage |
+|---|---|---|
+| 0 | `[1, M, K]` | FP32 or explicit FP16 activations |
+| 1 | `[1, N*K/2]` | INT8 bit carrier for E2M1 weights; low nibble first |
+| 2 | `[1, N*K/16]` | INT8 bit carrier for E4M3 block scales |
+| 3 | `[1, M, N]` | FP32 or explicit FP16 output |
+
+K must be a positive multiple of 16. Each weight row has its own K/16 scales. The equation is
+`output = activations @ (E2M1 * block_scale).T * tensor_scale`; the separate positive finite
+tensor scale is applied after the matrix product. FP16 explicitly rounds the product before
+its final scale. Runtime weights/scales may be updated without rebuilding the artifact.
+
+The graph uses bounded lookup tables, reshape, transpose, multiply and matmul. It neither assigns
+a new wire dtype nor mistakes NVFP4 for INT4 or MXFP4. Packed buffers stay packed at the backend
+boundary, while native compilers may allocate wider intermediate tensors. This initial path
+provides correctness and interoperability, not a native FP4 throughput guarantee.
+
 ## License
 
 Licensed under Apache-2.0 or MIT, at your option.

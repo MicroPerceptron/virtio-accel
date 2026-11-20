@@ -266,6 +266,7 @@ dependencies = [
  "virtio-accel-conformance",
  "virtio-accel-core",
  "virtio-accel-tosa",
+ "virtio-accel-tosa-build",
 ]
 
 [[package]]

@@ -121,6 +121,9 @@ pub enum RuntimeConditionSupport {
     None,
     /// Advisory `REQUIRE` conditions may remain, but mandatory dynamic conditions are rejected.
     AdvisoryOnly,
+    /// Index bounds must be discharged by `TosaAnalysis::proves_byte_lookup_bounds`.
+    /// Other dynamic conditions remain unsupported.
+    ProvenByteLookup,
 }
 
 /// Whole-graph structural boundary that is not reducible to an operator bit.

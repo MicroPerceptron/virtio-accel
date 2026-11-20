@@ -10,6 +10,8 @@
 
 extern crate alloc;
 
+pub mod quantized;
+
 use alloc::borrow::Cow;
 use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
@@ -227,6 +229,8 @@ pub enum OperatorKind {
     Erf,
     Reshape,
     Cast,
+    Gather,
+    Slice,
     Rescale {
         scale32: bool,
         rounding_mode: RoundingMode,
@@ -283,6 +287,8 @@ impl OperatorKind {
             Self::Erf => Op::ERF,
             Self::Reshape => Op::RESHAPE,
             Self::Cast => Op::CAST,
+            Self::Gather => Op::GATHER,
+            Self::Slice => Op::SLICE,
             Self::Rescale { .. } => Op::RESCALE,
             Self::Const => Op::CONST,
             Self::Identity => Op::IDENTITY,

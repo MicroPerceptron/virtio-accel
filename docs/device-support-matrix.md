@@ -79,7 +79,18 @@ tests execute FP16/FP32 MATMUL for the GPU and All policies. These are policy-le
 numerical execution results, not per-operation engine attribution or proof of concurrent
 GPU/ANE activity. See the [Python hardware results](../python/README.md#hardware-validation) for Intel, AMD and Qualcomm execution evidence, including the user-relayed Windows ARM64 Hexagon run.
 
+**Quantized inference.** Apple M4/macOS 27.0.1 passes FP8 decode/encode, constant-weight
+projections, packed cache append/window, and explicit FP32/FP16 NVFP4 projections under all
+three compute policies (2026-11-19). The packed boundary is implemented through typed ML
+Programs; wider intermediate weights may be allocated. See [ADR 0014](adr/0014-packed-quantized-inference.md).
+
 ### Intel OpenVINO (`virtio-accel-openvino`)
+
+**Quantized inference.** Gigatron/OpenVINO 2026.4.1 passes exact FP8 activations/cache and
+FP32 NVFP4 projections on CPU/GPU; explicit FP16 NVFP4 passes CPU/GPU/Lunar Lake NPU
+(2026-11-19). The NPU rejects the explicit FP32 policy and still withholds native FP8.
+These are correctness results, not native FP4 performance or compressed-residency claims.
+
 
 **The genuinely heterogeneous backend.** Device selection is explicit, ordered, and already covers
 three classes:

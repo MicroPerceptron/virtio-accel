@@ -23,7 +23,9 @@ mod lower;
 pub use lower::{
     LoweringError, OPENVINO_TOSA_CAPABILITY, OPENVINO_TOSA_FP8_CAPABILITY,
     OPENVINO_TOSA_FP8_TARGET, OPENVINO_TOSA_INTEGER_CAPABILITY, OPENVINO_TOSA_INTEGER_TARGET,
-    OPENVINO_TOSA_TARGET, supports_tosa_dtype, supports_tosa_operator,
+    OPENVINO_TOSA_QUANTIZED_CAPABILITY, OPENVINO_TOSA_QUANTIZED_FP16_CAPABILITY,
+    OPENVINO_TOSA_QUANTIZED_TARGET, OPENVINO_TOSA_TARGET, supports_tosa_dtype,
+    supports_tosa_operator,
 };
 
 use virtio_accel_tosa::CapabilityDescriptor;
@@ -31,8 +33,11 @@ use virtio_accel_tosa::CapabilityDescriptor;
 use virtio_accel_tosa::TosaCapabilityProvider;
 
 #[cfg(va_openvino)]
-const TOSA_CAPABILITIES: &[CapabilityDescriptor] =
-    &[OPENVINO_TOSA_CAPABILITY, OPENVINO_TOSA_INTEGER_CAPABILITY];
+const TOSA_CAPABILITIES: &[CapabilityDescriptor] = &[
+    OPENVINO_TOSA_CAPABILITY,
+    OPENVINO_TOSA_INTEGER_CAPABILITY,
+    OPENVINO_TOSA_QUANTIZED_CAPABILITY,
+];
 /// What an instance advertises when its device's compiler accepted the FP8 probe.
 ///
 /// FP8 support is a property of the device, not of this backend: Intel NPU arch 5010 (Panther
@@ -44,6 +49,20 @@ const TOSA_CAPABILITIES_WITH_FP8: &[CapabilityDescriptor] = &[
     OPENVINO_TOSA_CAPABILITY,
     OPENVINO_TOSA_INTEGER_CAPABILITY,
     OPENVINO_TOSA_FP8_CAPABILITY,
+    OPENVINO_TOSA_QUANTIZED_CAPABILITY,
+];
+#[cfg(va_openvino)]
+const TOSA_CAPABILITIES_FP16: &[CapabilityDescriptor] = &[
+    OPENVINO_TOSA_CAPABILITY,
+    OPENVINO_TOSA_INTEGER_CAPABILITY,
+    OPENVINO_TOSA_QUANTIZED_FP16_CAPABILITY,
+];
+#[cfg(va_openvino)]
+const TOSA_CAPABILITIES_FP16_WITH_FP8: &[CapabilityDescriptor] = &[
+    OPENVINO_TOSA_CAPABILITY,
+    OPENVINO_TOSA_INTEGER_CAPABILITY,
+    lower::OPENVINO_TOSA_FP8_FP16_CAPABILITY,
+    OPENVINO_TOSA_QUANTIZED_FP16_CAPABILITY,
 ];
 #[cfg(not(va_openvino))]
 const TOSA_CAPABILITIES: &[CapabilityDescriptor] = &[];

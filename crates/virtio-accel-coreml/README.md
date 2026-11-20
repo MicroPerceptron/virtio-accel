@@ -50,7 +50,7 @@ INT32, explicitly subtracts the two TOSA zero points, and accumulates in INT32; 
 through floating point.
 
 `TosaCapabilityProvider` exposes these as distinct floating and integer descriptors. The native
-instance includes the integer descriptor only when the host runtime reports macOS 26+ INT8 ML
+instance includes the integer, FP8, and mixed quantized descriptors only when the host runtime reports macOS 26+ INT8 ML
 Program support; non-macOS placeholders expose no descriptors.
 
 ### Low-precision boundary
@@ -61,10 +61,24 @@ path and macOS 26 or newer; older runtimes reject `COREML_TOSA_INTEGER_TARGET` b
 The native suite executes identity across all signed-byte edge values and a non-square MATMUL with
 nonzero zero points against the shared exact Rust oracle.
 
-Packed INT4, FP8E4M3, and FP8E5M2 remain unsupported. Core ML INT4 facilities are compressed-weight
-storage rather than TOSA INT4 tensor semantics, and Core ML exposes no FP8 tensor boundary. Those
-artifacts are rejected without silent dequantization. Additional INT8 operators likewise require
-explicit integer legalization and exact shared-oracle coverage before admission.
+`COREML_TOSA_FP8_TARGET` adds E4M3/E5M2 weights and activations on macOS 26+.
+Buffers retain one byte per element through an INT8 bit carrier; typed ML Program operations
+perform decoding and direct FP32 round-to-nearest-even encoding. CAST, FP8 MATMUL (FP16
+result), constants, and packed identity/reshape/transpose/concat/slice are admitted. ADD/MUL
+operate on explicitly widened FP16/FP32 values. Cache append/window graphs preserve every
+storage bit, including signed zero and NaN encodings. These are tensor primitives, not a
+paged-attention or KV-cache allocator.
+
+`COREML_TOSA_QUANTIZED_TARGET` admits the explicit NVFP4 projection graphs from
+`virtio_accel_tosa_build::quantized`: two E2M1 values per byte, one E4M3 scale per 16 weights,
+and a separate tensor scale. FP32 and explicit FP16 activation/result variants are available.
+Only byte-derived lookup indices with a static bounds proof are accepted. Packed INT4 tensor
+semantics and arbitrary dynamic gather indices remain unsupported.
+
+These paths keep packed boundary storage and decode in the submitted graph. Native compilers
+may materialize wider intermediate weights; this is not a native FP4 arithmetic or compressed
+resident-weight claim. Typed ML Programs retain the selected compute policy, but Core ML may
+place operations on CPU within that policy. See [ADR 0014](../../docs/adr/0014-packed-quantized-inference.md).
 
 Bindings use a device-neutral deterministic rule: block inputs occupy slots `0..N` in declared
 order and block outputs occupy `N..N+M`. Lowering assigns private Core ML feature and blob names;

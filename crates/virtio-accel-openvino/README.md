@@ -4,8 +4,9 @@ An Intel OpenVINO host backend for `virtio-accel`, executing device-neutral TOSA
 the NPU, GPU, or CPU inference devices of one host. `OpenVinoAccelerator::new` selects the
 preferred available device (NPU, then GPU, then CPU) and `with_device` selects one explicitly, by
 enumerated name (`"GPU.1"`) or class prefix (`"NPU"`). Models are compiled with OpenVINO's
-`ACCURACY` execution-mode hint so plugins may not silently execute a declared-FP32 graph at
-reduced precision.
+`ACCURACY` execution-mode hint. Quantized FP32 and exact FP8 activation graphs additionally
+require the explicit `f32` inference-precision hint; a device that rejects it cannot admit those
+graphs. The accuracy hint alone is not an FP32 precision guarantee on every plugin.
 
 **Portability tier:** `host-native` — OpenVINO C runtime (`libopenvino_c`, 2026.x) when detected
 at build time; a compile-only unsupported-runtime placeholder elsewhere.
@@ -42,12 +43,30 @@ declared order.
 
 ### Low-precision boundary
 
-`supports_tosa_dtype` reports FP16, FP32, INT8, and INT32 independently of operator coverage. The
-integer-profile lowerer keeps direct signed-byte boundaries, widens operands to INT32, explicitly
-subtracts TOSA zero points, and uses INT32 MATMUL. The shared identity and nonzero-zero-point
-MATMUL fixtures require bit-exact results. Packed INT4, FP8E4M3, FP8E5M2, RESCALE, and other INT8
-operators remain unsupported and are rejected before native compilation. This backend never
-dequantizes unsupported low-precision graphs.
+`supports_tosa_dtype` reports encoding capability independently of target and operator coverage.
+The integer profile retains exact INT8 identity and INT32 MATMUL with explicit zero points.
+The FP8 descriptor is advertised only after a native device compilation probe succeeds.
+E4M3/E5M2 weight constants, activations and packed cache movement are supported.
+
+FP8 graphs containing FP32 CAST or SLICE use INT8 bit carriers and explicit decode/encode operations,
+avoiding native Convert's observed FP16 double rounding and the GPU's FP8 Slice restriction.
+This path admits constants, CAST, identity, MATMUL, widened ADD/MUL, reshape, transpose, concat,
+and static slice. FP32 rounding is direct nearest-even; movement preserves all storage bits.
+Other existing FP8 graphs retain the native lowering described in ADR 0009.
+
+`OPENVINO_TOSA_QUANTIZED_TARGET` accepts the standard TOSA graphs emitted by
+`virtio_accel_tosa_build::quantized`, including NVFP4 E2M1 packed weights, E4M3 block scales
+(group size 16), and an explicit tensor scale. FP32 support is probed with the required native
+precision policy. Devices that reject it advertise `OPENVINO_TOSA_QUANTIZED_FP16_CAPABILITY`
+instead: use `nvfp4_matmul_fp16` and explicit FP16 activations/output. No FP32 graph is silently
+relabelled FP16. Lookup indices must have the static byte-widening bounds proof.
+
+CPU and GPU pass the FP32 projection and exact FP8 activation/cache tests on OpenVINO 2026.4.1.
+CPU, GPU and Lunar Lake NPU pass the explicit FP16 NVFP4 projection. That NPU still withholds
+the native FP8 target. Packed boundary bytes do not imply native FP4 arithmetic or compressed
+resident intermediates; decoding occurs inside the device graph. See
+[ADR 0014](../../docs/adr/0014-packed-quantized-inference.md). INT4 tensor semantics, RESCALE,
+and other unsupported integer operations remain rejected.
 
 ## Direct buffers and events
 

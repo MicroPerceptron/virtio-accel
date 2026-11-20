@@ -48,6 +48,13 @@ lowering utilities, while the macOS native job executes its real model and seman
 tests. An accessible Apple Neural Engine is required to construct the real backend; macOS runners
 without one skip execution after checking that availability through Core ML.
 
+Core ML's FP8 and mixed NVFP4 tiers require macOS 26+ INT8 ML Program boundaries. They
+retain packed bytes and perform explicit graph conversion. OpenVINO's mixed tier probes
+FP32 inference policy separately from native FP8 support; FP16-only devices advertise the
+narrower descriptor. The portable NVFP4 builder adds no host dependency or wire assignment.
+See [ADR 0014](adr/0014-packed-quantized-inference.md) for formats, numerical contracts and
+hardware evidence. Native compilers may expand weights internally.
+
 Python distribution wheels opt into the OpenVINO and XDNA `runtime-loading` features.
 These compile host adapters without vendor SDKs or hard link dependencies. Discovery
 loads all required symbols before creating handles, retaining the library for the process
