@@ -400,7 +400,14 @@ body {
     overflow: visible;
   }
 
-  #mdbook-content.va-has-toc > main { grid-column: 1; grid-row: 1; }
+  #mdbook-content.va-has-toc > main {
+    grid-column: 1;
+    grid-row: 1;
+    /* Long API names/code must scroll inside the prose column rather than
+     * impose their min-content width and overlap the contents rail. */
+    min-width: 0;
+    width: 100%;
+  }
 
   #va-toc {
     grid-column: 2;

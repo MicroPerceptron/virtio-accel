@@ -1,4 +1,5 @@
 name: Release Python SDK
+run-name: Python SDK · ${{ inputs.destination || 'pypi' }} · ${{ github.ref_name }}
 
 on:
   release:
@@ -41,6 +42,18 @@ jobs:
         run: |
           python python/scripts/check_release.py ref --destination "$DESTINATION" --ref "$GITHUB_REF"
           echo "destination=$DESTINATION" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Python SDK release"
+            echo "Destination: **$DESTINATION**"
+            if [ "$DESTINATION" = artifacts ]; then
+              echo "Build-only run: publishing is deliberately skipped."
+              echo "To publish, create a GitHub release with the matching python-v tag, or start a new run on that tag with destination pypi. Re-running this run keeps artifacts mode."
+            elif [ "$DESTINATION" = pypi ]; then
+              echo "After the PyPI upload succeeds, Website automatically rebuilds and deploys current main."
+            else
+              echo "TestPyPI upload only; the production website is not refreshed."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   wheels:
     needs: prepare
@@ -153,6 +166,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
+      # website/release_trigger.py identifies a production upload by this step name.
       - name: Publish to PyPI
         if: needs.prepare.outputs.destination == 'pypi'
         uses: pypa/gh-action-pypi-publish@release/v1

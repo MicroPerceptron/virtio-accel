@@ -25,6 +25,8 @@ Usage::
 
 from __future__ import annotations
 
+import importlib
+import inspect
 import re
 import sys
 from pathlib import Path
@@ -44,6 +46,12 @@ REQUIRED_PAGES = [
     "index.html",
     "getting-started.html",
     "api.html",
+    "python/index.html",
+    "python/reference.html",
+    "python/api/index.html",
+    "python/api/runtime.html",
+    "python/api/numpy.html",
+    "python/api/objects.inv",
     "favicon.svg",
     "docs/specification.html",
     "docs/wire-abi.html",
@@ -190,6 +198,38 @@ def check_references(pages: list[Path], api_built: bool) -> list[str]:
     return problems
 
 
+def check_python_api() -> list[str]:
+    """Every public export must have prose and an anchor in the generated API.
+
+    Read this checkout, never a previously installed wheel. Importing these
+    modules does not load the extension or discover accelerator devices.
+    """
+    sys.path.insert(0, str(WEBSITE.parent / "python"))
+    problems = []
+    for module_name, page_name in (("virtio_accel", "runtime"),
+                                   ("virtio_accel.numpy", "numpy")):
+        module = importlib.import_module(module_name)
+        page = BOOK / "python" / "api" / (page_name + ".html")
+        html = page.read_text() if page.exists() else ""
+        for name in module.__all__:
+            qualified = f"{module_name}.{name}"
+            obj = getattr(module, name)
+            if f'id="{qualified}"' not in html:
+                problems.append(f"Python API missing public export: {qualified}")
+            if not inspect.getdoc(obj):
+                problems.append(f"Python API missing docstring: {qualified}")
+            if inspect.isclass(obj) and obj.__module__.startswith("virtio_accel"):
+                for member, value in vars(obj).items():
+                    if member.startswith("_"):
+                        continue
+                    if inspect.isfunction(value) or isinstance(value, property):
+                        if not inspect.getdoc(value):
+                            problems.append(f"Python API missing docstring: {qualified}.{member}")
+                        if f'id="{qualified}.{member}"' not in html:
+                            problems.append(f"Python API missing member: {qualified}.{member}")
+    return problems
+
+
 def main() -> int:
     problems: list[str] = []
 
@@ -215,6 +255,8 @@ def main() -> int:
     api_built = (API / "index.html").exists()
     if not api_built:
         print("note: book/api/ is absent, skipping rustdoc link targets")
+
+    problems.extend(check_python_api())
 
     pages = site_pages()
     problems.extend(check_references(pages, api_built))

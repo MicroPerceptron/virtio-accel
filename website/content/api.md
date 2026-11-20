@@ -1,5 +1,9 @@
 # API reference
 
+The [Python SDK reference](python/api/index.html) is generated from Python
+signatures and docstrings. See the [Python guide](python/index.html) for installation.
+
+
 The public Rust API is documented with rustdoc and built for the whole workspace
 with all features enabled. The generated documentation is served under
 [`/api/`](api/index.html).

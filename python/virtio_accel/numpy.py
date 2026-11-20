@@ -20,18 +20,27 @@ __all__ = ["float16", "bfloat16", "float32", "asarray", "array", "zeros", "ones"
 
 
 def asarray(a, dtype=None):
+    """Create an immutable array or reuse an existing compatible Array.
+
+    Only FP16, BF16 and FP32 are supported. Host inputs are copied; symbolic
+    values retain their trace. Use ``dtype`` to request an explicit conversion."""
     return host_array(a, dtype)
 
 
 def array(a, dtype=None):
+    """Create an immutable array; equivalent to :func:`asarray`."""
     return host_array(a, dtype)
 
 
 def astype(a, dtype):
+    """Explicitly cast an array to FP16, BF16 or FP32."""
     return cast(asarray(a), dtype)
 
 
 def full(shape, fill_value, dtype=float32):
+    """Create a constant with a static shape and scalar fill value.
+
+    Dimensions must be positive and rank at most six; default dtype is FP32."""
     dtype = checked_dtype(dtype)
     shape = checked_shape((shape,) if isinstance(shape, int) else shape, dtype)
     if isinstance(fill_value, Array):
@@ -40,10 +49,12 @@ def full(shape, fill_value, dtype=float32):
 
 
 def zeros(shape, dtype=float32):
+    """Create a static array filled with zeros; default dtype is FP32."""
     return full(shape, 0, dtype)
 
 
 def ones(shape, dtype=float32):
+    """Create a static array filled with ones; default dtype is FP32."""
     return full(shape, 1, dtype)
 
 
@@ -59,22 +70,27 @@ def _binary(op, a, b):
 
 
 def add(a, b):
+    """Add arrays elementwise with broadcasting and frontend dtype promotion."""
     return _binary("add", a, b)
 
 
 def subtract(a, b):
+    """Subtract arrays elementwise with broadcasting and frontend dtype promotion."""
     return _binary("sub", a, b)
 
 
 def multiply(a, b):
+    """Multiply arrays elementwise with broadcasting and frontend dtype promotion."""
     return _binary("mul", a, b)
 
 
 def maximum(a, b):
+    """Select elementwise maxima with broadcasting and dtype promotion."""
     return _binary("maximum", a, b)
 
 
 def minimum(a, b):
+    """Select elementwise minima with broadcasting and dtype promotion."""
     return _binary("minimum", a, b)
 
 
@@ -84,34 +100,45 @@ def _unary(op, a):
 
 
 def negative(a):
+    """Negate each element, preserving shape and dtype."""
     return _unary("negate", a)
 
 
 def abs(a):
+    """Compute absolute values elementwise, preserving shape and dtype."""
     return _unary("abs", a)
 
 
 def exp(a):
+    """Compute the exponential elementwise, preserving shape and dtype."""
     return _unary("exp", a)
 
 
 def log(a):
+    """Compute the natural logarithm elementwise, preserving shape and dtype."""
     return _unary("log", a)
 
 
 def tanh(a):
+    """Compute the hyperbolic tangent elementwise, preserving shape and dtype."""
     return _unary("tanh", a)
 
 
 def sin(a):
+    """Compute sine elementwise in radians, preserving shape and dtype."""
     return _unary("sin", a)
 
 
 def cos(a):
+    """Compute cosine elementwise in radians, preserving shape and dtype."""
     return _unary("cos", a)
 
 
 def reshape(a, shape):
+    """Change shape without changing the element count.
+
+    One dimension may be ``-1`` for inference; all resolved dimensions must
+    be positive. The resulting rank must not exceed six."""
     a = asarray(a)
     shape = (shape,) if isinstance(shape, int) else tuple(shape)
     shape = tuple(operator.index(n) for n in shape)
@@ -129,6 +156,9 @@ def reshape(a, shape):
 
 
 def transpose(a, axes=None):
+    """Permute dimensions; reverse all dimensions when axes is None.
+
+    Explicit axes must be a complete permutation; negative axes are accepted."""
     a = asarray(a)
     if axes is None:
         axes = tuple(reversed(range(a.ndim)))
@@ -143,6 +173,12 @@ def transpose(a, axes=None):
 
 
 def matmul(a, b):
+    """Multiply two matrices or two batches with matching batch counts.
+
+    Both operands must have the same rank, either two or three, with matching
+    inner dimensions. Batch broadcasting and vector inputs are unsupported.
+    BF16 operands produce FP32 accumulator output; other output dtypes follow
+    frontend promotion."""
     a, b = promote(a, b)
     if a.ndim != b.ndim or a.ndim not in (2, 3):
         raise NotImplementedError("matmul requires two 2D or matching-batch 3D arrays")
@@ -196,9 +232,18 @@ def _reduction(a, axis, dtype, out, keepdims, average):
 
 
 def sum(a, axis=None, dtype=None, out=None, keepdims=False):
+    """Sum over all dimensions or the specified integer/tuple of axes.
+
+    Negative axes are accepted; duplicates are rejected. ``keepdims`` retains
+    reduced dimensions of size one. ``dtype`` explicitly selects the result
+    dtype; ``out`` must be None because arrays are immutable."""
     return _reduction(asarray(a), axis, dtype, out, keepdims, False)
 
 
 def mean(a, axis=None, dtype=None, out=None, keepdims=False):
+    """Average over all dimensions or specified integer/tuple of axes.
+
+    Uses the same axis, dtype and keepdims rules as :func:`sum`.
+    ``out`` must be None. Backend admission depends on the selected dtype."""
     return _reduction(asarray(a), axis, dtype, out, keepdims, True)
 

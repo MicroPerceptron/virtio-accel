@@ -1,0 +1,18 @@
+/* Match the existing site's dark palette while retaining Sphinx navigation. */
+body, div.document, div.body { background: #171923; color: #e6e7eb; }
+body, div.body, div.sphinxsidebar { font-family: system-ui, -apple-system, sans-serif; }
+div.document { width: min(1100px, 100%); }
+div.body { max-width: 820px; line-height: 1.65; }
+div.sphinxsidebar a, div.sphinxsidebar h3, div.sphinxsidebar h4,
+div.sphinxsidebar p, a { color: #70ddb2; }
+div.body h1, div.body h2, div.body h3 { color: #e6e7eb; font-family: inherit; }
+pre, code, tt, div.highlight, dl.py > dt { background: #222632; color: #e6e7eb; }
+code.xref, a code, tt.xref, a tt { background: #222632; color: #70ddb2; }
+pre { padding: 1rem; overflow-x: auto; }
+dl.py > dt { padding: .35rem .6rem; overflow-wrap: anywhere; }
+a.reference { border-bottom-color: #424956; }
+div.footer { color: #adb3c2; }
+@media (max-width: 875px) {
+  div.sphinxsidebar { background: #222632; }
+  div.body { padding: 1rem; }
+}

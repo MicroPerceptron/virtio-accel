@@ -4,6 +4,16 @@
 TOSA export, and synchronous native execution through Core ML, Vulkan, OpenVINO,
 Hexagon and XDNA. NumPy remains an explicit CPU reference. No speedup is claimed.
 
+## Install from PyPI
+
+```sh
+python -m pip install virtio-accel==0.1.0a1
+```
+
+Requires Python 3.10 or newer. See the [generated API reference](https://virtio-accel.org/python/api/)
+for public classes, functions and signatures. The online docs follow `main` and
+identify the SDK version; they may describe changes not yet released on PyPI.
+
 ## Build from this repository
 
 ```sh
@@ -17,7 +27,8 @@ python -m pip install .
 
 Building requires Rust 1.85+ and access to Cargo dependencies. The Python extension is
 an isolated Cargo workspace: PyO3 does not become a dependency of any portable crate.
-The package has not yet been published to PyPI. The release workflow builds CPython
+The package is published on [PyPI](https://pypi.org/project/virtio-accel/).
+The release workflow builds CPython
 3.10+ stable-ABI wheels for Linux (glibc 2.28+) and macOS 14+ on x86-64/ARM64,
 and Windows x86-64, plus a standalone source archive. Windows ARM64 wheels and
 Qualcomm hardware CI are deferred, tracked in [#209](https://github.com/MicroPerceptron/virtio-accel/issues/209); Hexagon remains available through QAIRT-enabled

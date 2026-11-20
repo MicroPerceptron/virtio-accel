@@ -96,6 +96,10 @@ class CompiledFunction:
         update_wrapper(self, function)
 
     def lower(self, *args, **kwargs):
+        """Trace or reuse a graph specialized to the input shapes and dtypes.
+
+        The Python function runs only when a specialization is first traced.
+        Captured values are snapshotted; clear the cache to capture changes."""
         bound = self._signature.bind(*args, **kwargs)
         bound.apply_defaults()
         arrays = tuple(host_array(v) for v in bound.arguments.values())
@@ -145,6 +149,7 @@ class CompiledFunction:
                 raise RuntimeError('; '.join(errors))
 
     def __call__(self, *args, **kwargs):
+        """Run using the explicitly selected device or CPU reference backend."""
         if self._device is not None:
             with self._lock:
                 lowered = self.lower(*args, **kwargs)
@@ -159,7 +164,26 @@ class CompiledFunction:
 
 
 def jit(function=None, *, backend=None, device=None, cache_size=16, timeout=30.0, strict=False):
-    """Trace/export, execute with device=, or explicitly select the CPU reference."""
+    """Decorate a pure function for static tracing and explicit execution.
+
+    Args:
+        function: Function to wrap, or None when used as a decorator factory.
+        backend: Set to ``"reference"`` for the NumPy CPU oracle. Mutually
+            exclusive with ``device``. There is no automatic CPU fallback.
+        device: A discovered Device or selector such as ``"gpu"``, ``"npu"``,
+            ``"cpu"`` or ``"hybrid"``. Bare kinds select index zero.
+        cache_size: Maximum cached shape/dtype specializations (default 16).
+        timeout: Native-operation timeout in seconds, greater than zero and
+            no more than 86400. A timeout does not cancel native work.
+        strict: Reject accelerator endpoints that permit CPU participation.
+
+    Returns:
+        A CompiledFunction, or a decorator when function is omitted.
+
+    With neither device nor backend, only lowering/export is enabled. Functions
+    must be pure and return one Array or a nonempty tuple of Arrays. Python
+    control flow may depend on static shapes, but never on tensor values.
+    """
     def wrap(fn):
         return CompiledFunction(fn, backend=backend, device=device, cache_size=cache_size, timeout=timeout, strict=strict)
     return wrap if function is None else wrap(function)

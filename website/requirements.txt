@@ -1,0 +1,4 @@
+# Documentation-only dependencies; no native extension or vendor SDK is needed.
+Sphinx==8.2.3
+numpy==2.5.5
+ml-dtypes==0.7.0
