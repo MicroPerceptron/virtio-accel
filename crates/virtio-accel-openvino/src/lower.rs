@@ -1757,7 +1757,7 @@ fn can_pack_i4(analysis: &TosaAnalysis<'_>, value: ValueId, data: &[u8]) -> bool
 }
 
 /// Fold a shared RHS's explicit TOSA transpose into native MatMul. In particular,
-/// expose [N,groups,group] -> [N,K] compressed weights to OpenVINO's FC matcher;
+/// expose `[N,groups,group]` -> `[N,K]` compressed weights to OpenVINO's FC matcher;
 /// retaining the redundant batch-one axis prevents compressed kernel selection.
 /// Only this consumer changes: any other users keep the original graph values.
 fn encode_transposed_matmul(
