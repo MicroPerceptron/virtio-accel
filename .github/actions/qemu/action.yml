@@ -1,0 +1,41 @@
+name: Patched experimental QEMU
+description: Cache the pinned source, firmware and build for one target and dependency ABI
+inputs:
+  target:
+    description: QEMU system target (aarch64 or x86_64)
+    required: true
+outputs:
+  executable:
+    description: Built QEMU executable
+    value: ${{ steps.build.outputs.executable }}
+runs:
+  using: composite
+  steps:
+    - name: Fingerprint QEMU build environment
+      id: environment
+      shell: bash
+      run: |
+        set -euo pipefail
+        fingerprint=$({
+          cat /etc/os-release
+          cc --version
+          python3 --version
+          ninja --version
+          dpkg-query -W -f='${Package}=${Version}\n' libc6 libc6-dev libglib2.0-dev
+          printf '%s\n' "$RUNNER_TEMP/qemu" "$GITHUB_WORKSPACE"
+        } | sha256sum | cut -d' ' -f1)
+        echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: ${{ runner.temp }}/qemu
+        # No partial restore: source, patches, target, configure options and ABI
+        # must all match. Retain firmware and Meson metadata alongside the ELF.
+        key: qemu-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.target }}-${{ steps.environment.outputs.fingerprint }}-${{ hashFiles('host/vhost-user/qemu/**', '.github/actions/qemu/action.yml') }}
+    - name: Validate patches and build (incremental on cache hit)
+      id: build
+      shell: bash
+      env:
+        QEMU_TARGET: ${{ inputs.target }}
+      run: |
+        host/vhost-user/qemu/build.sh "$RUNNER_TEMP/qemu"
+        echo "executable=$RUNNER_TEMP/qemu/build/qemu-system-$QEMU_TARGET" >> "$GITHUB_OUTPUT"

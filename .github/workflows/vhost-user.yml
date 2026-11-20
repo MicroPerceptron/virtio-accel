@@ -8,6 +8,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/vhost-user.yml'
+      - '.github/actions/qemu/**'
   push:
     branches: [main]
     paths:
@@ -16,6 +17,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/vhost-user.yml'
+      - '.github/actions/qemu/**'
   workflow_dispatch:
 
 permissions:
@@ -27,7 +29,7 @@ concurrency:
 
 jobs:
   transport:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -46,7 +48,9 @@ jobs:
       - name: Install QEMU build dependencies
         run: sudo apt-get update && sudo apt-get install -y ninja-build libglib2.0-dev python3-venv
       - name: Build experimental QEMU frontend
-        run: host/vhost-user/qemu/build.sh "$RUNNER_TEMP/qemu"
+        uses: ./.github/actions/qemu
+        with:
+          target: aarch64
       - name: Exercise real QEMU queues and reference execution
         run: |
           cargo build --manifest-path host/vhost-user/Cargo.toml --locked

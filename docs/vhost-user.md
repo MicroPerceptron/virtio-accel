@@ -51,6 +51,11 @@ python3 host/vhost-user/tests/qemu-smoke.py \
 On Ubuntu the additional build packages are `ninja-build libglib2.0-dev python3-venv`.
 `JOBS=6` can increase QEMU build concurrency. The script refuses another source revision and
 accepts an already-applied patch without discarding other changes.
+Set `QEMU_TARGET=x86_64` for Linux microvm guests (TCG or KVM). CI caches the
+complete source/build tree, including firmware, separately for each target.
+The key covers the pinned revision, patches, build script, runner architecture,
+compiler and runtime dependencies. Every restored tree is checked and rebuilt
+incrementally before the real QEMU tests run; there are no partial cache restores.
 
 The test uses QEMU's ARM `virt` machine under TCG and drives its real MMIO registers and guest
 RAM through qtest. It requires no KVM, elevated privileges, guest image, or accelerator hardware
@@ -80,7 +85,9 @@ cargo build --manifest-path host/vhost-user/Cargo.toml --locked \
 
 Use `--backend openvino`, `--backend vulkan`, or `--backend xdna`. `--device NPU` or `--device GPU`
 selects an OpenVINO endpoint explicitly; without it OpenVINO prefers NPU, then GPU, then CPU.
-Vulkan prints its selected device. Backend initialization failure is an error, not a silent
+`--backend vulkan --device 'exact device name'` selects a Vulkan endpoint. Discover
+names with `--backend openvino --list-devices` or `--backend vulkan --list-devices`
+(no socket needed). Vulkan prints its selected device. Backend initialization failure is an error, not a silent
 substitution of the mock backend. Existing backend runtime-discovery environment variables apply,
 including `VIRTIO_ACCEL_OPENVINO_LIBRARY` for the OpenVINO C runtime.
 
@@ -121,6 +128,28 @@ The daemon serves one connection and exits on disconnect or an unrecoverable tra
 fault. It does not replace an existing socket, reconnect an old device, or remove the caller's
 socket path. Remove the private directory after its processes have stopped.
 
+For a Linux kernel/initramfs, `python3 host/vhost-user/launch.py --help` provides
+a launcher which checks prerequisites, creates a private socket directory, prints
+both complete commands, and stops its children before removing that directory.
+Use `--dry-run` to inspect the commands without starting either process. For example:
+
+```sh
+python3 host/vhost-user/launch.py \
+  --qemu /tmp/va-qemu/build/qemu-system-x86_64 \
+  --daemon host/vhost-user/target/debug/virtio-accel-vhost-user \
+  --backend openvino --device NPU --allow-unknown-program-residency \
+  --kernel /path/to/vmlinuz --initrd /path/to/initramfs \
+  --append 'console=ttyS0 rdinit=/init'
+```
+
+TCG is the default. `--accel kvm` requires accessible `/dev/kvm`; the x86 launcher
+disables asynchronous page-fault injection for Linux/microvm compatibility.
+For ARM use `--target aarch64` with a matching QEMU binary/kernel and
+`--append 'console=ttyAMA0 ...'`. Additional disk/network arguments can follow `--`;
+do not duplicate the launcher's machine, RAM, serial or accelerator definitions.
+The guest image must contain a matching driver and SDK; the launcher does not
+install software into it. The direct daemon leaves socket cleanup to its caller.
+
 ### Resource policy
 
 `--buffer-budget BYTES` defaults to 512 MiB of actual retained buffer backing.
@@ -133,6 +162,10 @@ bound. To admit one such program, the operator must explicitly use:
 ```sh
 --program-budget 18446744073709551615
 ```
+
+The equivalent, readable option is `--allow-unknown-program-residency`. Starting
+a native host without that admission policy fails immediately with guidance,
+instead of waiting for the first guest program to fail with RESOURCE_LIMIT.
 
 The native-backend smoke test sets this option. It is **not a finite physical-memory guarantee**;
 use process/cgroup limits when compiler memory or CPU consumption must be bounded. The charge
