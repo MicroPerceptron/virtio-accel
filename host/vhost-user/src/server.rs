@@ -521,7 +521,7 @@ fn connected<A: Accelerator>(
     let host = Arc::new(Mutex::new(host));
     let mut handler = BackendReqHandler::from_stream(socket, host.clone());
     let mut pending = false;
-    let result = (|| {
+    let result: std::result::Result<(), Box<dyn std::error::Error>> = (|| {
         loop {
             let state = host
                 .lock()
@@ -556,7 +556,13 @@ fn connected<A: Accelerator>(
             drop(state);
             // Control wins over kicks, so reset/stop cannot race a new batch.
             if control_events.contains(PollFlags::POLLIN) {
-                handler.handle_request()?;
+                match handler.handle_request() {
+                    Ok(()) => {}
+                    // EOF between complete messages is normal QEMU shutdown. A
+                    // partial header/body still fails through the error arm.
+                    Err(Error::Disconnected) => return Ok(()),
+                    Err(error) => return Err(error.into()),
+                }
                 if host
                     .lock()
                     .map_err(|_| io::Error::other("host lock poisoned"))?
@@ -567,9 +573,10 @@ fn connected<A: Accelerator>(
                 pending = true;
                 continue;
             }
-            if control_events
-                .intersects(PollFlags::POLLHUP | PollFlags::POLLERR | PollFlags::POLLNVAL)
-            {
+            if control_events.intersects(PollFlags::POLLERR | PollFlags::POLLNVAL) {
+                return Err(io::Error::other("control socket failed").into());
+            }
+            if control_events.contains(PollFlags::POLLHUP) {
                 return Ok(());
             }
             if kick_events.intersects(PollFlags::POLLHUP | PollFlags::POLLERR | PollFlags::POLLNVAL)
@@ -591,10 +598,13 @@ fn connected<A: Accelerator>(
         }
     })();
     // Quiesce and attempt dependency-ordered resource teardown even on abrupt disconnect.
-    if let Ok(mut state) = host.lock() {
-        let _ = state.reset();
-    }
-    result
+    let reset = host
+        .lock()
+        .map_err(|_| io::Error::other("host lock poisoned"))?
+        .reset();
+    result?;
+    reset?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -602,6 +612,17 @@ mod tests {
     use super::*;
     use virtio_accel_mock::MockAccelerator;
     use virtio_accel_proto::{KnownOpcode, RequestFlags, RequestHeader};
+
+    #[test]
+    fn disconnect_between_messages_is_clean_but_truncation_fails() {
+        let (server, client) = UnixStream::pair().unwrap();
+        drop(client);
+        assert!(connected(server, host()).is_ok());
+        let (server, mut client) = UnixStream::pair().unwrap();
+        client.write_all(&[1, 0, 0]).unwrap();
+        drop(client);
+        assert!(connected(server, host()).is_err());
+    }
 
     fn host() -> Host<MockAccelerator> {
         Host::new(
