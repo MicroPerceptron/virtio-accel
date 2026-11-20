@@ -103,12 +103,34 @@ def gpu_project(x, weight):
 
 # gpu_project(x, weight) compiles once per shape/dtype and reuses native buffers.
 # gpu_project.clear_cache() releases cached programs/buffers and retraces on next use.
+# gpu_project.close() releases resources and permanently closes the function.
+# JIT functions also support `with va.jit(...) as function:` for scoped ownership.
 ```
 
 `cpu`, `npu` and `gpu` alias index zero of their class. Indices describe the current
 discovery snapshot, not persistent hardware identities. `backend="reference"` is an
 explicit NumPy oracle and never appears as a native device. Mock and vAccel wrapper
 crates are testing/integration infrastructure, not additional physical providers.
+
+Filtering with `devices(provider="vulkan")` probes only Vulkan. Pass the returned
+`Device` object to preserve that filtered snapshot's indices; a bare string selector
+uses the full discovery snapshot. Virtio caches metadata without keeping the device
+open; executable creation validates its identity again. `device_diagnostics()` forces
+a current probe, including permission and exclusive-ownership checks.
+
+`cache_size` bounds traced graphs. `resident_cache_size` separately bounds programs
+and buffers: it defaults to one for virtio and to `cache_size` for native providers.
+Programs are retired before compiling a replacement, while retained graphs avoid
+rerunning Python tracing. Independent JIT functions still share the host's resource
+budget; close unused functions before loading another on a single-program host.
+
+Completion polling uses a bounded fast phase (four retries or 50 µs), then timed
+parking from 50 µs up to 1 ms. Native and virtio execution share the same Rust
+utility. Its address-wait semantics use the standard library's cross-platform
+atomic/condition-variable primitives, without extra platform FFI or a newer macOS
+requirement. There is no completion callback in the baseline backend API or wire
+protocol: timed polling remains necessary, and a timeout never releases live native
+work prematurely. Scheduling precision is platform dependent.
 
 | Provider | Endpoints | Build/runtime requirements | Python admission boundary |
 | --- | --- | --- | --- |

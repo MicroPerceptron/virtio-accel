@@ -8,6 +8,7 @@ on:
       - 'python/**'
       - 'crates/**'
       - '.github/workflows/linux-guest.yml'
+      - '.github/actions/qemu/**'
   push:
     branches: [main]
     paths:
@@ -16,6 +17,7 @@ on:
       - 'python/**'
       - 'crates/**'
       - '.github/workflows/linux-guest.yml'
+      - '.github/actions/qemu/**'
   workflow_dispatch:
 
 permissions:
@@ -50,9 +52,9 @@ jobs:
       - name: Compile Linux driver with extra warnings
         run: make -C guest/linux W=1
       - name: Build experimental QEMU for x86 microvm
-        env:
-          QEMU_TARGET: x86_64
-        run: host/vhost-user/qemu/build.sh "$RUNNER_TEMP/qemu"
+        uses: ./.github/actions/qemu
+        with:
+          target: x86_64
       - name: Build host OpenVINO backend
         run: cargo build --manifest-path host/vhost-user/Cargo.toml --locked --features openvino
       - name: Build and install guest-only wheel

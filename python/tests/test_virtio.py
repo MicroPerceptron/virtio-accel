@@ -14,6 +14,55 @@ if sys.platform == "linux":
 
 @unittest.skipUnless(sys.platform == "linux", "Linux ioctl transport")
 class ResponseTests(unittest.TestCase):
+    def test_reused_transfer_storage_returns_independent_payloads(self):
+        session = self.session()
+        allocations = []
+
+        def reply(fd, op, data, mutate):
+            allocations.append(id(data))
+            sequence = v.HEADER.unpack_from(data, 32)[3]
+            self.response(data, sequence=sequence, length=8, used=24)
+            data[48:56] = bytes([sequence]) * 8
+
+        with patch.object(v.fcntl, "ioctl", side_effect=reply):
+            first = session.request(1, size=8)
+            second = session.request(1, size=8)
+        self.assertEqual(allocations[0], allocations[1])
+        self.assertEqual(first, bytes([1]) * 8)
+        self.assertEqual(second, bytes([2]) * 8)
+        self.assertLessEqual(len(session._transfer), v.IOCTL.size + session.max_request)
+
+    def test_cached_discovery_skips_native_and_reprobes_recreated_nodes(self):
+        from types import SimpleNamespace
+        from virtio_accel import _runtime
+
+        node = Path("/dev/virtio-accel0")
+        info = SimpleNamespace(
+            st_mode=0o20600, st_dev=1, st_ino=2, st_rdev=3, st_ctime_ns=4
+        )
+        session = SimpleNamespace(
+            node_identity=(1, 2, 3, 4), uuid=bytes(16), device_class=2
+        )
+        with (
+            patch.object(v, "_device_cache", {}),
+            patch.object(v.Path, "glob", return_value=[node]),
+            patch.object(v.Path, "stat", return_value=info),
+            patch.object(v, "acquire", return_value=session) as acquire,
+            patch.object(v, "release"),
+            patch.object(_runtime, "_native") as native,
+        ):
+            (first,) = _runtime.devices(provider="virtio")
+            self.assertEqual(_runtime.devices(provider="virtio"), (first,))
+            acquire.assert_called_once()
+            native.assert_not_called()
+            info.st_ino = 9
+            session.node_identity = (1, 9, 3, 4)
+            with self.assertRaisesRegex(RuntimeError, "no fallback"):
+                _runtime._resolve(first, False)
+            self.assertEqual(acquire.call_count, 2)
+            _runtime._discovery("virtio", refresh=True)
+            self.assertEqual(acquire.call_count, 3)
+
     def session(self):
         session = object.__new__(v.Session)
         session.fd = 123
@@ -21,6 +70,7 @@ class ResponseTests(unittest.TestCase):
         session.sequence = 0
         session.max_request = session.max_response = 4096
         session.lock = RLock()
+        session._transfer = bytearray()
         return session
 
     def response(self, data, *, status=0, flags=0, length=0, sequence=1, used=16):
