@@ -1,0 +1,46 @@
+diff --git a/hw/virtio/vhost-user-base.c b/hw/virtio/vhost-user-base.c
+index ff67a02..37cf08f 100644
+--- a/hw/virtio/vhost-user-base.c
++++ b/hw/virtio/vhost-user-base.c
+@@ -88,6 +88,20 @@ static int vub_stop(VirtIODevice *vdev)
+     return ret;
+ }
+
++static void vub_reset(VirtIODevice *vdev)
++{
++    VHostUserBase *vub = VHOST_USER_BASE(vdev);
++    int ret;
++
++    /* set_status has synchronously stopped the queues before this callback. */
++    if (vub->connected) {
++        ret = vhost_reset_device(&vub->vhost_dev);
++        if (ret < 0 && ret != -ENOSYS) {
++            virtio_error(vdev, "vhost-user reset failed: %d", ret);
++        }
++    }
++}
++
+ static int vub_set_status(VirtIODevice *vdev, uint8_t status)
+ {
+     VHostUserBase *vub = VHOST_USER_BASE(vdev);
+@@ -363,6 +377,7 @@ static void vub_class_init(ObjectClass *klass, const void *data)
+     vdc->get_config = vub_get_config;
+     vdc->set_config = vub_set_config;
+     vdc->set_status = vub_set_status;
++    vdc->reset = vub_reset;
+ }
+
+ static const TypeInfo vub_types[] = {
+diff --git a/hw/virtio/vhost-user.c b/hw/virtio/vhost-user.c
+index 63fa9a1..f1154d5 100644
+--- a/hw/virtio/vhost-user.c
++++ b/hw/virtio/vhost-user.c
+@@ -1534,7 +1534,7 @@ static int vhost_user_reset_device(struct vhost_dev *dev)
+         return -ENOSYS;
+     }
+
+-    return vhost_user_write(dev, &msg, NULL, 0);
++    return vhost_user_write_sync(dev, &msg, true);
+ }
+
+ static int vhost_user_backend_handle_config_change(struct vhost_dev *dev)

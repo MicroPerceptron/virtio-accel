@@ -432,6 +432,14 @@ contract evidence. The threat model and enforceable aggregate resource policy cl
 model. Coverage-guided fuzzing exercises protocol decoding, descriptor segmentation, and bounded
 stateful command sequences. The deterministic state-model replay suite extends that coverage with
 random context/resource graphs, stale-ID probes, submission/cancel/completion/reset race schedules,
-and minimized replay output for failures. A thin rust-vmm adapter supplying `virtio-device`,
-`virtio-queue`, and `vm-memory` integration remains a later platform layer, as do Linux
-vhost-user and an in-kernel guest driver.
+and minimized replay output for failures. The experimental Linux host now supplies `vhost`,
+`virtio-queue`, and `vm-memory` integration as a separate platform layer. Production QEMU
+frontend integration and guest drivers remain follow-up work.
+
+## Experimental QEMU host binding
+
+The [Linux vhost-user adapter](vhost-user.md) connects real shared split virtqueues to the
+existing command processor. Its separate workspace owns guest-memory validation, queue
+notifications, and serialized reset. Portable crates retain their existing OS-independent
+contracts. The QEMU development frontend uses experimental MMIO identity 65535; it is not
+an assigned Virtio type, and guest drivers remain separate work.

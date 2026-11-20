@@ -334,6 +334,20 @@ def check_fuzz_stays_unpublished() -> None:
         fail(f"{rel(manifest)} package.publish must remain false")
 
 
+def check_host_stays_separate() -> None:
+    """The Linux daemon has its own lockfile and cannot enter portable publication."""
+    manifest = ROOT / "host" / "vhost-user" / "Cargo.toml"
+    data = tomllib.loads(manifest.read_text(encoding="utf-8"))
+    if data.get("package", {}).get("publish") is not False:
+        fail(f"{rel(manifest)} package.publish must remain false")
+    if "workspace" not in data:
+        fail(f"{rel(manifest)} must remain a separate host workspace")
+    for name in ("lib.rs", "main.rs"):
+        root = manifest.parent / "src" / name
+        if "#![forbid(unsafe_code)]" not in root.read_text(encoding="utf-8"):
+            fail(f"{rel(root)} must forbid project-authored unsafe code")
+
+
 def main() -> int:
     check_workspace_metadata()
     check_published_set()
@@ -342,6 +356,7 @@ def main() -> int:
     for manifest in sorted(PACKAGE_MANIFESTS):
         check_manifest(manifest)
     check_fuzz_stays_unpublished()
+    check_host_stays_separate()
     for crate_root in sorted(CRATE_ROOTS):
         check_crate_root(crate_root)
     check_links()

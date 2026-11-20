@@ -2,7 +2,9 @@
 
 A cross-platform in-memory reference backend with deterministic test-only artifacts,
 harness-controlled execution, and scripted ownership-boundary faults. It is the backend the
-workspace examples and conformance suite run against.
+workspace examples and conformance suite run against. Standalone hosts can opt into
+`MockAccelerator::completing_on_poll()` to execute reference work on its first event poll;
+`Default` retains manual completion.
 
 Part of the [`virtio-accel`](https://github.com/MicroPerceptron/virtio-accel) workspace: an experimental native-Rust protocol and implementation stack for a
 transport-neutral virtual accelerator device. Portable crates contain no host-OS or vendor APIs;
