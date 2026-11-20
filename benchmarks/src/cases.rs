@@ -1,0 +1,334 @@
+use half::{bf16, f16};
+use virtio_accel_tosa::{DType, ExtensionSet, Level, ProfileSet, Target, Version};
+use virtio_accel_tosa_build::{Graph, Operator, OperatorKind, Shape, Tensor, quantized};
+
+#[derive(Clone, Copy, Debug)]
+pub enum Case {
+    MatmulF16Decode,
+    MatmulF16Prefill,
+    MatmulBf16Decode,
+    MatmulF32Decode,
+    Nvfp4F16Decode,
+    Nvfp4F16Prefill,
+    Nvfp4F32Decode,
+    Fp8E4M3Encode,
+    Fp8E5M2Encode,
+    Fp8E4M3Decode,
+    Fp8E5M2Decode,
+    Fp8CacheWindow,
+}
+pub const CASES: &[Case] = &[
+    Case::MatmulF16Decode,
+    Case::MatmulF16Prefill,
+    Case::MatmulBf16Decode,
+    Case::MatmulF32Decode,
+    Case::Nvfp4F16Decode,
+    Case::Nvfp4F16Prefill,
+    Case::Nvfp4F32Decode,
+    Case::Fp8E4M3Encode,
+    Case::Fp8E5M2Encode,
+    Case::Fp8E4M3Decode,
+    Case::Fp8E5M2Decode,
+    Case::Fp8CacheWindow,
+];
+
+pub struct Workload {
+    pub name: String,
+    pub artifact: Vec<u8>,
+    pub target: Target,
+    pub inputs: Vec<Vec<u8>>,
+    pub expected: Vec<u8>,
+    pub output_dtype: DType,
+    pub shape: Vec<usize>,
+    pub logical_flops: u64,
+}
+impl Workload {
+    pub fn validate(&self, actual: &[u8]) -> Result<(), String> {
+        if actual != self.expected {
+            let first = actual.iter().zip(&self.expected).position(|(a, b)| a != b);
+            return Err(format!(
+                "{}: output mismatch at byte {first:?}; lengths {} vs {}",
+                self.name,
+                actual.len(),
+                self.expected.len()
+            ));
+        }
+        Ok(())
+    }
+    pub fn input_bytes(&self) -> usize {
+        self.inputs.iter().map(Vec::len).sum()
+    }
+}
+fn target(ext: ExtensionSet) -> Target {
+    Target::new(
+        Version::TOSA_1_0,
+        ProfileSet::FLOATING_POINT,
+        Level::Level8K,
+        ext,
+    )
+}
+pub fn fp8_target() -> Target {
+    target(ExtensionSet::FP8E4M3.union(ExtensionSet::FP8E5M2))
+}
+fn encode(values: &[f32], d: DType) -> Vec<u8> {
+    match d {
+        DType::FP16 => values
+            .iter()
+            .flat_map(|v| f16::from_f32(*v).to_bits().to_le_bytes())
+            .collect(),
+        DType::BF16 => values
+            .iter()
+            .flat_map(|v| bf16::from_f32(*v).to_bits().to_le_bytes())
+            .collect(),
+        DType::FP32 => values.iter().flat_map(|v| v.to_le_bytes()).collect(),
+        _ => unreachable!(),
+    }
+}
+impl Case {
+    pub fn build(self) -> Workload {
+        let mut w = match self {
+            Self::MatmulF16Decode => matmul(1, 128, 256, DType::FP16),
+            Self::MatmulF16Prefill => matmul(16, 128, 256, DType::FP16),
+            Self::MatmulF32Decode => matmul(1, 128, 256, DType::FP32),
+            Self::MatmulBf16Decode => matmul(1, 128, 256, DType::BF16),
+            Self::Nvfp4F16Decode => nvfp4(1, 128, 256, DType::FP16),
+            Self::Nvfp4F16Prefill => nvfp4(16, 128, 256, DType::FP16),
+            Self::Nvfp4F32Decode => nvfp4(1, 128, 256, DType::FP32),
+            Self::Fp8E4M3Encode => cast(DType::FP8E4M3, true),
+            Self::Fp8E5M2Encode => cast(DType::FP8E5M2, true),
+            Self::Fp8E4M3Decode => cast(DType::FP8E4M3, false),
+            Self::Fp8E5M2Decode => cast(DType::FP8E5M2, false),
+            Self::Fp8CacheWindow => cache(),
+        };
+        w.name = format!("{self:?}");
+        w
+    }
+}
+fn matmul(m: usize, n: usize, k: usize, d: DType) -> Workload {
+    // Positive binary fractions make every result nonzero and exactly representable;
+    // With K=256 these products and every positive partial sum fit FP16 exactly,
+    // independent of accumulation order. Zero-filled output cannot pass validation.
+    let a = (0..m * k)
+        .map(|i| (i % 4 + 1) as f32 * 0.125)
+        .collect::<Vec<_>>();
+    let b = (0..k * n)
+        .map(|i| (i % 3 + 1) as f32 * 0.0625)
+        .collect::<Vec<_>>();
+    let output = if d == DType::BF16 { DType::FP32 } else { d };
+    let expected = (0..m * n)
+        .map(|i| {
+            let (row, col) = (i / n, i % n);
+            (0..k)
+                .map(|j| f64::from(a[row * k + j]) * f64::from(b[j * n + col]))
+                .sum::<f64>() as f32
+        })
+        .collect::<Vec<_>>();
+    let zero = encode(&[0.0], d);
+    let a_shape = [1, m as i32, k as i32];
+    let b_shape = [1, k as i32, n as i32];
+    let out_shape = [1, m as i32, n as i32];
+    let tensors = [
+        Tensor::new("a", &a_shape, d),
+        Tensor::new("b", &b_shape, d),
+        Tensor::constant("zero", &[1], d, &zero),
+        Tensor::new("out", &out_shape, output),
+    ];
+    let ops = [
+        Operator::new(OperatorKind::Const, &[], &["zero"]),
+        Operator::new(OperatorKind::MatMul, &["a", "b", "zero", "zero"], &["out"]),
+    ];
+    let target = target(if d == DType::BF16 {
+        ExtensionSet::BF16
+    } else {
+        ExtensionSet::NONE
+    });
+    Workload {
+        name: String::new(),
+        artifact: Graph::new("matmul", &tensors, &ops, &["a", "b"], &["out"])
+            .build(target)
+            .unwrap(),
+        target,
+        inputs: vec![encode(&a, d), encode(&b, d)],
+        expected: encode(&expected, output),
+        output_dtype: output,
+        shape: vec![m, n, k],
+        logical_flops: (2 * m * n * k) as u64,
+    }
+}
+fn nvfp4(m: usize, n: usize, k: usize, d: DType) -> Workload {
+    let a = (0..m * k)
+        .map(|i| (i % 4 + 1) as f32 * 0.125)
+        .collect::<Vec<_>>();
+    let weights = (0..n * k / 2)
+        .map(|i| [0x21, 0x43, 0x65, 0x10][i % 4])
+        .collect::<Vec<_>>();
+    let scales = (0..n * k / 16)
+        .map(|i| if i % 3 == 0 { 0x30 } else { 0x38 })
+        .collect::<Vec<_>>();
+    let lut = [
+        0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+    ];
+    let expected = (0..m * n)
+        .map(|i| {
+            let (row, col) = (i / n, i % n);
+            let sum = (0..k)
+                .map(|j| {
+                    let byte = weights[col * k / 2 + j / 2];
+                    let nibble = if j % 2 == 0 { byte & 15 } else { byte >> 4 };
+                    f64::from(a[row * k + j])
+                        * lut[nibble as usize]
+                        * f64::from(virtio_accel_tosa::fp8e4m3_to_f32(
+                            scales[col * k / 16 + j / 16],
+                        ))
+                })
+                .sum::<f64>() as f32;
+            (if d == DType::FP16 {
+                f16::from_f32(sum).to_f32()
+            } else {
+                sum
+            }) * 0.125
+        })
+        .collect::<Vec<_>>();
+    let artifact = if d == DType::FP16 {
+        quantized::nvfp4_matmul_fp16(m, n, k, 0x3000)
+    } else {
+        quantized::nvfp4_matmul(m, n, k, 0.125)
+    }
+    .unwrap();
+    Workload {
+        name: String::new(),
+        artifact,
+        target: quantized::TARGET,
+        inputs: vec![encode(&a, d), weights, scales],
+        expected: encode(&expected, d),
+        output_dtype: d,
+        shape: vec![m, n, k],
+        logical_flops: (2 * m * n * k) as u64,
+    }
+}
+fn cast(d: DType, encode_fp8: bool) -> Workload {
+    let bytes = (0..4096).map(|i| (i % 120) as u8).collect::<Vec<_>>();
+    let values = bytes
+        .iter()
+        .map(|b| {
+            if d == DType::FP8E4M3 {
+                virtio_accel_tosa::fp8e4m3_to_f32(*b)
+            } else {
+                virtio_accel_tosa::fp8e5m2_to_f32(*b)
+            }
+        })
+        .collect::<Vec<_>>();
+    let (input, output) = if encode_fp8 {
+        (DType::FP32, d)
+    } else {
+        (d, DType::FP32)
+    };
+    let tensors = [
+        Tensor::new("in", &[1, 4096], input),
+        Tensor::new("out", &[1, 4096], output),
+    ];
+    let ops = [Operator::new(OperatorKind::Cast, &["in"], &["out"])];
+    let floats = encode(&values, DType::FP32);
+    let (data, expected) = if encode_fp8 {
+        (floats, bytes)
+    } else {
+        (bytes, floats)
+    };
+    Workload {
+        name: String::new(),
+        artifact: Graph::new("cast", &tensors, &ops, &["in"], &["out"])
+            .build(fp8_target())
+            .unwrap(),
+        target: fp8_target(),
+        inputs: vec![data],
+        expected,
+        output_dtype: output,
+        shape: vec![4096],
+        logical_flops: 0,
+    }
+}
+fn cache() -> Workload {
+    let d = DType::FP8E4M3;
+    let tensors = [
+        Tensor::new("cache", &[1, 16384], d),
+        Tensor::new("append", &[1, 128], d),
+        Tensor::new("joined", &[1, 16512], d),
+        Tensor::new("out", &[1, 16384], d),
+    ];
+    let shapes = [
+        Shape::new("start", &[0, 128]),
+        Shape::new("size", &[1, 16384]),
+    ];
+    let ops = [
+        Operator::new(OperatorKind::ConstShape, &[], &["start"]),
+        Operator::new(OperatorKind::ConstShape, &[], &["size"]),
+        Operator::new(
+            OperatorKind::Concat { axis: 1 },
+            &["cache", "append"],
+            &["joined"],
+        ),
+        Operator::new(OperatorKind::Slice, &["joined", "start", "size"], &["out"]),
+    ];
+    let data = (0..16512).map(|i| (i % 256) as u8).collect::<Vec<_>>();
+    Workload {
+        name: String::new(),
+        artifact: Graph::new("cache", &tensors, &ops, &["cache", "append"], &["out"])
+            .with_shapes(&shapes)
+            .build(fp8_target())
+            .unwrap(),
+        target: fp8_target(),
+        inputs: vec![data[..16384].to_vec(), data[16384..].to_vec()],
+        expected: data[128..].to_vec(),
+        output_dtype: d,
+        shape: vec![16384, 128],
+        logical_flops: 0,
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn dense_fp16_reference_is_independent_of_accumulation_order() {
+        for case in [Case::MatmulF16Decode, Case::MatmulF16Prefill] {
+            let w = case.build();
+            let decode = |bytes: &[u8]| {
+                bytes
+                    .chunks_exact(2)
+                    .map(|v| f16::from_bits(u16::from_le_bytes([v[0], v[1]])).to_f32())
+                    .collect::<Vec<_>>()
+            };
+            let a = decode(&w.inputs[0]);
+            let b = decode(&w.inputs[1]);
+            let [m, n, k] = w.shape[..] else {
+                unreachable!()
+            };
+            for row in 0..m {
+                for col in 0..n {
+                    let units: Vec<_> = (0..k)
+                        .map(|j| a[row * k + j] * b[j * n + col] * 128.0)
+                        .collect();
+                    assert!(units.iter().all(|v| *v > 0.0 && v.fract() == 0.0));
+                    // Any partial sum is an integer <= 2048 scaled by 2^-7:
+                    // representable in FP16 for every reduction order.
+                    assert!(units.iter().sum::<f32>() <= 2048.0);
+                }
+            }
+        }
+    }
+    #[test]
+    fn workloads_are_valid_and_reject_corrupt_output() {
+        for case in CASES {
+            let w = case.build();
+            virtio_accel_tosa::parse(&w.artifact)
+                .unwrap()
+                .analyze_for(w.target)
+                .unwrap();
+            assert!(w.validate(&w.expected).is_ok());
+            assert!(w.validate(&vec![0; w.expected.len()]).is_err());
+            let mut wrong = w.expected.clone();
+            wrong[0] ^= 1;
+            assert!(w.validate(&wrong).is_err());
+            assert!(w.validate(&w.expected[..w.expected.len() - 1]).is_err());
+        }
+    }
+}

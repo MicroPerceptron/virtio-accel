@@ -142,12 +142,9 @@ checks bit-exact identity and INT32-accumulating MATMUL. The suite also checks o
 predictions and repeated compile/unload source cleanup. Future host backends inherit these exact
 artifacts and oracles instead of substituting provider-specific graphs.
 
-For local warm-path latency evidence, run the ignored release-mode measurement:
-
-```sh
-cargo test --release -p virtio-accel-coreml \
-  measures_warm_submission_and_completion_latency -- --ignored --nocapture
-```
+For repeatable load/unload, transfer, warm execution and round-trip measurements, use the
+separate [Divan benchmark package](../../benchmarks/README.md). It validates numerical output
+outside timing and records the selected policy. Hardware timing is not a correctness test.
 
 ## License
 

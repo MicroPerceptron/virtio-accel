@@ -40,6 +40,10 @@ cargo run -p virtio-accel-vulkan --example tosa_vulkan
 python3 ci/publish-dry-run.py
 ```
 
+For changes to benchmark workloads or measurement code, also run the
+[benchmark package checks and smoke cases](benchmarks/README.md). Its dependencies remain
+in a separate unpublished workspace.
+
 Portable-target checks need the bare-metal standard libraries:
 
 ```sh
