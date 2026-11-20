@@ -75,6 +75,12 @@ def sdk_execution():
     assert len(devices) == 1, va.device_diagnostics()
     device = devices[0]
     assert device.cpu_participation
+    # Subsequent discovery must not open/close the idle device and consume a
+    # reset namespace. Session creation still validates the cached identity.
+    from unittest.mock import patch
+
+    with patch.object(v, "acquire", side_effect=AssertionError("idle reprobe")):
+        assert va.devices(provider="virtio") == devices
     x = np.arange(32, dtype=np.float32).reshape(1, 32) / 8
     for function, expected in ((lambda a: a, x), (lambda a: a + a, x + x)):
         compiled = va.jit(function, device=device)
@@ -96,10 +102,61 @@ def sdk_execution():
             assert "exclusive" in str(error), error
         else:
             raise AssertionError("unverifiable strict placement was accepted")
+    traces = []
+
+    def changing_shape(a):
+        traces.append(a.shape)
+        return a + a
+
+    with va.jit(changing_shape, device=device) as compiled:
+        for size in (32, 64, 32):
+            values = np.arange(size, dtype=np.float32).reshape(1, size)
+            np.testing.assert_array_equal(compiled(values).to_numpy(), values + values)
+        assert traces == [(1, 32), (1, 64)]
+    print(
+        "PASS: shape changes retire resident programs while retaining traced graphs",
+        flush=True,
+    )
     print(
         f"PASS: Python SDK JIT identity/add, cached runs, discovery and close via {device}",
         flush=True,
     )
+
+
+def polling_measurements():
+    """Compare policies on the same resident graph; report, never gate on timing."""
+    import statistics
+
+    from virtio_accel import _native
+
+    adaptive = _native._PollWait
+
+    class FixedWait:
+        def wait(self, remaining):
+            time.sleep(min(0.001, remaining))
+
+    (device,) = va.devices(provider="virtio")
+    values = np.arange(32, dtype=np.float32).reshape(1, 32)
+    try:
+        with va.jit(lambda a: a + a, device=device) as compiled:
+            compiled(values)
+            for label, policy in (("fixed-1ms", FixedWait), ("adaptive", adaptive)):
+                _native._PollWait = policy
+                samples = []
+                cpu = time.process_time()
+                for _ in range(64):
+                    started = time.perf_counter()
+                    result = compiled(values)
+                    samples.append((time.perf_counter() - started) * 1e6)
+                    np.testing.assert_array_equal(result.to_numpy(), values + values)
+                cpu = (time.process_time() - cpu) * 1e6 / len(samples)
+                print(
+                    f"POLL_BENCH {label}: median_us={statistics.median(samples):.1f} "
+                    f"p95_us={sorted(samples)[60]:.1f} guest_cpu_us_per_call={cpu:.1f}",
+                    flush=True,
+                )
+    finally:
+        _native._PollWait = adaptive
 
 
 def timeout_contracts():
@@ -148,6 +205,7 @@ if __name__ == "__main__":
     driver_contracts()
     if os.environ.get("VA_TEST_BACKEND") != "mock":
         sdk_execution()
+        polling_measurements()
     timeout_contracts()
     malformed_frame_rejection()
     remove_contracts()

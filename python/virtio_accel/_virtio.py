@@ -4,6 +4,7 @@ The module is imported only on Linux. OS details deliberately stay outside the
 portable Rust crates. The native compiler owns TOSA serialization and targets.
 """
 
+import errno
 import fcntl
 import math
 import os
@@ -20,18 +21,61 @@ IOCTL = struct.Struct("=8I")
 HEADER = struct.Struct("<HHIQ")
 DEVICE_INFO = struct.Struct("<16sHHIIQ6IQQ")
 _sessions = {}
+_device_cache = {}
 _registry_lock = RLock()
 
 
 def _after_fork():
     # Inherited executables fail their PID check before touching inherited locks.
     # New processes must exec before opening the same exclusive device.
-    global _registry_lock, _sessions
+    global _registry_lock, _sessions, _device_cache
     _registry_lock = RLock()
     _sessions = {}
+    _device_cache = {}
 
 
 os.register_at_fork(after_in_child=_after_fork)
+
+
+OPERATIONS = {
+    1: "GET_DEVICE_INFO",
+    0x100: "CREATE_CONTEXT",
+    0x101: "DESTROY_CONTEXT",
+    0x200: "CREATE_BUFFER",
+    0x201: "DESTROY_BUFFER",
+    0x202: "WRITE_BUFFER",
+    0x203: "READ_BUFFER",
+    0x300: "LOAD_PROGRAM",
+    0x301: "UNLOAD_PROGRAM",
+    0x400: "CREATE_QUEUE",
+    0x401: "DESTROY_QUEUE",
+    0x500: "SUBMIT",
+    0x501: "POLL_EVENT",
+    0x503: "DESTROY_EVENT",
+}
+STATUSES = dict(
+    enumerate(
+        (
+            "OK",
+            "UNSUPPORTED",
+            "INCOMPATIBLE",
+            "INVALID_ARGUMENT",
+            "OUT_OF_BOUNDS",
+            "BUSY",
+            "OUT_OF_MEMORY",
+            "RESOURCE_LIMIT",
+            "DEADLINE_EXPIRED",
+            "DEVICE_LOST",
+            "PERMISSION_DENIED",
+            "STALE_OBJECT",
+        )
+    )
+)
+STATUSES[65535] = "INTERNAL_ERROR"
+
+
+def _node_identity(info):
+    return (info.st_dev, info.st_ino, info.st_rdev, info.st_ctime_ns)
 
 
 class ProtocolError(RuntimeError):
@@ -44,10 +88,22 @@ class Session:
         self.pid = os.getpid()
         self.lock = RLock()
         self.references = 0
-        self.fd = os.open(path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            self.fd = os.open(path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
+        except OSError as error:
+            hints = {
+                errno.EBUSY: "device is owned by another process; close its session first",
+                errno.EACCES: "access denied; ask the guest administrator to configure the trusted virtio-accel group",
+                errno.EPERM: "access denied by guest device policy",
+            }
+            if error.errno in hints:
+                raise OSError(error.errno, hints[error.errno], path) from error
+            raise
         self.sequence = 0
         try:
-            if not stat.S_ISCHR(os.fstat(self.fd).st_mode):
+            info = os.fstat(self.fd)
+            self.node_identity = _node_identity(info)
+            if not stat.S_ISCHR(info.st_mode):
                 raise RuntimeError(f"{path} is not a character device")
             info = bytearray(IOCTL.size)
             fcntl.ioctl(self.fd, INFO, info, True)
@@ -60,6 +116,7 @@ class Session:
                 97 <= self.max_request <= 1 << 20 and 92 <= self.max_response <= 1 << 20
             ):
                 raise ProtocolError("invalid Linux driver transfer bounds")
+            self._transfer = bytearray()
             payload = self.request(1, size=DEVICE_INFO.size)
             (
                 self.uuid,
@@ -109,13 +166,21 @@ class Session:
                 self.poison()
                 raise RuntimeError("virtio request IDs exhausted")
             self.sequence += 1
-            request = HEADER.pack(opcode, 0, len(payload), self.sequence) + payload
+            request_len = HEADER.size + len(payload)
             capacity = HEADER.size + size
-            data = bytearray(IOCTL.size + max(len(request), capacity))
+            required = IOCTL.size + max(request_len, capacity)
+            data = self._transfer
+            if len(data) < required:
+                # Geometric growth is bounded by the validated driver limits.
+                capacity_bytes = min(
+                    max(required, 2 * len(data)),
+                    IOCTL.size + max(self.max_request, self.max_response),
+                )
+                data.extend(bytes(capacity_bytes - len(data)))
             IOCTL.pack_into(
                 data,
                 0,
-                len(request),
+                request_len,
                 capacity,
                 max(1, min(60000, math.ceil(timeout * 1000))),
                 0,
@@ -124,14 +189,15 @@ class Session:
                 0,
                 0,
             )
-            data[IOCTL.size : IOCTL.size + len(request)] = request
+            HEADER.pack_into(data, IOCTL.size, opcode, 0, len(payload), self.sequence)
+            data[IOCTL.size + HEADER.size : IOCTL.size + request_len] = payload
             try:
                 fcntl.ioctl(self.fd, EXCHANGE, data, True)
-                request_len, used, milliseconds, flags, *reserved = IOCTL.unpack_from(
+                echoed_len, used, milliseconds, flags, *reserved = IOCTL.unpack_from(
                     data
                 )
                 if (
-                    request_len != len(request)
+                    echoed_len != request_len
                     or not 16 <= used <= capacity
                     or not milliseconds
                     or flags
@@ -141,7 +207,9 @@ class Session:
                 status, flags, length, sequence = HEADER.unpack_from(data, IOCTL.size)
                 if flags or sequence != self.sequence or length != used - HEADER.size:
                     raise ProtocolError("invalid response header")
-                result = bytes(data[IOCTL.size + HEADER.size : IOCTL.size + used])
+                result = bytes(
+                    memoryview(data)[IOCTL.size + HEADER.size : IOCTL.size + used]
+                )
                 if status:
                     # SUBMIT/DEVICE_LOST can carry an indeterminate event. Never
                     # replay it, even when the provider reports a nonzero ID.
@@ -149,8 +217,15 @@ class Session:
                         raise ProtocolError(f"device lost or unknown status {status}")
                     if result:
                         raise ProtocolError("unexpected failure payload")
+                    hint = ""
+                    if status == 7:
+                        hint = (
+                            "; close unused executables or reduce resident_cache_size; "
+                            "current native hosts admit one resident program"
+                        )
                     raise RuntimeError(
-                        f"virtio opcode {opcode:#x}: status {status}; no fallback selected"
+                        f"{OPERATIONS.get(opcode, hex(opcode))}: {STATUSES[status]} "
+                        f"(status {status}){hint}; no fallback selected"
                     )
                 if len(result) != size:
                     raise ProtocolError("unexpected response payload length")
@@ -189,29 +264,44 @@ def release(session):
                 del _sessions[session.path]
 
 
-def discover(result):
-    for path in sorted(Path("/dev").glob("virtio-accel[0-9]*")):
-        session = None
-        try:
-            session = acquire(str(path))
-            # OTHER is not evidence of CPU placement. Protocol 1.0 has no CPU
-            # participation bit or provider-name string; report conservatively.
-            kind = {1: "npu", 2: "gpu"}.get(session.device_class, "hybrid")
-            index = sum(d["kind"] == kind for d in result["devices"])
-            result["devices"].append(
-                {
-                    "id": f"{kind}:{index}",
-                    "kind": kind,
-                    "provider": "virtio",
-                    "name": str(path),
-                    "cpu_participation": True,
-                }
-            )
-        except (OSError, RuntimeError) as error:
-            result["diagnostics"].append(f"Virtio {path}: {error}")
-        finally:
-            if session is not None:
-                release(session)
+def discover(result, *, refresh=False):
+    paths = sorted(Path("/dev").glob("virtio-accel[0-9]*"))
+    with _registry_lock:
+        for missing in _device_cache.keys() - {str(p) for p in paths}:
+            del _device_cache[missing]
+        for path in paths:
+            session = None
+            name = str(path)
+            try:
+                info = path.stat(follow_symlinks=False)
+                if not stat.S_ISCHR(info.st_mode):
+                    raise RuntimeError(f"{path} is not a character device")
+                identity = _node_identity(info)
+                cached = _device_cache.get(name)
+                if not refresh and cached and cached[0] == identity:
+                    entry = cached[1].copy()
+                else:
+                    session = acquire(name)
+                    # Cache metadata, never a spare fd: an idle discovery must
+                    # not hold exclusive ownership or repeatedly reset the device.
+                    kind = {1: "npu", 2: "gpu"}.get(session.device_class, "hybrid")
+                    entry = dict(
+                        kind=kind,
+                        provider="virtio",
+                        name=name,
+                        cpu_participation=True,
+                        _identity=(session.node_identity, session.uuid.hex()),
+                    )
+                    _device_cache[name] = (session.node_identity, entry.copy())
+                index = sum(d["kind"] == entry["kind"] for d in result["devices"])
+                entry["id"] = f"{entry['kind']}:{index}"
+                result["devices"].append(entry)
+            except (OSError, RuntimeError) as error:
+                _device_cache.pop(name, None)
+                result["diagnostics"].append(f"Virtio {path}: {error}")
+            finally:
+                if session is not None:
+                    release(session)
 
 
 class VirtioExecutable:
@@ -233,6 +323,10 @@ class VirtioExecutable:
         s = self.session
         try:
             with s.lock:
+                if device._identity != (s.node_identity, s.uuid.hex()):
+                    raise RuntimeError(
+                        "virtio device changed since discovery; discover it again"
+                    )
                 if len(self.sizes) > s.max_bindings or any(
                     n > s.max_buffer for n in self.sizes
                 ):
@@ -253,6 +347,17 @@ class VirtioExecutable:
                         "<QQB7xII", count, 1, domain, 6 if i < self.inputs else 9, 0
                     )
                     self.buffers.append(s.object(0x200, desc, timeout))
+                bindings = b"".join(
+                    buffer
+                    + struct.pack("<QQIB3x", 0, count, i, 1 if i < self.inputs else 2)
+                    for i, (buffer, count) in enumerate(zip(self.buffers, self.sizes))
+                )
+                self.submission = (
+                    self.queue
+                    + self.program
+                    + struct.pack("<IIQ", len(self.buffers), 0, 0)
+                    + bindings
+                )
         except BaseException:
             try:
                 self.close(timeout)
@@ -292,19 +397,10 @@ class VirtioExecutable:
                             buffer + struct.pack("<QQ", offset, len(tail)) + tail,
                             timeout=remaining(),
                         )
-                bindings = b"".join(
-                    buffer
-                    + struct.pack("<QQIB3x", 0, count, i, 1 if i < self.inputs else 2)
-                    for i, (buffer, count) in enumerate(zip(self.buffers, self.sizes))
-                )
-                event = s.object(
-                    0x500,
-                    self.queue
-                    + self.program
-                    + struct.pack("<IIQ", len(self.buffers), 0, 0)
-                    + bindings,
-                    remaining(),
-                )
+                event = s.object(0x500, self.submission, remaining())
+                from ._native import _PollWait
+
+                poll = _PollWait()
                 while True:
                     state, error, reserved = struct.unpack(
                         "<HHI", s.request(0x501, event, size=8, timeout=remaining())
@@ -318,7 +414,7 @@ class VirtioExecutable:
                         raise ProtocolError("invalid event state")
                     if state:
                         break
-                    time.sleep(min(0.001, remaining()))
+                    poll.wait(remaining())
                 s.request(0x503, event, timeout=remaining())
                 if state != 1:
                     raise RuntimeError(
@@ -328,19 +424,17 @@ class VirtioExecutable:
                 for buffer, count in zip(
                     self.buffers[self.inputs :], self.sizes[self.inputs :]
                 ):
-                    parts = []
+                    output = bytearray(count)
                     chunk = s.max_response - 16
                     for offset in range(0, count, chunk):
                         length = min(chunk, count - offset)
-                        parts.append(
-                            s.request(
-                                0x203,
-                                buffer + struct.pack("<QQ", offset, length),
-                                size=length,
-                                timeout=remaining(),
-                            )
+                        output[offset : offset + length] = s.request(
+                            0x203,
+                            buffer + struct.pack("<QQ", offset, length),
+                            size=length,
+                            timeout=remaining(),
                         )
-                    outputs.append(b"".join(parts))
+                    outputs.append(output)
                 return outputs
             except BaseException:
                 # A failed run can own an event or partially modified buffers.

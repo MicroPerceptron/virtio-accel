@@ -1,5 +1,5 @@
 """Portable device selection and synchronous native execution with explicit host copies."""
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import importlib.util
 import json
 import os
@@ -32,6 +32,9 @@ class Device:
     name: str
     #: Whether CPU participation is permitted or cannot be excluded by the transport.
     cpu_participation: bool
+    # Retain the discovery scope so filtered IDs can be revalidated unchanged.
+    _identity: tuple | None = field(default=None, repr=False)
+    _discovery_provider: str | None = field(default=None, repr=False, compare=False)
 
 
 def _native():
@@ -78,39 +81,43 @@ def _openvino_library():
     return str(next(iter(candidates))) if len(candidates) == 1 else None
 
 
-def _discovery():
-    result = json.loads(_native().discover_devices(_openvino_library()))
-    if sys.platform == 'linux':
+def _discovery(provider=None, *, refresh=False):
+    result = (dict(devices=[], diagnostics=[]) if provider == "virtio" else
+              json.loads(_native().discover_devices(
+                  _openvino_library() if provider in (None, "openvino") else None, provider)))
+    if sys.platform == 'linux' and provider in (None, "virtio"):
         from ._virtio import discover
-        discover(result)
+        discover(result, refresh=refresh)
     return result
 
 
 def devices(kind=None, *, provider=None):
-    """Discover usable native endpoints. Indices belong to this discovery snapshot.
+    """Discover endpoints. Indices belong to this provider-filtered snapshot.
 
     Filter by kind or provider, and pass a returned Device to jit/compile to select
     that endpoint. Multiple providers may expose the same physical accelerator.
+    Virtio metadata is cached until its node changes; execution revalidates identity.
     """
     if kind not in (None, 'cpu', 'gpu', 'npu', 'hybrid'):
         raise ValueError('kind must be cpu, gpu, npu, hybrid, or None')
     if provider not in (None, 'coreml', 'vulkan', 'openvino', 'hexagon', 'xdna', 'virtio'):
         raise ValueError('unknown device provider')
-    return tuple(Device(**d) for d in _discovery()['devices']
+    return tuple(Device(**d, _discovery_provider=provider) for d in _discovery(provider)['devices']
                  if (kind is None or d['kind'] == kind)
                  and (provider is None or d['provider'] == provider))
 
 
 def device_diagnostics():
     """Explain missing runtimes, failed probes and excluded native endpoints."""
-    return tuple(_discovery()['diagnostics'])
+    return tuple(_discovery(refresh=True)['diagnostics'])
 
 
 def _resolve(selector, strict):
     identifier = _selector(selector)
-    discovery = _discovery()
+    scope = identifier._discovery_provider if isinstance(identifier, Device) else None
+    discovery = _discovery(scope)
     for entry in discovery['devices']:
-        device = Device(**entry)
+        device = Device(**entry, _discovery_provider=scope)
         if (device == identifier if isinstance(identifier, Device) else device.id == identifier):
             if strict and device.kind != 'cpu' and device.cpu_participation:
                 raise RuntimeError(f'{identifier} via {device.provider} cannot guarantee exclusive {device.kind} placement')
@@ -131,13 +138,16 @@ class Executable:
         self._timeout = _timeout(timeout)
         self.device = _resolve(device, strict)
         self._lowered = lowered
+        doc = lowered.to_dict()
+        self._outputs = tuple((np.dtype(doc["nodes"][i]["dtype"]).newbyteorder("<"),
+                               tuple(doc["nodes"][i]["shape"])) for i in doc["outputs"])
         self._lock = RLock()
         self._closed = False
         if self.device.provider == 'virtio':
             from ._virtio import VirtioExecutable
             self._native = VirtioExecutable(self.device, lowered, self._timeout)
         else:
-            self._native = _native().NativeExecutable(json.dumps(asdict(self.device)), lowered._json, self._timeout)
+            self._native = _native().NativeExecutable(json.dumps({k: v for k, v in asdict(self.device).items() if not k.startswith("_")}), lowered._json, self._timeout)
 
     def __call__(self, *args, **kwargs):
         """Execute with the compiled shapes and dtypes, returning independent host arrays.
@@ -152,15 +162,13 @@ class Executable:
             arrays = tuple(host_array(v) for v in bound.arguments.values())
             if tuple((a.shape, a.dtype.name) for a in arrays) != self._lowered._specs:
                 raise ValueError("inputs do not match this graph's shapes and dtypes")
-            payloads = [a.to_numpy().astype(a.dtype.newbyteorder('<'), copy=False).tobytes() for a in arrays]
+            payloads = [a._data.astype(a.dtype.newbyteorder('<'), copy=False).tobytes() for a in arrays]
             outputs = self._native.run(payloads, self._timeout)
-            doc = self._lowered.to_dict()
-            if len(outputs) != len(doc['outputs']):
+            if len(outputs) != len(self._outputs):
                 raise RuntimeError('native output count does not match compiled graph')
             result = []
-            for data, index in zip(outputs, doc['outputs']):
-                node = doc['nodes'][index]
-                array = np.frombuffer(data, dtype=np.dtype(node['dtype']).newbyteorder('<')).reshape(node['shape'])
+            for data, (dtype, shape) in zip(outputs, self._outputs):
+                array = np.frombuffer(data, dtype=dtype).reshape(shape)
                 result.append(host_array(array))
             return tuple(result) if self._lowered._multiple else result[0]
 

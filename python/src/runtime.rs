@@ -51,78 +51,88 @@ fn openvino_kind(name: &str) -> Option<&'static str> {
     }
 }
 
-pub fn discover(_openvino_library: Option<&str>) -> Discovery {
+pub fn discover(_openvino_library: Option<&str>, provider: Option<&str>) -> Discovery {
+    let wanted = |name: &str| provider.is_none_or(|p| p == name);
     let mut result = Discovery::default();
     #[cfg(va_python_coreml)]
-    match virtio_accel_coreml::CoreMlAccelerator::new_tosa() {
-        Ok(_) => result.add(
-            "npu",
-            "coreml",
-            "Apple Neural Engine (Core ML CPUAndNeuralEngine)".into(),
-            true,
-        ),
-        Err(error) => result.diagnostics.push(format!("Core ML: {error}")),
+    if wanted("coreml") {
+        match virtio_accel_coreml::CoreMlAccelerator::new_tosa() {
+            Ok(_) => result.add(
+                "npu",
+                "coreml",
+                "Apple Neural Engine (Core ML CPUAndNeuralEngine)".into(),
+                true,
+            ),
+            Err(error) => result.diagnostics.push(format!("Core ML: {error}")),
+        }
     }
     #[cfg(va_python_vulkan)]
-    match virtio_accel_vulkan::VulkanAccelerator::available_devices() {
-        Ok(mut names) => {
-            names.sort();
-            for name in &names {
-                // The current Rust API selects by name. Refuse ambiguous names instead of
-                // accidentally opening the first of two identically named physical devices.
-                if names.iter().filter(|n| *n == name).count() != 1 {
-                    result
-                        .diagnostics
-                        .push(format!("Vulkan: ambiguous device name {name:?}"));
-                    continue;
-                }
-                match virtio_accel_vulkan::VulkanAccelerator::with_device(name) {
-                    Ok(backend) => match backend.device_info() {
-                        Ok(info)
-                            if info.identity.class == virtio_accel_core::AcceleratorClass::GPU =>
-                        {
-                            result.add("gpu", "vulkan", name.clone(), false);
-                        }
-                        Ok(_) => result
+    if wanted("vulkan") {
+        match virtio_accel_vulkan::VulkanAccelerator::available_devices() {
+            Ok(mut names) => {
+                names.sort();
+                for name in &names {
+                    // The current Rust API selects by name. Refuse ambiguous names instead of
+                    // accidentally opening the first of two identically named physical devices.
+                    if names.iter().filter(|n| *n == name).count() != 1 {
+                        result
                             .diagnostics
-                            .push(format!("Vulkan: excluded non-GPU {name:?}")),
-                        Err(error) => result
-                            .diagnostics
-                            .push(format!("Vulkan {name:?}: {error:?}")),
-                    },
-                    Err(error) => result.diagnostics.push(format!("Vulkan {name:?}: {error}")),
+                            .push(format!("Vulkan: ambiguous device name {name:?}"));
+                        continue;
+                    }
+                    match virtio_accel_vulkan::VulkanAccelerator::with_device(name) {
+                        Ok(backend) => match backend.device_info() {
+                            Ok(info)
+                                if info.identity.class
+                                    == virtio_accel_core::AcceleratorClass::GPU =>
+                            {
+                                result.add("gpu", "vulkan", name.clone(), false);
+                            }
+                            Ok(_) => result
+                                .diagnostics
+                                .push(format!("Vulkan: excluded non-GPU {name:?}")),
+                            Err(error) => result
+                                .diagnostics
+                                .push(format!("Vulkan {name:?}: {error:?}")),
+                        },
+                        Err(error) => result.diagnostics.push(format!("Vulkan {name:?}: {error}")),
+                    }
                 }
             }
+            Err(error) => result.diagnostics.push(format!("Vulkan: {error}")),
         }
-        Err(error) => result.diagnostics.push(format!("Vulkan: {error}")),
     }
     // Keep existing Vulkan GPU indices stable; Core ML is another provider endpoint.
     #[cfg(va_python_coreml)]
-    match virtio_accel_coreml::CoreMlAccelerator::new_tosa_with_compute_units(
-        virtio_accel_coreml::CoreMlComputeUnits::CpuAndGpu,
-    ) {
-        Ok(_) => result.add(
-            "gpu",
-            "coreml",
-            "Apple GPU (Core ML CPUAndGPU)".into(),
-            true,
-        ),
-        Err(error) => result.diagnostics.push(format!("Core ML GPU: {error}")),
+    if wanted("coreml") {
+        match virtio_accel_coreml::CoreMlAccelerator::new_tosa_with_compute_units(
+            virtio_accel_coreml::CoreMlComputeUnits::CpuAndGpu,
+        ) {
+            Ok(_) => result.add(
+                "gpu",
+                "coreml",
+                "Apple GPU (Core ML CPUAndGPU)".into(),
+                true,
+            ),
+            Err(error) => result.diagnostics.push(format!("Core ML GPU: {error}")),
+        }
     }
     #[cfg(va_python_coreml)]
-    match virtio_accel_coreml::CoreMlAccelerator::new_tosa_with_compute_units(
-        virtio_accel_coreml::CoreMlComputeUnits::All,
-    ) {
-        Ok(_) => result.add(
-            "hybrid",
-            "coreml",
-            "Apple GPU + Neural Engine (Core ML All)".into(),
-            true,
-        ),
-        Err(error) => result.diagnostics.push(format!("Core ML All: {error}")),
+    if wanted("coreml") {
+        match virtio_accel_coreml::CoreMlAccelerator::new_tosa_with_compute_units(
+            virtio_accel_coreml::CoreMlComputeUnits::All,
+        ) {
+            Ok(_) => result.add(
+                "hybrid",
+                "coreml",
+                "Apple GPU + Neural Engine (Core ML All)".into(),
+                true,
+            ),
+            Err(error) => result.diagnostics.push(format!("Core ML All: {error}")),
+        }
     }
     #[cfg(va_python_openvino)]
-    {
+    if wanted("openvino") {
         let configured = match _openvino_library {
             Some(path) => virtio_accel_openvino::OpenVinoAccelerator::load_runtime_from(
                 std::path::Path::new(path),
@@ -152,23 +162,27 @@ pub fn discover(_openvino_library: Option<&str>) -> Discovery {
         }
     }
     #[cfg(va_python_hexagon)]
-    match virtio_accel_hexagon::HexagonAccelerator::new() {
-        Ok(_) => result.add("npu", "hexagon", "Qualcomm Hexagon (QNN HTP)".into(), false),
-        Err(e) => result.diagnostics.push(format!("Hexagon: {e}")),
+    if wanted("hexagon") {
+        match virtio_accel_hexagon::HexagonAccelerator::new() {
+            Ok(_) => result.add("npu", "hexagon", "Qualcomm Hexagon (QNN HTP)".into(), false),
+            Err(e) => result.diagnostics.push(format!("Hexagon: {e}")),
+        }
     }
     #[cfg(va_python_xdna)]
-    match virtio_accel_xdna::XdnaAccelerator::new() {
-        Ok(_) => result.add("npu", "xdna", "AMD XDNA (HRX device 0)".into(), false),
-        Err(e) => result.diagnostics.push(format!("XDNA: {e}")),
+    if wanted("xdna") {
+        match virtio_accel_xdna::XdnaAccelerator::new() {
+            Ok(_) => result.add("npu", "xdna", "AMD XDNA (HRX device 0)".into(), false),
+            Err(e) => result.diagnostics.push(format!("XDNA: {e}")),
+        }
     }
     for (provider, built) in [
-        ("Core ML", cfg!(va_python_coreml)),
-        ("Vulkan", cfg!(va_python_vulkan)),
-        ("OpenVINO", cfg!(va_python_openvino)),
-        ("Hexagon", cfg!(va_python_hexagon)),
-        ("XDNA", cfg!(va_python_xdna)),
+        ("coreml", cfg!(va_python_coreml)),
+        ("vulkan", cfg!(va_python_vulkan)),
+        ("openvino", cfg!(va_python_openvino)),
+        ("hexagon", cfg!(va_python_hexagon)),
+        ("xdna", cfg!(va_python_xdna)),
     ] {
-        if !built {
+        if !built && wanted(provider) {
             result.diagnostics.push(format!(
                 "{provider}: native backend not built (feature, target or SDK unavailable)"
             ));
@@ -400,9 +414,10 @@ impl<A: Accelerator + virtio_accel_tosa::TosaCapabilityProvider> Session<A> {
                 ))
             }
         };
+        let mut poll = crate::wait::AdaptivePoll::default();
         let completion = loop {
             match self.backend.poll_event(self.event.as_ref().unwrap()) {
-                Ok(EventState::Pending) => std::thread::sleep(Duration::from_millis(1)),
+                Ok(EventState::Pending) => poll.wait(Duration::from_millis(1)),
                 Ok(EventState::Complete) => break Ok(()),
                 Ok(EventState::Failed(e)) => {
                     self.poisoned = true;
@@ -682,10 +697,16 @@ mod python {
     }
 
     #[pyfunction]
-    #[pyo3(signature = (openvino_library=None))]
-    fn discover_devices(py: Python<'_>, openvino_library: Option<String>) -> PyResult<String> {
-        py.detach(|| serde_json::to_string(&discover(openvino_library.as_deref())))
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    #[pyo3(signature = (openvino_library=None, provider=None))]
+    fn discover_devices(
+        py: Python<'_>,
+        openvino_library: Option<String>,
+        provider: Option<String>,
+    ) -> PyResult<String> {
+        py.detach(|| {
+            serde_json::to_string(&discover(openvino_library.as_deref(), provider.as_deref()))
+        })
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
     #[pyfunction]
@@ -700,6 +721,32 @@ mod python {
         .into_iter()
         .filter_map(|(name, built)| built.then_some(name))
         .collect()
+    }
+
+    #[pyclass]
+    struct _PollWait {
+        poll: Mutex<crate::wait::AdaptivePoll>,
+    }
+
+    #[pymethods]
+    impl _PollWait {
+        #[new]
+        fn new() -> Self {
+            Self {
+                poll: Mutex::new(crate::wait::AdaptivePoll::default()),
+            }
+        }
+
+        fn wait(&self, py: Python<'_>, remaining: f64) -> PyResult<()> {
+            let remaining = duration(remaining)?;
+            py.detach(|| {
+                self.poll
+                    .lock()
+                    .map_err(|_| PyRuntimeError::new_err("poll wait lock poisoned"))?
+                    .wait(remaining);
+                Ok(())
+            })
+        }
     }
 
     #[pyclass]
@@ -759,6 +806,7 @@ mod python {
 
     pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module.add_function(wrap_pyfunction!(discover_devices, module)?)?;
+        module.add_class::<_PollWait>()?;
         module.add_function(wrap_pyfunction!(compiled_backends, module)?)?;
         module.add_class::<NativeExecutable>()?;
         Ok(())

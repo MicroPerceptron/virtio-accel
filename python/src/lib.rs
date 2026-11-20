@@ -2,6 +2,7 @@
 #![deny(unsafe_code)]
 
 mod runtime;
+pub mod wait;
 
 use serde::Deserialize;
 use serde_json::Value;

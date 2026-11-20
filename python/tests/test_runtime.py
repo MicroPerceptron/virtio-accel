@@ -15,6 +15,61 @@ GPU = dict(id='gpu:0', kind='gpu', provider='vulkan', name='test GPU', cpu_parti
 
 
 class DeviceTests(unittest.TestCase):
+    def test_provider_filter_is_forwarded_without_loading_other_runtimes(self):
+        import json
+        with patch.object(_runtime, '_native') as native, patch.object(_runtime, '_openvino_library') as library:
+            native.return_value.discover_devices.return_value = json.dumps(dict(devices=[GPU], diagnostics=[]))
+            device, = va.devices(provider='vulkan')
+            native.return_value.discover_devices.assert_called_once_with(None, 'vulkan')
+            library.assert_not_called()
+            self.assertEqual(_runtime._resolve(device, True), device)
+            self.assertEqual(native.return_value.discover_devices.call_count, 2)
+
+    def test_resident_eviction_keeps_graph_and_closes_before_compile(self):
+        device = _runtime.Device(**dict(GPU, provider='virtio'))
+        traced, live = [], []
+        class FakeExecutable:
+            def __init__(self, lowered, selected, **kwargs):
+                self.device = selected
+                self.lowered = lowered
+                self.closed = False
+                self.assert_no_live()
+                live.append(self)
+            def assert_no_live(self):
+                if any(not item.closed for item in live):
+                    raise RuntimeError('host permits only one resident program')
+            def __call__(self, *args):
+                return self.lowered.reference(*args)
+            def close(self):
+                self.closed = True
+        def function(x):
+            traced.append(x.shape)
+            return x + x
+        with patch.object(va.Lowered, 'compile', lambda lowered, *a, **k: FakeExecutable(lowered, *a, **k)):
+            with va.jit(function, device=device) as f:
+                for size in (2, 3, 2):
+                    x = np.ones(size, np.float32)
+                    np.testing.assert_array_equal(f(x).to_numpy(), x + x)
+                self.assertEqual(traced, [(2,), (3,)])
+                self.assertEqual(len(live), 3)
+            self.assertTrue(all(item.closed for item in live))
+            f.close()
+            with self.assertRaisesRegex(RuntimeError, 'closed'):
+                f(np.ones(2, np.float32))
+            with self.assertRaisesRegex(RuntimeError, 'closed'):
+                f.lower(np.ones(2, np.float32))
+
+    def test_close_attempts_every_release_after_an_os_error(self):
+        from unittest.mock import Mock
+        f = va.jit(lambda x: x)
+        first, second = Mock(), Mock()
+        first.close.side_effect = OSError('release failed')
+        f._executables.update(first=first, second=second)
+        with self.assertRaisesRegex(RuntimeError, 'release failed'):
+            f.close()
+        second.close.assert_called_once()
+        self.assertFalse(f._executables)
+
     def test_selector_alias_filtering_and_strict_placement(self):
         with patch.object(_runtime, '_discovery', return_value=dict(devices=[NPU, GPU], diagnostics=[])):
             self.assertEqual([d.id for d in va.devices('gpu')], ['gpu:0'])

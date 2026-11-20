@@ -21,6 +21,25 @@ The device defaults to `0600`. Grant access to a trusted guest user/group throug
 your device-management policy. Access grants ownership of this virtual device
 and its configured host resource budgets.
 
+For a persistent installation, `sudo make -C guest/linux install` installs for
+`KDIR`'s kernel, then `sudo modprobe virtio_accel` loads it. `uninstall` removes
+that installed module and refreshes dependencies; unload it first with
+`sudo modprobe -r virtio_accel`. Secure Boot guests may require module signing.
+`DESTDIR=/path/to/staging` stages installation without modifying the running OS.
+
+An optional udev rule grants access to a trusted guest group:
+
+```sh
+sudo groupadd -f virtio-accel
+sudo usermod -aG virtio-accel "$USER"
+sudo make -C guest/linux install-udev
+sudo udevadm control --reload-rules
+sudo udevadm trigger --subsystem-match=misc --sysname-match='virtio-accel*'
+```
+
+Log in again for group membership to take effect. `uninstall-udev` removes the
+rule; reload rules and recreate the device to restore its default permissions.
+
 Install a wheel built **from this change**; earlier PyPI releases lack the guest
 provider. The regular wheel includes the transport. To build a smaller guest-only
 wheel on a Linux build machine of the same architecture:
@@ -40,15 +59,18 @@ import numpy as np
 import virtio_accel as va
 
 device, = va.devices(provider="virtio")
-double = va.jit(lambda x: x + x, device=device)
-try:
+with va.jit(lambda x: x + x, device=device) as double:
     x = np.arange(32, dtype=np.float32).reshape(1, 32)
     np.testing.assert_array_equal(double(x).to_numpy(), x + x)
-finally:
-    double.clear_cache()
 ```
 
 `va.device_diagnostics()` explains permission, busy-device and protocol errors.
+Provider-filtered discovery probes only that provider. Device indices belong to
+that filtered snapshot; pass the `Device` object to preserve its selection scope.
+Virtio discovery caches validated metadata until the device node changes, without
+retaining an idle exclusive fd. Executable creation rechecks the node identity and
+device UUID. Diagnostics explicitly refresh the probe, so they can report current
+permission/busy errors (an idle refresh opens/closes and resets the device).
 The device name identifies its guest node. Its class comes from the host: GPU,
 NPU, or conservatively `hybrid` for OTHER/DSP. Protocol 1.0 does not expose the
 host provider's name or CPU participation. Guest endpoints conservatively set
@@ -78,7 +100,16 @@ There is no fallback or numerical-contract change.
   execution deadline also covers polling and copies.
 - Native host backends currently require a maximal declared program-residency
   charge, allowing one resident native program per host instance. Clear unused
-  SDK specialization caches before loading another program.
+  SDK executables before loading another independent program. JIT keeps up to 16
+  traced graphs but defaults to **one resident executable** for virtio, retiring
+  the old program before compiling a different shape. `resident_cache_size` is
+  separate from `cache_size`; larger resident caches require a compatible host
+  budget. `clear_cache()` permits reuse; `close()` and context-manager exit
+  permanently close a JIT function and report cleanup errors.
+- Completion polling retries at most four times within 50 µs, then parks for 50–1000 µs
+  with a bounded exponential backoff. The same Rust wait utility serves native
+  workers and guest Python, releasing the GIL during waits. Protocol 1.0 still
+  requires polling; there is no event queue or synthesized completion notifier.
 - Suspend/hibernation is rejected. Migration, reconnect, packed queues,
   multi-tenant scheduling and an allocated device ID remain outside this prototype.
 

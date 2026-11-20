@@ -1,0 +1,2 @@
+# Optional: only trusted members of this guest group may own the virtual device.
+SUBSYSTEM=="misc", KERNEL=="virtio-accel[0-9]*", GROUP="virtio-accel", MODE="0660"
