@@ -76,6 +76,8 @@ Rust tests additionally cover invalid producer-index jumps, 16-bit index wrap, i
 suppression, memory-map replacement validation, address-space translation, alias rejection,
 and namespace exhaustion. CI builds the pinned QEMU frontend and runs the mock test on Linux.
 These tests validate the **host/QEMU binding**, not a Linux or Kore guest driver or boot sequence.
+The separate [Linux guest driver and SDK boot test](../guest/linux/README.md)
+exercise Python inside a real Linux VM using this same host binding.
 
 ## Native backends
 
@@ -205,7 +207,9 @@ charge to fit a convenient budget.
   does not yet provide complete guest-visible DEVICE_NEEDS_RESET propagation; a production
   frontend must provide that and a defined disconnect policy before deployment.
 - The command processor isolates device epochs and contexts, but guest process identities are
-  not on this wire. Future guest drivers/services must mediate which process owns each object.
+  not on this wire. The Linux guest driver grants one exclusive whole-device
+  session per open file description and resets it on final close. A future
+  multi-tenant guest service would need finer object ownership mediation.
 
 ## Change classification
 

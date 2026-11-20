@@ -30,6 +30,10 @@
 
 An [experimental Linux vhost-user host and QEMU Virtio MMIO binding](docs/vhost-user.md) is available, using development device ID 65535 with a patched QEMU frontend. No official Virtio device ID has been assigned. The [vAccel adapter](crates/virtio-accel-vaccel/README.md) remains available for vAccel environments. `virtio-accel` is currently pre-standardization; protocol 1.0 is frozen as a versioned review input for independent implementation — it is stable enough to build against and to disagree with in writing, not an approved Virtio specification.
 
+The [experimental Linux guest driver](guest/linux/README.md) lets the Python SDK
+inside QEMU use the host accelerator through `devices(provider="virtio")`, with
+a booted Linux integration test and vendor runtimes kept on the host.
+
 ## Backend support
 
 “Supported” below means that the backend admits the declared program and dtype and exercises it end-to-end; support in the TOSA parser or shared numerical corpus alone does not imply hardware execution. “Not implemented” describes this repository, not necessarily the underlying hardware.

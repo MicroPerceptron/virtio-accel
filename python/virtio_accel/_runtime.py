@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import math
 import re
+import sys
 from threading import RLock
 
 import numpy as np
@@ -25,7 +26,7 @@ class Device:
     id: str
     #: ``cpu``, ``gpu``, ``npu`` or ``hybrid``.
     kind: str
-    #: ``coreml``, ``vulkan``, ``openvino``, ``hexagon`` or ``xdna``.
+    #: ``coreml``, ``vulkan``, ``openvino``, ``hexagon``, ``xdna`` or ``virtio``.
     provider: str
     #: Human-readable endpoint name.
     name: str
@@ -78,7 +79,11 @@ def _openvino_library():
 
 
 def _discovery():
-    return json.loads(_native().discover_devices(_openvino_library()))
+    result = json.loads(_native().discover_devices(_openvino_library()))
+    if sys.platform == 'linux':
+        from ._virtio import discover
+        discover(result)
+    return result
 
 
 def devices(kind=None, *, provider=None):
@@ -89,7 +94,7 @@ def devices(kind=None, *, provider=None):
     """
     if kind not in (None, 'cpu', 'gpu', 'npu', 'hybrid'):
         raise ValueError('kind must be cpu, gpu, npu, hybrid, or None')
-    if provider not in (None, 'coreml', 'vulkan', 'openvino', 'hexagon', 'xdna'):
+    if provider not in (None, 'coreml', 'vulkan', 'openvino', 'hexagon', 'xdna', 'virtio'):
         raise ValueError('unknown device provider')
     return tuple(Device(**d) for d in _discovery()['devices']
                  if (kind is None or d['kind'] == kind)
@@ -128,7 +133,11 @@ class Executable:
         self._lowered = lowered
         self._lock = RLock()
         self._closed = False
-        self._native = _native().NativeExecutable(json.dumps(asdict(self.device)), lowered._json, self._timeout)
+        if self.device.provider == 'virtio':
+            from ._virtio import VirtioExecutable
+            self._native = VirtioExecutable(self.device, lowered, self._timeout)
+        else:
+            self._native = _native().NativeExecutable(json.dumps(asdict(self.device)), lowered._json, self._timeout)
 
     def __call__(self, *args, **kwargs):
         """Execute with the compiled shapes and dtypes, returning independent host arrays.

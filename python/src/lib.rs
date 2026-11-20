@@ -300,9 +300,28 @@ mod python {
         Ok(PyBytes::new(py, &bytes))
     }
 
+    // Keep the guest's opaque target envelope identical to native execution,
+    // including dtype-dependent extensions. Python does not reconstruct it.
+    #[pyfunction]
+    fn build_tosa_program<'py>(
+        py: Python<'py>,
+        graph_json: String,
+    ) -> PyResult<(Bound<'py, PyBytes>, Vec<u32>)> {
+        let (bytes, target) = py
+            .detach(|| {
+                let bytes = super::compile_json(&graph_json)?;
+                let doc: super::Document =
+                    serde_json::from_str(&graph_json).map_err(|e| e.to_string())?;
+                Ok::<_, String>((bytes, doc.target().to_identity().0.to_vec()))
+            })
+            .map_err(PyValueError::new_err)?;
+        Ok((PyBytes::new(py, &bytes), target))
+    }
+
     #[pymodule]
     fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module.add_function(wrap_pyfunction!(build_tosa, module)?)?;
+        module.add_function(wrap_pyfunction!(build_tosa_program, module)?)?;
         super::runtime::register(module)?;
         Ok(())
     }
