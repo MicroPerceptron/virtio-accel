@@ -1,5 +1,9 @@
 # Experimental Python / NumPy frontend
 
+For execution inside QEMU, use the [Linux guest driver](../guest/linux/README.md)
+and `devices(provider="virtio")`. Vendor runtimes stay on the host. This provider
+requires a wheel built from the guest-driver change; older releases lack it.
+
 `virtio_accel.numpy` provides immutable FP16/BF16/FP32 arrays, static tracing, validated
 TOSA export, and synchronous native execution through Core ML, Vulkan, OpenVINO,
 Hexagon and XDNA. NumPy remains an explicit CPU reference. No speedup is claimed.

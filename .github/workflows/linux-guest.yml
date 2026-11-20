@@ -1,0 +1,82 @@
+name: Linux guest SDK
+
+on:
+  pull_request:
+    paths:
+      - 'guest/linux/**'
+      - 'host/vhost-user/**'
+      - 'python/**'
+      - 'crates/**'
+      - '.github/workflows/linux-guest.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'guest/linux/**'
+      - 'host/vhost-user/**'
+      - 'python/**'
+      - 'crates/**'
+      - '.github/workflows/linux-guest.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-guest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  boot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: stable
+      - name: Install guest kernel and build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-image-generic linux-headers-generic busybox-static cpio ninja-build libglib2.0-dev python3-venv
+          kernel=$(ls /boot/vmlinuz-*-generic | sort -V | tail -1)
+          sudo cp "$kernel" "$RUNNER_TEMP/vmlinuz"
+          sudo chmod a+r "$RUNNER_TEMP/vmlinuz"
+          echo "KDIR=/lib/modules/${kernel#/boot/vmlinuz-}/build" >> "$GITHUB_ENV"
+      - name: Compile Linux driver with extra warnings
+        run: make -C guest/linux W=1
+      - name: Build experimental QEMU for x86 microvm
+        env:
+          QEMU_TARGET: x86_64
+        run: host/vhost-user/qemu/build.sh "$RUNNER_TEMP/qemu"
+      - name: Build host OpenVINO backend
+        run: cargo build --manifest-path host/vhost-user/Cargo.toml --locked --features openvino
+      - name: Build and install guest-only wheel
+        run: |
+          python3 -m venv "$RUNNER_TEMP/guest-python"
+          "$RUNNER_TEMP/guest-python/bin/pip" install 'maturin>=1.16,<2'
+          "$RUNNER_TEMP/guest-python/bin/maturin" build --manifest-path python/Cargo.toml --locked --no-default-features --features python --out "$RUNNER_TEMP/wheels"
+          "$RUNNER_TEMP/guest-python/bin/pip" install "$RUNNER_TEMP"/wheels/*.whl
+          "$RUNNER_TEMP/guest-python/bin/python" -m unittest discover -s python/tests -p 'test_virtio.py' -v
+      - name: Package guest userspace without vendor SDKs
+        run: |
+          "$RUNNER_TEMP/guest-python/bin/python" guest/linux/tests/build_initramfs.py --module guest/linux/virtio_accel.ko --output "$RUNNER_TEMP/initramfs.gz" --backend openvino
+      - name: Install host-only inference runtime
+        run: |
+          python3 -m venv "$RUNNER_TEMP/host-python"
+          "$RUNNER_TEMP/host-python/bin/pip" install 'openvino>=2026.3,<2027'
+          library=$(find "$RUNNER_TEMP/host-python" -name 'libopenvino_c.so*' -type f)
+          test -n "$library"
+          echo "VIRTIO_ACCEL_OPENVINO_LIBRARY=$library" >> "$GITHUB_ENV"
+      - name: Boot Linux and execute Python through virtio (TCG, no KVM required)
+        run: |
+          python3 guest/linux/tests/qemu_guest.py --qemu "$RUNNER_TEMP/qemu/build/qemu-system-x86_64" --kernel "$RUNNER_TEMP/vmlinuz" --initramfs "$RUNNER_TEMP/initramfs.gz" --daemon host/vhost-user/target/debug/virtio-accel-vhost-user --backend openvino --device CPU --log "$RUNNER_TEMP/linux-guest.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-guest-log
+          path: ${{ runner.temp }}/linux-guest.log
