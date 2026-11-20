@@ -496,6 +496,11 @@ Target checks need the corresponding standard libraries:
 rustup target add aarch64-unknown-none riscv64gc-unknown-none-elf wasm32-unknown-unknown
 ```
 
+## Benchmarks
+
+The separate [Divan benchmark suite](benchmarks/README.md) measures graph preparation, model
+loading, buffer transfers and native backend execution with validated outputs and captured provenance.
+
 ## Status
 
 Included in protocol 1.0:

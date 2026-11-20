@@ -1,0 +1,40 @@
+[package]
+name = "virtio-accel-benchmarks"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+license = "MIT OR Apache-2.0"
+
+# Measurement dependencies never enter portable consumers or published tarballs.
+[workspace]
+
+[features]
+default = []
+coreml = ["dep:virtio-accel-coreml"]
+openvino = ["dep:virtio-accel-openvino"]
+vulkan = ["dep:virtio-accel-vulkan"]
+hexagon = ["dep:virtio-accel-hexagon"]
+xdna = ["dep:virtio-accel-xdna"]
+
+[dependencies]
+blake3 = "1.8.3"
+divan = "=0.1.21"
+half = { version = "2.7", default-features = false }
+serde_json = "1.0"
+virtio-accel-core = { path = "../crates/virtio-accel-core" }
+virtio-accel-tosa = { path = "../crates/virtio-accel-tosa" }
+virtio-accel-tosa-build = { path = "../crates/virtio-accel-tosa-build" }
+virtio-accel-coreml = { path = "../crates/virtio-accel-coreml", optional = true }
+virtio-accel-openvino = { path = "../crates/virtio-accel-openvino", optional = true, features = ["runtime-loading"] }
+virtio-accel-vulkan = { path = "../crates/virtio-accel-vulkan", optional = true }
+virtio-accel-hexagon = { path = "../crates/virtio-accel-hexagon", optional = true }
+virtio-accel-xdna = { path = "../crates/virtio-accel-xdna", optional = true, features = ["runtime-loading"] }
+
+[[bench]]
+name = "portable"
+harness = false
+
+[[bench]]
+name = "hardware"
+harness = false

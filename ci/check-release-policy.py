@@ -348,6 +348,19 @@ def check_host_stays_separate() -> None:
             fail(f"{rel(root)} must forbid project-authored unsafe code")
 
 
+def check_benchmarks_stay_separate() -> None:
+    """Measurement dependencies cannot become portable publication dependencies."""
+    manifest = ROOT / "benchmarks" / "Cargo.toml"
+    data = tomllib.loads(manifest.read_text(encoding="utf-8"))
+    if data.get("package", {}).get("publish") is not False or "workspace" not in data:
+        fail(f"{rel(manifest)} must remain an unpublished, separate workspace")
+    if data.get("features", {}).get("default") != []:
+        fail(f"{rel(manifest)} must not select a hardware backend by default")
+    for root in (manifest.parent / "src").glob("*.rs"):
+        if root.name == "lib.rs" and "#![forbid(unsafe_code)]" not in root.read_text():
+            fail(f"{rel(root)} must forbid project-authored unsafe code")
+
+
 def main() -> int:
     check_workspace_metadata()
     check_published_set()
@@ -357,6 +370,7 @@ def main() -> int:
         check_manifest(manifest)
     check_fuzz_stays_unpublished()
     check_host_stays_separate()
+    check_benchmarks_stay_separate()
     for crate_root in sorted(CRATE_ROOTS):
         check_crate_root(crate_root)
     check_links()
