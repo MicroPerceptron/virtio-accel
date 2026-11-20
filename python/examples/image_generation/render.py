@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageOps, __version__ as pillow_version
 
 BACKGROUND = "#0b1220"
 PANEL = "#121e30"
@@ -222,6 +222,16 @@ def main():
         )
     manifest = dict(
         schema=1,
+        renderer_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        pillow_version=pillow_version,
+        numpy_version=np.__version__,
+        ffmpeg_version=subprocess.check_output(
+            ["ffmpeg", "-version"], text=True
+        ).splitlines()[0],
+        outputs_sha256={
+            name: hashlib.sha256((args.output / name).read_bytes()).hexdigest()
+            for name in ("poster.png", "showcase.gif", "showcase.mp4")
+        },
         capture_sha256=hashlib.sha256(
             (args.results / "frames.npz").read_bytes()
         ).hexdigest(),

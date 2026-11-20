@@ -10,6 +10,7 @@ import hashlib
 import json
 from pathlib import Path
 import struct
+import tempfile
 import urllib.request
 
 import numpy as np
@@ -63,7 +64,9 @@ def dataset(directory, prefix):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--output", type=Path, required=True)
-    p.add_argument("--data", type=Path, default=Path("/tmp/virtio-accel-mnist"))
+    p.add_argument(
+        "--data", type=Path, default=Path(tempfile.gettempdir()) / "virtio-accel-mnist"
+    )
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--device", choices=("cpu", "mps"), default="cpu")

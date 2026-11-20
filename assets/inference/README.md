@@ -25,6 +25,8 @@ The two Mac reports are additional validation, not a cross-machine comparison.
 Reports in [results/](results/) preserve all raw samples, numerical validation,
 checkpoint/input/source hashes, timing boundaries, runtime/OS and CPU details.
 The measured runner is commit `1d227f3`; source hashes identify its exact files.
+Later edits add pre-allocation checkpoint-header validation and media/docs only;
+the inference graph and measurement loop are unchanged.
 Minimum warmup and sampling windows are each one second per batch, with at
 least five warmups and 101 samples. One synchronous invocation is in flight.
 Compilation, NumPy reference work and media rendering are outside those windows.

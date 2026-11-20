@@ -1,5 +1,14 @@
 {
   "schema": 1,
+  "renderer_sha256": "7f4d12ff7d2db73c91f6a5c48daaba4170dbe5d2839a2fb53e47ee1cdf8f15fa",
+  "pillow_version": "12.3.0",
+  "numpy_version": "2.5.5",
+  "ffmpeg_version": "ffmpeg version 8.1.2 Copyright (c) 2000-2026 the FFmpeg developers",
+  "outputs_sha256": {
+    "poster.png": "8b59ecb9a108837deab843611681a74361fb6ab658d3470bdc43151c1409ffeb",
+    "showcase.gif": "1dec823404d972c655b5b86715939cdf9604ed6ecff926db76c48069de056df7",
+    "showcase.mp4": "56e484a732c1b367a6a9486d05df280f343019fefe0464c1c8326e3aef936db6"
+  },
   "capture_sha256": "22e59bf2d02a6d500537d0dfe15392c9bb31f87c4104319ade6596dd38a1ccb9",
   "report_sha256": {
     "cpu": "2f653bba9a64b374be6a6a421857db7775ad7e788df4dc39d2ea150f652b782b",
