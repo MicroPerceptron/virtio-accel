@@ -115,3 +115,13 @@ Build Linux release wheels with `maturin build --release --locked
 whole five-wheel release plus its source archive. `installed` verifies that the
 active environment imports the installed wheel and contains the expected native
 adapters. Full hardware regression tests remain necessary when native code changes.
+
+## Website refresh
+
+After a successful production PyPI upload, the Website workflow automatically
+rebuilds the site and both API references from current `main`, then deploys through
+the existing `production` environment. Build-only and TestPyPI runs do not trigger
+a production refresh. Re-running an artifacts-only run keeps its original inputs;
+its run title and summary identify that publication is intentionally skipped.
+Python source, guide and packaging-metadata changes also rebuild the site on PRs
+and deploy after merging to `main`. See [website maintenance](../website/README.md).

@@ -12,7 +12,8 @@ This script is the single entry point for producing the public site. It:
   3. Generates ``src/SUMMARY.md``.
   4. Builds rustdoc for the whole workspace and copies it under ``book/api/``.
   5. Runs ``mdbook build``.
-  6. Overlays the hand-written landing page (``content/index.html``) onto
+  6. Builds the Python API with Sphinx and runs its documentation examples.
+  7. Overlays the hand-written landing page (``content/index.html``) onto
      ``book/index.html``. The landing page is a standalone document rather than
      an mdBook chapter, so it is not constrained by the book's chrome.
 
@@ -52,6 +53,7 @@ GITHUB_BASE = "https://github.com/MicroPerceptron/virtio-accel/blob/main"
 # it becomes the order of the generated SUMMARY.md.
 CURATED: list[tuple[str, str]] = [
     ("README.md", "getting-started.md"),
+    ("python/README.md", "python/index.md"),
     ("docs/specification.md", "docs/specification.md"),
     ("docs/wire-abi.md", "docs/wire-abi.md"),
     ("docs/virtqueue.md", "docs/virtqueue.md"),
@@ -71,6 +73,7 @@ CURATED: list[tuple[str, str]] = [
 # verbatim into the book source.
 CONTENT_PAGES: list[tuple[str, str]] = [
     ("api.md", "api.md"),
+    ("python-reference.md", "python/reference.md"),
 ]
 
 # Standalone documents copied straight into the built site, bypassing mdBook.
@@ -175,6 +178,11 @@ def write_summary() -> None:
         "# Summary",
         "",
         "[Getting started](getting-started.md)",
+        "",
+        "# Python SDK",
+        "",
+        "- [Python guide](python/index.md)",
+        "- [Python API](python/reference.md)",
         "",
         "# Protocol 1.0",
         "",
@@ -315,6 +323,22 @@ See the <a href="../api.html">crate reference</a> for tiers and roles, or the
     (api_dir / "index.html").write_text(html, encoding="utf-8")
 
 
+def build_python_docs() -> None:
+    # Imports the pure Python frontend from source; never loads _native or probes
+    # devices. A clean build prevents deleted API pages from lingering.
+    output = BOOK / "python" / "api"
+    if output.exists():
+        shutil.rmtree(output)
+    subprocess.run(
+        [sys.executable, "-m", "sphinx", "-W", "--keep-going", "-E", "-a",
+         "-b", "html", str(WEBSITE / "python"), str(output)], check=True,
+    )
+    subprocess.run(
+        [sys.executable, "-m", "sphinx", "-W", "--keep-going", "-b", "doctest",
+         str(WEBSITE / "python"), str(WEBSITE / "python-doctest")], check=True,
+    )
+
+
 def build_mdbook() -> None:
     subprocess.run(["mdbook", "build"], cwd=WEBSITE, check=True)
 
@@ -369,6 +393,7 @@ def main() -> int:
     if not args.skip_rustdoc:
         build_rustdoc()
 
+    build_python_docs()
     copy_standalone()
     copy_assets()
 

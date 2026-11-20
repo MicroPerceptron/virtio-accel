@@ -48,41 +48,53 @@ class Array:
 
     @property
     def shape(self):
+        """Static dimensions as a tuple."""
         return self._shape
 
     @property
     def dtype(self):
+        """NumPy dtype describing FP16, BF16 or FP32 values."""
         return self._dtype
 
     @property
     def ndim(self):
+        """Number of dimensions."""
         return len(self.shape)
 
     @property
     def size(self):
+        """Total number of elements."""
         return math.prod(self.shape)
 
     @property
     def T(self):
+        """Transpose with the dimension order reversed."""
         from .numpy import transpose
         return transpose(self)
 
     def reshape(self, *shape):
+        """Return a reshaped value; accepts a shape tuple or individual dimensions."""
         from .numpy import reshape
         return reshape(self, shape[0] if len(shape) == 1 else shape)
 
     def sum(self, axis=None, dtype=None, out=None, keepdims=False):
+        """Reduce by summation; see :func:`virtio_accel.numpy.sum`."""
         from .numpy import sum
         return sum(self, axis=axis, dtype=dtype, out=out, keepdims=keepdims)
 
     def mean(self, axis=None, dtype=None, out=None, keepdims=False):
+        """Reduce by averaging; see :func:`virtio_accel.numpy.mean`."""
         from .numpy import mean
         return mean(self, axis=axis, dtype=dtype, out=out, keepdims=keepdims)
 
     def astype(self, dtype):
+        """Explicitly convert to a supported floating-point dtype."""
         return cast(self, dtype)
 
     def to_numpy(self):
+        """Return an independent NumPy copy of an eager value.
+
+        Raises TypeError for symbolic values; tracing never reads tensor values."""
         if self._graph is not None:
             raise TypeError("a traced value cannot be read on the host")
         return self._data.copy()

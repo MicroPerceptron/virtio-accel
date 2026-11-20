@@ -15,10 +15,21 @@ from ._array import host_array
 
 @dataclass(frozen=True)
 class Device:
+    """Immutable endpoint discovered by :func:`virtio_accel.devices`.
+
+    IDs are local to a discovery snapshot. Multiple providers can expose the
+    same hardware. CPU participation is a placement allowance, not a claim
+    about which processors executed a particular graph.
+    """
+    #: Snapshot-local selector, for example ``gpu:0``.
     id: str
+    #: ``cpu``, ``gpu``, ``npu`` or ``hybrid``.
     kind: str
+    #: ``coreml``, ``vulkan``, ``openvino``, ``hexagon`` or ``xdna``.
     provider: str
+    #: Human-readable endpoint name.
     name: str
+    #: Whether the provider permits CPU participation in accelerator work.
     cpu_participation: bool
 
 
@@ -120,6 +131,10 @@ class Executable:
         self._native = _native().NativeExecutable(json.dumps(asdict(self.device)), lowered._json, self._timeout)
 
     def __call__(self, *args, **kwargs):
+        """Execute with the compiled shapes and dtypes, returning independent host arrays.
+
+        Calls are serialized per executable. Results are an Array or a tuple
+        matching the traced return structure. Use ``to_numpy()`` for host copies."""
         with self._lock:
             if self._closed:
                 raise RuntimeError('executable is closed')
@@ -141,6 +156,9 @@ class Executable:
             return tuple(result) if self._lowered._multiple else result[0]
 
     def close(self):
+        """Release native programs and buffers; repeated calls have no effect.
+
+        Use a context manager or call explicitly to observe release errors."""
         with self._lock:
             if not self._closed:
                 self._closed = True

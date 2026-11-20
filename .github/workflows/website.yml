@@ -7,11 +7,15 @@ name: Website
     paths:
       - "docs/**"
       - "website/**"
+      - "python/**"
+      - "pyproject.toml"
       - "README.md"
       - "Cargo.toml"
       - "Cargo.lock"
       - "crates/**"
       - ".github/workflows/website.yml"
+      - ".github/workflows/python-release.yml"
+      - ".github/workflows/publish.yml"
   # Every pull request that can change what the site publishes rebuilds it, so
   # a broken doc, a dangling cross-link, or a rustdoc failure fails the PR
   # instead of landing on virtio-accel.org after the merge.
@@ -19,14 +23,19 @@ name: Website
     paths:
       - "docs/**"
       - "website/**"
+      - "python/**"
+      - "pyproject.toml"
       - "README.md"
       - "Cargo.toml"
       - "Cargo.lock"
       - "crates/**"
       - ".github/workflows/website.yml"
+      - ".github/workflows/python-release.yml"
+      - ".github/workflows/publish.yml"
   workflow_run:
     workflows:
       - "Publish crates"
+      - "Release Python SDK"
     types:
       - completed
   workflow_dispatch:
@@ -49,6 +58,28 @@ env:
   MDBOOK_VERSION: "0.5.4"
 
 jobs:
+  refresh:
+    name: decide-refresh
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      refresh: ${{ steps.release.outputs.refresh }}
+    steps:
+      # workflow_run is privileged: only execute reviewed main, never the
+      # triggering branch or any upstream artifact.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Explain refresh decision
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 website/release_trigger.py
+
   # Pull-request validation. Builds exactly what a push to main would publish
   # and stops there: no artifact, no deploy, and no permissions beyond
   # `contents: read`.
@@ -74,6 +105,16 @@ jobs:
           tool: mdbook@${{ env.MDBOOK_VERSION }}
           fallback: none
 
+      - name: Install Python documentation dependencies
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: |
+          python -m pip install --only-binary=:all: -r website/requirements.txt
+
+      - name: Test documentation and release refresh rules
+        run: python -m unittest discover -s website -p 'test_*.py' -v
+
       - name: Build the site
         run: python3 website/build.py
 
@@ -84,14 +125,13 @@ jobs:
     name: build-site
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    if: >-
-      github.event_name != 'pull_request'
-      && (github.event_name != 'workflow_run'
-      || github.event.workflow_run.conclusion == 'success')
+    needs: refresh
+    if: needs.refresh.outputs.refresh == 'true'
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: main
           persist-credentials: false
 
       - name: Install stable Rust
@@ -104,6 +144,16 @@ jobs:
         with:
           tool: mdbook@${{ env.MDBOOK_VERSION }}
           fallback: none
+
+      - name: Install Python documentation dependencies
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: |
+          python -m pip install --only-binary=:all: -r website/requirements.txt
+
+      - name: Test documentation and release refresh rules
+        run: python -m unittest discover -s website -p 'test_*.py' -v
 
       - name: Build the site
         run: python3 website/build.py
@@ -127,10 +177,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: build
-    if: >-
-      github.event_name != 'pull_request'
-      && (github.event_name != 'workflow_run'
-      || github.event.workflow_run.conclusion == 'success')
     environment: production
     env:
       DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}

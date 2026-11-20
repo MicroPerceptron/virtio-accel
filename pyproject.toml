@@ -18,7 +18,7 @@ openvino = ["openvino>=2026.3,<2027"]
 [project.urls]
 Homepage = "https://github.com/MicroPerceptron/virtio-accel"
 Repository = "https://github.com/MicroPerceptron/virtio-accel"
-Documentation = "https://github.com/MicroPerceptron/virtio-accel/tree/main/python"
+Documentation = "https://virtio-accel.org/python/"
 Issues = "https://github.com/MicroPerceptron/virtio-accel/issues"
 
 [tool.maturin]

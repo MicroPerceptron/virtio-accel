@@ -229,6 +229,20 @@ other provider adapters --------------------> virtio-accel-core
 
 The transport crate exposes reset-scoped chain identities, flattened direction/length metadata, and owned publication/completion tokens. Neither it nor the device-state layer leaks guest addresses, ring pointers, or concrete descriptor types into the command engine or provider backend.
 
+## Python SDK
+
+The experimental Python SDK provides NumPy-style tracing, TOSA export and explicit
+native execution across the available accelerator backends.
+
+```sh
+python -m pip install virtio-accel==0.1.0a1
+```
+
+Start with the [Python guide](python/README.md) and
+[generated API reference](https://virtio-accel.org/python/api/). Backend runtimes
+and supported dtypes vary by platform; Windows ARM64/Hexagon currently requires
+a source build with QAIRT rather than a PyPI wheel.
+
 ## Install
 
 ```toml
