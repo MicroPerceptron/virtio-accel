@@ -67,6 +67,10 @@ jobs:
         run: python benchmarks/run.py --backend openvino --device CPU --case Nvfp4F16Decode --phase all --runtime-version 2026.3.0 --output benchmarks/results/openvino-smoke -- --test
       - name: Validate four simultaneous request slots
         run: python benchmarks/run.py --backend openvino --device CPU --case Nvfp4F16Decode --phase pipeline_execution --in-flight 4 --requests 32 --runtime-version 2026.3.0 --output benchmarks/results/openvino-pipeline -- --test
+      - name: Validate constant INT4 and INT8 projections
+        run: |
+          python benchmarks/run.py --backend openvino --device CPU --case Int4F16ProjectionDecode --runtime-version 2026.3.0 --output benchmarks/results/openvino-int4 -- --test
+          python benchmarks/run.py --backend openvino --device CPU --case Int8F16ProjectionDecode --runtime-version 2026.3.0 --output benchmarks/results/openvino-int8 -- --test
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:

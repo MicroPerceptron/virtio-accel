@@ -16,6 +16,12 @@ pub enum Case {
     Fp8E4M3Decode,
     Fp8E5M2Decode,
     Fp8CacheWindow,
+    Int4F16ProjectionDecode,
+    Int4F16ProjectionPrefill,
+    Int8F16ProjectionDecode,
+    Int8F16ProjectionPrefill,
+    F16ProjectionDecode,
+    F16ProjectionPrefill,
 }
 pub const CASES: &[Case] = &[
     Case::MatmulF16Decode,
@@ -30,6 +36,12 @@ pub const CASES: &[Case] = &[
     Case::Fp8E4M3Decode,
     Case::Fp8E5M2Decode,
     Case::Fp8CacheWindow,
+    Case::Int4F16ProjectionDecode,
+    Case::Int4F16ProjectionPrefill,
+    Case::Int8F16ProjectionDecode,
+    Case::Int8F16ProjectionPrefill,
+    Case::F16ProjectionDecode,
+    Case::F16ProjectionPrefill,
 ];
 
 pub struct Workload {
@@ -99,9 +111,106 @@ impl Case {
             Self::Fp8E4M3Decode => cast(DType::FP8E4M3, false),
             Self::Fp8E5M2Decode => cast(DType::FP8E5M2, false),
             Self::Fp8CacheWindow => cache(),
+            Self::Int4F16ProjectionDecode => projection(1, 1024, 2048, 4),
+            Self::Int4F16ProjectionPrefill => projection(16, 1024, 2048, 4),
+            Self::Int8F16ProjectionDecode => projection(1, 1024, 2048, 8),
+            Self::Int8F16ProjectionPrefill => projection(16, 1024, 2048, 8),
+            Self::F16ProjectionDecode => projection(1, 1024, 2048, 16),
+            Self::F16ProjectionPrefill => projection(16, 1024, 2048, 16),
         };
         w.name = format!("{self:?}");
         w
+    }
+}
+fn projection(m: usize, n: usize, k: usize, bits: u8) -> Workload {
+    let group = 128;
+    // Identical dequantized weights for all three representations. W8 uses q*16
+    // and scale/16, ensuring it cannot accidentally take the narrower i4 path.
+    let q = (0..n * k)
+        .map(|i| {
+            let hash = (i as u32).wrapping_mul(1664525).wrapping_add(1013904223);
+            ((hash >> 24) & 15) as i8 - 8
+        })
+        .collect::<Vec<_>>();
+    let scales = (0..n * k / group)
+        .map(|i| if i % 3 == 0 { 0.125 } else { 0.0625 })
+        .collect::<Vec<f32>>();
+    // 128 nonzero binary-fraction activations per row keep every possible
+    // FP16 partial sum representable, independently of reduction order.
+    // The full dense weight matrix is still read by the native kernels.
+    let a = (0..m * k)
+        .map(|i| if i % 16 == (i / k) % 16 { 0.125 } else { 0.0 })
+        .collect::<Vec<_>>();
+    let weights = (0..n * k)
+        .map(|i| f32::from(q[i]) * scales[i / group])
+        .collect::<Vec<_>>();
+    let expected = (0..m * n)
+        .map(|i| {
+            (0..k)
+                .map(|j| f64::from(a[(i / n) * k + j]) * f64::from(weights[(i % n) * k + j]))
+                .sum::<f64>() as f32
+        })
+        .collect::<Vec<_>>();
+    let d = DType::FP16;
+    let artifact = match bits {
+        4 => {
+            let packed = q
+                .chunks_exact(2)
+                .map(|p| (p[0] as u8 & 15) | (p[1] as u8 & 15) << 4)
+                .collect::<Vec<_>>();
+            let scale_bits = scales
+                .iter()
+                .map(|v| f16::from_f32(*v).to_bits())
+                .collect::<Vec<_>>();
+            quantized::int4_matmul_fp16(m, n, k, group, &packed, &scale_bits).unwrap()
+        }
+        8 => {
+            let weights = q.iter().map(|v| *v * 16).collect::<Vec<_>>();
+            let scale_bits = scales
+                .iter()
+                .map(|v| f16::from_f32(*v / 16.0).to_bits())
+                .collect::<Vec<_>>();
+            quantized::int8_matmul_fp16(m, n, k, group, &weights, &scale_bits).unwrap()
+        }
+        16 => {
+            let a_shape = [1, m as i32, k as i32];
+            let b_shape = [1, k as i32, n as i32];
+            let out_shape = [1, m as i32, n as i32];
+            let transposed = (0..k * n)
+                .map(|i| weights[(i % n) * k + i / n])
+                .collect::<Vec<_>>();
+            let data = encode(&transposed, d);
+            let zero = [0, 0];
+            let tensors = [
+                Tensor::new("a", &a_shape, d),
+                Tensor::constant("b", &b_shape, d, &data),
+                Tensor::constant("zero", &[1], d, &zero),
+                Tensor::new("out", &out_shape, d),
+            ];
+            let ops = [
+                Operator::new(OperatorKind::Const, &[], &["b"]),
+                Operator::new(OperatorKind::Const, &[], &["zero"]),
+                Operator::new(OperatorKind::MatMul, &["a", "b", "zero", "zero"], &["out"]),
+            ];
+            Graph::new("projection", &tensors, &ops, &["a"], &["out"])
+                .build(target(ExtensionSet::NONE))
+                .unwrap()
+        }
+        _ => unreachable!(),
+    };
+    Workload {
+        name: String::new(),
+        artifact,
+        target: if bits == 16 {
+            target(ExtensionSet::NONE)
+        } else {
+            quantized::TARGET
+        },
+        inputs: vec![encode(&a, d)],
+        expected: encode(&expected, d),
+        output_dtype: d,
+        shape: vec![m, n, k],
+        logical_flops: (2 * m * n * k) as u64,
     }
 }
 fn matmul(m: usize, n: usize, k: usize, d: DType) -> Workload {
@@ -287,6 +396,17 @@ fn cache() -> Workload {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn compressed_projection_controls_have_identical_values() {
+        for m in [1, 16] {
+            let control = projection(m, 4, 256, 16);
+            for bits in [4, 8] {
+                let packed = projection(m, 4, 256, bits);
+                assert_eq!(packed.inputs, control.inputs);
+                assert_eq!(packed.expected, control.expected);
+            }
+        }
+    }
     #[test]
     fn dense_fp16_reference_is_independent_of_accumulation_order() {
         for case in [Case::MatmulF16Decode, Case::MatmulF16Prefill] {
