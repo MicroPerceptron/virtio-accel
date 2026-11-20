@@ -1036,6 +1036,43 @@ fn encode_operator(
     let output_element = builder.element(output_tensor.dtype())?;
     let output_dims = static_dims(output_tensor)?;
 
+    if op == Op::GREATER_EQUAL {
+        // OpenVINO 2026.4.1 on Lunar Lake NPU compiles GreaterEqual with a BOOL
+        // result but returns FP16 storage. A caller-bound byte tensor then fails
+        // at inference. Both ordered comparisons below return actual BOOL bytes.
+        // Unlike !(x < y), (x > y) || (x == y) stays false for unordered NaNs;
+        // equality also preserves the required +0 == -0 behavior.
+        let (left, left_dims) = value_port_dims(builder, analysis, inputs[0])?;
+        let (right, right_dims) = value_port_dims(builder, analysis, inputs[1])?;
+        let operands = [(left, left_dims.as_slice()), (right, right_dims.as_slice())];
+        let greater = builder.emit_layer(
+            "Greater",
+            "opset1",
+            &format!("{stem}_greater"),
+            "auto_broadcast=\"numpy\"",
+            &operands,
+            &[(OvElement::Bool, &output_dims)],
+        )[0];
+        let equal = builder.emit_layer(
+            "Equal",
+            "opset1",
+            &format!("{stem}_equal"),
+            "auto_broadcast=\"numpy\"",
+            &operands,
+            &[(OvElement::Bool, &output_dims)],
+        )[0];
+        let result = builder.emit_layer(
+            "LogicalOr",
+            "opset1",
+            &stem,
+            "auto_broadcast=\"numpy\"",
+            &[(greater, &output_dims), (equal, &output_dims)],
+            &[(OvElement::Bool, &output_dims)],
+        )[0];
+        builder.set_source(outputs[0], result);
+        return Ok(());
+    }
+
     // (layer type, extra `<data .../>` attributes)
     const NUMPY: &str = "auto_broadcast=\"numpy\"";
     let (kind, data) = match op {
@@ -1059,7 +1096,6 @@ fn encode_operator(
         Op::MINIMUM => ("Minimum", NUMPY.to_owned()),
         Op::EQUAL => ("Equal", NUMPY.to_owned()),
         Op::GREATER => ("Greater", NUMPY.to_owned()),
-        Op::GREATER_EQUAL => ("GreaterEqual", NUMPY.to_owned()),
         Op::LOGICAL_AND => ("LogicalAnd", NUMPY.to_owned()),
         Op::LOGICAL_OR => ("LogicalOr", NUMPY.to_owned()),
         Op::LOGICAL_XOR => ("LogicalXor", NUMPY.to_owned()),

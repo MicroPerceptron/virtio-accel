@@ -68,6 +68,14 @@ resident intermediates; decoding occurs inside the device graph. See
 [ADR 0014](../../docs/adr/0014-packed-quantized-inference.md). INT4 tensor semantics, RESCALE,
 and other unsupported integer operations remain rejected.
 
+### Ordered comparison legalization
+
+`GREATER_EQUAL` lowers to `Greater OR Equal`. On OpenVINO 2026.4.1, Lunar Lake NPU's
+native `GreaterEqual` declares BOOL but produces FP16 storage, failing a caller-bound
+one-byte output. The equivalent ordered comparisons preserve NaN, infinity and signed-zero
+semantics and return actual Boolean bytes. CPU/GPU/NPU regression tests cover these edges
+and the full Boolean corpus; no CPU fallback or hidden output conversion is used.
+
 ## Direct buffers and events
 
 Program buffers are page-aligned, zero-initialized provider allocations. Submissions wrap the

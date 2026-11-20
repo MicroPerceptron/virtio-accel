@@ -1204,3 +1204,41 @@ fn fp8_activation_and_constant_weights_execute_together() {
         }
     }
 }
+
+#[test]
+fn greater_equal_preserves_ordered_float_semantics_and_byte_output() {
+    use virtio_accel_tosa::DType;
+    use virtio_accel_tosa_build::{Graph, Operator, OperatorKind, Tensor};
+    let tensors = [
+        Tensor::new("a", &[1, 16], DType::FP16),
+        Tensor::new("b", &[1, 16], DType::FP16),
+        Tensor::new("out", &[1, 16], DType::BOOL),
+    ];
+    let ops = [Operator::new(
+        OperatorKind::GreaterEqual,
+        &["a", "b"],
+        &["out"],
+    )];
+    let graph = Graph::new("ordered", &tensors, &ops, &["a", "b"], &["out"])
+        .build(OPENVINO_TOSA_TARGET)
+        .unwrap();
+    let a: [u16; 16] = [
+        0, 0x8000, 0x7c00, 0xfc00, 0x7e00, 0x3c00, 0xbc00, 0, 0x7c00, 0xfc00, 0x3c00, 0x3c00,
+        0xbc00, 0xbc00, 0x0400, 0x8400,
+    ];
+    let b: [u16; 16] = [
+        0x8000, 0, 0x7c00, 0xfc00, 0, 0x7e00, 0, 0x7e00, 0xfc00, 0x7c00, 0x3c00, 0x4000, 0xc000,
+        0xbc00, 0, 0x8000,
+    ];
+    let a = a.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
+    let b = b.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
+    for device in devices() {
+        let out = run_tosa_bytes(&device, &graph, &[&a, &b], 16)
+            .expect("ordered comparison must admit byte output");
+        assert_eq!(
+            out,
+            [1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0],
+            "{device}"
+        );
+    }
+}
