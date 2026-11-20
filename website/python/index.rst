@@ -15,6 +15,7 @@ are CPU reference operations unless traced and explicitly compiled for a device.
 
    runtime
    numpy
+   quantized
 
 A reference calculation
 -----------------------

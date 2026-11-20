@@ -4,7 +4,8 @@
 //! ML Program format added that boundary on macOS 26. This module deliberately implements only
 //! operations whose integer semantics have been executed against the shared Rust oracle:
 //! same-type identity and INT8 MATMUL with explicit zero-point subtraction and INT32 accumulation.
-//! No path converts integer tensors through floating point.
+//! The emitted graph uses integer tensors. Because the native compiler can use FP32
+//! internally, MATMUL admission bounds every possible partial sum to its exact integer range.
 
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
@@ -280,6 +281,16 @@ fn encode_matmul(
     let lhs_zero_point = zero_point(inputs[2])?;
     let rhs_zero_point = zero_point(inputs[3])?;
 
+    // Core ML may execute MIL INT32 MATMUL through FP32 arithmetic, even with
+    // low-precision accumulation disabled. Bound the sum of absolute products
+    // so every product and partial sum is exactly representable in binary32.
+    // Without this check long INT8 dot products silently lose integer bits.
+    let magnitude = |zero: i32| i64::from((128 + zero).max(127 - zero));
+    let bound = i64::from(lhs_shape[2]) * magnitude(lhs_zero_point) * magnitude(rhs_zero_point);
+    if bound > (1 << 24) {
+        return Err(LoweringError::UnsupportedGraph);
+    }
+
     let mut operations = Vec::new();
     operations
         .try_reserve_exact(11)
@@ -521,6 +532,51 @@ mod tests {
                 .windows(10)
                 .any(|bytes| bytes == [0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01])
         );
+    }
+
+    #[test]
+    fn rejects_integer_dots_outside_exact_binary32_range() {
+        use virtio_accel_tosa_build::{OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor};
+        for (k, zero, accepted) in [
+            (1024, 0i8, true),
+            (1025, 0, false),
+            (258, -128, true),
+            (259, -128, false),
+        ] {
+            let mut graph = OwnedGraph::new("integer_dot");
+            for (name, shape, dtype) in [
+                ("a", vec![1, 1, k], DType::INT8),
+                ("b", vec![1, k, 1], DType::INT8),
+                ("out", vec![1, 1, 1], DType::INT32),
+            ] {
+                graph.push_tensor(OwnedTensor::new(name, shape, dtype));
+            }
+            graph.push_tensor(OwnedTensor::constant(
+                "zero",
+                vec![1],
+                DType::INT8,
+                vec![zero as u8],
+            ));
+            graph.push_operator(OwnedOperator::new(
+                OperatorKind::Const,
+                vec![],
+                vec!["zero".into()],
+            ));
+            graph.push_operator(OwnedOperator::new(
+                OperatorKind::MatMul,
+                vec!["a".into(), "b".into(), "zero".into(), "zero".into()],
+                vec!["out".into()],
+            ));
+            graph.push_input("a");
+            graph.push_input("b");
+            graph.push_output("out");
+            let bytes = graph.build(COREML_TOSA_INTEGER_TARGET).unwrap();
+            assert_eq!(
+                lower_integer_tosa(&bytes, COREML_TOSA_INTEGER_TARGET).is_ok(),
+                accepted,
+                "K={k}, zero={zero}"
+            );
+        }
     }
 
     #[test]

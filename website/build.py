@@ -67,6 +67,7 @@ CURATED: list[tuple[str, str]] = [
     ("docs/backend-implementer-guide.md", "docs/backend-implementer-guide.md"),
     ("docs/hexagon-operator-matrix.md", "docs/hexagon-operator-matrix.md"),
     ("docs/releases/v1.0.md", "docs/releases/v1.0.md"),
+    ("docs/releases/v0.5.0.md", "docs/releases/v0.5.0.md"),
 ]
 
 # Hand-authored mdBook chapters that live in website/content/ and are copied

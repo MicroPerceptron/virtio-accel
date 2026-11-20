@@ -66,12 +66,12 @@ tests remain recorded in the README; they do not validate the subsequent loader 
    ```sh
    python -m pip install 'numpy>=2,<3' 'ml-dtypes>=0.5,<1'
    python -m pip install --no-deps --only-binary=:all: \
-     --index-url https://test.pypi.org/simple/ virtio-accel==0.1.0a1
+     --index-url https://test.pypi.org/simple/ virtio-accel==0.1.0a2
    python -c "import virtio_accel as va; print(va.devices()); print(va.device_diagnostics())"
    ```
 
 4. For production, create a GitHub release from the reviewed `main` commit with
-   tag **`python-v0.1.0a1`**. Mark this initial alpha as a prerelease. Publishing
+   tag **`python-v0.1.0a2`**. Mark this alpha as a prerelease. Publishing
    that GitHub release triggers the workflow. It publishes only after all builds,
    installed-wheel tests, source rebuild, and artifact
    completeness checks pass. The crates.io workflow ignores `python-v` releases.

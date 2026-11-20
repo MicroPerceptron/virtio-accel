@@ -5,17 +5,20 @@ import math
 import operator
 
 import numpy as np
-from ml_dtypes import bfloat16
+from ml_dtypes import bfloat16, float8_e4m3fn, float8_e5m2
 
 MAX_RANK = 6
 MAX_BYTES = 256 * 1024 * 1024
 MAX_NODES = 4096
+FLOAT_DTYPES = tuple(map(np.dtype, (np.float16, bfloat16, np.float32)))
+FP8_DTYPES = tuple(map(np.dtype, (float8_e4m3fn, float8_e5m2)))
+INT_DTYPES = tuple(map(np.dtype, (np.int8, np.int32)))
 
 
 def checked_dtype(dtype):
     dtype = np.dtype(dtype)
-    if dtype not in (np.dtype("float16"), np.dtype("float32"), np.dtype(bfloat16)):
-        raise TypeError("only float16, bfloat16 and float32 are supported; request an explicit cast")
+    if dtype not in FLOAT_DTYPES + FP8_DTYPES + INT_DTYPES:
+        raise TypeError("supported dtypes: float16, bfloat16, float32, float8_e4m3fn, float8_e5m2, int8, int32")
     return dtype
 
 
@@ -33,7 +36,7 @@ def checked_shape(shape, dtype=np.float32):
 
 @dataclass(frozen=True, eq=False)
 class Array:
-    """FP16/BF16/FP32 value. Eager values use NumPy; symbolic values belong to one trace.
+    """Typed tensor value. Eager values use NumPy; symbolic values belong to one trace.
 
     Use ``to_numpy()`` for an explicit, independent host copy. No device allocation
     or acceleration is implied by the reference implementation.
@@ -53,7 +56,7 @@ class Array:
 
     @property
     def dtype(self):
-        """NumPy dtype describing FP16, BF16 or FP32 values."""
+        """NumPy dtype describing the tensor storage format."""
         return self._dtype
 
     @property
@@ -88,7 +91,7 @@ class Array:
         return mean(self, axis=axis, dtype=dtype, out=out, keepdims=keepdims)
 
     def astype(self, dtype):
-        """Explicitly convert to a supported floating-point dtype."""
+        """Explicitly convert between supported dtype pairs."""
         return cast(self, dtype)
 
     def to_numpy(self):
@@ -182,6 +185,9 @@ def cast(value, dtype):
     dtype = checked_dtype(dtype)
     if value.dtype == dtype:
         return value
+    if value.dtype in INT_DTYPES or dtype in INT_DTYPES:
+        if not (value.dtype == np.dtype("int8") and dtype in (np.dtype("int32"), np.dtype("float16"), np.dtype("float32"))):
+            raise TypeError("integer casts support int8 to int32/float16/float32 only")
     return primitive("cast", (value,), value.shape, dtype=dtype)
 
 
@@ -197,6 +203,9 @@ def promote(a, b):
         b = host_array(b, a.dtype)
     else:
         a, b = host_array(a), host_array(b)
+    if a.dtype not in FLOAT_DTYPES or b.dtype not in FLOAT_DTYPES:
+        if a.dtype != b.dtype:
+            raise TypeError("FP8 and integer operands require matching dtypes or explicit casts")
     # NumPy does not define promotion between BF16 and FP16. Both widen to
     # FP32 when mixed, preserving each format's precision and exponent range.
     dtype = a.dtype if a.dtype == b.dtype else np.dtype("float32")
@@ -263,7 +272,7 @@ def evaluate(op, args, attrs, shape, dtype):
     if op in functions:
         # Sign/data operations preserve FP16 bit patterns. Arithmetic evaluates
         # in FP32 and rounds once to storage precision, as in the FP16 tier.
-        if op not in ("negate", "abs", "maximum", "minimum"):
+        if dtype not in INT_DTYPES and op not in ("negate", "abs", "maximum", "minimum"):
             for a in args:
                 checked_shape(a.shape, np.float32)
             checked_shape(shape, np.float32)
@@ -273,7 +282,12 @@ def evaluate(op, args, attrs, shape, dtype):
         for a in args:
             checked_shape(a.shape, np.float32)
         checked_shape(shape, np.float32)
-        return np.matmul(*(a.astype(np.float32, copy=False) for a in args)).astype(dtype)
+        accumulator = np.int32 if args[0].dtype == np.dtype("int8") else np.float32
+        return np.matmul(*(a.astype(accumulator, copy=False) for a in args)).astype(dtype)
+    if op == "gather":
+        return args[0][np.arange(args[0].shape[0])[:, None], args[1], :]
+    if op == "concat":
+        return np.concatenate(args, axis=attrs["axis"])
     if op == "identity":
         return args[0]
     if op == "reshape":

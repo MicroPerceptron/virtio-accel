@@ -14,6 +14,21 @@ if sys.platform == "linux":
 
 @unittest.skipUnless(sys.platform == "linux", "Linux ioctl transport")
 class ResponseTests(unittest.TestCase):
+    def test_quantized_binding_sizes_follow_storage_dtype(self):
+        import numpy as np
+        import virtio_accel as va
+        import virtio_accel.numpy as vnp
+        from virtio_accel import _runtime
+        from types import SimpleNamespace
+        for dtype, size in [(np.int8, 1), (np.int32, 4), (vnp.float8_e4m3fn, 1), (vnp.float8_e5m2, 1), (np.float16, 2), (np.float32, 4)]:
+            lowered = va.jit(lambda x: x).lower(np.ones(3, dtype))
+            executable = object.__new__(v.VirtioExecutable)
+            with patch.object(_runtime, '_native') as native, patch.object(v, 'acquire', side_effect=RuntimeError('stop before allocation')):
+                native.return_value.build_tosa_program.return_value = (b'model', ())
+                with self.assertRaisesRegex(RuntimeError, 'stop before allocation'):
+                    executable.__init__(SimpleNamespace(name='/dev/test'), lowered, 1)
+            self.assertEqual(executable.sizes, [3 * size, 3 * size])
+
     def test_reused_transfer_storage_returns_independent_payloads(self):
         session = self.session()
         allocations = []

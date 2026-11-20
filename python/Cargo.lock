@@ -333,7 +333,7 @@ checksum = "7264e107f553ccae879d21fbea1d6724ac785e8c3bfc762137959b5802826ef3"
 
 [[package]]
 name = "virtio-accel-core"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "bitflags",
  "virtio-accel-transport",
@@ -341,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-coreml"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "cc",
  "half",
@@ -351,7 +351,7 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-hexagon"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "cc",
  "virtio-accel-core",
@@ -360,7 +360,7 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-openvino"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "half",
  "libloading",
@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-python"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "pyo3",
  "serde",
@@ -388,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-tosa"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "flatbuffers",
  "virtio-accel-core",
@@ -396,7 +396,7 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-tosa-build"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "flatbuffers",
  "virtio-accel-tosa",
@@ -404,11 +404,11 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-transport"
-version = "0.4.1"
+version = "0.5.0"
 
 [[package]]
 name = "virtio-accel-vulkan"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "ash",
  "virtio-accel-core",
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-xdna"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "libloading",
  "virtio-accel-core",

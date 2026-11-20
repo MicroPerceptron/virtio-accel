@@ -42,6 +42,14 @@ enum ElementType {
     BFloat16,
     #[serde(rename = "float32")]
     Float32,
+    #[serde(rename = "float8_e4m3fn")]
+    Float8E4M3,
+    #[serde(rename = "float8_e5m2")]
+    Float8E5M2,
+    #[serde(rename = "int8")]
+    Int8,
+    #[serde(rename = "int32")]
+    Int32,
 }
 
 impl ElementType {
@@ -50,34 +58,56 @@ impl ElementType {
             Self::Float16 => DType::FP16,
             Self::BFloat16 => DType::BF16,
             Self::Float32 => DType::FP32,
+            Self::Float8E4M3 => DType::FP8E4M3,
+            Self::Float8E5M2 => DType::FP8E5M2,
+            Self::Int8 => DType::INT8,
+            Self::Int32 => DType::INT32,
         }
     }
 
     fn bytes(self) -> usize {
         match self {
             Self::Float16 | Self::BFloat16 => 2,
-            Self::Float32 => 4,
+            Self::Float32 | Self::Int32 => 4,
+            Self::Float8E4M3 | Self::Float8E5M2 | Self::Int8 => 1,
         }
     }
 }
 
 impl Document {
     fn target(&self) -> Target {
-        let extensions = if self
+        let mut extensions = ExtensionSet::NONE;
+        let mut profiles = if self
             .nodes
             .iter()
-            .any(|n| matches!(n.dtype, ElementType::BFloat16))
+            .any(|n| matches!(n.dtype, ElementType::Int8 | ElementType::Int32))
         {
-            ExtensionSet::BF16
+            ProfileSet::INTEGER
         } else {
-            ExtensionSet::NONE
+            ProfileSet::FLOATING_POINT
         };
-        Target::new(
-            Version::TOSA_1_0,
-            ProfileSet::FLOATING_POINT,
-            Level::Level8K,
-            extensions,
-        )
+        for node in &self.nodes {
+            match node.dtype {
+                ElementType::Int8 | ElementType::Int32 => {
+                    profiles = profiles.union(ProfileSet::INTEGER);
+                }
+                _ => profiles = profiles.union(ProfileSet::FLOATING_POINT),
+            }
+            if matches!(node.dtype, ElementType::BFloat16) {
+                extensions = extensions.union(ExtensionSet::BF16);
+            }
+            if matches!(
+                node.dtype,
+                ElementType::Float8E4M3 | ElementType::Float8E5M2
+            ) {
+                // Both formats belong to the advertised FP8 tier. This does not
+                // claim support for arbitrary mixtures with other extensions.
+                extensions = extensions
+                    .union(ExtensionSet::FP8E4M3)
+                    .union(ExtensionSet::FP8E5M2);
+            }
+        }
+        Target::new(Version::TOSA_1_0, profiles, Level::Level8K, extensions)
     }
 }
 
@@ -175,7 +205,7 @@ fn lower_node(
     let expected_attrs: &[&str] = match node.op.as_str() {
         "const" => &["data"],
         "transpose" => &["axes"],
-        "reduce_sum" => &["axis"],
+        "reduce_sum" | "concat" => &["axis"],
         _ => &[],
     };
     if node.attrs.len() != expected_attrs.len()
@@ -185,7 +215,7 @@ fn lower_node(
     }
     let arity = match node.op.as_str() {
         "input" | "const" => 0,
-        "add" | "sub" | "mul" | "maximum" | "minimum" | "matmul" => 2,
+        "add" | "sub" | "mul" | "maximum" | "minimum" | "matmul" | "gather" | "concat" => 2,
         _ => 1,
     };
     if node.inputs.len() != arity {
@@ -247,6 +277,13 @@ fn lower_node(
         "sin" => OperatorKind::Sin,
         "cos" => OperatorKind::Cos,
         "matmul" => OperatorKind::MatMul,
+        "gather" => OperatorKind::Gather,
+        "concat" => OperatorKind::Concat {
+            axis: node.attrs["axis"]
+                .as_i64()
+                .and_then(|v| i32::try_from(v).ok())
+                .ok_or("invalid axis")?,
+        },
         "reshape" => {
             let shape = format!("s{index}");
             graph.push_shape(OwnedShape::new(

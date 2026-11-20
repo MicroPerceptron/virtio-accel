@@ -27,7 +27,7 @@ class Lowered:
         return json.loads(self._json)
 
     def to_tosa(self):
-        """Return validated static TOSA 1.0 FP bytes; requires the native extension."""
+        """Return validated static TOSA 1.0 bytes; requires the native extension."""
         try:
             from ._native import build_tosa
         except ImportError as exc:

@@ -17,7 +17,7 @@ and a frozen `conformance/v1.0` directory; it does not require a `1.0.0` Cargo v
 
 ### Cargo version posture
 
-The workspace publishes at `0.1.x` while carrying the frozen protocol 1.0 baseline. This is
+The workspace publishes at pre-1.0 `0.x` versions while carrying the frozen protocol 1.0 baseline. This is
 deliberate rather than an unreconciled gap:
 
 - The Cargo version tracks the **Rust API and package graph**, which is young and expected to change
