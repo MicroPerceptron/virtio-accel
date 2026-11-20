@@ -45,6 +45,8 @@ jobs:
           cargo clippy --manifest-path host/vhost-user/Cargo.toml --locked --all-targets --all-features -- -D warnings
       - name: Test host contracts
         run: cargo test --manifest-path host/vhost-user/Cargo.toml --locked --all-features
+      - name: Check launcher process and socket cleanup
+        run: python3 host/vhost-user/tests/test_launch.py
       - name: Install QEMU build dependencies
         run: sudo apt-get update && sudo apt-get install -y ninja-build libglib2.0-dev python3-venv
       - name: Build experimental QEMU frontend
