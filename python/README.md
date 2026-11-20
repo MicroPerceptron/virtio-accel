@@ -458,4 +458,3 @@ integer dots fail admission rather than return rounded integers.
 See the [generated quantized API](https://virtio-accel.org/python/api/quantized.html)
 for exact argument layouts. Native policy selection is not proof of GPU or ANE
 placement, and compressed storage is not a guarantee of speedup.
-

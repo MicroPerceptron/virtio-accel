@@ -857,11 +857,12 @@ pub(crate) fn lower_tosa_with_weights(
 
     let mut lowered = builder.finish();
     lowered.features = features;
-    lowered.requires_fp32 = (packed_fp8
-        && analysis
-            .execution_order(block)
-            .iter()
-            .any(|id| matches!(analysis.operator(*id).op(), Op::CAST | Op::MATMUL)))
+    lowered.requires_fp32 = target == OPENVINO_TOSA_INTEGER_TARGET
+        || (packed_fp8
+            && analysis
+                .execution_order(block)
+                .iter()
+                .any(|id| matches!(analysis.operator(*id).op(), Op::CAST | Op::MATMUL)))
         || analysis
             .values()
             .iter()
@@ -1322,6 +1323,15 @@ fn encode_operator(
         Op::GATHER => {
             let (data, data_dims) = value_port_dims(builder, analysis, inputs[0])?;
             let (indices, index_dims) = value_port_dims(builder, analysis, inputs[1])?;
+            // Keep short runtime lookup indices in the plugin's I64 Gather path.
+            let indices = builder.emit_layer(
+                "Convert",
+                "opset1",
+                &format!("{stem}_indices_i64"),
+                "destination_type=\"i64\"",
+                &[(indices, &index_dims)],
+                &[(OvElement::I64, &index_dims)],
+            )[0];
             let axis = builder.emit_i64_const(&format!("{stem}_axis"), &[1], true)?;
             let ports = builder.emit_layer(
                 "Gather",
@@ -1545,6 +1555,13 @@ fn encode_int8_matmul(
         Ok(i32::from(bytes[0] as i8))
     };
     let zero_points = [read_zero_point(inputs[2])?, read_zero_point(inputs[3])?];
+    // CPU plugins can execute integer MatMul through FP32. Preserve exactness
+    // for every possible input and partial sum, including nonzero zero points.
+    let magnitude = |zero: i32| i64::from((128 + zero).max(127 - zero));
+    let k = static_dims(tensor(analysis, inputs[0])?)?[2];
+    if k * magnitude(zero_points[0]) * magnitude(zero_points[1]) > (1 << 24) {
+        return Err(LoweringError::UnsupportedGraph);
+    }
     let stem = format!("tosa_{}_matmul", operator_id.get());
     let mut adjusted = Vec::with_capacity(2);
     for index in 0..2 {
