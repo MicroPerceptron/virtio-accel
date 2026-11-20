@@ -2,6 +2,8 @@
 
 import importlib.util
 import json
+import io
+import zipfile
 import os
 from pathlib import Path
 import tempfile
@@ -80,6 +82,31 @@ class ImageGenerationTests(unittest.TestCase):
             np.savez_compressed(path, unexpected=np.zeros(1))
             with self.assertRaises(ValueError):
                 model.load_checkpoint(path)
+
+    def test_oversized_declared_array_is_rejected_before_allocation(self):
+        checkpoint = EXAMPLE.parents[2] / "assets" / "inference" / "decoder.npz"
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            zipfile.ZipFile(checkpoint) as original,
+        ):
+            path = Path(tmp) / "huge.npz"
+            header = io.BytesIO()
+            np.lib.format.write_array_header_1_0(
+                header, dict(descr="<f2", fortran_order=False, shape=(2**40,))
+            )
+            with zipfile.ZipFile(
+                path, "w", compression=zipfile.ZIP_DEFLATED
+            ) as archive:
+                for name in original.namelist():
+                    archive.writestr(
+                        name,
+                        header.getvalue() if name == "b0.npy" else original.read(name),
+                    )
+            with patch.object(
+                model.np, "load", side_effect=AssertionError("must not allocate")
+            ):
+                with self.assertRaisesRegex(ValueError, "invalid tensor b0"):
+                    model.load_checkpoint(path)
 
     def test_timing_statistics_keep_outlier_and_validation_rejects_bad_pixels(self):
         result = runner.summarize([1_000_000, 2_000_000, 100_000_000], 16)

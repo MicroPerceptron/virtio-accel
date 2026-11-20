@@ -32,6 +32,25 @@ def load_checkpoint(path):
             or sum(m.file_size for m in members) > 8 * 1024 * 1024
         ):
             raise ValueError("invalid or oversized checkpoint archive")
+        # Validate declared array dimensions before NumPy can allocate from a header.
+        for member in members:
+            key = member.filename[:-4]
+            with archive.open(member) as data:
+                version = np.lib.format.read_magic(data)
+                readers = {
+                    (1, 0): np.lib.format.read_array_header_1_0,
+                    (2, 0): np.lib.format.read_array_header_2_0,
+                }
+                if version not in readers:
+                    raise ValueError("unsupported array header version")
+                shape, _, dtype = readers[version](data)
+            valid = (
+                shape == () and dtype.kind == "U" and dtype.itemsize <= 65536
+                if key == "metadata"
+                else shape == SHAPES[key] and dtype == np.float16
+            )
+            if not valid:
+                raise ValueError(f"invalid tensor {key}")
     with np.load(path, allow_pickle=False) as archive:
         if set(archive.files) != set(SHAPES) | {"metadata"}:
             raise ValueError("unexpected checkpoint members")
