@@ -43,3 +43,10 @@ The policy is immutable per backend and mapped at each TOSA model load, includin
 in-memory compilation. It changes placement permissions only, not pointer ownership or
 event lifetimes. The legacy host-path constructor retains its ANE target identity and
 policy. The bridge rejects invalid tags and disables low-precision GPU accumulation.
+
+## Compressed constants
+
+Constant INT4/INT8 and palette lowering uses safe Rust and the existing owned ML Program
+byte buffer. Packed MIL types never become boundary tensors. No new FFI function, buffer
+ownership rule or submission-time conversion is introduced. The optional compute-plan
+diagnostic is a standalone Objective-C program outside the adapter's FFI boundary.

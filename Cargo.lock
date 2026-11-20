@@ -280,6 +280,7 @@ name = "virtio-accel-coreml"
 version = "0.4.1"
 dependencies = [
  "cc",
+ "half",
  "virtio-accel-conformance",
  "virtio-accel-core",
  "virtio-accel-tosa",

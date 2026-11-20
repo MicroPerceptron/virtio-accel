@@ -451,6 +451,33 @@ impl<'a> TosaAnalysis<'a> {
         &self.conditions
     }
 
+    /// Prove an index bound by inspecting every serialized INT32 constant index.
+    /// Runtime tensors, non-index conditions and out-of-range constants are not proven.
+    pub fn proves_constant_index_bounds(&self, condition: &RuntimeCondition<'_>) -> bool {
+        let RuntimeCondition::IndicesInRange {
+            indices,
+            upper_bound,
+            ..
+        } = condition
+        else {
+            return false;
+        };
+        let AnalyzedValueKind::Tensor(tensor) = self.value(*indices).kind() else {
+            return false;
+        };
+        if tensor.dtype() != DType::INT32 {
+            return false;
+        }
+        self.serialized_constant(*indices).is_some_and(|bytes| {
+            !bytes.is_empty()
+                && bytes.len() % 4 == 0
+                && bytes.chunks_exact(4).all(|b| {
+                    let value = i32::from_le_bytes(b.try_into().unwrap());
+                    value >= 0 && (value as u64) < *upper_bound
+                })
+        })
+    }
+
     /// Prove an index check for the exact byte-lookup idiom `CAST(INT8 -> INT32) + 128`.
     ///
     /// The signed byte widens exactly into [-128, 127]; adding 128 cannot overflow and

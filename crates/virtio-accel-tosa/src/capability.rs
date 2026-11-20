@@ -124,6 +124,9 @@ pub enum RuntimeConditionSupport {
     /// Index bounds must be discharged by `TosaAnalysis::proves_byte_lookup_bounds`.
     /// Other dynamic conditions remain unsupported.
     ProvenByteLookup,
+    /// Index bounds must be discharged by `TosaAnalysis::proves_byte_lookup_bounds`
+    /// or `TosaAnalysis::proves_constant_index_bounds`. Other conditions are rejected.
+    ProvenConstantOrByteLookup,
 }
 
 /// Whole-graph structural boundary that is not reducible to an operator bit.

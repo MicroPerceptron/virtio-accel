@@ -10,8 +10,8 @@ use super::*;
 /// MATMUL. Slots are 0: FP16 activations `[1,M,K]`, 1: FP16 output `[1,M,N]`.
 ///
 /// TOSA 1.0 has no INT4-to-float CAST. The portable artifact therefore serializes
-/// these exact values as INT8 constants, using one byte per weight. OpenVINO can
-/// losslessly repack them to native i4 constants at load time. This is not a TOSA
+/// these exact values as INT8 constants, using one byte per weight. OpenVINO and Core ML can
+/// losslessly repack them to native compressed constants at load time. This is not a TOSA
 /// INT4 tensor or NVFP4; no automatic quantization of floating weights occurs.
 /// Changing weights or scales requires rebuilding and reloading the program.
 pub fn int4_matmul_fp16(

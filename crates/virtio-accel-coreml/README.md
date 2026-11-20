@@ -150,3 +150,23 @@ outside timing and records the selected policy. Hardware timing is not a correct
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 [MIT license](LICENSE-MIT) at your option.
+
+## Immutable low-bit weights
+
+On the macOS 26+ mixed tier, `quantized::int4_matmul_fp16` and
+`int8_matmul_fp16` now lower to native compressed constants and FP16 linear operations.
+CPU/GPU and All use blockwise int4/int8 shift-scale constants. CPU/ANE uses exactly
+rounded 16-entry palettes when integer values fit four bits. Activations remain FP16;
+this is not the exact INT8/INT32 tier or calibrated W8A8.
+
+`quantized::palette4_matmul_fp16` accepts explicit nibble indices and arbitrary finite
+FP16 palette entries. Core ML emits `constexpr_lut_to_dense` and shares identical
+adjacent palettes without changing a value. Choose `group_size=K` for per-output-channel
+palettes; sharing tables across output channels can improve ANE placement. Palettes
+varying across the input dimension may execute on CPU. Selected policies always permit
+CPU participation; inspect the compute plan and benchmark the actual geometry.
+
+These optimizations apply only to immutable constants. The portable integer artifact
+stores one byte per weight and the palette artifact stores INT32 indices; native packing
+happens at load. Updating weights requires rebuilding/reloading. Runtime NVFP4 and FP8
+paths are unchanged. See [ADR 0016](../../docs/adr/0016-coreml-compressed-weights.md).

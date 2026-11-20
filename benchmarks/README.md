@@ -203,3 +203,32 @@ CI formats/lints/checks the package on Linux, macOS and Windows, checks Rust 1.8
 and capture tests, and executes portable, pinned OpenVINO CPU and four-slot pipeline smoke cases. It uploads result
 bundles for inspection. Shared hosted runners are correctness gates, **not performance gates**.
 Dedicated hardware measurements remain an explicit operator action.
+
+### Core ML compressed weights
+
+`Palette4F16ProjectionDecode/Prefill` matches the input-block integer controls above.
+`Palette4ChannelDecode/Prefill` and `F16ChannelDecode/Prefill` are a separate matched pair:
+K-wide palettes, shared across 16 output channels, expose ANE-compatible table geometry.
+`Int4F16ProjectionBatch` and `F16ProjectionBatch` use M=128 with the original group-128
+weights to test a larger workload. All retain exact reference checks.
+
+```sh
+python3 benchmarks/run.py --backend coreml --device cpu-gpu --case Int4F16ProjectionBatch
+python3 benchmarks/run.py --backend coreml --device cpu-ane --case Palette4ChannelPrefill
+```
+
+Record compiler placement separately from timing, on macOS 26+:
+
+```sh
+VIRTIO_ACCEL_COREML_TEST_MODEL_DIR=/tmp/coreml-weights cargo test -p virtio-accel-coreml \
+  --lib export_compressed_weights_for_native_inspection
+xcrun clang -fobjc-arc -fblocks -framework CoreML -framework Foundation \
+  -mmacosx-version-min=14.4 benchmarks/inspect_coreml.m -o /tmp/inspect-coreml
+/tmp/inspect-coreml /tmp/coreml-weights/int4-m128.mlmodel cpu-gpu /tmp/int4-plan.json
+/tmp/inspect-coreml /tmp/coreml-weights/palette4-channel-m16.mlmodel cpu-ane /tmp/palette-plan.json
+```
+
+The diagnostic matches production precision and optimization hints and records Apple's
+**anticipated** placement. It is not an execution trace or compressed-residency measurement.
+CPU/GPU policies may prefer CPU for small projections; input-axis palette blocks may not
+support ANE at all. Keep policy, shape and table geometry beside any reported timing.

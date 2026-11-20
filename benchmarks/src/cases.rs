@@ -16,8 +16,16 @@ pub enum Case {
     Fp8E4M3Decode,
     Fp8E5M2Decode,
     Fp8CacheWindow,
+    Int4F16ProjectionBatch,
+    F16ProjectionBatch,
     Int4F16ProjectionDecode,
     Int4F16ProjectionPrefill,
+    Palette4ChannelDecode,
+    Palette4ChannelPrefill,
+    F16ChannelDecode,
+    F16ChannelPrefill,
+    Palette4F16ProjectionDecode,
+    Palette4F16ProjectionPrefill,
     Int8F16ProjectionDecode,
     Int8F16ProjectionPrefill,
     F16ProjectionDecode,
@@ -36,8 +44,16 @@ pub const CASES: &[Case] = &[
     Case::Fp8E4M3Decode,
     Case::Fp8E5M2Decode,
     Case::Fp8CacheWindow,
+    Case::Int4F16ProjectionBatch,
+    Case::F16ProjectionBatch,
     Case::Int4F16ProjectionDecode,
     Case::Int4F16ProjectionPrefill,
+    Case::Palette4ChannelDecode,
+    Case::Palette4ChannelPrefill,
+    Case::F16ChannelDecode,
+    Case::F16ChannelPrefill,
+    Case::Palette4F16ProjectionDecode,
+    Case::Palette4F16ProjectionPrefill,
     Case::Int8F16ProjectionDecode,
     Case::Int8F16ProjectionPrefill,
     Case::F16ProjectionDecode,
@@ -111,19 +127,49 @@ impl Case {
             Self::Fp8E4M3Decode => cast(DType::FP8E4M3, false),
             Self::Fp8E5M2Decode => cast(DType::FP8E5M2, false),
             Self::Fp8CacheWindow => cache(),
-            Self::Int4F16ProjectionDecode => projection(1, 1024, 2048, 4),
-            Self::Int4F16ProjectionPrefill => projection(16, 1024, 2048, 4),
-            Self::Int8F16ProjectionDecode => projection(1, 1024, 2048, 8),
-            Self::Int8F16ProjectionPrefill => projection(16, 1024, 2048, 8),
-            Self::F16ProjectionDecode => projection(1, 1024, 2048, 16),
-            Self::F16ProjectionPrefill => projection(16, 1024, 2048, 16),
+            Self::Int4F16ProjectionBatch => projection(128, 1024, 2048, ProjectionWeights::Int4),
+            Self::F16ProjectionBatch => projection(128, 1024, 2048, ProjectionWeights::F16),
+            Self::Int4F16ProjectionDecode => projection(1, 1024, 2048, ProjectionWeights::Int4),
+            Self::Int4F16ProjectionPrefill => projection(16, 1024, 2048, ProjectionWeights::Int4),
+            Self::Palette4ChannelDecode => {
+                projection(1, 1024, 2048, ProjectionWeights::Palette4Channel)
+            }
+            Self::Palette4ChannelPrefill => {
+                projection(16, 1024, 2048, ProjectionWeights::Palette4Channel)
+            }
+            Self::F16ChannelDecode => projection(1, 1024, 2048, ProjectionWeights::F16Channel),
+            Self::F16ChannelPrefill => projection(16, 1024, 2048, ProjectionWeights::F16Channel),
+            Self::Palette4F16ProjectionDecode => {
+                projection(1, 1024, 2048, ProjectionWeights::Palette4)
+            }
+            Self::Palette4F16ProjectionPrefill => {
+                projection(16, 1024, 2048, ProjectionWeights::Palette4)
+            }
+            Self::Int8F16ProjectionDecode => projection(1, 1024, 2048, ProjectionWeights::Int8),
+            Self::Int8F16ProjectionPrefill => projection(16, 1024, 2048, ProjectionWeights::Int8),
+            Self::F16ProjectionDecode => projection(1, 1024, 2048, ProjectionWeights::F16),
+            Self::F16ProjectionPrefill => projection(16, 1024, 2048, ProjectionWeights::F16),
         };
         w.name = format!("{self:?}");
         w
     }
 }
-fn projection(m: usize, n: usize, k: usize, bits: u8) -> Workload {
-    let group = 128;
+#[derive(Clone, Copy, PartialEq)]
+enum ProjectionWeights {
+    Palette4Channel,
+    F16Channel,
+    Int4,
+    Int8,
+    Palette4,
+    F16,
+}
+
+fn projection(m: usize, n: usize, k: usize, format: ProjectionWeights) -> Workload {
+    let channel = matches!(
+        format,
+        ProjectionWeights::Palette4Channel | ProjectionWeights::F16Channel
+    );
+    let group = if channel { k } else { 128 };
     // Identical dequantized weights for all three representations. W8 uses q*16
     // and scale/16, ensuring it cannot accidentally take the narrower i4 path.
     let q = (0..n * k)
@@ -133,7 +179,13 @@ fn projection(m: usize, n: usize, k: usize, bits: u8) -> Workload {
         })
         .collect::<Vec<_>>();
     let scales = (0..n * k / group)
-        .map(|i| if i % 3 == 0 { 0.125 } else { 0.0625 })
+        .map(|i| {
+            if (if channel { i / 16 } else { i }) % 3 == 0 {
+                0.125
+            } else {
+                0.0625
+            }
+        })
         .collect::<Vec<f32>>();
     // 128 nonzero binary-fraction activations per row keep every possible
     // FP16 partial sum representable, independently of reduction order.
@@ -152,8 +204,8 @@ fn projection(m: usize, n: usize, k: usize, bits: u8) -> Workload {
         })
         .collect::<Vec<_>>();
     let d = DType::FP16;
-    let artifact = match bits {
-        4 => {
+    let artifact = match format {
+        ProjectionWeights::Int4 => {
             let packed = q
                 .chunks_exact(2)
                 .map(|p| (p[0] as u8 & 15) | (p[1] as u8 & 15) << 4)
@@ -164,7 +216,7 @@ fn projection(m: usize, n: usize, k: usize, bits: u8) -> Workload {
                 .collect::<Vec<_>>();
             quantized::int4_matmul_fp16(m, n, k, group, &packed, &scale_bits).unwrap()
         }
-        8 => {
+        ProjectionWeights::Int8 => {
             let weights = q.iter().map(|v| *v * 16).collect::<Vec<_>>();
             let scale_bits = scales
                 .iter()
@@ -172,7 +224,23 @@ fn projection(m: usize, n: usize, k: usize, bits: u8) -> Workload {
                 .collect::<Vec<_>>();
             quantized::int8_matmul_fp16(m, n, k, group, &weights, &scale_bits).unwrap()
         }
-        16 => {
+        ProjectionWeights::Palette4 | ProjectionWeights::Palette4Channel => {
+            let packed = q
+                .chunks_exact(2)
+                .map(|p| (p[0] as u8 & 15) | ((p[1] as u8 & 15) << 4))
+                .collect::<Vec<_>>();
+            let palette = scales
+                .iter()
+                .flat_map(|scale| {
+                    (0..16u8).map(move |code| {
+                        let signed = ((code as i8) << 4) >> 4;
+                        f16::from_f32(f32::from(signed) * scale).to_bits()
+                    })
+                })
+                .collect::<Vec<_>>();
+            quantized::palette4_matmul_fp16(m, n, k, group, &packed, &palette).unwrap()
+        }
+        ProjectionWeights::F16 | ProjectionWeights::F16Channel => {
             let a_shape = [1, m as i32, k as i32];
             let b_shape = [1, k as i32, n as i32];
             let out_shape = [1, m as i32, n as i32];
@@ -196,12 +264,14 @@ fn projection(m: usize, n: usize, k: usize, bits: u8) -> Workload {
                 .build(target(ExtensionSet::NONE))
                 .unwrap()
         }
-        _ => unreachable!(),
     };
     Workload {
         name: String::new(),
         artifact,
-        target: if bits == 16 {
+        target: if matches!(
+            format,
+            ProjectionWeights::F16 | ProjectionWeights::F16Channel
+        ) {
             target(ExtensionSet::NONE)
         } else {
             quantized::TARGET
@@ -399,9 +469,17 @@ mod tests {
     #[test]
     fn compressed_projection_controls_have_identical_values() {
         for m in [1, 16] {
-            let control = projection(m, 4, 256, 16);
-            for bits in [4, 8] {
-                let packed = projection(m, 4, 256, bits);
+            let palette = projection(m, 32, 256, ProjectionWeights::Palette4Channel);
+            let dense = projection(m, 32, 256, ProjectionWeights::F16Channel);
+            assert_eq!(palette.inputs, dense.inputs);
+            assert_eq!(palette.expected, dense.expected);
+            let control = projection(m, 4, 256, ProjectionWeights::F16);
+            for format in [
+                ProjectionWeights::Int4,
+                ProjectionWeights::Int8,
+                ProjectionWeights::Palette4,
+            ] {
+                let packed = projection(m, 4, 256, format);
                 assert_eq!(packed.inputs, control.inputs);
                 assert_eq!(packed.expected, control.expected);
             }

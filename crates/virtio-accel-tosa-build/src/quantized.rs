@@ -7,7 +7,9 @@ use alloc::{vec, vec::Vec};
 use virtio_accel_tosa::{DType, ExtensionSet, Level, ProfileSet, Target, Version};
 
 mod integer;
+mod palette;
 pub use integer::{int4_matmul_fp16, int8_matmul_fp16};
+pub use palette::palette4_matmul_fp16;
 
 pub const TARGET: Target = Target::new(
     Version::TOSA_1_0,
