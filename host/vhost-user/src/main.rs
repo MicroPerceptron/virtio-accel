@@ -52,6 +52,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let backend = backend.ok_or(USAGE)?;
+    let built = match backend.as_str() {
+        "mock" => true,
+        "openvino" => cfg!(feature = "openvino"),
+        "vulkan" => cfg!(feature = "vulkan"),
+        "xdna" => cfg!(feature = "xdna"),
+        _ => false,
+    };
+    if !built {
+        return Err(format!("backend {backend:?} is unavailable in this build").into());
+    }
     if device.is_some() && !matches!(backend.as_str(), "openvino" | "vulkan") {
         return Err("--device selects an OpenVINO endpoint or an exact Vulkan device name".into());
     }

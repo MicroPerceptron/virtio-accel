@@ -4,6 +4,7 @@
 import argparse
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
@@ -39,6 +40,10 @@ def stop(process):
 
 
 def main():
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, interrupted)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--qemu", type=executable, required=True)
     parser.add_argument("--daemon", type=executable, required=True)
@@ -133,7 +138,8 @@ def main():
         print(shlex.join(command), flush=True)
         if args.dry_run:
             return 0
-        # Detect unpatched/missing frontend before starting the host process.
+        # Detect a missing frontend before starting the host process. The caller
+        # must still supply the reviewed patched build, not an upstream binary.
         subprocess.run(
             [args.qemu, "-device", "vhost-user-test-device,help"],
             check=True,
@@ -162,4 +168,7 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None
