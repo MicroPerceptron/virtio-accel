@@ -4,14 +4,14 @@ For execution inside QEMU, use the [Linux guest driver](../guest/linux/README.md
 and `devices(provider="virtio")`. Vendor runtimes stay on the host. This provider
 requires a wheel built from the guest-driver change; older releases lack it.
 
-`virtio_accel.numpy` provides immutable FP16/BF16/FP32 arrays, static tracing, validated
+`virtio_accel.numpy` provides immutable typed arrays, static tracing, validated
 TOSA export, and synchronous native execution through Core ML, Vulkan, OpenVINO,
 Hexagon and XDNA. NumPy remains an explicit CPU reference. No speedup is claimed.
 
 ## Install from PyPI
 
 ```sh
-python -m pip install virtio-accel==0.1.0a1
+python -m pip install virtio-accel==0.1.0a2
 ```
 
 Requires Python 3.10 or newer. See the [generated API reference](https://virtio-accel.org/python/api/)
@@ -68,8 +68,10 @@ np.testing.assert_allclose(
 )
 ```
 
-The exported artifact is static TOSA 1.0 Floating Point, Level 8K, with no optional
-extensions for FP16/FP32; BF16 graphs explicitly declare the BF16 extension. Validation is not a claim of admission by every backend. Backend dtype,
+Exported artifacts use static TOSA 1.0, Level 8K, with profiles and extensions
+selected from graph dtypes. FP16/FP32 use the floating profile without extensions;
+BF16 declares BF16, FP8 declares both FP8 formats, and integer/mixed graphs
+select their corresponding profiles. Validation is not a claim of admission by every backend. Backend dtype,
 operator, shape, and runtime requirements still apply. Unsupported graphs fail admission;
 there is no automatic provider, dtype, or CPU fallback.
 
@@ -134,7 +136,7 @@ work prematurely. Scheduling precision is platform dependent.
 
 | Provider | Endpoints | Build/runtime requirements | Python admission boundary |
 | --- | --- | --- | --- |
-| Core ML | NPU, GPU, hybrid CPU/GPU/ANE | macOS 14+ | FP16/FP32; CPU participation; no CAST |
+| Core ML | NPU, GPU, hybrid CPU/GPU/ANE | macOS 14+; macOS 26+ for quantized tiers | FP16/FP32 base tier; FP8, integer and compressed-weight ML Program tiers; CPU participation |
 | Vulkan | GPU, macOS/Linux/Windows | Vulkan loader and GPU driver (MoltenVK on macOS) | FP16/FP32; software CPU devices excluded |
 | OpenVINO | CPU/GPU/NPU | OpenVINO 2026.3 C runtime and device plugins/drivers at execution time | FP16/FP32, subject to plugin admission; no floating-tier CAST; exact named device, no AUTO/HETERO |
 | Hexagon | NPU, Windows ARM64 | Source/local wheel builds require the complete QAIRT/QNN SDK and HTP runtime; no prebuilt release wheel yet | FP16; FP32 rejected without downconversion |
@@ -251,7 +253,8 @@ requiring hard cancellation should isolate device execution in their own process
 | Shapes | `reshape` with one inferred dimension, `transpose`, `.T` |
 | Inspection | `shape`, `dtype`, `ndim`, `size`; explicit `to_numpy()` |
 
-FP16, BF16 and FP32 are implemented, including `astype` and `Array.astype`. Python literals default to FP32; in binary operations with an array they adopt its dtype. Mixed floating dtypes promote to FP32 through explicit graph casts. Existing NumPy arrays and
+FP16, BF16 and FP32 support arithmetic. FP8 E4M3FN/E5M2 and INT8/INT32 support
+explicit storage and movement; see the quantized section below for operation limits. Python literals default to FP32; in binary operations with an array they adopt its dtype. Mixed floating dtypes promote to FP32 through explicit graph casts. Existing NumPy arrays and
 scalars preserve their declared dtype: unsupported dtypes raise, unless the caller
 explicitly requests `dtype=vnp.float16` or `dtype=vnp.float32`. There is no implicit FP64 narrowing. Noncontiguous
 host inputs are copied into owned contiguous storage. Host reads return independent
@@ -264,8 +267,9 @@ integer arithmetic, autograd, DLPack, and standard NumPy dispatch are not implem
 Unsupported functions and keywords fail rather than forwarding to NumPy. In particular,
 `np.asarray(array)` is refused; use `array.to_numpy()` explicitly.
 
-FP16 operations round their results to FP16. Matrix products and reductions accumulate
-in FP32. Reductions narrow only after all axes (and mean scaling) are complete;
+FP16 operations round their results to FP16. The CPU reference accumulates matrix
+products and reductions in FP32. Native FP16 MATMUL follows TOSA's FP16 accuracy
+contract and is not a bitwise FP32-accumulation promise. Reductions narrow only after all axes (and mean scaling) are complete;
 `dtype=` selects the result dtype. The reference graph uses sequential axis reductions and mean via FP32 reciprocal
 multiplication. Its rounding can differ from NumPy's direct multi-axis reduction or
 division. The hardware smoke suite compares admitted workloads to this reference; full hardware
@@ -402,3 +406,56 @@ results above. The changed Windows runtime-path loader still needs manual valida
 on a QAIRT-configured machine before restoring the Windows ARM64 release wheel.
 The first release defers that wheel and its hardware CI; hosted CI covers the other
 five wheel targets. No PyPI upload is claimed here.
+## Quantized types and projections (0.1.0a2)
+
+```python
+from virtio_accel import quantized as q
+
+# Weights [N,K] = [[1,2,3,4]], signed INT4, low nibble first.
+scales = np.ones((1, 1), dtype=np.float16)
+projection = va.jit(
+    lambda x: q.int4_matmul(x, bytes([0x21, 0x43]), scales, group_size=4)
+)
+# Select a discovered Core ML or OpenVINO device as above.
+with projection.lower(np.ones((1, 4), np.float16)).compile(device) as executable:
+    result = executable(np.ones((1, 4), np.float16))
+```
+
+- `vnp.float8_e4m3fn` and `vnp.float8_e5m2` use `ml-dtypes` byte encodings.
+  Identity, reshape, transpose and explicit casts enable activation/KV-cache
+  storage; widen to FP16/FP32 before arithmetic. No implicit FP8 promotion.
+- `vnp.int8` and `vnp.int32` preserve integer bytes. INT8 `matmul` has zero
+  zero-points and INT32 output; casts only widen INT8 to INT32/FP16/FP32.
+  General integer arithmetic and float-to-integer casts are not exposed.
+- `q.int4_matmul` and `q.int8_matmul` use immutable row-major [N,K] integer
+  weights and positive finite FP16 scales [N,K/group_size]. Activations and
+  outputs are FP16. Constants retain their decode pattern in TOSA so Core ML
+  and OpenVINO can select compressed native storage at load time.
+- `q.palette4_matmul` uses packed four-bit indices and finite FP16 palettes
+  [N,K/group_size,16]. This is arbitrary scalar palettization, supported by
+  Core ML's compressed-weight tier; it is not linear INT4 or NVFP4.
+- `q.nvfp4_matmul` uses runtime INT8 carriers for packed E2M1 weights
+  [1,N*K/2] and E4M3FN scale bits [1,N*K/16], K divisible by 16.
+  Decode and block scaling precede MATMUL; the separate positive tensor scale
+  follows it. Use `uint8_array.view(np.int8)` for raw bytes. FP16 or FP32
+  activations select the corresponding computation tier.
+
+Captured weights/scales snapshot on tracing; clear the cache to capture edits.
+NVFP4 byte inputs can change per invocation without reloading. FP8 is a TOSA
+extension; NVFP4 and integer/palette projections use the mixed integer/float
+profile. Neither packed format invents a new wire dtype or changes protocol 1.0.
+The existing 16 MiB diagnostic-JSON and 256 MiB per-tensor limits still apply.
+
+Core ML quantized tiers require macOS 26+. OpenVINO CPU/GPU support FP8 and mixed
+projections; NPU supports the FP16 mixed path, not the FP8 boundary tier. Other
+providers reject unsupported graphs explicitly. The Linux guest adapter uses
+actual dtype byte widths and forwards the same TOSA artifact to its host.
+Core ML integer MATMUL currently requires a single rank-three operation and
+bounds the worst-case absolute dot-product sum to 2**24 (K <= 1024 for zero
+zero-points): its compiler can use FP32 internally for MIL INT32 MATMUL. Larger
+integer dots fail admission rather than return rounded integers.
+
+See the [generated quantized API](https://virtio-accel.org/python/api/quantized.html)
+for exact argument layouts. Native policy selection is not proof of GPU or ANE
+placement, and compressed storage is not a guarantee of speedup.
+

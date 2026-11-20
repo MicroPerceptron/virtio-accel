@@ -1,4 +1,4 @@
-"""A deliberately small NumPy-style FP16/BF16/FP32 namespace.
+"""A deliberately small NumPy-style tensor namespace.
 
 Eager calls are an explicit CPU reference implementation. Traced calls construct
 TOSA-compatible primitives. Unsupported functions are not forwarded to NumPy.
@@ -7,13 +7,15 @@ TOSA-compatible primitives. Unsupported functions are not forwarded to NumPy.
 import math
 import operator
 import numpy as _np
-from ml_dtypes import bfloat16
+from ml_dtypes import bfloat16, float8_e4m3fn, float8_e5m2
 
-from ._array import Array, cast, checked_dtype, checked_shape, host_array, primitive, promote
+from ._array import FLOAT_DTYPES, Array, cast, checked_dtype, checked_shape, host_array, primitive, promote
 
 float16 = _np.float16
 float32 = _np.float32
-__all__ = ["float16", "bfloat16", "float32", "asarray", "array", "zeros", "ones", "full", "add",
+int8 = _np.int8
+int32 = _np.int32
+__all__ = ["float8_e4m3fn", "float8_e5m2", "int8", "int32", "float16", "bfloat16", "float32", "asarray", "array", "zeros", "ones", "full", "add",
            "subtract", "multiply", "maximum", "minimum", "negative", "abs",
            "exp", "log", "tanh", "sin", "cos", "matmul", "reshape",
            "transpose", "astype", "sum", "mean"]
@@ -22,7 +24,7 @@ __all__ = ["float16", "bfloat16", "float32", "asarray", "array", "zeros", "ones"
 def asarray(a, dtype=None):
     """Create an immutable array or reuse an existing compatible Array.
 
-    Only FP16, BF16 and FP32 are supported. Host inputs are copied; symbolic
+    FP16, BF16, FP32, FP8 E4M3FN/E5M2, INT8 and INT32 are supported. Host inputs are copied; symbolic
     values retain their trace. Use ``dtype`` to request an explicit conversion."""
     return host_array(a, dtype)
 
@@ -33,7 +35,7 @@ def array(a, dtype=None):
 
 
 def astype(a, dtype):
-    """Explicitly cast an array to FP16, BF16 or FP32."""
+    """Explicitly cast an array; integer casts are limited to INT8 widening."""
     return cast(asarray(a), dtype)
 
 
@@ -60,6 +62,7 @@ def ones(shape, dtype=float32):
 
 def _binary(op, a, b):
     a, b = promote(a, b)
+    _require_float(a)
     shape = checked_shape(_np.broadcast_shapes(a.shape, b.shape), a.dtype)
     # TOSA binary operands have equal rank; NumPy permits leading dimensions.
     if a.ndim < len(shape):
@@ -94,8 +97,13 @@ def minimum(a, b):
     return _binary("minimum", a, b)
 
 
+def _require_float(a):
+    if a.dtype not in FLOAT_DTYPES:
+        raise TypeError("arithmetic requires float16/bfloat16/float32; explicitly widen FP8 or integer storage")
+
 def _unary(op, a):
     a = asarray(a)
+    _require_float(a)
     return primitive(op, (a,), a.shape)
 
 
@@ -177,14 +185,17 @@ def matmul(a, b):
 
     Both operands must have the same rank, either two or three, with matching
     inner dimensions. Batch broadcasting and vector inputs are unsupported.
+    INT8 operands produce exact INT32 output (zero points are zero).
     BF16 operands produce FP32 accumulator output; other output dtypes follow
     frontend promotion."""
     a, b = promote(a, b)
+    if a.dtype != _np.dtype(int8):
+        _require_float(a)
     if a.ndim != b.ndim or a.ndim not in (2, 3):
         raise NotImplementedError("matmul requires two 2D or matching-batch 3D arrays")
     if a.shape[-1] != b.shape[-2]:
         raise ValueError("matmul inner dimensions do not match")
-    dtype = float32 if a.dtype == _np.dtype(bfloat16) else a.dtype
+    dtype = int32 if a.dtype == _np.dtype(int8) else float32 if a.dtype == _np.dtype(bfloat16) else a.dtype
     if a.ndim == 3:
         if a.shape[0] != b.shape[0]:
             raise ValueError("matmul batch dimensions must match")
@@ -210,6 +221,7 @@ def _axes(a, axis):
 
 
 def _reduction(a, axis, dtype, out, keepdims, average):
+    _require_float(a)
     if out is not None:
         raise NotImplementedError("out= and mutation are not supported")
     result_dtype = a.dtype if dtype is None else checked_dtype(dtype)

@@ -14,6 +14,8 @@ import time
 from pathlib import Path
 from threading import RLock
 
+from ._array import checked_dtype
+
 # asm-generic ioctl encoding used by the supported Linux x86/ARM wheels.
 EXCHANGE = 0xC020B700
 INFO = 0x8020B701
@@ -313,7 +315,7 @@ class VirtioExecutable:
         self.inputs = len(doc["inputs"])
         self.sizes = [
             math.prod(doc["nodes"][i]["shape"])
-            * (4 if doc["nodes"][i]["dtype"] == "float32" else 2)
+            * checked_dtype(doc["nodes"][i]["dtype"]).itemsize
             for i in doc["inputs"] + doc["outputs"]
         ]
         self.session = acquire(device.name)

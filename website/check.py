@@ -51,6 +51,7 @@ REQUIRED_PAGES = [
     "python/api/index.html",
     "python/api/runtime.html",
     "python/api/numpy.html",
+    "python/api/quantized.html",
     "python/api/objects.inv",
     "favicon.svg",
     "docs/specification.html",
@@ -207,7 +208,8 @@ def check_python_api() -> list[str]:
     sys.path.insert(0, str(WEBSITE.parent / "python"))
     problems = []
     for module_name, page_name in (("virtio_accel", "runtime"),
-                                   ("virtio_accel.numpy", "numpy")):
+                                   ("virtio_accel.numpy", "numpy"),
+                                   ("virtio_accel.quantized", "quantized")):
         module = importlib.import_module(module_name)
         page = BOOK / "python" / "api" / (page_name + ".html")
         html = page.read_text() if page.exists() else ""

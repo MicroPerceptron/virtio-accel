@@ -17,7 +17,7 @@ class PythonApiCoverageTests(unittest.TestCase):
 
     def validate(self, value, html):
         module = SimpleNamespace(__all__=['exported'], exported=value)
-        for page in ('runtime', 'numpy'):
+        for page in ('runtime', 'numpy', 'quantized'):
             (self.book / 'python/api' / (page + '.html')).write_text(html)
         with patch.object(check, 'BOOK', self.book), patch.object(
                 check.importlib, 'import_module', return_value=module):
@@ -27,15 +27,16 @@ class PythonApiCoverageTests(unittest.TestCase):
         def exported():
             """A documented API."""
         problems = self.validate(exported, '')
-        self.assertEqual(len(problems), 2)
+        self.assertEqual(len(problems), 3)
         self.assertTrue(all('missing public export' in item for item in problems))
 
     def test_generated_signature_without_prose_is_rejected(self):
         def exported():
             pass
         problems = self.validate(exported, '<a id="virtio_accel.exported"></a>'
-                                 '<a id="virtio_accel.numpy.exported"></a>')
-        self.assertEqual(len(problems), 2)
+                                 '<a id="virtio_accel.numpy.exported"></a>'
+                                 '<a id="virtio_accel.quantized.exported"></a>')
+        self.assertEqual(len(problems), 3)
         self.assertTrue(all('missing docstring' in item for item in problems))
 
     def test_public_methods_and_properties_must_be_documented(self):
@@ -50,11 +51,11 @@ class PythonApiCoverageTests(unittest.TestCase):
             def value(self):
                 """Public property."""
                 return 1
-        html = '<a id="virtio_accel.exported"></a><a id="virtio_accel.numpy.exported"></a>'
+        html = '<a id="virtio_accel.exported"></a><a id="virtio_accel.numpy.exported"></a><a id="virtio_accel.quantized.exported"></a>'
         problems = self.validate(Exported, html)
-        self.assertEqual(len(problems), 4)
+        self.assertEqual(len(problems), 6)
         self.assertTrue(all('missing member' in item for item in problems))
-        for module in ('virtio_accel', 'virtio_accel.numpy'):
+        for module in ('virtio_accel', 'virtio_accel.numpy', 'virtio_accel.quantized'):
             for member in ('method', 'value'):
                 html += f'<a id="{module}.exported.{member}"></a>'
         self.assertEqual(self.validate(Exported, html), [])
