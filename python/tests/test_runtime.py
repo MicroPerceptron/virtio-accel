@@ -15,6 +15,15 @@ GPU = dict(id='gpu:0', kind='gpu', provider='vulkan', name='test GPU', cpu_parti
 
 
 class DeviceTests(unittest.TestCase):
+    def test_executable_rejects_symbolic_input_before_reading_payload(self):
+        from virtio_accel._array import Graph
+        lowered = va.jit(lambda x: x + x).lower(np.ones(2, np.float32))
+        with patch.object(_runtime, '_resolve', return_value=_runtime.Device(**GPU)), patch.object(_runtime, '_native') as native:
+            with lowered.compile('gpu') as executable:
+                with self.assertRaisesRegex(TypeError, 'traced value'):
+                    executable(Graph().input((2,), np.dtype('float32')))
+                native.return_value.NativeExecutable.return_value.run.assert_not_called()
+
     def test_provider_filter_is_forwarded_without_loading_other_runtimes(self):
         import json
         with patch.object(_runtime, '_native') as native, patch.object(_runtime, '_openvino_library') as library:

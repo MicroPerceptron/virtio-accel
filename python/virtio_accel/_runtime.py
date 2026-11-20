@@ -160,6 +160,8 @@ class Executable:
             bound = self._lowered._signature.bind(*args, **kwargs)
             bound.apply_defaults()
             arrays = tuple(host_array(v) for v in bound.arguments.values())
+            if any(a._graph is not None for a in arrays):
+                raise TypeError('a traced value cannot be read on the host')
             if tuple((a.shape, a.dtype.name) for a in arrays) != self._lowered._specs:
                 raise ValueError("inputs do not match this graph's shapes and dtypes")
             payloads = [a._data.astype(a.dtype.newbyteorder('<'), copy=False).tobytes() for a in arrays]

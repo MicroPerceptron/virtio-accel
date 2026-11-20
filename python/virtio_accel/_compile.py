@@ -177,6 +177,9 @@ class CompiledFunction:
         with self._lock:
             if self._closed:
                 raise RuntimeError("compiled function is closed")
+            if self._device is None and self._backend is None:
+                raise RuntimeError("device execution requires device=; use .lower(...).to_tosa() "
+                                   "or explicitly select jit(backend='reference')")
             # Snapshot once. lower() and Executable accept these immutable Arrays
             # without copying the original NumPy inputs a second time.
             bound = self._signature.bind(*args, **kwargs)
@@ -202,9 +205,6 @@ class CompiledFunction:
                     self._executables[key] = lowered.compile(self._device, timeout=self._timeout, strict=self._strict)
                 self._executables.move_to_end(key)
                 return self._executables[key](*bound.args, **bound.kwargs)
-            if self._backend is None:
-                raise RuntimeError("device execution requires device=; use .lower(...).to_tosa() "
-                                   "or explicitly select jit(backend='reference')")
             return lowered.reference(*bound.args, **bound.kwargs)
 
 
