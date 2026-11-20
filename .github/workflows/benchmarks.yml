@@ -65,6 +65,8 @@ jobs:
           /tmp/benchmark-runtime/bin/python -c 'import openvino,pathlib,os; p=next((pathlib.Path(openvino.__file__).parent/"libs").glob("libopenvino_c.so.*")); print("VIRTIO_ACCEL_OPENVINO_LIBRARY="+str(p))' >> "$GITHUB_ENV"
       - name: Validate every phase on a real CPU runtime
         run: python benchmarks/run.py --backend openvino --device CPU --case Nvfp4F16Decode --phase all --runtime-version 2026.3.0 --output benchmarks/results/openvino-smoke -- --test
+      - name: Validate four simultaneous request slots
+        run: python benchmarks/run.py --backend openvino --device CPU --case Nvfp4F16Decode --phase pipeline_execution --in-flight 4 --requests 32 --runtime-version 2026.3.0 --output benchmarks/results/openvino-pipeline -- --test
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:

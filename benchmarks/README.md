@@ -52,6 +52,45 @@ Set `VA_BENCH_BACKEND`, `VA_BENCH_DEVICE` and optionally `VA_BENCH_METADATA` bef
 hardware cases directly. Do not run the entire case list blindly: support varies by backend.
 The wrapper defaults to FP16 matmul, FP32 for Vulkan, or BF16 for XDNA.
 
+## In-flight throughput
+
+`warm_execution` retains the depth-one latency baseline. `pipeline_execution` measures a rolling
+window of independent requests, with an explicit depth and number of completed requests per
+Divan iteration:
+
+```sh
+python3 benchmarks/run.py --backend coreml --device all --case Nvfp4F16Decode --phase pipeline_execution --in-flight 16 --requests 256
+python3 benchmarks/run.py --backend openvino --device GPU --case Nvfp4F16Decode --phase pipeline_execution --in-flight 8 --requests 256
+```
+
+The window fills before polling. Every scan checks all occupied slots, retires terminal events,
+and immediately refills available slots. A slow oldest request does not block later completions.
+Every iteration drains all its accepted requests before returning. The harness allocates its
+slot/event bookkeeping before sampling; submission still includes the provider's native overhead.
+
+Each slot owns a resident program and a separate output, isolating native intermediate state.
+Read-only inputs, including weights, are shared by default; they are uploaded only during setup.
+`--input-mode per-slot` instead allocates and uploads independent input buffers once for each
+slot (required for XDNA's exclusive in-flight buffer guards). Metadata records the mode, program
+count and resident input/output payload sizes; native program/intermediate memory is additional.
+No input/output buffer is rewritten or freed while its event is live. All slots undergo exact
+numerical validation before and after measurement.
+
+Depth defaults to 1 and requests per iteration to `max(256, depth)`. Depth must fit the provider's
+advertised event, program and buffer limits for the selected mode. There is no additional fixed
+harness ring cap and no automatic reduction on rejection. Advertised limits are upper bounds:
+a provider may reject earlier because of runtime limits (for example XDNA's submission lane),
+or allow only depth one (Hexagon). Such rejection fails the run. Direct Cargo invocations use
+`VA_BENCH_IN_FLIGHT`, `VA_BENCH_REQUESTS` and `VA_BENCH_INPUT_MODE` instead of wrapper options.
+
+Divan's **time columns are for a whole request batch**. Its item counter reports completed
+requests/second; dividing batch time by request count gives amortized cost, **not individual
+request latency**. The metadata's peak live-event count describes accepted, unreclaimed host
+events; it is not a measurement of simultaneous hardware execution. This is independent-request
+throughput with identical resident inputs, not dependent autoregressive token throughput.
+Use equal request counts across depth comparisons and repeat/reorder sweeps to expose drift.
+Larger representative tensors are still needed to establish a memory-bandwidth ceiling.
+
 ## Workloads
 
 | Case | Shape and contract |
@@ -84,7 +123,8 @@ construction, context/queue/buffer creation and initial compilation are outside 
 | `download` | Read the output into an existing host allocation |
 | `warm_execution` (default) | Prepare bindings, submit, poll to terminal completion and release the event; buffers/program resident |
 | `round_trip` | Upload all inputs, warm execution, download output |
-| `all` | Each of the five phases separately |
+| `pipeline_execution` | Fill, rolling refill and drain of a configured batch of resident independent requests |
+| `all` | Each of the six phases separately |
 
 The initial load duration is also recorded once in metadata; it is **not** a cold-compilation
 statistical result. `load_unload` retains the fixture's initial resident program, so it measures
@@ -92,10 +132,10 @@ additional program lifecycle cost in that context. Transfer counters count API p
 not measured PCIe/DRAM traffic; shared-memory providers may perform a host copy. Very short
 transfers need Divan's automatic batching, not forced one-iteration samples.
 
-These are serial host wall-clock API measurements, including backend/runtime overhead. Core ML
+These are host wall-clock API measurements, including backend/runtime overhead. Only the explicit
+pipeline phase permits multiple outstanding requests. Core ML
 policies allow CPU participation and do not prove GPU/ANE placement. No device timestamp,
-engine utilization, native low-bit instruction throughput, concurrency scaling or VM transport
-cost is inferred from these results. The portable target measures graph authoring and
+engine utilization, native low-bit instruction throughput, VM transport cost is inferred from these results. The portable target measures graph authoring and
 parse/analyze only.
 
 `VA_BENCH_WARMUPS` defaults to 3 untimed executions after the initial correctness execution.
@@ -113,7 +153,7 @@ Keep all three result files together:
 - `run.json`: exact invocation, exit status, UTC times, commit/dirty state and tracked-diff hash,
   lockfile hash, Rust/Cargo, OS/architecture, selected runtime environment and operator version.
 - `cases.jsonl`: hardware identity, compiled target/profile/optimization, workload/input fingerprint,
-  shape/dtype/bytes/logical work, actual buffer properties/alignment, phase boundary, warmups and polling settings.
+  shape/dtype/bytes/logical work, actual buffer properties/alignment, phase boundary, warmups, polling settings and pipeline resource/iteration counts.
 
 Only exit code zero is a successful run. Metadata alone is not evidence that execution succeeded.
 Use a clean committed checkout for publishable comparisons; the tracked-diff hash does not capture
@@ -124,6 +164,6 @@ from a single smoke run. Divan 0.1.21 has no supported structured sample exporte
 native report is the statistical record.
 
 CI formats/lints/checks the package on Linux, macOS and Windows, checks Rust 1.85, runs reference
-and capture tests, and executes portable and pinned OpenVINO CPU smoke cases. It uploads result
+and capture tests, and executes portable, pinned OpenVINO CPU and four-slot pipeline smoke cases. It uploads result
 bundles for inspection. Shared hosted runners are correctness gates, **not performance gates**.
 Dedicated hardware measurements remain an explicit operator action.
