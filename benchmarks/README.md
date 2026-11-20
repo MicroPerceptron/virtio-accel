@@ -176,8 +176,8 @@ python3 benchmarks/inspect_openvino.py /tmp/int4-ir --device GPU
 The diagnostic retains native IR, compiled execution XML and JSON, checks 12 random
 FP16 inputs against independent binary64 products, and on GPU requires i4 weights,
 f16 arithmetic and no DynamicQuantize. CPU/NPU modes validate numerics and retain
-compiler evidence without asserting an unproven compressed-kernel selection. CPU on
-the tested Lunar Lake runtime still expands weights during execution. This diagnostic
+compiler evidence without asserting a compressed-kernel selection: those devices use
+explicitly rounded FP16 weight constants prepared at load time. This diagnostic
 measures no timing; use Divan for timing and keep its result bundle.
 
 ### Result bundles

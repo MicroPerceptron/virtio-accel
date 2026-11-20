@@ -20,7 +20,8 @@ def main():
     args = parser.parse_args()
     root = args.directory
     core = ov.Core()
-    model = core.read_model(root / "int4.xml")
+    stem = "int4" if args.device == "GPU" else "int4-expanded"
+    model = core.read_model(root / f"{stem}.xml")
     properties = {"EXECUTION_MODE_HINT": "ACCURACY", "PERF_COUNT": True}
     if args.device in ("CPU", "GPU"):
         properties["DYNAMIC_QUANTIZATION_GROUP_SIZE"] = 0
@@ -53,7 +54,7 @@ def main():
         "openvino": ov.__version__, "device": args.device,
         "device_name": core.get_property(args.device, "FULL_DEVICE_NAME"),
         "properties": properties, "exact_random_readbacks": 12,
-        "lowered_weights_blob_bytes": (root / "int4.bin").stat().st_size,
+        "lowered_weights_blob_bytes": (root / f"{stem}.bin").stat().st_size,
         "layers": layers,
     }
     (root / f"inspection-{args.device}.json").write_text(json.dumps(report, indent=2) + "\n")

@@ -83,10 +83,12 @@ compilation disables implicit dynamic activation quantization; ACCURACY alone pe
 There is no opt-in to lossy W4A8 under a W4A16 label. NPU lacks that runtime property.
 
 On Lunar Lake / OpenVINO 2026.4.1, production-lowered IR reports GPU `weights_precision=i4`
-and `runtimePrecision=f16`, with no DynamicQuantize node. CPU and NPU pass numerical
-execution, but this does not establish compressed residency or a speedup on those devices;
-the inspected CPU graph still expands the weights during execution. Portable artifacts
-retain one byte per weight; the native IR uses half a byte, plus scales/alignment. Changing
+and `runtimePrecision=f16`, with no DynamicQuantize node. CPU and NPU instead evaluate
+the constant FP16 dequantization once at load time. This avoids per-inference CPU expansion
+and fixes NPU scale fusion dropping the intermediate FP16 rounding for fractional scales.
+The `half` crate performs binary16 rounding; no inference-time host work is added.
+Those devices retain FP16 weights, so they gain no compressed-residency claim. Portable artifacts
+retain one byte per weight; GPU native constants use half a byte, plus scales/alignment. Changing
 weights requires program reload. See the [benchmark diagnostic](../../benchmarks/README.md)
 and [ADR 0015](../../docs/adr/0015-compressed-integer-weights.md).
 
