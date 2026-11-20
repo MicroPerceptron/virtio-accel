@@ -1,5 +1,11 @@
 # Workload examples
 
+For a trained generative model, native CPU/GPU/NPU comparisons and reproducible
+README media, see the [image-generation showcase](image_generation/README.md).
+It uses FP16 throughout and has a separate capture/measurement interface.
+
+## Small numerical examples
+
 Each script implements a reusable numerical function, generates deterministic demo
 inputs, evaluates the traced graph on the explicit CPU reference, and checks an
 independent NumPy result. `--export model.tosa` additionally writes a graph validated
@@ -19,7 +25,7 @@ python python/examples/nearest_centroid.py --dtype float16
 python python/examples/fir_filter.py --dtype float32 --export filter.tosa
 ```
 
-Every example accepts `--dtype float16` and `--dtype float32`. FP16 reduces input and
+Each of the three numerical examples accepts `--dtype float16` and `--dtype float32`. FP16 reduces input and
 constant storage; it does not imply a speedup in the NumPy reference. The classifier
 uses FP32 dot-product accumulation with FP16 storage rounding at operation boundaries.
 Distances explicitly promote FP16 inputs to FP32 to reduce cancellation. FIR uses host
