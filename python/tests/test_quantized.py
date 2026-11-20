@@ -143,7 +143,7 @@ class QuantizedHardwareTests(unittest.TestCase):
         a = np.full((1, 1, 2048), 127, np.int8)
         b = np.full((1, 2048, 1), 127, np.int8)
         b[0, 0, 0] = 126
-        if self.device.provider == 'coreml':
+        if self.device.provider in ('coreml', 'openvino'):
             with self.assertRaises(RuntimeError):
                 va.jit(lambda a, b: a @ b).lower(a, b).compile(self.device)
             a, b = a[:, :, :1024].copy(), b[:, :1024, :].copy()
