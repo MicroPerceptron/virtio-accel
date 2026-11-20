@@ -11,12 +11,16 @@ use std::{
 use virtio_accel_core::*;
 use virtio_accel_tosa::{TosaCapabilityProvider, parse};
 
+mod pipeline;
+
+#[derive(Clone, Copy)]
 pub enum Phase {
     LoadUnload,
     Upload,
     Download,
     Warm,
     RoundTrip,
+    Pipeline,
 }
 impl Phase {
     fn boundary(&self) -> &'static str {
@@ -28,6 +32,9 @@ impl Phase {
             Self::Download => "host wall clock: read_buffer into preallocated host output",
             Self::Warm => {
                 "host wall clock: bindings, submit, terminal polling and event release; resident buffers"
+            }
+            Self::Pipeline => {
+                "host wall clock: fill, rolling refill on terminal completion, drain; resident inputs and per-slot programs/outputs; batch duration, not request latency"
             }
             Self::RoundTrip => {
                 "host wall clock: upload all inputs, execute to terminal, release event, download output"
@@ -41,6 +48,7 @@ impl Phase {
             Self::Download => "download",
             Self::Warm => "warm_execution",
             Self::RoundTrip => "round_trip",
+            Self::Pipeline => "pipeline_execution",
         }
     }
 }
@@ -101,30 +109,35 @@ impl<A: Accelerator> Fixture<A> {
             .read_buffer(&self.output, 0, &mut Sink(&mut self.readback))
             .unwrap();
     }
-    fn execute(&self) {
-        assert!(self.inputs.len() <= 3);
+    fn submit_to(
+        &self,
+        program: &A::Program,
+        inputs: &[A::Buffer],
+        output: &A::Buffer,
+    ) -> A::Event {
+        assert!(inputs.len() <= 3);
         // Fixed scratch avoids allocating a bindings Vec in every timed submission.
         let bindings: [BindingRef<'_, A::Buffer>; 4] = std::array::from_fn(|i| {
-            if i < self.inputs.len() {
+            if i < inputs.len() {
                 BindingRef {
                     slot: i as u32,
-                    buffer: &self.inputs[i],
+                    buffer: &inputs[i],
                     range: BufferRange::new(0, self.workload.inputs[i].len() as u64).unwrap(),
                     access: AccessMode::Read,
                 }
             } else {
                 BindingRef {
-                    slot: self.inputs.len() as u32,
-                    buffer: &self.output,
+                    slot: inputs.len() as u32,
+                    buffer: output,
                     range: BufferRange::new(0, self.workload.expected.len() as u64).unwrap(),
                     access: AccessMode::Write,
                 }
             }
         });
-        let event = match self.backend.submit(
+        match self.backend.submit(
             &self.queue,
-            &self.program,
-            &bindings[..self.inputs.len() + 1],
+            program,
+            &bindings[..inputs.len() + 1],
             Timeout::Infinite,
         ) {
             Ok(e) => e,
@@ -133,7 +146,10 @@ impl<A: Accelerator> Fixture<A> {
             Err(SubmitFailure::Indeterminate { error, .. }) => {
                 panic!("indeterminate submit: {error:?}")
             }
-        };
+        }
+    }
+    fn execute(&self) {
+        let event = self.submit_to(&self.program, &self.inputs, &self.output);
         let deadline = Instant::now() + self.timeout;
         loop {
             match self.backend.poll_event(&event).unwrap() {
@@ -193,6 +209,9 @@ pub fn measure<A: Accelerator + TosaCapabilityProvider>(
             .any(|c| c.target == workload.target),
         "requested target is not advertised; choose a supported case explicitly"
     );
+    let pipeline_config = matches!(phase, Phase::Pipeline).then(|| {
+        pipeline::Config::from_env(backend.device_info().unwrap().limits, workload.inputs.len())
+    });
     let context = backend.create_context(ContextDesc::default()).unwrap();
     let model = parse(&workload.artifact).unwrap();
     let artifact = model.artifact_ref(workload.target, u64::MAX).unwrap();
@@ -235,8 +254,7 @@ pub fn measure<A: Accelerator + TosaCapabilityProvider>(
     let wait_us = number("VA_BENCH_WAIT_US", 0);
     let timeout = Duration::from_secs(number("VA_BENCH_TIMEOUT_SECS", 30));
     assert!(!timeout.is_zero());
-    metadata(
-        serde_json::json!({"schema":1,"build_target":env!("VA_BENCH_BUILD_TARGET"),
+    let meta = serde_json::json!({"schema":1,"build_target":env!("VA_BENCH_BUILD_TARGET"),
         "build_profile":env!("VA_BENCH_BUILD_PROFILE"),"optimization":env!("VA_BENCH_BUILD_OPT_LEVEL"),
         "case":workload.name,"phase":phase.name(),
         "backend":std::env::var("VA_BENCH_BACKEND").ok(),"requested_device":std::env::var("VA_BENCH_DEVICE").ok(),
@@ -247,8 +265,7 @@ pub fn measure<A: Accelerator + TosaCapabilityProvider>(
         "logical_flops":workload.logical_flops,"fingerprint":fingerprint.finalize().to_hex().to_string(),
         "warmups":warmups,"poll_wait_us":wait_us,"timeout_seconds":timeout.as_secs(),
         "initial_load_ns":initial_load.as_nanos().to_string(),"boundary":phase.boundary(),
-        "placement":"selected backend only; Core ML policy may include CPU; no engine-level timing"}),
-    );
+        "placement":"selected backend only; Core ML policy may include CPU; no engine-level timing"});
     let mut f = Fixture {
         backend,
         context,
@@ -262,6 +279,12 @@ pub fn measure<A: Accelerator + TosaCapabilityProvider>(
         timeout,
     };
     f.upload();
+    if let Some(config) = pipeline_config {
+        pipeline::measure(b, &f, config, warmups, meta);
+        f.close();
+        return;
+    }
+    metadata(meta);
     f.execute();
     f.validate();
     for _ in 0..warmups {
@@ -286,6 +309,7 @@ pub fn measure<A: Accelerator + TosaCapabilityProvider>(
                 .bench_local(|| f.download());
         }
         Phase::Warm => b.counter(ItemsCount::new(1u64)).bench_local(|| f.execute()),
+        Phase::Pipeline => unreachable!("handled above"),
         Phase::RoundTrip => b.counter(ItemsCount::new(1u64)).bench_local(|| {
             f.upload();
             f.execute();

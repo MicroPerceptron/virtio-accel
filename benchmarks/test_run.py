@@ -47,6 +47,14 @@ class RunnerTests(unittest.TestCase):
             console.flush()
             self.assertIn("╰─ framework output", console.buffer.getvalue().decode("utf-8"))
 
+    def test_invalid_pipeline_settings_never_start_a_build(self):
+        for settings in [["--in-flight", "0"], ["--in-flight", "4", "--requests", "3", "--phase", "pipeline_execution"], ["--in-flight", "4"]]:
+            with patch.object(sys, "argv", ["run.py", "--backend", "coreml", "--device", "all"] + settings), patch.object(run.subprocess, "Popen") as child, contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    run.main()
+                self.assertEqual(error.exception.code, 2)
+                child.assert_not_called()
+
     def test_device_is_required_before_building(self):
         with patch.object(sys, "argv", ["run.py", "--backend", "openvino"]), patch.object(run.subprocess, "Popen") as child, contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit) as error:

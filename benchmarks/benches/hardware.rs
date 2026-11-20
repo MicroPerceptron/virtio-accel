@@ -26,3 +26,8 @@ fn warm_execution(b: divan::Bencher, c: Case) {
 fn round_trip(b: divan::Bencher, c: Case) {
     selected(b, c, Phase::RoundTrip);
 }
+
+#[divan::bench(args=CASES,sample_count=30,max_time=5)]
+fn pipeline_execution(b: divan::Bencher, c: Case) {
+    selected(b, c, Phase::Pipeline);
+}

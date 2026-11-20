@@ -27,7 +27,10 @@ def main() -> int:
     p.add_argument("--backend", choices=["portable", "coreml", "openvino", "vulkan", "hexagon", "xdna"], required=True)
     p.add_argument("--device", default="")
     p.add_argument("--case", default=None)
-    p.add_argument("--phase", choices=["load_unload", "upload", "download", "warm_execution", "round_trip", "all"], default="warm_execution")
+    p.add_argument("--phase", choices=["load_unload", "upload", "download", "warm_execution", "round_trip", "pipeline_execution", "all"], default="warm_execution")
+    p.add_argument("--in-flight", type=int, default=1, help="pipeline slots, bounded by provider resources")
+    p.add_argument("--requests", type=int, help="completed requests per pipeline sample, default max(256, depth)")
+    p.add_argument("--input-mode", choices=["shared", "per-slot"], default="shared")
     p.add_argument("--output", type=Path)
     p.add_argument("--runtime-version", default="unrecorded", help="operator-supplied vendor runtime version")
     p.add_argument("divan_args", nargs=argparse.REMAINDER, help="Divan flags after --")
@@ -41,11 +44,16 @@ def main() -> int:
     case = a.case or ({"xdna": "MatmulBf16Decode", "vulkan": "MatmulF32Decode"}.get(a.backend, "MatmulF16Decode"))
     if not re.fullmatch(r"[A-Za-z0-9_]+", case):
         p.error("--case must be an exact benchmark case name")
+    if a.in_flight < 1 or (a.requests is not None and a.requests < a.in_flight):
+        p.error("require 1 <= --in-flight <= --requests")
+    if (a.backend == "portable" or a.phase not in {"pipeline_execution", "all"}) and (a.in_flight != 1 or a.requests is not None or a.input_mode != "shared"):
+        p.error("pipeline settings require a hardware --phase pipeline_execution (or all)")
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     out = (a.output or ROOT / "benchmarks" / "results" / f"{stamp}-{a.backend}").resolve()
     out.mkdir(parents=True, exist_ok=False)
     env = os.environ.copy()
     env.update(VA_BENCH_BACKEND=a.backend, VA_BENCH_DEVICE=a.device, VA_BENCH_METADATA=str(out / "cases.jsonl"))
+    env.update(VA_BENCH_IN_FLIGHT=str(a.in_flight), VA_BENCH_REQUESTS=str(a.requests or max(256, a.in_flight)), VA_BENCH_INPUT_MODE=a.input_mode)
     cmd = ["cargo", "bench", "--locked", "--manifest-path", "benchmarks/Cargo.toml", "--bench", "portable" if a.backend == "portable" else "hardware"]
     if a.backend != "portable":
         cmd += ["--features", a.backend]
@@ -64,7 +72,7 @@ def main() -> int:
         "backend": a.backend, "requested_device": a.device,
         "runtime_version_operator_supplied": a.runtime_version,
         "lockfile_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
-        "environment": {k: env[k] for k in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET", "VA_BENCH_WARMUPS", "VA_BENCH_WAIT_US", "VA_BENCH_TIMEOUT_SECS", "VIRTIO_ACCEL_OPENVINO_LIBRARY", "VIRTIO_ACCEL_HRX_LIBRARY", "VIRTIO_ACCEL_HRX_DIR", "VIRTIO_ACCEL_HRX_LIB_DIR", "HRX_DIR", "VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN", "VK_DRIVER_FILES", "VK_ICD_FILENAMES", "VIRTIO_ACCEL_QNN_SDK_ROOT", "VIRTIO_ACCEL_QNN_LIB_DIR", "QNN_SDK_ROOT"] if k in env},
+        "environment": {k: env[k] for k in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET", "VA_BENCH_IN_FLIGHT", "VA_BENCH_REQUESTS", "VA_BENCH_INPUT_MODE", "VA_BENCH_WARMUPS", "VA_BENCH_WAIT_US", "VA_BENCH_TIMEOUT_SECS", "VIRTIO_ACCEL_OPENVINO_LIBRARY", "VIRTIO_ACCEL_HRX_LIBRARY", "VIRTIO_ACCEL_HRX_DIR", "VIRTIO_ACCEL_HRX_LIB_DIR", "HRX_DIR", "VIRTIO_ACCEL_AMDXDNA_TOOLCHAIN", "VK_DRIVER_FILES", "VK_ICD_FILENAMES", "VIRTIO_ACCEL_QNN_SDK_ROOT", "VIRTIO_ACCEL_QNN_LIB_DIR", "QNN_SDK_ROOT"] if k in env},
         "timing": "Divan host wall-clock statistics; report.txt is authoritative; no custom estimator",
     }
     (out / "run.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
