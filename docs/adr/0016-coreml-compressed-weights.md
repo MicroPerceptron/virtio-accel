@@ -43,7 +43,10 @@ consumers retain their producers. All transformations occur during load, outside
 
 Unit tests cover constant-only matching, shared outputs, packed signed nibbles, palette
 compaction, malformed authoring inputs and rejection of negative/high/runtime indices.
-Native basis-vector tests isolate decoded weights from reduction order and check arbitrary
+FP16-output MATMUL retains TOSA's FP16 accumulation accuracy contract; it does not
+promise bit-identical FP32/FP64 reductions. Dense fractional activation tests use a local
+absolute-error bound stricter than TOSA's 2*K bound. Native basis-vector tests isolate
+decoded weights from reduction order and check arbitrary
 fractional scales, signed values, FP16 subnormals and all palette entries on GPU, ANE and
 All policies. Existing FP8, NVFP4, exact integer and asynchronous ownership tests remain gates.
 Matched Divan cases compare identical weights/activations against FP16 at M=1/16/128,

@@ -1579,6 +1579,47 @@ fn compressed_integer_weights_preserve_fp16_rounding() {
             }
             let out =
                 run_tosa_bytes_on(&backend, &graph, quantized::TARGET, &[&x], m * n * 2).unwrap();
+            // TOSA 1.0 FP16-output MATMUL permits FP16 accumulation: it does not
+            // promise correctly rounded FP64 dots. Exercise dense fractional
+            // activations with a local error bound, while keeping the independent
+            // basis-vector weight decoding check below bit-exact.
+            let codes = [0x3555u16, 0xb99a, 0x2e66, 0x3c01, 0x33ab, 0xb601, 0x3999];
+            let activation = (0..m * k)
+                .map(|i| f16::from_bits(codes[(i * 13 + i / k) % codes.len()]))
+                .collect::<Vec<_>>();
+            let bytes = activation
+                .iter()
+                .flat_map(|v| v.to_bits().to_le_bytes())
+                .collect::<Vec<_>>();
+            let result =
+                run_tosa_bytes_on(&backend, &graph, quantized::TARGET, &[&bytes], m * n * 2)
+                    .unwrap();
+            for (i, b) in result.chunks_exact(2).enumerate() {
+                let terms = (0..k)
+                    .map(|j| {
+                        let offset = (i % n) * k + j;
+                        let w = f16::from_f32(
+                            f32::from(weights[offset])
+                                * f16::from_bits(scales[offset / group]).to_f32(),
+                        );
+                        f64::from(activation[(i / n) * k + j].to_f32()) * f64::from(w.to_f32())
+                    })
+                    .collect::<Vec<_>>();
+                let reference = terms.iter().sum::<f64>();
+                // Two normalized rounding units is stricter than the TOSA dot
+                // absolute bound (2*K). Use sum(abs(products)), not abs(sum), so
+                // cancellation does not turn a valid FP16 reduction into a failure.
+                // https://www.mlplatform.org/tosa/tosa_spec_1_0_0.html#_dot_product_accuracy_requirements
+                let bound =
+                    (terms.iter().map(|x| x.abs()).sum::<f64>() / 2048.0).max(1.0 / 16384.0);
+                let actual =
+                    f64::from(f16::from_bits(u16::from_le_bytes(b.try_into().unwrap())).to_f32());
+                assert!(
+                    (actual - reference).abs() <= 2.0 * bound,
+                    "fractional W{bits} {units:?} [{i}]: {actual} vs {reference}, bound {}",
+                    2.0 * bound
+                );
+            }
             for (i, b) in out.chunks_exact(2).enumerate() {
                 let got = u16::from_le_bytes(b.try_into().unwrap());
                 // Dot products can canonicalize negative zero; every nonzero weight is exact.
