@@ -102,7 +102,8 @@ if the two drift apart.
 `.github/workflows/website.yml` validates PRs and gates production refreshes before building and deploying.
 
 `check-site` runs on **every pull request** that touches `docs/**`,
-`website/**`, `python/**`, `README.md`, `crates/**`, or the Rust/Python manifests. It builds exactly what
+`website/**`, `python/**`, `README.md`, Rust sources, assets, release workflows,
+or the Rust/Python manifests. It builds exactly what
 a push to `main` would publish and then runs `check.py`, so a doc edit that
 breaks a cross-link, deletes a page something still points at, or fails rustdoc
 fails the PR rather than reaching the live site. It uploads nothing, deploys
