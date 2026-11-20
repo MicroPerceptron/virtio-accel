@@ -77,6 +77,12 @@ address is read as `*const *const c_char`; the non-null, NUL-terminated immutabl
 is copied into an owned `CString` in the table before use. The C-variadic compilation
 function keeps exactly the same signature and argument-count convention.
 
+Compilation passes one to three key/value pairs as a contiguous variadic prefix:
+ACCURACY, CPU/GPU `DYNAMIC_QUANTIZATION_GROUP_SIZE=0`, and optional FP32 precision.
+The argument count is twice the number of pairs, and every key/value is a static C
+string. NPU does not receive the unsupported dynamic-quantization property. Native i4
+is internal constant storage only: no i4 type can reach host buffer binding/alignment.
+
 On Windows an explicit runtime path is made absolute and loaded with
 `LOAD_WITH_ALTERED_SEARCH_PATH`, keeping dependent DLL lookup relative to that
 library without mutating the process-wide DLL search configuration.

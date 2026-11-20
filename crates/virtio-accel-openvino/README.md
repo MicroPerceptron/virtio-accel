@@ -68,6 +68,28 @@ resident intermediates; decoding occurs inside the device graph. See
 [ADR 0014](../../docs/adr/0014-packed-quantized-inference.md). INT4 tensor semantics, RESCALE,
 and other unsupported integer operations remain rejected.
 
+### Constant INT4 and INT8 weight-only projections
+
+`quantized::{int4_matmul_fp16,int8_matmul_fp16}` author symmetric grouped W4A16/W8A16
+projections with immutable weights/scales and FP16 activation/output bindings. The graph
+spells out integer-to-float conversion and multiplication. At load time, an INT8 constant
+whose values all fit [-8,7] and whose only consumers are FP16/FP32 casts can use a packed
+native i4 constant. Integer boundaries and non-float consumers prevent this rewrite.
+TOSA's INT4 dtype and exact INT8-to-INT32 MATMUL semantics are unchanged.
+
+The backend folds a batch-one RHS transpose into native MatMul and exposes the grouped
+weight reshape as `[N,K]`, enabling OpenVINO's compressed FullyConnected matcher. CPU/GPU
+compilation disables implicit dynamic activation quantization; ACCURACY alone permits it.
+There is no opt-in to lossy W4A8 under a W4A16 label. NPU lacks that runtime property.
+
+On Lunar Lake / OpenVINO 2026.4.1, production-lowered IR reports GPU `weights_precision=i4`
+and `runtimePrecision=f16`, with no DynamicQuantize node. CPU and NPU pass numerical
+execution, but this does not establish compressed residency or a speedup on those devices;
+the inspected CPU graph still expands the weights during execution. Portable artifacts
+retain one byte per weight; the native IR uses half a byte, plus scales/alignment. Changing
+weights requires program reload. See the [benchmark diagnostic](../../benchmarks/README.md)
+and [ADR 0015](../../docs/adr/0015-compressed-integer-weights.md).
+
 ### Ordered comparison legalization
 
 `GREATER_EQUAL` lowers to `Greater OR Equal` with an explicit `IsNaN` guard. On OpenVINO 2026.4.1, Lunar Lake NPU's

@@ -16,6 +16,8 @@
 // encoder, but only the native runtime modules call it from `load_program`.
 #![cfg_attr(not(va_openvino), allow(dead_code))]
 
+#[cfg(test)]
+mod compressed_tests;
 mod packed_fp8;
 
 use std::fmt;
@@ -326,6 +328,8 @@ pub(crate) enum OvElement {
     F16,
     F8E4M3,
     F8E5M2,
+    /// Internal constant storage only; never a model boundary or a TOSA dtype.
+    I4,
     I8,
     I32,
     I64,
@@ -340,6 +344,7 @@ impl OvElement {
             Self::F16 => "f16",
             Self::F8E4M3 => "f8e4m3",
             Self::F8E5M2 => "f8e5m2",
+            Self::I4 => "i4",
             Self::I8 => "i8",
             Self::I32 => "i32",
             Self::I64 => "i64",
@@ -355,6 +360,7 @@ impl OvElement {
             // Not "FP8E4M3": OpenVINO writes the FP8 port precisions without the FP prefix.
             Self::F8E4M3 => "F8E4M3",
             Self::F8E5M2 => "F8E5M2",
+            Self::I4 => "I4",
             Self::I8 => "I8",
             Self::I32 => "I32",
             Self::I64 => "I64",
@@ -365,6 +371,7 @@ impl OvElement {
     /// Storage bytes per scalar.
     pub(crate) const fn scalar_bytes(self) -> u32 {
         match self {
+            Self::I4 => panic!("packed constants have no whole-byte scalar size"),
             Self::F32 | Self::I32 => 4,
             Self::F16 => 2,
             Self::F8E4M3 | Self::F8E5M2 | Self::I8 => 1,
@@ -387,7 +394,7 @@ impl OvElement {
     }
 }
 
-/// A model-boundary element type; I64 stays internal to the graph.
+/// A model-boundary element type; I4 and I64 stay internal to the graph.
 fn boundary_element(dtype: DType) -> Result<OvElement, LoweringError> {
     match dtype {
         DType::FP16 => Ok(OvElement::F16),
@@ -685,14 +692,20 @@ impl IrBuilder {
 }
 
 fn element_byte_len(element: OvElement, dims: &[i64]) -> Result<u64, LoweringError> {
-    let mut total = u64::from(element.scalar_bytes());
+    let mut total = 1u64;
     for dim in dims {
         let dim = u64::try_from(*dim).map_err(|_| LoweringError::UnsupportedGraph)?;
         total = total
             .checked_mul(dim)
             .ok_or(LoweringError::UnsupportedGraph)?;
     }
-    Ok(total)
+    if element == OvElement::I4 {
+        Ok(total.div_ceil(2))
+    } else {
+        total
+            .checked_mul(u64::from(element.scalar_bytes()))
+            .ok_or(LoweringError::UnsupportedGraph)
+    }
 }
 
 pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, LoweringError> {
@@ -1014,6 +1027,15 @@ fn encode_operator(
     }
 
     let stem = format!("tosa_{}_{}", operator_id.get(), op.name().unwrap_or("op"));
+    if op == Op::MATMUL
+        && matches!(
+            tensor(analysis, inputs[0])?.dtype(),
+            DType::FP16 | DType::FP32
+        )
+        && encode_transposed_matmul(builder, analysis, inputs, outputs, &stem)?
+    {
+        return Ok(());
+    }
     if op == Op::MAX_POOL2D {
         return encode_max_pool2d(builder, analysis, operator_id, inputs, outputs, &stem);
     }
@@ -1682,7 +1704,17 @@ fn encode_tosa_constant(
         .ok_or(LoweringError::InvalidConstant)?;
     let dims = static_dims(tensor)?;
     let name = format!("tosa_{}_const", operator_id.get());
-    let port = if element == OvElement::Bool {
+    let port = if element == OvElement::I8 && can_pack_i4(analysis, output, data) {
+        // Exact storage rewrite, not quantization: every signed INT8 value fits
+        // native i4, and all consumers immediately convert it to floating point.
+        // Keep Convert -> Multiply -> Reshape visible to the plugin's compressed
+        // weight matcher instead of pre-expanding weights to FP16 constants.
+        let packed = data
+            .chunks(2)
+            .map(|pair| (pair[0] & 15) | (pair.get(1).copied().unwrap_or(0) & 15) << 4)
+            .collect::<Vec<_>>();
+        builder.emit_const(&name, OvElement::I4, &dims, &packed)?
+    } else if element == OvElement::Bool {
         // Normalize TOSA bool serialization to strict 0/1 storage bytes.
         let mut normalized = Vec::new();
         normalized
@@ -1695,6 +1727,89 @@ fn encode_tosa_constant(
     };
     builder.set_source(output, port);
     Ok(())
+}
+
+fn can_pack_i4(analysis: &TosaAnalysis<'_>, value: ValueId, data: &[u8]) -> bool {
+    if data.iter().any(|v| !(-8..=7).contains(&(*v as i8)))
+        || analysis
+            .blocks()
+            .iter()
+            .any(|b| analysis.block_outputs(b.id()).contains(&value))
+    {
+        return false;
+    }
+    let mut consumed = false;
+    for operator in analysis.operators() {
+        if !analysis.operator_inputs(operator.id()).contains(&value) {
+            continue;
+        }
+        consumed = true;
+        if operator.op() != Op::CAST
+            || !matches!(
+                tensor(analysis, analysis.operator_outputs(operator.id())[0]).map(|t| t.dtype()),
+                Ok(DType::FP16 | DType::FP32)
+            )
+        {
+            return false;
+        }
+    }
+    consumed
+}
+
+/// Fold a shared RHS's explicit TOSA transpose into native MatMul. In particular,
+/// expose [N,groups,group] -> [N,K] compressed weights to OpenVINO's FC matcher;
+/// retaining the redundant batch-one axis prevents compressed kernel selection.
+/// Only this consumer changes: any other users keep the original graph values.
+fn encode_transposed_matmul(
+    builder: &mut IrBuilder,
+    analysis: &TosaAnalysis<'_>,
+    inputs: &[ValueId],
+    outputs: &[ValueId],
+    stem: &str,
+) -> Result<bool, LoweringError> {
+    let Some(transpose) = analysis.value(inputs[1]).producer() else {
+        return Ok(false);
+    };
+    let OpAttributes::Transpose { perms } = analysis.operator(transpose).source().attributes()
+    else {
+        return Ok(false);
+    };
+    if perms.iter().collect::<Vec<_>>() != [0, 2, 1] {
+        return Ok(false);
+    }
+    let matrix = analysis.operator_inputs(transpose)[0];
+    let matrix_dims = static_dims(tensor(analysis, matrix)?)?;
+    if matrix_dims.len() != 3 || matrix_dims[0] != 1 {
+        return Ok(false);
+    }
+    let source = match analysis.value(matrix).producer() {
+        Some(op) if analysis.operator(op).op() == Op::RESHAPE => analysis.operator_inputs(op)[0],
+        _ => matrix,
+    };
+    let (source, dims) = value_port_dims(builder, analysis, source)?;
+    let shape = &matrix_dims[1..];
+    let shape_port = builder.emit_i64_const(&format!("{stem}_rhs_shape"), shape, false)?;
+    let element = builder.element(tensor(analysis, matrix)?.dtype())?;
+    let rhs = builder.emit_layer(
+        "Reshape",
+        "opset1",
+        &format!("{stem}_rhs"),
+        "special_zero=\"false\"",
+        &[(source, &dims), (shape_port, &[2])],
+        &[(element, shape)],
+    )[0];
+    let (lhs, lhs_dims) = value_port_dims(builder, analysis, inputs[0])?;
+    let out_dims = static_dims(tensor(analysis, outputs[0])?)?;
+    let result = builder.emit_layer(
+        "MatMul",
+        "opset1",
+        stem,
+        "transpose_a=\"false\" transpose_b=\"true\"",
+        &[(lhs, &lhs_dims), (rhs, shape)],
+        &[(element, &out_dims)],
+    )[0];
+    builder.set_source(outputs[0], result);
+    Ok(true)
 }
 
 fn constant_is_parameter_only(analysis: &TosaAnalysis<'_>, value: ValueId) -> bool {
@@ -1741,7 +1856,8 @@ fn validate_quantized_types(
     let float = |d| matches!(d, DType::FP16 | DType::FP32);
     let valid = match op {
         Op::CAST => {
-            (input == DType::INT8 && output == DType::INT32) || (float(input) && float(output))
+            (input == DType::INT8 && (output == DType::INT32 || float(output)))
+                || (float(input) && float(output))
         }
         Op::ADD => input == DType::INT32 || float(input),
         Op::MUL | Op::MATMUL => float(input),

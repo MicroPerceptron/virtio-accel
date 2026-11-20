@@ -106,7 +106,29 @@ operator cannot be smuggled in as a raw number. Multi-block
 control flow, dynamic shapes, variables, external tensor data, and custom
 operators remain outside this authoring boundary.
 
-## Packed NVFP4 projection
+## Quantized projections
+
+For immutable signed integer weights, use `quantized::int4_matmul_fp16` or
+`quantized::int8_matmul_fp16`. Both take `(m, n, k, group_size, weights, scale_bits)`:
+weights are row-major `[N,K]`, scales are positive finite binary16 bits `[N,K/group_size]`,
+and K must be divisible by the positive group size. INT4 takes packed low-nibble-first
+two's-complement bytes (including -8); INT8 takes signed bytes. These are symmetric
+weight-only formats: FP16 conversion and group scaling precede FP16 MATMUL. Only
+activations `[1,M,K]` and output `[1,M,N]` occupy binding slots 0 and 1.
+
+The portable TOSA artifact stores integer values as INT8 constants, because TOSA 1.0
+does not permit INT4-to-float CAST. The OpenVINO adapter can losslessly repack eligible
+constants to native i4. Thus the portable artifact costs one byte per weight; native
+packed storage is a separate backend optimization. Changing weights/scales requires
+rebuilding/reloading the program. Neither helper quantizes floats or interprets NVFP4.
+
+```rust
+use virtio_accel_tosa_build::quantized::int4_matmul_fp16;
+let graph = int4_matmul_fp16(1, 1, 4, 4, &[0x21, 0xfe], &[0x3000])?;
+# Ok::<(), virtio_accel_tosa_build::quantized::QuantizedBuildError>(())
+```
+
+### Runtime NVFP4 weights
 
 ```rust
 use virtio_accel_tosa_build::quantized::{nvfp4_matmul, nvfp4_matmul_fp16, TARGET};

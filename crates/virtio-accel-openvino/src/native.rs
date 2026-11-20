@@ -626,20 +626,33 @@ fn compile_with_precision(
     fp32: bool,
 ) -> Result<CompiledModelHandle, BackendError> {
     let mut compiled = ptr::null_mut();
+    let disable_dynamic_quantization =
+        device.to_bytes().starts_with(b"CPU") || device.to_bytes().starts_with(b"GPU");
     // SAFETY: core, model, and device are live; `property_args_size` counts the variadic
     // arguments (one key/value pair contributes two) per the documented convention pinned by a
     // unit test. All keys/values are static C strings (or the retained runtime key).
-    // The optional precision pair is read only when the count is four; extra variadic
-    // arguments are valid when the count is two. Every pointer outlives this call.
+    // CPU/GPU otherwise insert lossy activation quantization for compressed weights,
+    // even with ACCURACY. NPU does not expose this property. Optional pairs form a
+    // contiguous prefix, with the count matching exactly; all pointers outlive the call.
     let status = unsafe {
         (ffi::api().ov_core_compile_model)(
             core.as_const_ptr(),
             model.model.as_ptr(),
             device.as_ptr(),
-            if fp32 { 4 } else { 2 },
+            2 + 2 * usize::from(disable_dynamic_quantization) + 2 * usize::from(fp32),
             &mut compiled,
             ffi::execution_mode_property(),
             c"ACCURACY".as_ptr(),
+            if disable_dynamic_quantization {
+                c"DYNAMIC_QUANTIZATION_GROUP_SIZE".as_ptr()
+            } else {
+                c"INFERENCE_PRECISION_HINT".as_ptr()
+            },
+            if disable_dynamic_quantization {
+                c"0".as_ptr()
+            } else {
+                c"f32".as_ptr()
+            },
             c"INFERENCE_PRECISION_HINT".as_ptr(),
             c"f32".as_ptr(),
         )
@@ -660,6 +673,7 @@ const fn element_code(element: OvElement) -> ffi::ov_element_type_e {
         OvElement::F8E4M3 => ffi::ELEMENT_F8E4M3,
         OvElement::F8E5M2 => ffi::ELEMENT_F8E5M2,
         OvElement::I8 => ffi::ELEMENT_I8,
+        OvElement::I4 => panic!("i4 is internal constant storage, never a boundary tensor"),
         OvElement::I32 => ffi::ELEMENT_I32,
         OvElement::I64 => ffi::ELEMENT_I64,
         OvElement::Bool => ffi::ELEMENT_BOOLEAN,

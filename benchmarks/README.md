@@ -146,6 +146,42 @@ a vendor call that blocks internally. A timeout invalidates the run.
 
 ## Reproducibility and CI
 
+### Constant integer-weight comparison
+
+`Int4F16ProjectionDecode`, `Int8F16ProjectionDecode` and `F16ProjectionDecode` compare
+identical dequantized weights and activations at M=1, N=1024, K=2048. The corresponding
+`Prefill` cases use M=16. Weights/scales are immutable program constants, with groups of
+128 for W4/W8; only activations are uploaded. W8 uses q*16 and scale/16 so its values
+match W4 while genuinely requiring eight-bit storage. Sparse binary-fraction activations
+make the exact golden output independent of accumulation order; these are dense kernels
+over the full weight matrix, not a model-quality or end-to-end token benchmark.
+
+```sh
+python3 benchmarks/run.py --backend openvino --device GPU --case Int4F16ProjectionDecode
+python3 benchmarks/run.py --backend openvino --device GPU --case Int8F16ProjectionDecode
+python3 benchmarks/run.py --backend openvino --device GPU --case F16ProjectionDecode
+```
+
+The result metadata includes artifact size and reference-output fingerprint. W4's portable
+artifact still uses INT8 constants; native OpenVINO repacking happens at program load.
+Never infer a compressed kernel or physical memory footprint from the case name alone.
+To inspect the actual production lowering (with OpenVINO and NumPy installed):
+
+```sh
+VIRTIO_ACCEL_OPENVINO_TEST_IR_DIR=/tmp/int4-ir cargo test -p virtio-accel-openvino \
+  --lib export_compressed_projection_for_native_inspection
+python3 benchmarks/inspect_openvino.py /tmp/int4-ir --device GPU
+```
+
+The diagnostic retains native IR, compiled execution XML and JSON, checks 12 random
+FP16 inputs against independent binary64 products, and on GPU requires i4 weights,
+f16 arithmetic and no DynamicQuantize. CPU/NPU modes validate numerics and retain
+compiler evidence without asserting an unproven compressed-kernel selection. CPU on
+the tested Lunar Lake runtime still expands weights during execution. This diagnostic
+measures no timing; use Divan for timing and keep its result bundle.
+
+### Result bundles
+
 Keep all three result files together:
 
 - `report.txt`: native Divan statistics and build/runtime diagnostics. Divan owns the estimator;

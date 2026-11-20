@@ -262,6 +262,8 @@ pub fn measure<A: Accelerator + TosaCapabilityProvider>(
         "shape":workload.shape,"output_dtype":format!("{:?}",workload.output_dtype),
         "input_buffer_info":format!("{input_info:?}"),"output_buffer_info":format!("{output_info:?}"),
         "input_bytes":workload.input_bytes(),"output_bytes":workload.expected.len(),
+        "artifact_bytes":workload.artifact.len(),
+        "reference_fingerprint":blake3::hash(&workload.expected).to_hex().to_string(),
         "logical_flops":workload.logical_flops,"fingerprint":fingerprint.finalize().to_hex().to_string(),
         "warmups":warmups,"poll_wait_us":wait_us,"timeout_seconds":timeout.as_secs(),
         "initial_load_ns":initial_load.as_nanos().to_string(),"boundary":phase.boundary(),

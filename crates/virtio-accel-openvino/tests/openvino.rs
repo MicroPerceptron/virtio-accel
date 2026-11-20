@@ -875,6 +875,56 @@ fn nvfp4_fp16_projection_obeys_explicit_rounding() {
     }
 }
 
+#[test]
+fn constant_int4_and_int8_weights_execute_with_fp16_activations() {
+    use virtio_accel_tosa_build::quantized;
+    let q = (0..16 * 32)
+        .map(|i| ((i % 16) as i8) << 4 >> 4)
+        .collect::<Vec<_>>();
+    let packed = q
+        .chunks_exact(2)
+        .map(|p| (p[0] as u8 & 15) | (p[1] as u8 & 15) << 4)
+        .collect::<Vec<_>>();
+    let scales = (0..32)
+        .map(|i| [0x3000, 0x3400, 0x3800][i % 3])
+        .collect::<Vec<_>>();
+    let w8 = q.iter().map(|v| *v * 16).collect::<Vec<_>>();
+    let s8 = scales.iter().map(|v| v - 0x1000).collect::<Vec<_>>();
+    let graphs = [
+        quantized::int4_matmul_fp16(2, 16, 32, 16, &packed, &scales).unwrap(),
+        quantized::int8_matmul_fp16(2, 16, 32, 16, &w8, &s8).unwrap(),
+    ];
+    let xb = [
+        0xb800u16, 0xb600, 0xb400, 0xb000, 0, 0x3000, 0x3400, 0x3600, 0x3800,
+    ];
+    let x = (0..64)
+        .flat_map(|i| xb[i % 9].to_le_bytes())
+        .collect::<Vec<_>>();
+    // Independent binary64 dot products rounded using Python struct.pack('<e').
+    // All signed nibbles, varying per-row groups, two activation rows. W8's
+    // q*16 and scale/16 represent exactly the same dequantized weights.
+    let expected = [
+        0xb700u16, 0x4140, 0xbb00, 0xb700, 0x4140, 0xbb00, 0xb700, 0x4140, 0xbb00, 0xb700, 0x4140,
+        0xbb00, 0xb700, 0x4140, 0xbb00, 0xb700, 0xbcc0, 0xc3c0, 0xc0c0, 0xbcc0, 0xc3c0, 0xc0c0,
+        0xbcc0, 0xc3c0, 0xc0c0, 0xbcc0, 0xc3c0, 0xc0c0, 0xbcc0, 0xc3c0, 0xc0c0, 0xbcc0,
+    ]
+    .iter()
+    .flat_map(|v| v.to_le_bytes())
+    .collect::<Vec<_>>();
+    for device in devices() {
+        for (index, graph) in graphs.iter().enumerate() {
+            eprintln!(
+                "constant W{}A16 on {device}",
+                if index == 0 { 4 } else { 8 }
+            );
+            let out =
+                run_tosa_bytes_for_target(&device, graph, quantized::TARGET, &[&x], expected.len())
+                    .expect("constant integer weight projection must execute");
+            assert_eq!(out, expected, "{device} integer weight projection {index}");
+        }
+    }
+}
+
 fn fp8_cast_graph(
     input: virtio_accel_tosa::DType,
     output: virtio_accel_tosa::DType,
