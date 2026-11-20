@@ -18,15 +18,15 @@
 `virtio-accel` defines a protocol and contains executable `no_std` guest, device, transport, queue, and TOSA layers for exposing an accelerator to a guest: contexts, buffers, programs, execution queues, submissions, and events.
 
 <p align="center">
-  <a href="assets/demo/kerr.mp4">▶ Watch the Kerr black-hole demo</a>
+  <a href="assets/inference/showcase.mp4"><img src="assets/inference/showcase.gif" alt="Actual Intel NPU image generation: a trained FP16 digit decoder, with CPU, GPU and NPU round-trip measurements" width="100%"></a>
+  <br>
+  <sub>Learned image generation through the Python SDK. Actual NPU output; animation playback is illustrative.</sub>
 </p>
 
-<p align="center">
-  <img src="assets/demo/origin.png" alt="Exterior view of the wormhole demo" width="49%">
-  <img src="assets/demo/throat.png" alt="Throat view of the wormhole demo" width="49%">
-  <br>
-  <sub>Demo: NPU-assisted live geodesic ray tracing of a GR wormhole metric</sub>
-</p>
+[Run the inference showcase](python/examples/image_generation/README.md) ·
+[Watch the video](assets/inference/showcase.mp4) ·
+[Measurement details](assets/inference/README.md) ·
+[Earlier Kerr demo](assets/demo/kerr.mp4)
 
 An [experimental Linux vhost-user host and QEMU Virtio MMIO binding](docs/vhost-user.md) is available, using development device ID 65535 with a patched QEMU frontend. No official Virtio device ID has been assigned. The [vAccel adapter](crates/virtio-accel-vaccel/README.md) remains available for vAccel environments. `virtio-accel` is currently pre-standardization; protocol 1.0 is frozen as a versioned review input for independent implementation — it is stable enough to build against and to disagree with in writing, not an approved Virtio specification.
 

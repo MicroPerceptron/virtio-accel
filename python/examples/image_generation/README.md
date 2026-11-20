@@ -13,7 +13,7 @@ From the repository root, with the Python SDK built from this branch installed:
 
 ```sh
 python python/examples/image_generation/run.py \
-  --checkpoint python/examples/image_generation/decoder.npz \
+  --checkpoint assets/inference/decoder.npz \
   --provider openvino --device npu --output /tmp/digits-npu \
   --batch 1 16 64 256 --samples 101 --frames 48
 ```
@@ -57,7 +57,7 @@ inferences along a deterministic latent loop; its playback speed is illustrative
 
 ## Model and reproduction
 
-`decoder.npz` is a newly trained checkpoint, not random weights. It contains
+[`decoder.npz`](../../../assets/inference/decoder.npz) is a newly trained checkpoint, not random weights. It contains
 686,864 FP16 parameters in a 42 → 512 → 512 → 784 decoder: 32 latent dimensions
 and 10 one-hot class inputs. Its SHA-256 is
 `3dca1f985621c1aa79f57333cd700bf706c09a7fd714a8db171ed18dc7aaa3ce`.
@@ -91,3 +91,22 @@ Code follows the repository's MIT OR Apache-2.0 license. The bundled trained
 checkpoint and generated digit media are distributed under
 [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/), with this
 attribution retained; the training dataset itself is not included.
+
+## Recreate the media
+
+Install Pillow (`python -m pip install 'Pillow>=12,<13'`) and `ffmpeg`. Put matched
+reports at `cpu.json`, `gpu.json`, `npu.json` and the NPU's `frames.npz` in one
+directory. Rendering verifies provider, checkpoint, source, CPU identity, inputs
+and measurement settings before showing the comparison. With the bundled capture:
+
+```sh
+python python/examples/image_generation/render.py \
+  --results assets/inference/results --output /tmp/digit-media \
+  --font /path/to/regular.ttf --bold-font /path/to/bold.ttf
+```
+
+Use fonts installed on your machine (for example DejaVu Sans on Linux or Arial
+on macOS/Windows). This writes a PNG poster, animated GIF, H.264 MP4 and a
+provenance manifest. The bundled media used Pillow 12.3.0 and Arial. It displays
+the batch-256 comparison, while the animated grid contains 100 separate latent
+samples. See [all measured batches and raw results](../../../assets/inference/README.md).

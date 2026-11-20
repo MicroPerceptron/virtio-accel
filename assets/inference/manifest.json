@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "capture_sha256": "22e59bf2d02a6d500537d0dfe15392c9bb31f87c4104319ade6596dd38a1ccb9",
+  "report_sha256": {
+    "cpu": "2f653bba9a64b374be6a6a421857db7775ad7e788df4dc39d2ea150f652b782b",
+    "gpu": "7b700584a03bb6a2359503e94e5091aeee47870ee831f68db6629db92f542dce",
+    "npu": "8e1f6533f9638d1fdf35f015885b52bf13c6e637b2f1d105b78ef158aef71a91"
+  },
+  "frames": 48,
+  "fps": 12,
+  "benchmark_batch": 256,
+  "font_sha256": [
+    "525979822591a3447cfc49d943d6f7683508e25543407871c0ed8fed05fd2bd9",
+    "d72db21f9242aedd6b917d8549ad5921766b24d5f8d0becfda2ff4c620b3c2e0"
+  ],
+  "playback": "illustrative, not real-time; measurements recorded separately"
+}

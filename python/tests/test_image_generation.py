@@ -29,7 +29,7 @@ class ImageGenerationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.weights, cls.metadata, cls.sha = model.load_checkpoint(
-            EXAMPLE / "decoder.npz"
+            EXAMPLE.parents[2] / "assets" / "inference" / "decoder.npz"
         )
 
     def test_learned_model_exports_and_matches_independent_oracle(self):

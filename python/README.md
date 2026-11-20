@@ -313,6 +313,10 @@ The wire protocol and existing portable Rust public APIs are unchanged.
 
 ## Examples and device placement
 
+The [image-generation showcase](https://github.com/MicroPerceptron/virtio-accel/blob/main/python/examples/image_generation/README.md)
+runs a trained FP16 decoder through Core ML or OpenVINO, with matched native
+CPU/GPU/NPU measurements and reproducible media.
+
 See [examples](https://github.com/MicroPerceptron/virtio-accel/blob/main/python/examples/README.md) for an MLP classifier, nearest-centroid classification,
 and FIR filtering, with independent numerical checks and optional TOSA export.
 See [device placement](https://github.com/MicroPerceptron/virtio-accel/blob/main/python/device-placement.md) for selector semantics and provider constraints.
