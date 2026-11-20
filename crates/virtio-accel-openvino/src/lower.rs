@@ -747,15 +747,28 @@ pub(crate) fn lower_tosa_with_weights(
     let mut builder = IrBuilder::new(analysis.values().len())?;
     builder.expand_weight_constants = expand_weight_constants;
     // Native Convert rounds through FP16 on some plugins, and GPU Slice rejects FP8.
-    // Graphs needing activation conversion or cache windows use an exact byte carrier.
+    // Native GPU FP8 movement also canonicalizes some E5M2 NaN payloads. Pure
+    // storage graphs use byte carriers so cache movement preserves every bit.
+    let storage_only = analysis.execution_order(block).iter().all(|id| {
+        matches!(
+            analysis.operator(*id).op(),
+            Op::CONST
+                | Op::CONST_SHAPE
+                | Op::IDENTITY
+                | Op::RESHAPE
+                | Op::TRANSPOSE
+                | Op::CONCAT
+                | Op::SLICE
+        )
+    });
     builder.packed_fp8 = target == OPENVINO_TOSA_FP8_TARGET
-        && analysis
+        && (storage_only || analysis
             .execution_order(block)
             .iter()
             .any(|id| analysis.operator(*id).op() == Op::SLICE
                 || (analysis.operator(*id).op() == Op::CAST
                     && analysis.operator_inputs(*id).iter().chain(analysis.operator_outputs(*id))
-                        .any(|v| matches!(analysis.value(*v).kind(), AnalyzedValueKind::Tensor(t) if t.dtype() == DType::FP32))));
+                        .any(|v| matches!(analysis.value(*v).kind(), AnalyzedValueKind::Tensor(t) if t.dtype() == DType::FP32)))));
     let packed_fp8 = builder.packed_fp8;
     if packed_fp8
         && analysis.execution_order(block).iter().any(|id| {
@@ -2265,6 +2278,8 @@ mod tests {
                 "{dtype:?}: FP8 movement was widened\n{xml}"
             );
             assert_eq!(xml.matches("type=\"Transpose\"").count(), 1, "{dtype:?}");
+            assert_eq!(lowered.features[0].element, OvElement::I8);
+            assert_eq!(lowered.features[1].element, OvElement::I8);
         }
     }
 
@@ -2384,6 +2399,17 @@ mod tests {
             lower_tosa(IDENTITY_INT8.artifact, OPENVINO_TOSA_TARGET).unwrap_err(),
             LoweringError::UnsupportedType(DType::INT8)
         );
+    }
+
+    #[test]
+    fn single_batch_byte_lookups_avoid_batched_gather() {
+        let bytes =
+            virtio_accel_tosa_build::quantized::nvfp4_matmul_fp16(1, 1, 16, 0x3c00).unwrap();
+        let lowered = lower_tosa(&bytes, OPENVINO_TOSA_QUANTIZED_TARGET).unwrap();
+        let xml = xml_str(&lowered);
+        assert_eq!(xml.matches("batch_dims=\"0\"").count(), 3);
+        assert!(!xml.contains("batch_dims=\"1\""));
+        assert_eq!(xml.matches("_flat_indices").count(), 3);
     }
 
     #[test]
