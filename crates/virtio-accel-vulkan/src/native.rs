@@ -1374,6 +1374,27 @@ impl std::fmt::Debug for VulkanBuffer {
 }
 
 impl VulkanBuffer {
+    /// Inspect a quiescent coherent mapping without an explicit readback copy.
+    /// A scoped read guard rejects reentrant writable submissions until the
+    /// callback returns; the borrowed view cannot escape this call.
+    pub fn with_bytes<R>(&self, inspect: impl FnOnce(&[u8]) -> R) -> Result<R, BackendError> {
+        if !self.desc.usage.contains(BufferUsage::TRANSFER_SOURCE) {
+            return Err(BackendError::PermissionDenied);
+        }
+        if self.in_flight() != 0 {
+            return Err(BackendError::Busy);
+        }
+        self.context.shared.check_live()?;
+        let memory = self.mapped.ok_or(BackendError::Unsupported)?;
+        let len = usize::try_from(self.desc.bytes()).map_err(|_| BackendError::ResourceLimit)?;
+        let _guard = Guard::acquire(&self.state, false)?;
+        // SAFETY: the live buffer owns a coherent mapping covering its logical
+        // length. Terminal fence observation established host visibility. The
+        // read guard excludes new device writes during the borrowed callback,
+        // including reentrant submit; &self excludes mutable host transfers.
+        let bytes = unsafe { std::slice::from_raw_parts(memory.as_ptr().cast_const(), len) };
+        Ok(inspect(bytes))
+    }
     fn in_flight(&self) -> u64 {
         self.state.in_flight.get()
     }
@@ -2058,6 +2079,34 @@ impl std::fmt::Debug for VulkanAccelerator {
 }
 
 impl VulkanAccelerator {
+    /// Explicit bounded wait for this backend's event. Unlike `poll_event`, this
+    /// may block the calling host thread. No queue/command-pool ownership moves.
+    pub fn wait_event(
+        &self,
+        event: &VulkanEvent,
+        timeout: std::time::Duration,
+    ) -> Result<EventState, BackendError> {
+        if !Rc::ptr_eq(&self.shared, &event.context.shared) {
+            return Err(BackendError::InvalidArgument);
+        }
+        let state = event.poll()?;
+        if state != EventState::Pending {
+            return Ok(state);
+        }
+        let fence = event.context.slots[event.slot as usize].fence;
+        let nanos = timeout.as_nanos().min(u128::from(u64::MAX)) as u64;
+        // SAFETY: event retains its context/device and claimed fence slot. Its
+        // !Send/!Sync ownership excludes reset, release or destruction during wait.
+        match unsafe { self.shared.device.wait_for_fences(&[fence], true, nanos) } {
+            Ok(()) => event.poll(),
+            Err(vk::Result::TIMEOUT) => Ok(EventState::Pending),
+            Err(vk::Result::ERROR_DEVICE_LOST) => {
+                self.shared.poisoned.set(true);
+                Ok(event.latch(EventState::Failed(BackendError::DeviceLost)))
+            }
+            Err(result) => Err(self.shared.fail(result)),
+        }
+    }
     /// Open the preferred Vulkan 1.3 compute device: discrete, integrated, virtual, then CPU.
     pub fn new() -> Result<Self, InitError> {
         let instance = Instance::create()?;
@@ -2389,7 +2438,9 @@ impl VulkanAccelerator {
             .min_storage_buffer_offset_alignment
             .max(WORD_BYTES);
         let tuning = shared.physical.tuning;
-        let mut descriptors = vec![vk::DescriptorBufferInfo::default(); tuning.buffers as usize];
+        let mut descriptor_storage =
+            [vk::DescriptorBufferInfo::default(); MAX_BINDINGS_PER_SUBMISSION as usize + 1];
+        let descriptors = &mut descriptor_storage[..tuning.buffers as usize];
         let mut seen = 0_u32;
         for binding in bindings {
             if !Rc::ptr_eq(&binding.buffer.context, context) {
@@ -2482,7 +2533,7 @@ impl VulkanAccelerator {
         }
 
         let slot = &context.slots[slot_index as usize];
-        match self.record_and_submit(slot, program, &descriptors, wait) {
+        match self.record_and_submit(slot, program, descriptors, wait) {
             Ok(()) => {}
             Err(vk::Result::ERROR_DEVICE_LOST) => {
                 // Past the admission boundary with an ambiguous outcome: the event owns the slot
@@ -2587,17 +2638,15 @@ impl VulkanAccelerator {
         // A gated submission's first dispatch waits for the gate's value; everything the host
         // wrote before signalling it is then visible to the device (the semaphore signal operation
         // is a host-to-device memory dependency).
-        let waits: Vec<vk::SemaphoreSubmitInfo> = wait
-            .map(|(semaphore, value)| {
-                vk::SemaphoreSubmitInfo::default()
-                    .semaphore(semaphore)
-                    .value(value)
-                    .stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-            })
-            .into_iter()
-            .collect();
+        let wait_info = wait.map(|(semaphore, value)| {
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(semaphore)
+                .value(value)
+                .stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+        });
+        let waits = wait_info.as_slice();
         let submits = [vk::SubmitInfo2::default()
-            .wait_semaphore_infos(&waits)
+            .wait_semaphore_infos(waits)
             .command_buffer_infos(&submit_buffers)];
         // SAFETY: the slot is free (no submission references its command buffer, fence, or
         // descriptor set), the descriptor infos name live buffers whose ranges were validated,
@@ -2608,6 +2657,15 @@ impl VulkanAccelerator {
             device.update_descriptor_sets(std::slice::from_ref(&write), &[]);
             device.reset_fences(&[slot.fence])?;
             device.begin_command_buffer(slot.command_buffer, &begin)?;
+            // Intermediates belong to the program, not to a request slot. A previous
+            // submission of this program may still read/write that arena. Queue order
+            // alone does not order compute memory accesses across submissions; serialize
+            // arena reuse before the first dispatch as well as hazards within the graph.
+            // Completed, observed submissions need no dependency, and arena-free programs
+            // keep their existing ability to overlap on disjoint bindings.
+            if program.arena.is_some() && program.state.in_flight.get() != 0 {
+                device.cmd_pipeline_barrier2(slot.command_buffer, &compute_dependency);
+            }
             device.cmd_bind_descriptor_sets(
                 slot.command_buffer,
                 vk::PipelineBindPoint::COMPUTE,
