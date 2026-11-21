@@ -128,7 +128,7 @@ def main():
             "-chardev",
             f"socket,id=accel,path={socket}",
             "-device",
-            "vhost-user-test-device,bus=virtio-mmio-bus.0,chardev=accel,virtio-id=65535,num_vqs=1,vq_size=1024,config_size=16",
+            "vhost-user-test-device,bus=virtio-mmio-bus.0,chardev=accel,virtio-id=56,num_vqs=1,vq_size=1024,config_size=16",
         ]
         if args.initrd:
             command += ["-initrd", args.initrd]

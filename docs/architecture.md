@@ -441,5 +441,5 @@ frontend integration and guest drivers remain follow-up work.
 The [Linux vhost-user adapter](vhost-user.md) connects real shared split virtqueues to the
 existing command processor. Its separate workspace owns guest-memory validation, queue
 notifications, and serialized reset. Portable crates retain their existing OS-independent
-contracts. The QEMU development frontend uses experimental MMIO identity 65535; it is not
+contracts. The QEMU development frontend uses provisional device ID 56; it is not
 an assigned Virtio type, and guest drivers remain separate work.

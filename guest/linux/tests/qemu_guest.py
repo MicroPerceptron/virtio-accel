@@ -76,7 +76,7 @@ def main():
                     "-device",
                     (
                         "vhost-user-test-device,bus=virtio-mmio-bus.0,chardev=accel,"
-                        "virtio-id=65535,num_vqs=1,vq_size=1024,config_size=16"
+                        "virtio-id=56,num_vqs=1,vq_size=1024,config_size=16"
                     ),
                 ]
                 with args.log.open("w") as log:

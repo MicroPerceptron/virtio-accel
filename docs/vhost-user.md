@@ -20,15 +20,18 @@ and READ_BUFFER perform explicit transfers. Shared guest RAM does not enable ext
 ## Status and identity
 
 This is a development binding, **not an assigned Virtio device type or a production QEMU device**.
-The test configuration uses experimental device ID **65535 over modern Virtio MMIO**. Do not use
-that ID with the modern PCI device-ID arithmetic or distribute a PCI device impersonating an
-assigned type. Official allocation and a production frontend remain tracked by
+The test configuration uses provisional device ID **56**, over modern Virtio MMIO or modern
+Virtio PCI (`1af4:1078`). The number is not assigned: it is unallocated in the Virtio
+specification today, clear of the IDs other VMMs use unofficially (61 to 63), and small enough for
+the PCI device-ID arithmetic, which the earlier 65535 was not. It is one constant and will change
+when an ID is allocated. Do not distribute a device that impersonates an assigned type. Official
+allocation and a production frontend remain tracked by
 [issue #103](https://github.com/MicroPerceptron/virtio-accel/issues/103).
 
 The current QEMU 10.2.1 generic test frontend needs two reviewed local patches, shipped in
 [`host/vhost-user/qemu`](../host/vhost-user/qemu/):
 
-1. Accept experimental ID 65535 in the diagnostic device-name lookup. Unpatched QEMU asserts.
+1. Accept provisional ID 56 in the diagnostic device-name lookup. Unpatched QEMU asserts.
 2. Forward whole-device reset to the backend and wait for its acknowledgement. Without this,
    stopping the queues leaves the backend's old context and buffer handles alive.
 
@@ -124,7 +127,7 @@ host/vhost-user/target/debug/virtio-accel-vhost-user \
   --socket "$run_dir/accel.sock" --backend mock
 ```
 
-Connect the patched QEMU frontend with `virtio-id=65535,num_vqs=1,vq_size=1024,config_size=16`,
+Connect the patched QEMU frontend with `virtio-id=56,num_vqs=1,vq_size=1024,config_size=16`,
 modern Virtio MMIO (`-global virtio-mmio.force-legacy=false`), a `chardev socket`, and a shared
 `memory-backend-memfd` object. The complete runnable invocation is in the smoke test. A real guest
 still needs a driver implementing this device's command protocol.

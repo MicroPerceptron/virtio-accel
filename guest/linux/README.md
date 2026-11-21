@@ -2,7 +2,7 @@
 
 This out-of-tree module connects the Python SDK inside a Linux VM to the
 [vhost-user host](../../docs/vhost-user.md). It registers `/dev/virtio-accelN`
-for development Virtio MMIO device ID **65535**. This is not an allocated Virtio
+for provisional Virtio device ID **56**. This is not an allocated Virtio
 ID, an upstream Linux driver, or a production QEMU device. The frozen device
 protocol remains 1.0; Linux APIs stay outside the portable crates.
 
