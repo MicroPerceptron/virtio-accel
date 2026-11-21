@@ -539,6 +539,64 @@ impl<'a> TosaAnalysis<'a> {
         false
     }
 
+    /// Prove dynamic lookup bounds from the graph's INT32 min/max expressions.
+    ///
+    /// Unknown producers have the full INT32 range, including CAST results. This
+    /// therefore proves `MINIMUM(MAXIMUM(x, 0), upper - 1)` for every possible x,
+    /// without trusting callers, tensor names, or float-to-int conversion behavior.
+    /// A fixed visit budget bounds cold analysis; exhaustion widens to the full
+    /// range rather than manufacturing a proof. No arithmetic overflow is inferred.
+    pub fn proves_integer_index_bounds(&self, condition: &RuntimeCondition<'_>) -> bool {
+        let RuntimeCondition::IndicesInRange {
+            indices,
+            upper_bound,
+            ..
+        } = condition
+        else {
+            return false;
+        };
+        let (low, high) = self.integer_index_interval(*indices, &mut 64);
+        low >= 0 && (high as u64) < *upper_bound
+    }
+
+    fn integer_index_interval(&self, value: ValueId, budget: &mut usize) -> (i32, i32) {
+        let unknown = (i32::MIN, i32::MAX);
+        if *budget == 0 {
+            return unknown;
+        }
+        *budget -= 1;
+        if !matches!(self.value(value).kind(), AnalyzedValueKind::Tensor(t) if t.dtype() == DType::INT32)
+        {
+            return unknown;
+        }
+        if let Some(bytes) = self.serialized_constant(value) {
+            if bytes.is_empty() || bytes.len() % 4 != 0 {
+                return unknown;
+            }
+            return bytes
+                .chunks_exact(4)
+                .fold((i32::MAX, i32::MIN), |(lo, hi), b| {
+                    let x = i32::from_le_bytes(b.try_into().unwrap());
+                    (lo.min(x), hi.max(x))
+                });
+        }
+        let Some(producer) = self.value(value).producer() else {
+            return unknown;
+        };
+        let op = self.operator(producer).op();
+        if !matches!(op, Op::MINIMUM | Op::MAXIMUM) {
+            return unknown;
+        }
+        let inputs = self.operator_inputs(producer);
+        let a = self.integer_index_interval(inputs[0], budget);
+        let b = self.integer_index_interval(inputs[1], budget);
+        if op == Op::MINIMUM {
+            (a.0.min(b.0), a.1.min(b.1))
+        } else {
+            (a.0.max(b.0), a.1.max(b.1))
+        }
+    }
+
     pub fn value(&self, id: ValueId) -> &AnalyzedValue<'a> {
         &self.values[id.index()]
     }

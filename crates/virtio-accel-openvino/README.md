@@ -46,7 +46,7 @@ residency bound, so the provider promise stays truthful.
 Loading validates and analyzes the FlatBuffer with `virtio-accel-tosa`, lowers the graph to an
 in-memory OpenVINO IR (version 11) document plus weights blob inside this crate, reads it with
 `ov_core_read_model_from_memory_buffer`, and compiles it for this instance's device. Program
-admission accepts exactly one static region and basic block with no runtime obligations; static,
+admission accepts exactly one static region and basic block with no unproven runtime obligations; static,
 positive shapes; FP16, FP32, or INT8 tensor boundaries plus restricted INT32 outputs; and the
 operator set reported by `supports_tosa_operator`. The integer target currently admits exact INT8
 identity and INT8 MATMUL with INT32 output. Everything else is rejected while loading, with
@@ -56,6 +56,23 @@ guide specifies.
 `TosaCapabilityProvider` publishes separate conservative floating and integer descriptors after a
 native runtime/device has been constructed. Compile-only placeholders return an empty descriptor
 slice instead of advertising work they cannot execute.
+
+The floating tier also accepts FP32/INT32 casts, constant-parameter slicing and
+gather. Runtime gather indices must have statically proven bounds; a valid test
+fixture is not an admission proof. The mixed integer/float target additionally
+accepts `MINIMUM(MAXIMUM(indices, 0), vocabulary_size - 1)` and the full floating
+operator set, alongside its existing byte-lookup and packed-weight programs.
+Its FP32 precision requirement remains intact: devices that cannot provide it
+must run the indexed region elsewhere. The proof follows constants and INT32
+min/max only, with a bounded traversal; arbitrary arithmetic remains unknown.
+
+Centered, last-axis FP32 layer normalization expressed as TOSA reduction,
+scaling, subtraction, square, epsilon addition and reciprocal square root lowers
+to native MVN with epsilon inside the square root. Both means must use exactly
+the reciprocal axis length, the squared value must be the same centered tensor,
+and epsilon must be a positive finite scalar. Other consumers retain the original
+values; near-matching expressions do not fuse. This is a cold lowering change,
+with no new wire ABI or runtime compilation during submission.
 
 Binding slots are device-neutral: inputs occupy slots `0..N` and outputs occupy `N..N+M`, both in
 declared order.

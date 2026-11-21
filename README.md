@@ -67,7 +67,7 @@ with zero zero-points); compressed FP16 weight projections are a separate tier.
 
 ### Core ML (_Apple GPU and Neural Engine_)
 
-- **Execution:** Explicit CPU/ANE, CPU/GPU and combined CPU/GPU/ANE policies. Core ML chooses per-operation placement; combined mode does not guarantee simultaneous GPU/ANE use. FP32 NeuralNetwork graphs exclude ANE to preserve precision (CPUOnly under CPU/ANE, CPU/GPU under combined mode). FP16 retains the full policy. The support table refers to model-boundary dtypes; restricted INT32 outputs are also available.
+- **Execution:** Explicit CPU/ANE, CPU/GPU and combined CPU/GPU/ANE policies. Core ML chooses per-operation placement; combined mode does not guarantee simultaneous GPU/ANE use. FP32 NeuralNetwork graphs use CPUOnly to preserve precision; both GPU and ANE can narrow their intermediates. FP16 and explicitly typed ML Programs retain the selected policy. The support table refers to model-boundary dtypes; restricted INT32 outputs are also available.
 - **INT8:** Direct INT8 model boundaries require macOS 26+ and support identity plus zero-point-aware MATMUL with INT32 output, subject to the exactness bound above.
 - **FP8 and packed weights:** macOS 26+ adds E4M3/E5M2 storage/casts, widened MATMUL, explicit NVFP4 projections, and immutable INT4/INT8 or palette weight compression. FP8 storage uses byte carriers; decoding stays in the submitted graph. See [ADR 0014](docs/adr/0014-packed-quantized-inference.md) and [ADR 0016](docs/adr/0016-coreml-compressed-weights.md).
 - **Explicit limits:** TOSA INT4 tensors and unsupported integer operators are rejected. Compression and compute-policy selection do not guarantee GPU/ANE placement or speedup.

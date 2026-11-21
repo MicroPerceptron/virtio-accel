@@ -220,14 +220,20 @@ class HardwareTests(unittest.TestCase):
             executable(x)
         executable.close()
 
-    def test_unsupported_cast_is_explicit_and_recoverable(self):
+    def test_cast_capability_is_explicit_and_recoverable(self):
         if self.record.provider not in ('coreml', 'openvino', 'vulkan'):
             self.skipTest('Base floating-tier CAST boundary')
-        x = np.ones((2, 2), np.float16)
+        x = np.array([[1.5, -2], [.125, 1024]], np.float16)
         lowered = va.jit(lambda x: x.astype(vnp.float32)).lower(x)
         for _ in range(2):
-            with self.assertRaisesRegex(RuntimeError, 'CAST'):
-                lowered.compile(self.device)
+            if self.record.provider == 'openvino':
+                with lowered.compile(self.device) as executable:
+                    actual = executable(x).to_numpy()
+                    self.assertEqual(actual.dtype, np.dtype(np.float32))
+                    np.testing.assert_array_equal(actual, x.astype(np.float32))
+            else:
+                with self.assertRaisesRegex(RuntimeError, 'CAST'):
+                    lowered.compile(self.device)
         if self.record.provider == 'coreml':
             with self.assertRaisesRegex(RuntimeError, 'exclusive'):
                 va.jit(lambda x: x).lower(x).compile(self.device, strict=True)

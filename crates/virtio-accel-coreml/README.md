@@ -11,10 +11,11 @@ reports NPU, GPU, or OTHER respectively; these are policy endpoints, not separat
 Core ML decides per-operation placement, with no promise of exclusive accelerator use or
 simultaneous GPU/ANE activity. The legacy host-path constructor remains CPU/ANE only.
 
-The floating-point NeuralNetwork format does not enforce intermediate precision on ANE.
+The floating-point NeuralNetwork format does not enforce intermediate precision on GPU or ANE.
 To preserve FP32 graph arithmetic, programs containing FP32 tensors use CPUOnly under
-the CPU/ANE policy, and CPUAndGPU under `All`. FP16 programs retain the full selected
-policy. GPU low-precision accumulation is disabled. This selection happens before model
+every policy. FP16 and explicitly typed ML Programs retain the full selected
+policy. GPU low-precision accumulation is disabled, but that flag alone does not
+prevent FP16-rounded elementwise arithmetic (observed for COS on M4). Selection happens before model
 loading within the permitted compute units; it never retries a failed program elsewhere.
 Exact integer ML Programs retain their explicit types and selected policy.
 
@@ -43,7 +44,9 @@ identity and constants; floating-point unary, binary, comparison, logical, selec
 reduction layers; batched matrix multiplication; unpadded NHWC max pooling through explicit NCHW
 layout transposes; and concat, reshape, reverse, and transpose. `supports_tosa_operator` exposes the
 operator set; unsupported attribute combinations such as nonzero pooling padding are rejected while
-loading. Unsupported control flow, dynamic shapes, profiles, extensions, dtypes, and operators are
+loading. `LOG` is excluded from the NeuralNetwork tier: its runtime adds a default
+epsilon, so `log(1)` does not produce zero. Runtime `POW` domains also require proof
+that this tier currently cannot supply. Unsupported control flow, dynamic shapes, profiles, extensions, dtypes, and operators are
 likewise rejected before admission. The separate integer-profile tier currently admits exact INT8
 identity and INT8 batched matrix multiplication with INT32 output. MATMUL widens both operands to
 INT32, explicitly subtracts the two TOSA zero points, and accumulates in INT32; it never converts

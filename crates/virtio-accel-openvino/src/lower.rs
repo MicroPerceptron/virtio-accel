@@ -19,6 +19,9 @@
 #[cfg(test)]
 mod compressed_tests;
 mod constant_weights;
+#[cfg(test)]
+pub(crate) mod language_model_tests;
+mod normalization;
 mod packed_fp8;
 #[cfg(test)]
 pub(crate) mod residual_tests;
@@ -61,7 +64,7 @@ pub const OPENVINO_TOSA_FP8_TARGET: Target = Target::new(
     ExtensionSet::FP8E4M3.union(ExtensionSet::FP8E5M2),
 );
 
-/// Mixed integer/float target for explicitly packed-storage graphs (including NVFP4).
+/// Mixed integer/float target for packed storage and graph-proven embedding indices.
 pub const OPENVINO_TOSA_QUANTIZED_TARGET: Target = Target::new(
     Version::TOSA_1_0,
     ProfileSet::FLOATING_POINT.union(ProfileSet::INTEGER),
@@ -71,29 +74,18 @@ pub const OPENVINO_TOSA_QUANTIZED_TARGET: Target = Target::new(
 pub const OPENVINO_TOSA_QUANTIZED_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
     target: OPENVINO_TOSA_QUANTIZED_TARGET,
     dtypes: &[
+        DTypeCapability::new(DType::BOOL, ValueRoles::ALL),
         DTypeCapability::new(DType::INT8, ValueRoles::ALL),
         DTypeCapability::new(DType::INT32, ValueRoles::ALL),
         DTypeCapability::new(DType::FP32, ValueRoles::ALL),
         DTypeCapability::new(DType::FP16, ValueRoles::ALL),
     ],
-    operators: &[
-        OperatorCapability::new(Op::CONST),
-        OperatorCapability::new(Op::CONST_SHAPE),
-        OperatorCapability::new(Op::CAST),
-        OperatorCapability::new(Op::ADD),
-        OperatorCapability::constrained(Op::MUL, OperatorConstraints::ZERO_SHIFT),
-        OperatorCapability::new(Op::GATHER),
-        OperatorCapability::new(Op::CONCAT),
-        OperatorCapability::constrained(Op::SLICE, OperatorConstraints::CONSTANT_PARAMETERS),
-        OperatorCapability::new(Op::RESHAPE),
-        OperatorCapability::new(Op::TRANSPOSE),
-        OperatorCapability::constrained(Op::MATMUL, OperatorConstraints::ZERO_ZERO_POINTS),
-    ],
+    operators: OPENVINO_FLOAT_OPERATORS,
     graph: GraphCapabilities {
         max_regions: 1,
         max_blocks: 1,
         dynamic_shapes: false,
-        runtime_conditions: RuntimeConditionSupport::ProvenByteLookup,
+        runtime_conditions: RuntimeConditionSupport::ProvenBoundedOrByteLookup,
     },
 };
 
@@ -176,14 +168,24 @@ const FLOAT_OPERATORS: &[OperatorCapability] = &[
     OperatorCapability::new(Op::IDENTITY),
 ];
 
-/// `CAST` for the FP8 tier only.
-///
-/// It is deliberately absent from [`FLOAT_OPERATORS`]: that list is the operator surface shared
-/// with the Core ML provider, and `advertised_operator_and_dtype_surface_is_exact` in the Hexagon
-/// crate asserts the two agree operator for operator through `supports_tosa_operator`. Adding
-/// `CAST` there would have OpenVINO advertise an operator Core ML does not. The FP8 tier extends
-/// the shared list instead of mutating it.
+// CAST extends the OpenVINO tiers without changing the historical common
+// float list shared with other providers.
 const CAST_CAPABILITY: OperatorCapability = OperatorCapability::new(Op::CAST);
+
+// Backend-specific extensions leave the historical cross-provider common list
+// unchanged. In particular, Core ML need not claim OpenVINO's integer lookup path.
+const OPENVINO_FLOAT_OPERATORS: &[OperatorCapability] = &{
+    let mut extended = [CAST_CAPABILITY; FLOAT_OPERATORS.len() + 3];
+    extended[FLOAT_OPERATORS.len() + 1] =
+        OperatorCapability::constrained(Op::SLICE, OperatorConstraints::CONSTANT_PARAMETERS);
+    extended[FLOAT_OPERATORS.len() + 2] = OperatorCapability::new(Op::GATHER);
+    let mut i = 0;
+    while i < FLOAT_OPERATORS.len() {
+        extended[i] = FLOAT_OPERATORS[i];
+        i += 1;
+    }
+    extended
+};
 
 /// The FP8 tier's operators: every shared float operator, plus `CAST` as the narrowing path the
 /// Vulkan FP8 tier also carries. Built from [`FLOAT_OPERATORS`] rather than restated, so the two
@@ -242,12 +244,12 @@ const INTEGER_OPERATORS: &[OperatorCapability] = &[
 pub const OPENVINO_TOSA_CAPABILITY: CapabilityDescriptor = CapabilityDescriptor {
     target: OPENVINO_TOSA_TARGET,
     dtypes: FLOAT_DTYPES,
-    operators: FLOAT_OPERATORS,
+    operators: OPENVINO_FLOAT_OPERATORS,
     graph: GraphCapabilities {
         max_regions: 1,
         max_blocks: 1,
         dynamic_shapes: false,
-        runtime_conditions: RuntimeConditionSupport::None,
+        runtime_conditions: RuntimeConditionSupport::ProvenBoundedOrByteLookup,
     },
 };
 
@@ -733,7 +735,11 @@ pub(crate) fn lower_tosa_with_weights(
     if analysis.regions().len() != 1
         || analysis.blocks().len() != 1
         || analysis.conditions().iter().any(|c| {
-            target != OPENVINO_TOSA_QUANTIZED_TARGET || !analysis.proves_byte_lookup_bounds(c)
+            !((target == OPENVINO_TOSA_QUANTIZED_TARGET && analysis.proves_byte_lookup_bounds(c))
+                || (matches!(
+                    target,
+                    OPENVINO_TOSA_TARGET | OPENVINO_TOSA_QUANTIZED_TARGET
+                ) && analysis.proves_integer_index_bounds(c)))
         })
     {
         return Err(LoweringError::UnsupportedGraph);
@@ -902,7 +908,7 @@ fn validate_target_types(analysis: &TosaAnalysis<'_>, target: Target) -> Result<
         let mismatched = if target == OPENVINO_TOSA_QUANTIZED_TARGET {
             !matches!(
                 dtype,
-                DType::INT8 | DType::INT32 | DType::FP16 | DType::FP32
+                DType::BOOL | DType::INT8 | DType::INT32 | DType::FP16 | DType::FP32
             )
         } else if target == OPENVINO_TOSA_TARGET {
             dtype == DType::INT8
@@ -1060,6 +1066,9 @@ fn encode_operator(
     }
 
     let stem = format!("tosa_{}_{}", operator_id.get(), op.name().unwrap_or("op"));
+    if op == Op::MUL && normalization::emit(builder, analysis, inputs, outputs[0], &stem)? {
+        return Ok(());
+    }
     if builder.expand_weight_constants
         && op == Op::MUL
         && constant_weights::fold(builder, analysis, inputs, outputs[0], &stem)?
@@ -1960,12 +1969,14 @@ fn validate_quantized_types(
         Op::CAST => {
             (input == DType::INT8 && (output == DType::INT32 || float(output)))
                 || (float(input) && float(output))
+                || (float(input) && output == DType::INT32)
+                || (input == DType::INT32 && float(output))
         }
         Op::ADD => input == DType::INT32 || float(input),
         Op::MUL | Op::MATMUL => float(input),
         Op::GATHER => float(input),
         Op::RESHAPE | Op::TRANSPOSE | Op::CONCAT | Op::SLICE => true,
-        _ => false,
+        _ => return validate_operator_types(analysis, op, inputs, outputs),
     };
     if valid {
         Ok(())
@@ -2014,7 +2025,24 @@ fn validate_operator_types(
         // side is checked independently rather than against a shared predicate.
         Op::CAST => {
             for value in inputs.iter().chain(outputs) {
-                require(*value, is_float_or_fp8)?;
+                require(*value, |t| {
+                    matches!(
+                        t,
+                        DType::FP16 | DType::FP32 | DType::FP8E4M3 | DType::FP8E5M2 | DType::INT32
+                    )
+                })?;
+            }
+        }
+        Op::GATHER => {
+            require(inputs[0], is_float)?;
+            require(inputs[1], is_int32)?;
+            require(outputs[0], is_float)?;
+        }
+        Op::MINIMUM | Op::MAXIMUM => {
+            for value in inputs.iter().chain(outputs) {
+                require(*value, |t| {
+                    matches!(t, DType::FP16 | DType::FP32 | DType::INT32)
+                })?;
             }
         }
         // FP8 operands are legal and widened at emission; the result is not FP8. TOSA's FP8
