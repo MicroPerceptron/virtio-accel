@@ -21,6 +21,7 @@ body:
         - virtio-accel-transport
         - virtio-accel-core
         - virtio-accel-split-queue
+        - virtio-accel-shared-queue
         - virtio-accel-guest
         - virtio-accel-device
         - virtio-accel-mock

@@ -182,31 +182,33 @@ Independently of backend execution, `virtio-accel-tosa` validates the declared T
 
 ## Workspace
 
-| Crate                      | Tier                  | Description                                                                                                                                                                     |
-| -------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `virtio-accel-vaccel`      | `core`                | Adapter seam for mapping native provider contracts (including vAccel-style backends) to `virtio-accel-core`                                                                     |
-| `virtio-accel-coreml`      | `std`                 | TOSA-to-Core ML lowering, direct buffers, and asynchronous GPU/ANE-capable prediction                                                                                               |
-| `virtio-accel-openvino`    | `std`                 | TOSA-to-OpenVINO IR lowering, direct host-pointer tensors, and asynchronous NPU/GPU/CPU inference                                                                               |
-| `virtio-accel-vulkan`      | `std`                 | Vendor-neutral Vulkan 1.3 compute backend over `ash`: crate-authored SPIR-V kernels, direct storage-buffer binding, and the shared FP32 plus native FP16 and FP8 operator tiers |
-| `virtio-accel-xdna`        | `std`                 | AMD XDNA2 NPU backend over HRX with direct buffers, asynchronous dispatch, and strict BF16/FP8/INT8 TOSA tiers                                                                  |
-| `virtio-accel-hexagon`     | `std` (Windows ARM64) | Strict FP16/INT8 TOSA-to-QNN lowering, direct buffers, and asynchronous Hexagon HTP execution                                                                                   |
-| `virtio-accel`             | `core + alloc`        | Facade re-exporting the portable layers                                                                                                                                         |
-| `virtio-accel-proto`       | `core`                | Pointer-free, little-endian protocol 1.0 wire structures                                                                                                                        |
-| `virtio-accel-transport`   | `core`                | Dependency-free descriptor-chain, queue, reset, and notification ports                                                                                                          |
-| `virtio-accel-core`        | `core`                | Backend lifecycle, memory, program, queue, and event contracts                                                                                                                  |
-| `virtio-accel-tosa`        | `core + alloc`        | Bounded zero-copy TOSA 1.0 validation, lowering analysis, specialization, and packed low-precision utilities                                                                    |
-| `virtio-accel-tosa-build`  | `core + alloc`        | Borrowed and incrementally owned static TOSA 1.0 authoring with mandatory validation round trips                                                                                |
-| `virtio-accel-split-queue` | `core + alloc`        | Bounded in-memory split-ring reference model                                                                                                                                    |
-| `virtio-accel-guest`       | `core + alloc`        | Typed reference client with bounded request tracking                                                                                                                            |
-| `virtio-accel-device`      | `core + alloc`        | Device-owned state, including bounded generational IDs                                                                                                                          |
-| `virtio-accel-mock`        | `std`                 | In-memory backend with deterministic test-only artifacts and scripted faults                                                                                                    |
-| `virtio-accel-conformance` | `std`                 | Transport-free semantic suite and shared FP32/FP16/FP8/INT8/INT4 numerical TOSA corpus                                                                                          |
-| `virtio-accel-cleanroom`   | `core`                | Independent conformance codec, written without the shared protocol types                                                                                                        |
+| Crate                       | Tier                  | Description                                                                                                                                                                     |
+| --------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `virtio-accel-vaccel`       | `core`                | Adapter seam for mapping native provider contracts (including vAccel-style backends) to `virtio-accel-core`                                                                     |
+| `virtio-accel-coreml`       | `std`                 | TOSA-to-Core ML lowering, direct buffers, and asynchronous GPU/ANE-capable prediction                                                                                           |
+| `virtio-accel-openvino`     | `std`                 | TOSA-to-OpenVINO IR lowering, direct host-pointer tensors, and asynchronous NPU/GPU/CPU inference                                                                               |
+| `virtio-accel-vulkan`       | `std`                 | Vendor-neutral Vulkan 1.3 compute backend over `ash`: crate-authored SPIR-V kernels, direct storage-buffer binding, and the shared FP32 plus native FP16 and FP8 operator tiers |
+| `virtio-accel-xdna`         | `std`                 | AMD XDNA2 NPU backend over HRX with direct buffers, asynchronous dispatch, and strict BF16/FP8/INT8 TOSA tiers                                                                  |
+| `virtio-accel-hexagon`      | `std` (Windows ARM64) | Strict FP16/INT8 TOSA-to-QNN lowering, direct buffers, and asynchronous Hexagon HTP execution                                                                                   |
+| `virtio-accel`              | `core + alloc`        | Facade re-exporting the portable layers                                                                                                                                         |
+| `virtio-accel-proto`        | `core`                | Pointer-free, little-endian protocol 1.0 wire structures                                                                                                                        |
+| `virtio-accel-transport`    | `core`                | Dependency-free descriptor-chain, queue, reset, and notification ports                                                                                                          |
+| `virtio-accel-core`         | `core`                | Backend lifecycle, memory, program, queue, and event contracts                                                                                                                  |
+| `virtio-accel-tosa`         | `core + alloc`        | Bounded zero-copy TOSA 1.0 validation, lowering analysis, specialization, and packed low-precision utilities                                                                    |
+| `virtio-accel-tosa-build`   | `core + alloc`        | Borrowed and incrementally owned static TOSA 1.0 authoring with mandatory validation round trips                                                                                |
+| `virtio-accel-split-queue`  | `core + alloc`        | Bounded in-memory split-ring reference model                                                                                                                                    |
+| `virtio-accel-shared-queue` | `core`                | Both halves of the split ring over memory a driver and a device share, behind a platform-supplied memory trait                                                                  |
+| `virtio-accel-guest`        | `core + alloc`        | Typed reference client with bounded request tracking                                                                                                                            |
+| `virtio-accel-device`       | `core + alloc`        | Device-owned state, including bounded generational IDs                                                                                                                          |
+| `virtio-accel-mock`         | `std`                 | In-memory backend with deterministic test-only artifacts and scripted faults                                                                                                    |
+| `virtio-accel-conformance`  | `std`                 | Transport-free semantic suite and shared FP32/FP16/FP8/INT8/INT4 numerical TOSA corpus                                                                                          |
+| `virtio-accel-cleanroom`    | `core`                | Independent conformance codec, written without the shared protocol types                                                                                                        |
 
 ## Dependency graph
 
 ```text
 virtio-accel-split-queue ---> virtio-accel-transport
+virtio-accel-shared-queue --> virtio-accel-transport
                                       ^
                                       |
 virtio-accel-device ----------+-------+------> virtio-accel-core

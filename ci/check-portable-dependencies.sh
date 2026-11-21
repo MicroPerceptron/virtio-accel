@@ -8,6 +8,7 @@ readonly packages=(
   virtio-accel-core
   virtio-accel-guest
   virtio-accel-split-queue
+  virtio-accel-shared-queue
 )
 
 for package in "${packages[@]}"; do

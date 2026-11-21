@@ -24,6 +24,7 @@ PUBLISH_ORDER = (
     "virtio-accel-tosa",
     "virtio-accel-tosa-build",
     "virtio-accel-split-queue",
+    "virtio-accel-shared-queue",
     "virtio-accel-guest",
     "virtio-accel-mock",
     "virtio-accel-device",
