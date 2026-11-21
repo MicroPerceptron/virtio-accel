@@ -1500,8 +1500,13 @@ impl Accelerator for OpenVinoAccelerator {
         // constant to prevent scale fusion from changing FP16 intermediates.
         let expand_weights = self.device.to_bytes().starts_with(b"CPU")
             || self.device.to_bytes().starts_with(b"NPU");
-        let lowered =
-            lower_tosa_with_weights(bytes, target, expand_weights).map_err(Self::lowering_error)?;
+        let lowered = lower_tosa_with_weights(
+            bytes,
+            target,
+            expand_weights,
+            self.device.to_bytes().starts_with(b"GPU"),
+        )
+        .map_err(Self::lowering_error)?;
         let require_fp32 = (target == crate::OPENVINO_TOSA_QUANTIZED_TARGET
             || target == crate::OPENVINO_TOSA_FP8_TARGET)
             && lowered.requires_fp32;
@@ -2368,6 +2373,105 @@ mod tests {
         backend.free_buffer(input).unwrap();
         backend.free_buffer(output).unwrap();
         backend.destroy_context(context).unwrap();
+    }
+
+    #[test]
+    fn external_residual_is_read_on_every_reused_request() {
+        let Some(discovery) = backend() else { return };
+        for device in discovery.runtime_devices().unwrap() {
+            let backend = OpenVinoAccelerator::with_device(&device).unwrap();
+            let context = backend.create_context(ContextDesc::default()).unwrap();
+            let queue = backend
+                .create_queue(&context, QueueDesc::default())
+                .unwrap();
+            for (rows, columns) in [(1, 4), (2, 7), (16, 4)] {
+                for swapped in [false, true] {
+                    let artifact =
+                        crate::lower::residual_tests::residual_graph(rows, columns, swapped);
+                    let program = backend
+                        .load_program(&context, tosa_artifact(&SliceSource(&artifact)))
+                        .unwrap();
+                    let mut buffers: Vec<_> = program
+                        .slots
+                        .iter()
+                        .map(|slot| {
+                            let desc = BufferDesc::new(
+                                slot.byte_len,
+                                4096,
+                                MemoryDomain::Shared,
+                                BufferUsage::TRANSFER_SOURCE
+                                    | BufferUsage::TRANSFER_DESTINATION
+                                    | BufferUsage::PROGRAM_INPUT
+                                    | BufferUsage::PROGRAM_OUTPUT,
+                            )
+                            .unwrap();
+                            backend
+                                .allocate_buffer(&context, desc)
+                                .unwrap()
+                                .into_parts()
+                                .0
+                        })
+                        .collect();
+                    let created = backend.native_requests_created();
+                    let reused = backend.native_requests_reused();
+                    for iteration in 0..8 {
+                        let input: Vec<f32> = (0..rows * 3)
+                            .map(|i| (i - iteration) as f32 / 16.0)
+                            .collect();
+                        let residual: Vec<f32> = (0..rows * columns)
+                            .map(|i| (i + iteration * 3 - 5) as f32 / 32.0)
+                            .collect();
+                        for (buffer, values) in buffers.iter_mut().zip([&input, &residual]) {
+                            let bytes: Vec<_> =
+                                values.iter().flat_map(|x| x.to_ne_bytes()).collect();
+                            backend
+                                .write_buffer(buffer, 0, &SliceSource(&bytes))
+                                .unwrap();
+                        }
+                        let bindings: Vec<_> = buffers
+                            .iter()
+                            .zip(&program.slots)
+                            .enumerate()
+                            .map(|(i, (buffer, slot))| BindingRef {
+                                slot: i as u32,
+                                buffer,
+                                range: virtio_accel_core::BufferRange::new(0, slot.byte_len)
+                                    .unwrap(),
+                                access: if i == 2 {
+                                    AccessMode::Write
+                                } else {
+                                    AccessMode::Read
+                                },
+                            })
+                            .collect();
+                        let event = backend
+                            .submit(&queue, &program, &bindings, Timeout::Infinite)
+                            .unwrap();
+                        assert_eq!(wait_for_terminal(&backend, &event), EventState::Complete);
+                        buffers[2].with_bytes(|bytes| {
+                            for (i, b) in bytes.chunks_exact(4).enumerate() {
+                                let row = i / columns as usize;
+                                let col = i % columns as usize;
+                                let dot: f32 = (0..3).map(|k| input[row*3+k] * (((k*columns as usize+col)%7) as f32-3.0)/8.0).sum();
+                                let expected = (dot + residual[i])*0.5;
+                                let actual = f32::from_ne_bytes(b.try_into().unwrap());
+                                assert!((actual-expected).abs() < 0.005,
+                                    "{device} rows={rows} columns={columns} swapped={swapped} iteration={iteration} element={i}: {actual} != {expected}");
+                            }
+                        }).unwrap();
+                        backend.destroy_event(event).unwrap();
+                    }
+                    assert_eq!(backend.native_requests_created() - created, 1);
+                    assert_eq!(backend.native_requests_reused() - reused, 7);
+                    backend.unload_program(program).unwrap();
+                    for buffer in buffers {
+                        backend.free_buffer(buffer).unwrap();
+                    }
+                }
+            }
+            backend.destroy_queue(queue).unwrap();
+            backend.destroy_context(context).unwrap();
+        }
     }
 
     #[test]

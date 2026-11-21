@@ -151,6 +151,21 @@ the corresponding Intel Level Zero vendor driver is installed. A plugin that rej
 for example FP32 on an FP16-centric NPU compiler — surfaces the failure from `load_program`;
 nothing is silently downconverted or re-placed by this crate.
 
+### External GPU residuals
+
+On Panther Lake with OpenVINO 2026.4.0, an FP32 constant-weight MatMul followed by
+an Add of a runtime residual can fuse into a GPU sum post-op that reads stale
+output instead of the residual. GPU lowering expresses this specific Add as
+`product - (-residual)`, with either original operand order. Negation is exact;
+the rewrite adds no host copies or submission-time compilation. CPU and NPU
+lowering remain unchanged. This is a correctness workaround, not a promise that
+the vendor will fuse every pointwise operation into one kernel.
+
+`external_residual_is_read_on_every_reused_request` exercises all enumerated
+endpoints, two operand orders, three shapes, and eight changing-input iterations.
+It passed on Biggertron's CPU, GPU and NPU; the GPU failure was also reproduced
+through OpenVINO directly, outside the request cache and AXIR scheduler.
+
 ## Running
 
 ```sh
