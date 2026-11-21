@@ -1248,6 +1248,12 @@ mod tests {
             let op = Op::new(raw);
             let coreml = virtio_accel_coreml::supports_tosa_operator(op);
             let openvino = virtio_accel_openvino::supports_tosa_operator(op);
+            // OpenVINO now has independently validated floating-profile lookup
+            // and slicing. This does not broaden Core ML or Hexagon's envelope.
+            if matches!(op, Op::CAST | Op::SLICE | Op::GATHER) {
+                assert!(openvino && !coreml && !supports_tosa_operator(op));
+                continue;
+            }
             // Core ML NeuralNetwork LOG adds an unavoidable epsilon. Its
             // fail-closed exception must not narrow the other providers.
             if op == Op::LOG {
