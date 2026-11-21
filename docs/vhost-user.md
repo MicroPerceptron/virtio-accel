@@ -28,12 +28,17 @@ when an ID is allocated. Do not distribute a device that impersonates an assigne
 allocation and a production frontend remain tracked by
 [issue #103](https://github.com/MicroPerceptron/virtio-accel/issues/103).
 
-The current QEMU 10.2.1 generic test frontend needs two reviewed local patches, shipped in
+The current QEMU 10.2.1 generic test frontend needs four local patches, shipped in
 [`host/vhost-user/qemu`](../host/vhost-user/qemu/):
 
 1. Accept provisional ID 56 in the diagnostic device-name lookup. Unpatched QEMU asserts.
 2. Forward whole-device reset to the backend and wait for its acknowledgement. Without this,
    stopping the queues leaves the backend's old context and buffer handles alive.
+3. Let the transport, not the backend, offer `VIRTIO_F_ACCESS_PLATFORM`. Without this, a backend
+   that can translate makes the guest see the feature even with `iommu_platform=off`, where
+   nothing translates: a device that claims confinement and has none.
+4. Grant each IOTLB miss the access it asked for. Without this, every translation is handed to
+   the backend read-write, and a page the guest mapped read-only can be written once read.
 
 The build script pins upstream commit `2d3df8abca265c9bcc9e438d691d561592060998` and applies
 these patches. They have not been upstreamed. QEMU itself describes `vhost-user-test-device` as
@@ -81,6 +86,33 @@ and namespace exhaustion. CI builds the pinned QEMU frontend and runs the mock t
 These tests validate the **host/QEMU binding**, not a Linux or Kore guest driver or boot sequence.
 The separate [Linux guest driver and SDK boot test](../guest/linux/README.md)
 exercise Python inside a real Linux VM using this same host binding.
+
+## Behind an IOMMU
+
+By default the device takes guest-physical addresses and the daemon maps all of guest RAM: a
+driver that names any guest memory in a descriptor has the device read or write it. A guest whose
+drivers are not trusted with that needs the device confined, and `--iommu` confines it:
+
+- the daemon offers **and requires** `VIRTIO_F_ACCESS_PLATFORM`, and never starts a queue for a
+  frontend that would hand it untranslated addresses;
+- it keeps the memory table's files **without mapping them**, maps each range when the guest's
+  IOMMU domain grants it (vhost-user `IOTLB_MSG`), in the direction granted, and unmaps on
+  invalidation;
+- rings and every buffer of a chain are resolved through the domain before the command is
+  dispatched. An address the domain does not map, or does not map for that direction, makes the
+  chain unusable (used length 0), exactly like any other unreachable buffer.
+
+The frontend must be Virtio PCI with `iommu_platform=on` behind the machine's IOMMU; QEMU does not
+route a Virtio MMIO transport through one. `launch.py --iommu` assembles both halves (aarch64
+`virt` with SMMUv3; an x86 machine has not been run). QEMU patches 3 and 4 above are required for
+the confinement to be real, and `vendor/vhost` must be the `vhost` 0.16.0 crate with IOTLB support
+added: no released version has the backend side.
+
+Cost: the frontend answers a miss with one page, so a buffer's first use costs a socket round trip
+and a mapping per page. Grants persist until invalidated, so memory a driver keeps mapped pays once.
+
+The translation is enforced by host software — QEMU's IOMMU model decides and this daemon obeys.
+The daemon still holds the guest's memory files.
 
 ## Native backends
 

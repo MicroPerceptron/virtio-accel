@@ -61,6 +61,13 @@ def main():
     parser.add_argument("--memory-mib", type=int, default=1536)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
+        "--iommu",
+        action="store_true",
+        help="put the device behind the machine's IOMMU: virtio-pci, "
+        "VIRTIO_F_ACCESS_PLATFORM required, the host maps only what the "
+        "guest's domain grants (aarch64 virt with SMMUv3 only)",
+    )
+    parser.add_argument(
         "qemu_args", nargs=argparse.REMAINDER, help="additional QEMU options after --"
     )
     args = parser.parse_args()
@@ -70,6 +77,10 @@ def main():
         parser.error(
             "native backends require --allow-unknown-program-residency (one resident program; not a physical-memory bound)"
         )
+    if args.iommu and args.target != "aarch64":
+        # Virtio MMIO has no route to an IOMMU in QEMU, and microvm has no
+        # PCI. An x86 machine with one (q35, intel-iommu) has not been run.
+        parser.error("--iommu is validated on --target aarch64 only")
     if args.accel == "kvm" and not args.dry_run:
         try:
             with open("/dev/kvm", "rb+"):
@@ -93,9 +104,20 @@ def main():
             host_command += ["--device", args.device]
         if args.allow_unknown_program_residency:
             host_command += ["--allow-unknown-program-residency"]
+        identity = "chardev=accel,virtio-id=56,num_vqs=1,vq_size=1024,config_size=16"
+        if args.iommu:
+            # Both halves or neither: the daemon refuses to run unless the
+            # frontend translates, and the frontend refuses a daemon that
+            # cannot follow the translation.
+            host_command += ["--iommu"]
+            frontend = f"vhost-user-test-device-pci,{identity},iommu_platform=on"
+        else:
+            frontend = f"vhost-user-test-device,bus=virtio-mmio-bus.0,{identity}"
         machine = (
             "microvm,acpi=off,auto-kernel-cmdline=on"
             if args.target == "x86_64"
+            else "virt,iommu=smmuv3"
+            if args.iommu
             else "virt"
         )
         cpu = "max" if args.accel == "tcg" else "host"
@@ -128,7 +150,7 @@ def main():
             "-chardev",
             f"socket,id=accel,path={socket}",
             "-device",
-            "vhost-user-test-device,bus=virtio-mmio-bus.0,chardev=accel,virtio-id=56,num_vqs=1,vq_size=1024,config_size=16",
+            frontend,
         ]
         if args.initrd:
             command += ["-initrd", args.initrd]
@@ -141,7 +163,7 @@ def main():
         # Detect a missing frontend before starting the host process. The caller
         # must still supply the reviewed patched build, not an upstream binary.
         subprocess.run(
-            [args.qemu, "-device", "vhost-user-test-device,help"],
+            [args.qemu, "-device", frontend.split(",")[0] + ",help"],
             check=True,
             stdout=subprocess.DEVNULL,
         )
