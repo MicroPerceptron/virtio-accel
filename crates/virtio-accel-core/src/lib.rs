@@ -6,6 +6,9 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+mod notification;
+pub use notification::CompletionNotification;
+
 use bitflags::bitflags;
 use core::fmt;
 use core::num::{NonZeroU32, NonZeroU64};
@@ -1098,6 +1101,23 @@ pub trait Accelerator {
     ///   backend is lost. Once observed, a terminal state is stable across every later success.
     /// - **Allocation/copies:** polling allocates no per-call state and copies no bulk content.
     fn poll_event(&self, event: &Self::Event) -> Result<EventState, BackendError>;
+
+    /// Register a host completion hint, replacing any previous registration.
+    ///
+    /// `true` means the provider retains a cloned waker and wakes it when
+    /// completion can be observed, including completion racing registration.
+    /// Notifications may be coalesced or spurious: callers must still observe
+    /// authoritative event state before releasing resources. Re-register after
+    /// each wake if still pending. The waker must be bounded and nonblocking.
+    /// `false` means no registration was retained; callers must keep polling.
+    /// This optional host mechanism adds no protocol capability or wire event.
+    fn register_event_waker(
+        &self,
+        _event: &Self::Event,
+        _waker: &core::task::Waker,
+    ) -> Result<bool, BackendError> {
+        Ok(false)
+    }
 
     /// Attempt to make a pending event terminal as [`EventState::Cancelled`].
     ///

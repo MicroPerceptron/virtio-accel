@@ -102,7 +102,7 @@ mod native;
 #[cfg(va_openvino)]
 pub use native::{
     OpenVinoAccelerator, OpenVinoBuffer, OpenVinoContext, OpenVinoEvent, OpenVinoProgram,
-    OpenVinoQueue,
+    OpenVinoQueue, SharedInput,
 };
 
 /// Placeholder that keeps workspace consumers portable when no OpenVINO runtime was detected.

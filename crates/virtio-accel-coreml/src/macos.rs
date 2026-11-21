@@ -21,8 +21,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use virtio_accel_core::{
     Accelerator, AcceleratorClass, AccessMode, AllocatedBuffer, ArtifactRef, BackendError,
     BindingRef, BufferDesc, BufferInfo, BufferProperties, BufferUsage, ByteSink, ByteSource,
-    Capabilities, ContextDesc, DeviceIdentity, DeviceInfo, DeviceLimits, EventState, MemoryDomain,
-    QueueDesc, ReleaseFailure, SubmitFailure, Timeout,
+    Capabilities, CompletionNotification, ContextDesc, DeviceIdentity, DeviceInfo, DeviceLimits,
+    EventState, MemoryDomain, QueueDesc, ReleaseFailure, SubmitFailure, Timeout,
 };
 use virtio_accel_tosa::{CapabilityDescriptor, TosaCapabilityProvider};
 
@@ -115,6 +115,7 @@ unsafe extern "C" {
         binding_count: usize,
         context: *mut c_void,
         release_context: NativeReleaseContext,
+        notify_context: NativeReleaseContext,
         error: *mut NativeError,
     ) -> *mut c_void;
     fn va_coreml_submit_copy(
@@ -123,6 +124,7 @@ unsafe extern "C" {
         bytes: u64,
         context: *mut c_void,
         release_context: NativeReleaseContext,
+        notify_context: NativeReleaseContext,
         error: *mut NativeError,
     ) -> *mut c_void;
     fn va_coreml_event_poll(event: *mut c_void, error: *mut NativeError) -> u32;
@@ -352,6 +354,7 @@ pub struct CoreMlQueue {
 
 /// Asynchronous Core ML prediction event.
 pub struct CoreMlEvent {
+    notification: Arc<CompletionNotification>,
     native: NonNull<c_void>,
 }
 
@@ -608,10 +611,24 @@ fn build_lowered_slot_plan(mappings: &[LoweredFeature]) -> Vec<SlotPlan> {
         .collect()
 }
 
+struct CompletionContext {
+    backings: Vec<EventBacking>,
+    notification: Arc<CompletionNotification>,
+}
 unsafe extern "C" fn release_event_backings(context: *mut c_void) {
-    // SAFETY: successful submission transfers exactly one pointer produced by `Box::into_raw` to
-    // the bridge, and its completion block calls this function exactly once.
-    drop(unsafe { Box::from_raw(context.cast::<Vec<EventBacking>>()) });
+    // SAFETY: the bridge owns this Box and calls release before terminal status
+    // publication, then notify exactly once to reclaim it. No concurrent Rust access.
+    unsafe { &mut *context.cast::<CompletionContext>() }
+        .backings
+        .clear();
+}
+unsafe extern "C" fn notify_event_completion(context: *mut c_void) {
+    // SAFETY: successful submission transferred this Box; the bridge calls here
+    // only after releasing guards and publishing authoritative terminal status.
+    let context = unsafe { Box::from_raw(context.cast::<CompletionContext>()) };
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        context.notification.notify()
+    }));
 }
 
 impl Accelerator for CoreMlAccelerator {
@@ -1015,8 +1032,12 @@ impl Accelerator for CoreMlAccelerator {
         }
 
         prepare_event_backings(&mut event_backings).map_err(SubmitFailure::Rejected)?;
-        let backings = Box::new(event_backings);
-        let backing_context = Box::into_raw(backings).cast::<c_void>();
+        let notification = Arc::new(CompletionNotification::default());
+        let context = Box::new(CompletionContext {
+            backings: event_backings,
+            notification: notification.clone(),
+        });
+        let backing_context = Box::into_raw(context).cast::<c_void>();
         let mut error = NativeError::default();
         // SAFETY: model and binding pointers remain valid through this admission call. The Core ML
         // arrays created by the bridge borrow the allocations. On success the completion block
@@ -1029,6 +1050,7 @@ impl Accelerator for CoreMlAccelerator {
                     native_bindings.len(),
                     backing_context,
                     release_event_backings,
+                    notify_event_completion,
                     &mut error,
                 )
             },
@@ -1047,7 +1069,7 @@ impl Accelerator for CoreMlAccelerator {
                 let source = native_bindings[input];
                 let destination = native_bindings[output];
                 if source.bytes != destination.bytes {
-                    drop(unsafe { Box::from_raw(backing_context.cast::<Vec<EventBacking>>()) });
+                    drop(unsafe { Box::from_raw(backing_context.cast::<CompletionContext>()) });
                     return Err(SubmitFailure::Rejected(BackendError::Incompatible));
                 }
                 // SAFETY: the binding-range and backing guards above keep both allocations live
@@ -1059,6 +1081,7 @@ impl Accelerator for CoreMlAccelerator {
                         source.bytes,
                         backing_context,
                         release_event_backings,
+                        notify_event_completion,
                         &mut error,
                     )
                 }
@@ -1068,13 +1091,25 @@ impl Accelerator for CoreMlAccelerator {
             Some(native) => native,
             None => {
                 // SAFETY: the bridge contract retains the context only when it returns an event.
-                drop(unsafe { Box::from_raw(backing_context.cast::<Vec<EventBacking>>()) });
+                drop(unsafe { Box::from_raw(backing_context.cast::<CompletionContext>()) });
                 return Err(SubmitFailure::Rejected(Self::native_error(error)));
             }
         };
         self.direct_binding_admissions
             .fetch_add(bindings.len() as u64, Ordering::Relaxed);
-        Ok(CoreMlEvent { native })
+        Ok(CoreMlEvent {
+            native,
+            notification,
+        })
+    }
+
+    fn register_event_waker(
+        &self,
+        event: &Self::Event,
+        waker: &core::task::Waker,
+    ) -> Result<bool, BackendError> {
+        event.notification.register(waker);
+        Ok(true)
     }
 
     fn poll_event(&self, event: &Self::Event) -> Result<EventState, BackendError> {

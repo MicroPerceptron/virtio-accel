@@ -517,11 +517,12 @@ void *va_coreml_submit(void *model,
                        size_t binding_count,
                        void *context,
                        va_coreml_release_context_fn release_context,
+                       va_coreml_release_context_fn notify_context,
                        struct va_coreml_error *error) {
     struct VAEvent *eventForException = NULL;
     @autoreleasepool {
         va_set_error(error, VA_COREML_OK, 0, 0);
-        if (model == NULL || bindings == NULL || context == NULL || release_context == NULL) {
+        if (model == NULL || bindings == NULL || context == NULL || release_context == NULL || notify_context == NULL) {
             va_set_error(error, VA_COREML_INVALID_ARGUMENT, VA_COREML_BRIDGE_DOMAIN, 16);
             return NULL;
         }
@@ -629,6 +630,7 @@ void *va_coreml_submit(void *model,
                     }
                     release_context(context);
                     atomic_store_explicit(&event->status, terminalStatus, memory_order_release);
+                    notify_context(context);
                     va_event_release_inner(event);
                 }
             }];
@@ -650,11 +652,12 @@ void *va_coreml_submit_copy(const void *source,
                             uint64_t bytes,
                             void *context,
                             va_coreml_release_context_fn release_context,
+                            va_coreml_release_context_fn notify_context,
                             struct va_coreml_error *error) {
     @autoreleasepool {
         va_set_error(error, VA_COREML_OK, 0, 0);
         if (source == NULL || destination == NULL || bytes == 0 ||
-            bytes > SIZE_MAX || context == NULL || release_context == NULL) {
+            bytes > SIZE_MAX || context == NULL || release_context == NULL || notify_context == NULL) {
             va_set_error(error, VA_COREML_INVALID_ARGUMENT, VA_COREML_BRIDGE_DOMAIN, 28);
             return NULL;
         }
@@ -668,6 +671,7 @@ void *va_coreml_submit_copy(const void *source,
                 memmove(destination, source, copyBytes);
                 release_context(context);
                 atomic_store_explicit(&event->status, VA_COREML_EVENT_COMPLETE, memory_order_release);
+                notify_context(context);
                 va_event_release_inner(event);
             }
         });

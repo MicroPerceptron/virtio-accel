@@ -17,6 +17,25 @@ asks pkg-config for `openvino` and enables the native modules only on success.
 placeholder, and `VIRTIO_ACCEL_OPENVINO_LIB_DIR` links archive installs that ship no pkg-config
 metadata. Builds without the runtime still compile and unit-test the portable TOSA-to-IR encoder.
 
+## Shared host inputs and output views
+
+Native builds expose `SharedInput::initialize(bytes, alignment, fill)` to allocate
+and initialize owned page-aligned storage once. After initialization it is
+immutable and cloneable across device-owning threads. `import_shared_input`
+creates context-local, read-only buffers over the same allocation: no per-device
+upload copy is performed. Events retain storage even if caller handles disappear.
+Producers can fill the shared allocation directly instead of staging a `Vec` first.
+
+`OpenVinoBuffer::with_bytes` inspects output storage through a scoped immutable
+borrow, without `read_buffer` or a readback allocation. A read guard rejects native
+writers for the callback lifetime, including reentrant submissions; the borrow
+cannot escape and panic releases the guard. The output still must be quiescent.
+
+These are safe host-only APIs; no wire-level external-memory feature is added.
+They eliminate explicit provider transfers but do not attest to plugin-internal
+staging. Column packing or dense output assembly may still copy application data.
+See [ADR 0017](../../docs/adr/0017-openvino-shared-inputs.md) and [the audit](SAFETY.md).
+
 ## Production TOSA artifacts
 
 The production path accepts `virtio-accel-tosa` artifacts (`ArtifactFormat` `"TOSA"`) declaring
@@ -131,6 +150,21 @@ re-initialization is not crash-safe on driverless hosts (see `SAFETY.md`). Devic
 the corresponding Intel Level Zero vendor driver is installed. A plugin that rejects a model —
 for example FP32 on an FP16-centric NPU compiler — surfaces the failure from `load_program`;
 nothing is silently downconverted or re-placed by this crate.
+
+### External GPU residuals
+
+On Panther Lake with OpenVINO 2026.4.0, an FP32 constant-weight MatMul followed by
+an Add of a runtime residual can fuse into a GPU sum post-op that reads stale
+output instead of the residual. GPU lowering expresses this specific Add as
+`product - (-residual)`, with either original operand order. Negation is exact;
+the rewrite adds no host copies or submission-time compilation. CPU and NPU
+lowering remain unchanged. This is a correctness workaround, not a promise that
+the vendor will fuse every pointwise operation into one kernel.
+
+`external_residual_is_read_on_every_reused_request` exercises all enumerated
+endpoints, two operand orders, three shapes, and eight changing-input iterations.
+It passed on Biggertron's CPU, GPU and NPU; the GPU failure was also reproduced
+through OpenVINO directly, outside the request cache and AXIR scheduler.
 
 ## Running
 

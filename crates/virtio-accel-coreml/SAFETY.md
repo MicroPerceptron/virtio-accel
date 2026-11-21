@@ -50,3 +50,14 @@ Constant INT4/INT8 and palette lowering uses safe Rust and the existing owned ML
 byte buffer. Packed MIL types never become boundary tensors. No new FFI function, buffer
 ownership rule or submission-time conversion is introduced. The optional compute-plan
 diagnostic is a standalone Objective-C program outside the adapter's FFI boundary.
+
+## Completion notification
+
+Prediction and exact-copy submissions transfer one boxed `CompletionContext` to
+the native completion block. Its first callback clears buffer backing guards;
+the bridge then release-publishes terminal status. A second callback consumes the
+box, signals its `Arc<CompletionNotification>`, and catches waker unwinding before
+returning across the ABI. The public event owns another Arc, so registration can
+race either callback or occur after completion. Dropping the public event early
+does not invalidate callback state. Failed admission transfers no context and
+Rust reclaims the box. Notification never substitutes for authoritative polling.

@@ -104,7 +104,7 @@ fn export_compressed_projection_for_native_inspection() {
     let lowered = lower_tosa(&graph, quantized::TARGET).unwrap();
     std::fs::write(dir.join("int4.xml"), lowered.xml).unwrap();
     std::fs::write(dir.join("int4.bin"), lowered.weights).unwrap();
-    let lowered = lower_tosa_with_weights(&graph, quantized::TARGET, true).unwrap();
+    let lowered = lower_tosa_with_weights(&graph, quantized::TARGET, true, false).unwrap();
     std::fs::write(dir.join("int4-expanded.xml"), lowered.xml).unwrap();
     std::fs::write(dir.join("int4-expanded.bin"), lowered.weights).unwrap();
 }
@@ -112,7 +112,7 @@ fn export_compressed_projection_for_native_inspection() {
 #[test]
 fn expanded_constants_round_fractional_scales_at_load_time() {
     let graph = quantized::int4_matmul_fp16(1, 1, 4, 2, &[0x78, 0xf1], &[0x3555, 0x399a]).unwrap();
-    let lowered = lower_tosa_with_weights(&graph, quantized::TARGET, true).unwrap();
+    let lowered = lower_tosa_with_weights(&graph, quantized::TARGET, true, false).unwrap();
     let xml = std::str::from_utf8(&lowered.xml).unwrap();
     let pos = xml.find("_rounded_weights\"").unwrap();
     let data = &xml[pos..];
