@@ -79,8 +79,9 @@ def main():
         )
     if args.iommu and args.target != "aarch64":
         # Virtio MMIO has no route to an IOMMU in QEMU, and microvm has no
-        # PCI. An x86 machine with one (q35, intel-iommu) has not been run.
-        parser.error("--iommu is validated on --target aarch64 only")
+        # PCI. q35 behind intel-iommu was measured without a guest, but this
+        # launcher's x86 machine is microvm and no guest has booted on q35.
+        parser.error("--iommu is assembled for --target aarch64 only")
     if args.accel == "kvm" and not args.dry_run:
         try:
             with open("/dev/kvm", "rb+"):

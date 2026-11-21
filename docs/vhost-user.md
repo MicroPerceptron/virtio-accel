@@ -103,8 +103,11 @@ drivers are not trusted with that needs the device confined, and `--iommu` confi
   chain unusable (used length 0), exactly like any other unreachable buffer.
 
 The frontend must be Virtio PCI with `iommu_platform=on` behind the machine's IOMMU; QEMU does not
-route a Virtio MMIO transport through one. `launch.py --iommu` assembles both halves (aarch64
-`virt` with SMMUv3; an x86 machine has not been run). QEMU patches 3 and 4 above are required for
+route a Virtio MMIO transport through one. `launch.py --iommu` assembles both halves for aarch64
+`virt` with SMMUv3. The same daemon and patches were also measured, without a guest, on x86 q35
+behind `intel-iommu` (legacy mode, queued invalidation); the launcher does not assemble that
+machine. An `intel-iommu` built with `snoop-control=on` cannot be used: QEMU exits when a vhost
+device starts behind it. QEMU patches 3 and 4 above are required for
 the confinement to be real, and `vendor/vhost` must be the `vhost` 0.16.0 crate with IOTLB support
 added: no released version has the backend side.
 
