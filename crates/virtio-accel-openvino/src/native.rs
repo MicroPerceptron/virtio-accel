@@ -2,8 +2,8 @@
 //!
 //! Every `unsafe` block carries a `SAFETY:` comment referencing the invariants audited in
 //! `SAFETY.md`. Each OpenVINO handle has exactly one Rust owner with a `Drop` implementation;
-//! the shared `ov_core_t` is process-wide. Completion is poll-latched: no foreign callback ever
-//! owns Rust memory.
+//! the shared `ov_core_t` is process-wide. A request-owned callback only publishes
+//! a notification; the owning thread observes native status and releases storage.
 
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::cell::{Cell, RefCell, RefMut};
@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 use virtio_accel_core::{
     Accelerator, AcceleratorClass, AccessMode, AllocatedBuffer, ArtifactRef, BackendError,
     BindingRef, BufferDesc, BufferInfo, BufferProperties, BufferUsage, ByteSink, ByteSource,
-    Capabilities, ContextDesc, DeviceIdentity, DeviceInfo, DeviceLimits, EventState, MemoryDomain,
-    QueueDesc, ReleaseFailure, SubmitFailure, Timeout,
+    Capabilities, CompletionNotification, ContextDesc, DeviceIdentity, DeviceInfo, DeviceLimits,
+    EventState, MemoryDomain, QueueDesc, ReleaseFailure, SubmitFailure, Timeout,
 };
 use virtio_accel_tosa::{CapabilityDescriptor, TosaCapabilityProvider};
 
@@ -875,7 +875,37 @@ impl std::fmt::Debug for OpenVinoProgram {
 // Only completed requests enter this bounded per-program cache. Their tensor
 // wrappers retain allocations, but access guards are reacquired on every start.
 const MAX_IDLE_REQUESTS: usize = 8;
+// The C runtime captures the ADDRESS of ov_callback_t, not a copy. Both the
+// ABI record and its argument therefore live in one request-owned stable Box.
+struct CallbackState {
+    notification: CompletionNotification,
+    record: ffi::ov_callback_t,
+}
+impl CallbackState {
+    fn new() -> Box<Self> {
+        let mut state = Box::new(Self {
+            notification: CompletionNotification::default(),
+            record: ffi::ov_callback_t {
+                callback_func: completion_callback,
+                args: ptr::null_mut(),
+            },
+        });
+        state.record.args = (&state.notification as *const CompletionNotification)
+            .cast_mut()
+            .cast();
+        state
+    }
+}
+unsafe extern "C" fn completion_callback(context: *mut c_void) {
+    // SAFETY: the event/cache owns the stable Box until request destruction has
+    // joined callbacks. Reset/reuse happens only after native terminal observation.
+    let notification = unsafe { &*context.cast::<CompletionNotification>() };
+    // A user-supplied waker must never unwind across the foreign ABI.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| notification.notify()));
+}
+
 struct CachedRequest {
+    callback: Option<Box<CallbackState>>,
     request: NonNull<ffi::ov_infer_request_t>,
     tensors: Vec<BoundTensor>,
 }
@@ -899,6 +929,7 @@ pub struct OpenVinoQueue {
 /// observed terminal state is latched; the guards are dropped strictly before the latch is
 /// published.
 pub struct OpenVinoEvent {
+    callback: Option<Box<CallbackState>>,
     resident: Rc<ProgramResident>,
     request: NonNull<ffi::ov_infer_request_t>,
     metadata: RefCell<EventMetadata>,
@@ -980,6 +1011,7 @@ impl Drop for OpenVinoEvent {
         {
             let tensors = mem::take(&mut self.metadata.borrow_mut().tensors);
             self.resident.idle.borrow_mut().push(CachedRequest {
+                callback: self.callback.take(),
                 request: self.request,
                 tensors,
             });
@@ -1233,6 +1265,33 @@ impl OpenVinoAccelerator {
         Ok((start, end))
     }
 
+    /// Owning-worker completion observation. After a callback hint, explicitly
+    /// join its retirement to obtain the C API's authoritative success/error.
+    /// OpenVINO publishes that result AFTER its callback returns. This may block
+    /// for the callback tail; never call it from submit, poll_event or a callback.
+    /// Without a hint it performs the ordinary nonblocking readiness probe.
+    pub fn observe_notified_event(
+        &self,
+        event: &OpenVinoEvent,
+    ) -> Result<EventState, BackendError> {
+        if let Some(state) = event.latched.get() {
+            return Ok(state);
+        }
+        if event
+            .callback
+            .as_ref()
+            .expect("event callback")
+            .notification
+            .is_notified()
+        {
+            // SAFETY: the event retains a live request and all storage; its
+            // callback only notifies and does not depend on the owning worker.
+            let status = unsafe { (ffi::api().ov_infer_request_wait)(event.request.as_ptr()) };
+            return Ok(self.latch_request_status(event, status));
+        }
+        Ok(self.poll_request(event))
+    }
+
     fn lowering_error(error: crate::LoweringError) -> BackendError {
         match error {
             crate::LoweringError::Parse(_)
@@ -1270,6 +1329,10 @@ impl OpenVinoAccelerator {
                 return EventState::Pending;
             }
         }
+        self.latch_request_status(event, status)
+    }
+
+    fn latch_request_status(&self, event: &OpenVinoEvent, status: ffi::ov_status_e) -> EventState {
         let state = match status {
             ffi::OV_STATUS_OK => match event.outputs_are_directly_backed() {
                 Ok(true) => EventState::Complete,
@@ -1654,13 +1717,16 @@ impl Accelerator for OpenVinoAccelerator {
         // Native phase. Failures below free every created handle and reject: nothing observable
         // was started until `start_async` succeeds, so `SubmitFailure::Indeterminate` is never
         // produced.
-        let request = if let Some(mut cached) = program.resident.idle.borrow_mut().pop() {
+        let (request, mut callback) = if let Some(mut cached) =
+            program.resident.idle.borrow_mut().pop()
+        {
             event_metadata.tensors = mem::take(&mut cached.tensors);
             let request = cached.request;
+            let callback = cached.callback.take().expect("cached callback");
             // Transfer request ownership into the event without freeing it.
             mem::forget(cached);
             self.native_requests_reused.fetch_add(1, Ordering::Relaxed);
-            request
+            (request, callback)
         } else {
             let mut request = ptr::null_mut();
             // SAFETY: compiled model is live and request is a valid out-pointer.
@@ -1676,10 +1742,22 @@ impl Accelerator for OpenVinoAccelerator {
                     domain: OPENVINO_EXTERNAL_DOMAIN,
                     code: 0,
                 }))?;
+            let callback = CallbackState::new();
+            // SAFETY: both request and callback record are stable and remain owned
+            // until after native request destruction. Nothing has started yet.
+            if let Err(error) = check_status(unsafe {
+                (ffi::api().ov_infer_request_set_callback)(request.as_ptr(), &callback.record)
+            }) {
+                // SAFETY: no inference was started; free before the callback Box.
+                unsafe { (ffi::api().ov_infer_request_free)(request.as_ptr()) };
+                return Err(SubmitFailure::Rejected(error));
+            }
             self.native_requests_created.fetch_add(1, Ordering::Relaxed);
-            request
+            (request, callback)
         };
+        callback.notification.reset();
         let event = OpenVinoEvent {
+            callback: Some(callback),
             resident: program.resident.clone(),
             request,
             metadata: RefCell::new(event_metadata),
@@ -1771,6 +1849,24 @@ impl Accelerator for OpenVinoAccelerator {
         self.direct_binding_admissions
             .fetch_add(bindings.len() as u64, Ordering::Relaxed);
         Ok(event)
+    }
+
+    fn register_event_waker(
+        &self,
+        event: &Self::Event,
+        waker: &core::task::Waker,
+    ) -> Result<bool, BackendError> {
+        // Deadline cancellation still requires the caller's timer/poll path.
+        if event.deadline.is_some() {
+            return Ok(false);
+        }
+        event
+            .callback
+            .as_ref()
+            .expect("event callback")
+            .notification
+            .register(waker);
+        Ok(true)
     }
 
     fn poll_event(&self, event: &Self::Event) -> Result<EventState, BackendError> {
@@ -1952,8 +2048,43 @@ mod tests {
         }
     }
 
+    struct CompletionWake {
+        ready: std::sync::atomic::AtomicBool,
+        thread: std::thread::Thread,
+    }
+    impl std::task::Wake for CompletionWake {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.ready.store(true, std::sync::atomic::Ordering::Release);
+            self.thread.unpark();
+        }
+    }
     fn wait_for_terminal(backend: &OpenVinoAccelerator, event: &OpenVinoEvent) -> EventState {
+        let observer = std::sync::Arc::new(CompletionWake {
+            ready: std::sync::atomic::AtomicBool::new(false),
+            thread: std::thread::current(),
+        });
+        let waker = core::task::Waker::from(observer.clone());
+        let notified = backend.register_event_waker(event, &waker).unwrap();
         let deadline = Instant::now() + Duration::from_secs(15);
+        if notified {
+            while !observer.ready.load(std::sync::atomic::Ordering::Acquire) {
+                let left = deadline
+                    .checked_duration_since(Instant::now())
+                    .expect("completion notification lost");
+                std::thread::park_timeout(left);
+            }
+            let terminal = backend.observe_notified_event(event).unwrap();
+            assert_ne!(terminal, EventState::Pending);
+            observer
+                .ready
+                .store(false, std::sync::atomic::Ordering::Release);
+            assert!(backend.register_event_waker(event, &waker).unwrap());
+            assert!(
+                observer.ready.load(std::sync::atomic::Ordering::Acquire),
+                "late registration lost"
+            );
+            return terminal;
+        }
         loop {
             match backend.poll_event(event).unwrap() {
                 EventState::Pending => {

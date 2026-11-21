@@ -32,7 +32,7 @@ multiple native readers or one native writer, rejects host transfers while eithe
 active, and rejects every conflicting submission. Multiple bindings from one event to the same
 allocation are collapsed to the strongest required access before acquiring a guard.
 
-Event completion is poll-latch: no foreign callback ever owns Rust memory. Each submission's
+Event completion retains authoritative poll-latch state observation. Each submission's
 infer request, bound tensors, and backing guards are owned by the Rust event handle. Polling
 probes the request without blocking; on the first terminal observation the backing guards are
 dropped strictly before the latched state becomes observable, so a caller that sees a terminal
@@ -130,3 +130,22 @@ is internal constant storage only: no i4 type can reach host buffer binding/alig
 On Windows an explicit runtime path is made absolute and loaded with
 `LOAD_WITH_ALTERED_SEARCH_PATH`, keeping dependent DLL lookup relative to that
 library without mutating the process-wide DLL search configuration.
+
+## Completion notification
+
+The optional host waker adds no wire capability. A request-owned stable
+`Box<CallbackState>` contains both `ov_callback_t` and its notification word:
+the OpenVINO C wrapper captures the callback record's address, not a copy.
+The foreign callback borrows only this notification object, never the Rust event,
+buffers or non-Send native handles. Waker panics are caught at the ABI boundary.
+Native request destruction precedes callback storage destruction on every path.
+Cached requests retain the box and reset its registration only after terminal
+native observation proves the previous callback has returned.
+
+The C callback omits the exception status and precedes publication of the final
+native promise. It is a hint, not a completion latch. `poll_event` still uses a
+zero-timeout probe. The explicit owning-worker `observe_notified_event` may join
+only a notified callback's retirement via native wait, then check the result and
+release backing guards. Callback code must stay bounded and cannot depend on the
+waiting worker. Events with deadlines decline registration, preserving timed
+cancellation observation. Registration after notification wakes immediately.

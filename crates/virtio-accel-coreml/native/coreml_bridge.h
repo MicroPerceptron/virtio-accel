@@ -87,6 +87,7 @@ void *va_coreml_submit(void *model,
                        size_t binding_count,
                        void *context,
                        va_coreml_release_context_fn release_context,
+                       va_coreml_release_context_fn notify_context,
                        struct va_coreml_error *error);
 
 void *va_coreml_submit_copy(const void *source,
@@ -94,6 +95,7 @@ void *va_coreml_submit_copy(const void *source,
                             uint64_t bytes,
                             void *context,
                             va_coreml_release_context_fn release_context,
+                            va_coreml_release_context_fn notify_context,
                             struct va_coreml_error *error);
 
 uint32_t va_coreml_event_poll(void *event, struct va_coreml_error *error);

@@ -134,18 +134,44 @@ fn split_artifact() -> Vec<u8> {
         .unwrap()
 }
 
+struct CompletionWake {
+    ready: std::sync::atomic::AtomicBool,
+    thread: std::thread::Thread,
+}
+impl std::task::Wake for CompletionWake {
+    fn wake(self: std::sync::Arc<Self>) {
+        self.ready.store(true, std::sync::atomic::Ordering::Release);
+        self.thread.unpark();
+    }
+}
 fn wait_for_terminal(
     backend: &CoreMlAccelerator,
     event: &CoreMlEvent,
 ) -> Result<EventState, BackendError> {
+    let observer = std::sync::Arc::new(CompletionWake {
+        ready: std::sync::atomic::AtomicBool::new(false),
+        thread: std::thread::current(),
+    });
+    let waker = core::task::Waker::from(observer.clone());
+    assert!(backend.register_event_waker(event, &waker)?);
     let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        match backend.poll_event(event)? {
-            EventState::Pending if Instant::now() < deadline => std::thread::yield_now(),
-            EventState::Pending => return Err(BackendError::DeadlineExpired),
-            terminal => return Ok(terminal),
-        }
+    while !observer.ready.load(std::sync::atomic::Ordering::Acquire) {
+        let left = deadline
+            .checked_duration_since(Instant::now())
+            .expect("completion notification lost");
+        std::thread::park_timeout(left);
     }
+    let terminal = backend.poll_event(event)?;
+    assert_ne!(terminal, EventState::Pending);
+    observer
+        .ready
+        .store(false, std::sync::atomic::Ordering::Release);
+    assert!(backend.register_event_waker(event, &waker)?);
+    assert!(
+        observer.ready.load(std::sync::atomic::Ordering::Acquire),
+        "late registration lost"
+    );
+    Ok(terminal)
 }
 
 fn run_tosa_bytes(
