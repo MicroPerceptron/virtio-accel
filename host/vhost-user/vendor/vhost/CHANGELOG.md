@@ -1,0 +1,201 @@
+# Changelog
+
+## [Unreleased]
+
+### Added
+### Changed
+### Deprecated
+### Fixed
+
+## v0.16.0
+
+### Added
+- [[#251]](https://github.com/rust-vmm/vhost/pull/251) Add `SHMEM_MAP` and `SHMEM_UNMAP` support
+- [[#336]](https://github.com/rust-vmm/vhost/pull/336) Add frontend support for device state transfer (`VHOST_USER_PROTOCOL_F_DEVICE_STATE`)
+- [[#339]](https://github.com/rust-vmm/vhost/pull/339) Add support for `GET_SHMEM_CONFIG` message
+
+### Changed
+- [[#338]](https://github.com/rust-vmm/vhost/pull/338) Implement `From<Error>` for `io::Error`, rename `Backend::node` to `inner` and inline `lock()` calls
+- [[#347]](https://github.com/rust-vmm/vhost/pull/347) Shift feature bits to accommodate `GET_VRING_BASE_INFLIGHT` spec change
+
+### Fixed
+- [[#338]](https://github.com/rust-vmm/vhost/pull/338) vhost: fix double-locking in Backend to Frontend request handlers
+- [[#342]](https://github.com/rust-vmm/vhost/pull/342) vhost-user: frontend: Read the full reply for set_log_base
+
+## v0.15.0
+
+### Added
+- [[#311]](https://github.com/rust-vmm/vhost/pull/311) Implement
+  `From<UnixListener>` for `vhost_user::Listener`.
+
+### Changed
+- [[#321]](https://github.com/rust-vmm/vhost/pull/321) Don't take ownership of listener in `BackendListener`.
+- [[#334]](https://github.com/rust-vmm/vhost/pull/334) Updated vm-memory to 0.17.1 and vmm-sys-util to 0.15.0
+
+### Fixed
+- [[#304]](https://github.com/rust-vmm/vhost/pull/304) Fix building docs.
+- [[#326]](https://github.com/rust-vmm/vhots/pull/326) Fix `get_vring_base()` returning 0 instead of
+  the vring base for vhost-kern backends when compiling in release mode.
+
+## v0.14.0
+
+### Added
+- [[#268]](https://github.com/rust-vmm/vhost/pull/268) Add support for `VHOST_USER_GET_SHARED_OBJECT`
+
+### Changed
+- [[#290]](https://github.com/rust-vmm/vhost/pull/290) Backends now
+  always support `VHOST_USER_PROTOCOL_F_REPLY_ACK`, without the
+  `VhostUserBackendReqHandler` implementation having to include it in
+  the features returned from `get_protocol_features`.
+- [[#295]](https://github.com/rust-vmm/vhost/pull/295) Updated vm-memory to 0.16.2 and vmm-sys-util to 0.14.0
+
+### Fixed
+- [[#277]](https://github.com/rust-vmm/vhost/pull/277) vhost: Fix reply header for error case in POSTCOPY_ADVISE
+
+## v0.13.0
+
+### Added
+- [[#266]](https://github.com/rust-vmm/vhost/pull/266) Add support for `VHOST_USER_RESET_DEVICE`
+
+### Changed
+- [[#269]](https://github.com/rust-vmm/vhost/pull/269) Update vm-memory to 0.16.0 and virtio-queue to 0.13.0
+
+## v0.12.1
+
+### Fixed
+- [[#267]](https://github.com/rust-vmm/vhost/pull/267) Fix feature unification issues with gpu-socket feature.
+
+## v0.12.0 - yanked
+
+This version got yanked because the `gpu_socket` feature introduced in this
+release was causing problems
+(see [#265](https://github.com/rust-vmm/vhost/issues/265)).
+Starting with the next version (v0.12.1), the `gpu_socket` feature was removed.
+
+### Added
+- [[#241]](https://github.com/rust-vmm/vhost/pull/241) Add shared objects support
+- [[#239]](https://github.com/rust-vmm/vhost/pull/239) Add support for `VHOST_USER_GPU_SET_SOCKET`
+
+### Changed
+- [[#257]](https://github.com/rust-vmm/vhost/pull/257) Update vm-memory from 0.14.0 to 0.15.0.
+- [[#243]](https://github.com/rust-vmm/vhost/pull/243) Ignore unknown bits in `VHOST_USER_GET_PROTOCOL_FEATURES` response.
+
+### Remove
+- [[#246]](https://github.com/rust-vmm/vhost/pull/246) Remove support for FS_* requests
+
+## v0.11.0
+
+### Added
+- [[#203]](https://github.com/rust-vmm/vhost/pull/203) Add back-end's internal state migration support
+- [[#218]](https://github.com/rust-vmm/vhost/pull/218) Adding POSTCOPY support
+- [[#206]](https://github.com/rust-vmm/vhost/pull/206) Add bitmap support for tracking dirty pages during migration
+
+## v0.10.0
+
+### Changed
+- [[#219]](https://github.com/rust-vmm/vhost/pull/219) Update vmm-sys-util dependency to 0.12.1.
+
+### Remove
+- [[#202]](https://github.com/rust-vmm/vhost/pull/202) Do not expose for internal-usage-only `NOOP` and `MAX_CMD` requests.
+- [[#205]](https://github.com/rust-vmm/vhost/pull/205) Remove some commented out code.
+
+### Fixed
+- [[#208]](https://github.com/rust-vmm/vhost/pull/208) Fix various message structs being `repr(Rust)` instead of `repr(C)`.
+
+## v0.9.0
+
+### Changed
+- [[#187]](https://github.com/rust-vmm/vhost/pull/187) Clean master slave
+  - Replaced master/slave with frontend/backend in the codebase and public API.
+  - Replaced master/slave with frontend/backend in the crate features.
+- Updated dependency bitflags from 1.0 to 2.4
+- [[#116]](https://github.com/rust-vmm/vhost/pull/116) Upgrade to 2021 edition
+
+### Fixed
+- [[#184]](https://github.com/rust-vmm/vhost/pull/184) Safety fixes
+- [[#186]](https://github.com/rust-vmm/vhost/pull/186) vhost: Fix clippy warnings.
+
+## v0.8.1
+
+### Fixed
+- [[#175]](https://github.com/rust-vmm/vhost/pull/175) vhost: Always enable vm-memory/backend-mmap
+
+## v0.8.0
+
+### Added
+- [[#169]](https://github.com/rust-vmm/vhost/pull/160) vhost: Add xen memory mapping support
+
+### Fixed
+- [[#165]](https://github.com/rust-vmm/vhost/pull/165) vhost: vdpa: Provide custom set_vring_addr() implementation
+- [[#172]](https://github.com/rust-vmm/vhost/pull/172) Vhost user fix
+
+## v0.7.0
+
+### Added
+- [[#137]](https://github.com/rust-vmm/vhost/pull/137) vhost_user: add Error::Disconnected
+
+### Changed
+- Updated dependency vm-memory 0.10.0 to 0.11.0
+
+### Fixed
+- [[#135]](https://github.com/rust-vmm/vhost/pull/135) vhost_user: fix UB on invalid master request
+- [[#136]](https://github.com/rust-vmm/vhost/pull/136) vhost_user: fix unsound send_message functions
+- [[#153]](https://github.com/rust-vmm/vhost/pull/153) Fix set_vring_addr issues
+
+### Deprecated
+
+## v0.6.0
+
+### Upgraded
+- vm-memory from 0.9 to 0.10
+- vmm-sys-util from 0.10 to 0.11
+
+## v0.5.0
+
+### Changed
+- [[#113]](https://github.com/rust-vmm/vhost/pull/113) Improved error messages.
+- [[#115]](https://github.com/rust-vmm/vhost/pull/115) Use caret requirements for dependencies.
+
+## v0.4.0
+
+### Added
+- [[#109]](https://github.com/rust-vmm/vhost/pull/109) vhost_kern: vdpa: Override the implementation of valid()
+
+### Fixed
+- [[#102]](https://github.com/rust-vmm/vhost/pull/102) Fix warnings and update test coverage
+- [[#104]](https://github.com/rust-vmm/vhost/pull/104) fix CODEOWNERS file
+- [[#107]](https://github.com/rust-vmm/vhost/pull/107) vhost_kern/vdpa: fix get_iova_range()
+
+## v0.3.0
+
+### Added
+- [[#92]](https://github.com/rust-vmm/vhost/pull/92) implement vhost_net backend
+- [[#97]](https://github.com/rust-vmm/vhost/pull/97) add method to restore Vdpa objects
+
+### Changed
+- [[#90]](https://github.com/rust-vmm/vhost/pull/90) add vdpa and vhost-vdpa simple description
+- [[#90]](https://github.com/rust-vmm/vhost/pull/90) use vmm_sys_util::fam for vhost_vdpa_config
+- [[#95]](https://github.com/rust-vmm/vhost/pull/95) relax vm-memory dependency
+- [[#98]](https://github.com/rust-vmm/vhost/pull/98) generate documentation for doc.rs with all features enabled
+
+### Fixed
+- [[#98]](https://github.com/rust-vmm/vhost/pull/98) fix a bug in SlaveReqHandler::set_config() which passes wrong configuration data to backend
+
+### Deprecated
+- [[#90]](https://github.com/rust-vmm/vhost/pull/90) remove parse_iotlb_msg
+
+## v0.2.0
+
+### Added
+
+- [[#74]](https://github.com/rust-vmm/vhost/pull/74) Implement FromRawFd for Listener
+
+- [[#33]](https://github.com/rust-vmm/vhost/pull/33) Add vhost-vDPA support (in-kernel)
+
+### Changed
+
+- [[#68]](https://github.com/rust-vmm/vhost/pull/68) Enforce ByteValued for received structs
+
+## v0.1.0
+
+First release

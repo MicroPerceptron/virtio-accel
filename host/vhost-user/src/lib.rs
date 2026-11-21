@@ -2,10 +2,11 @@
 //! No guest pointers reach the portable command processor or accelerator backend.
 #![forbid(unsafe_code)]
 
+mod iommu;
 mod memory;
 mod server;
 
-pub use server::{Host, serve};
+pub use server::{Host, Step, serve};
 
 use virtio_accel_proto::{Le16, Le32, WireConfig};
 
@@ -23,3 +24,6 @@ pub const CONFIG: WireConfig = WireConfig {
 
 /// Base Virtio and vhost-user features. Device-specific features remain zero.
 pub const FEATURES: u64 = (1 << 32) | (1 << 30);
+/// `VIRTIO_F_ACCESS_PLATFORM`: the device reaches memory through the platform
+/// IOMMU. Offered, and then required, only when the daemon is started behind one.
+pub const ACCESS_PLATFORM: u64 = 1 << 33;

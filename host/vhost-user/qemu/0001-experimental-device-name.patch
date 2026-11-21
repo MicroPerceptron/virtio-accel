@@ -1,12 +1,15 @@
 diff --git a/hw/virtio/virtio.c b/hw/virtio/virtio.c
 --- a/hw/virtio/virtio.c
 +++ b/hw/virtio/virtio.c
-@@ -202,6 +202,10 @@
+@@ -202,6 +202,13 @@
  static const char *virtio_id_to_name(uint16_t device_id)
  {
-+    /* Local development identity; not an assigned device type. */
-+    if (device_id == UINT16_MAX) {
-+        return "virtio-experimental";
++    /*
++     * virtio-accel's provisional device type: not assigned by the Virtio
++     * TC, and small enough for the modern PCI device ID (0x1040 + type).
++     */
++    if (device_id == 56) {
++        return "virtio-accel";
 +    }
      assert(device_id < G_N_ELEMENTS(virtio_device_names));
      const char *name = virtio_device_names[device_id];

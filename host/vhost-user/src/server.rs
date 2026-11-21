@@ -6,8 +6,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
-use vhost::vhost_user::GpuBackend;
 use vhost::vhost_user::message::*;
+use vhost::vhost_user::{Backend, GpuBackend};
 use vhost::vhost_user::{BackendReqHandler, Error, Result, VhostUserBackendReqHandlerMut};
 use virtio_accel_core::{Accelerator, TransportByteSink, TransportByteSource};
 use virtio_accel_device::{
@@ -19,8 +19,9 @@ use virtio_queue::{Queue, QueueOwnedT, QueueT, desc::split::Descriptor};
 use vm_memory::{Address, Bytes, FileOffset, GuestAddress, GuestMemory, GuestMemoryMmap};
 use zerocopy::IntoBytes;
 
+use crate::iommu::Iotlb;
 use crate::memory::{Port, Segment};
-use crate::{CONFIG, FEATURES, MAX_DESCRIPTORS, QUEUE_SIZE};
+use crate::{ACCESS_PLATFORM, CONFIG, FEATURES, MAX_DESCRIPTORS, QUEUE_SIZE};
 
 fn invalid() -> Error {
     Error::InvalidParam
@@ -31,10 +32,37 @@ fn mapped<T, E>(result: std::result::Result<T, E>) -> Result<T> {
 fn index(value: u32) -> Result<()> {
     if value == 0 { Ok(()) } else { Err(invalid()) }
 }
-fn protocols() -> VhostUserProtocolFeatures {
-    VhostUserProtocolFeatures::CONFIG
-        | VhostUserProtocolFeatures::REPLY_ACK
-        | VhostUserProtocolFeatures::RESET_DEVICE
+/// What one call to [`Host::process_queue`] left to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// Nothing is available; wait for a kick.
+    Idle,
+    /// A bounded batch completed and more may be available.
+    More,
+    /// The device needs the translation of `iova` before it can go on. Nothing
+    /// was consumed: the same work is found again once the frontend answers.
+    Miss { iova: u64, write: bool },
+}
+
+/// How one chain ended.
+enum Outcome {
+    /// Completed, with this many bytes written.
+    Used(u32),
+    /// A buffer is not translated yet.
+    Miss { iova: u64, write: bool },
+}
+
+/// The address space the queue's addresses name: the IOMMU domain's granted
+/// ranges when there is one, all of guest RAM otherwise.
+fn view<'a>(
+    iotlb: &'a Option<Iotlb>,
+    memory: &'a Option<GuestMemoryMmap>,
+) -> Result<&'a GuestMemoryMmap> {
+    iotlb
+        .as_ref()
+        .map(Iotlb::view)
+        .or(memory.as_ref())
+        .ok_or_else(invalid)
 }
 fn overlaps(a: u64, alen: u64, b: u64, blen: u64) -> bool {
     a < b.saturating_add(blen) && b < a.saturating_add(alen)
@@ -56,6 +84,25 @@ pub struct Host<A: Accelerator> {
     kick: Option<File>,
     call: Option<File>,
     error: Option<File>,
+    /// The device sits behind the platform IOMMU: `VIRTIO_F_ACCESS_PLATFORM`
+    /// is offered and required, and every address is an I/O virtual address.
+    iommu: bool,
+    /// The domain's granted ranges; replaces `memory` when `iommu`.
+    iotlb: Option<Iotlb>,
+    /// The channel misses are sent on, and a handle to wait for its replies.
+    backend: Option<(Backend, UnixStream)>,
+    reply_ack: bool,
+    /// The address the frontend last answered a miss for. Finding the same
+    /// address missing again means it has no translation: asking twice
+    /// would ask forever.
+    asked: Option<u64>,
+    /// A ring address has no translation. The queue stays stopped until the
+    /// driver describes it again.
+    parked: bool,
+    /// Behind an IOMMU the ring addresses arrive exactly as the driver wrote
+    /// them. Whether they describe a queue at all is recorded here rather
+    /// than answered with an error: see `set_vring_enable`.
+    described: bool,
 }
 
 impl<A: Accelerator> Host<A> {
@@ -81,7 +128,74 @@ impl<A: Accelerator> Host<A> {
             kick: None,
             call: None,
             error: None,
+            iommu: false,
+            iotlb: None,
+            backend: None,
+            reply_ack: false,
+            asked: None,
+            parked: false,
+            described: false,
         })
+    }
+
+    /// Put the device behind the platform IOMMU.
+    ///
+    /// It then offers `VIRTIO_F_ACCESS_PLATFORM` and refuses to start without
+    /// it, so a frontend that would hand it untranslated addresses — no IOMMU
+    /// in front of the device, or `iommu_platform=off` — fails closed.
+    pub fn behind_iommu(mut self) -> Self {
+        self.iommu = true;
+        self
+    }
+
+    fn features(&self) -> u64 {
+        FEATURES | if self.iommu { ACCESS_PLATFORM } else { 0 }
+    }
+
+    fn protocols(&self) -> VhostUserProtocolFeatures {
+        let base = VhostUserProtocolFeatures::CONFIG
+            | VhostUserProtocolFeatures::REPLY_ACK
+            | VhostUserProtocolFeatures::RESET_DEVICE;
+        if self.iommu {
+            base | VhostUserProtocolFeatures::BACKEND_REQ
+        } else {
+            base
+        }
+    }
+
+    /// The channel to send a miss on, and the handle to await its reply on.
+    fn miss_channel(&self) -> Result<(Backend, UnixStream)> {
+        let (backend, replies) = self.backend.as_ref().ok_or_else(invalid)?;
+        Ok((
+            backend.clone(),
+            replies.try_clone().map_err(Error::SocketError)?,
+        ))
+    }
+
+    /// The frontend answered the miss for `iova`, with a translation or
+    /// without one.
+    fn answered(&mut self, iova: u64) {
+        self.asked = Some(iova);
+    }
+
+    /// The first ring address without a translation, if any.
+    fn ring_miss(&mut self) -> Option<Step> {
+        let iotlb = self.iotlb.as_ref()?;
+        let n = u64::from(self.queue.size());
+        let (iova, write) = [
+            (self.queue.desc_table(), n * 16, false),
+            (self.queue.avail_ring(), 6 + n * 2, false),
+            (self.queue.used_ring(), 6 + n * 8, true),
+        ]
+        .into_iter()
+        .find_map(|(base, len, write)| Some((iotlb.missing(base, len, write)?, write)))?;
+        if self.asked == Some(iova) {
+            // The driver described a ring the domain does not map.
+            self.asked = None;
+            self.parked = true;
+            return Some(Step::Idle);
+        }
+        Some(Step::Miss { iova, write })
     }
 
     fn stopped(&self) -> Result<()> {
@@ -99,6 +213,8 @@ impl<A: Accelerator> Host<A> {
         self.call = None;
         self.error = None;
         self.negotiated = false;
+        self.asked = None;
+        self.parked = false;
         self.namespace = self.namespace.checked_add(1).ok_or_else(invalid)?;
         let namespace = ObjectNamespace::new(self.namespace).ok_or_else(invalid)?;
         let report = mapped(self.processor.reset(namespace))?;
@@ -123,22 +239,41 @@ impl<A: Accelerator> Host<A> {
     }
 
     /// Process at most one queue's worth of work, then return to control messages.
-    /// `true` asks the event loop to run another bounded batch without awaiting a kick.
-    pub fn process_queue(&mut self) -> Result<bool> {
-        if !self.enabled {
-            return Ok(false);
+    /// [`Step::More`] asks the event loop to run another bounded batch without awaiting a kick.
+    pub fn process_queue(&mut self) -> Result<Step> {
+        if !self.enabled || self.parked {
+            return Ok(Step::Idle);
         }
-        let memory = self.memory.as_ref().ok_or_else(invalid)?;
+        if let Some(step) = self.ring_miss() {
+            return Ok(step);
+        }
+        let memory = view(&self.iotlb, &self.memory)?;
         for _ in 0..QUEUE_SIZE {
             // Unlike pop_descriptor_chain, iter reports invalid producer-index jumps.
             let Some(chain) = mapped(self.queue.iter(memory))?.next() else {
-                return Ok(false);
+                return Ok(Step::Idle);
             };
             let head = chain.head_index();
             if head >= self.queue.size() {
                 return Err(invalid());
             }
-            let used = Self::command(&mut self.processor, &self.queue, memory, head)?;
+            let used = match Self::command(
+                &mut self.processor,
+                &self.queue,
+                memory,
+                self.iotlb.as_ref(),
+                self.asked,
+                head,
+            )? {
+                Outcome::Used(used) => used,
+                Outcome::Miss { iova, write } => {
+                    // Hand the chain back: it is taken again, whole, once
+                    // the frontend has answered.
+                    self.queue.go_to_previous_position();
+                    return Ok(Step::Miss { iova, write });
+                }
+            };
+            self.asked = None;
             mapped(self.queue.add_used(memory, head, used))?;
             // rust-vmm supplies the publication fence but does not yet honor
             // the split ring's legacy NO_INTERRUPT hint itself.
@@ -157,15 +292,25 @@ impl<A: Accelerator> Host<A> {
                 return Err(invalid());
             }
         }
-        Ok(true)
+        Ok(Step::More)
     }
 
+    /// Run the chain at `head`.
+    ///
+    /// Behind an IOMMU (`iotlb`), every buffer is checked against the
+    /// domain before anything is dispatched, in the direction its descriptor
+    /// declares. The first address without a translation is reported as a
+    /// miss — unless it is `asked`, the address the frontend has just
+    /// answered for, in which case it has none and the chain is unusable
+    /// like any other chain naming memory the device cannot reach.
     fn command(
         processor: &mut CommandProcessor<A>,
         queue: &Queue,
         memory: &GuestMemoryMmap,
+        iotlb: Option<&Iotlb>,
+        asked: Option<u64>,
         head: u16,
-    ) -> Result<u32> {
+    ) -> Result<Outcome> {
         let mut segments = [Segment::default(); MAX_DESCRIPTORS];
         let mut regions = [ChainRegion::readable(0); MAX_DESCRIPTORS];
         let mut visited = [false; QUEUE_SIZE as usize];
@@ -178,20 +323,19 @@ impl<A: Accelerator> Host<A> {
         let mut count = 0;
         loop {
             if current >= queue.size() || count == MAX_DESCRIPTORS || visited[current as usize] {
-                return Ok(0);
+                return Ok(Outcome::Used(0));
             }
             visited[current as usize] = true;
             let descriptor: Descriptor =
                 match memory.read_obj(GuestAddress(rings[0].0 + u64::from(current) * 16)) {
                     Ok(value) => value,
-                    Err(_) => return Ok(0),
+                    Err(_) => return Ok(Outcome::Used(0)),
                 };
             let address = descriptor.addr().raw_value();
             let len = u64::from(descriptor.len());
             if descriptor.flags() & !3 != 0
                 || len == 0
                 || address.checked_add(len).is_none()
-                || !memory.check_range(descriptor.addr(), len as usize)
                 || rings
                     .iter()
                     .any(|(base, size)| overlaps(address, len, *base, *size))
@@ -199,7 +343,21 @@ impl<A: Accelerator> Host<A> {
                     .iter()
                     .any(|s| overlaps(address, len, s.address, s.len))
             {
-                return Ok(0);
+                return Ok(Outcome::Used(0));
+            }
+            // Reachability last: a chain malformed in itself never asks the
+            // frontend for anything.
+            match iotlb {
+                None if memory.check_range(descriptor.addr(), len as usize) => {}
+                None => return Ok(Outcome::Used(0)),
+                Some(iotlb) => {
+                    let write = descriptor.is_write_only();
+                    match iotlb.missing(address, len, write) {
+                        None => {}
+                        Some(iova) if asked == Some(iova) => return Ok(Outcome::Used(0)),
+                        Some(iova) => return Ok(Outcome::Miss { iova, write }),
+                    }
+                }
             }
             segments[count] = Segment { address, len };
             regions[count] = if descriptor.is_write_only() {
@@ -214,7 +372,7 @@ impl<A: Accelerator> Host<A> {
             current = descriptor.next();
         }
         let Ok(layout) = validate_chain_layout(&regions[..count], MAX_DESCRIPTORS as u16) else {
-            return Ok(0);
+            return Ok(Outcome::Used(0));
         };
         let split = usize::from(layout.readable_descriptors());
         let request = Port {
@@ -232,10 +390,10 @@ impl<A: Accelerator> Host<A> {
             &TransportByteSource::new(&request),
             &mut TransportByteSink::new(&mut response),
         ) {
-            Ok(CommandOutcome::Response { used, .. }) => Ok(used),
-            Ok(CommandOutcome::Unusable(_)) => Ok(0),
+            Ok(CommandOutcome::Response { used, .. }) => Ok(Outcome::Used(used)),
+            Ok(CommandOutcome::Unusable(_)) => Ok(Outcome::Used(0)),
             // Preflight failure has no side effects; a response access failure may have.
-            Err(virtio_accel_device::CommandProcessError::Preflight(_)) => Ok(0),
+            Err(virtio_accel_device::CommandProcessError::Preflight(_)) => Ok(Outcome::Used(0)),
             Err(_) => Err(invalid()),
         }
     }
@@ -253,6 +411,7 @@ impl<A: Accelerator> VhostUserBackendReqHandlerMut for Host<A> {
         self.reset()?;
         self.owner = false;
         self.memory = None;
+        self.iotlb = None;
         self.regions.clear();
         Ok(())
     }
@@ -260,14 +419,24 @@ impl<A: Accelerator> VhostUserBackendReqHandlerMut for Host<A> {
         self.reset()
     }
     fn get_features(&mut self) -> Result<u64> {
-        Ok(FEATURES)
+        Ok(self.features())
     }
     fn set_features(&mut self, features: u64) -> Result<()> {
         self.stopped()?;
-        if !self.owner || features & !FEATURES != 0 || features & FEATURES != FEATURES {
+        if !self.owner {
             return Err(invalid());
         }
-        self.negotiated = true;
+        // Exactly the offered set, or the device does not run. Behind an
+        // IOMMU that includes ACCESS_PLATFORM: a frontend strips it when
+        // nothing translates for this device.
+        //
+        // The value is the driver's, and the frontend forwards whatever the
+        // driver acknowledged, including nothing at all. That is not a
+        // protocol error by the frontend, so it is not answered by ending the
+        // connection — which takes the device, and with some frontends the
+        // whole machine, away from every other tenant of the guest. The
+        // device stays connected and `set_vring_enable` leaves it stopped.
+        self.negotiated = features == self.features();
         Ok(())
     }
     fn set_mem_table(&mut self, regions: &[VhostUserMemoryRegion], files: Vec<File>) -> Result<()> {
@@ -275,8 +444,7 @@ impl<A: Accelerator> VhostUserBackendReqHandlerMut for Host<A> {
         if !self.owner || regions.is_empty() || regions.len() > 32 || regions.len() != files.len() {
             return Err(invalid());
         }
-        let mut ranges = Vec::with_capacity(regions.len());
-        for (i, (region, file)) in regions.iter().zip(files).enumerate() {
+        for (i, (region, file)) in regions.iter().zip(&files).enumerate() {
             let end = region
                 .mmap_offset
                 .checked_add(region.memory_size)
@@ -304,15 +472,23 @@ impl<A: Accelerator> VhostUserBackendReqHandlerMut for Host<A> {
             {
                 return Err(invalid());
             }
-            ranges.push((
-                GuestAddress(region.guest_phys_addr),
-                mapped(usize::try_from(region.memory_size))?,
-                Some(FileOffset::new(file, region.mmap_offset)),
-            ));
         }
-        ranges.sort_by_key(|range| range.0);
-        let memory = mapped(GuestMemoryMmap::from_ranges_with_files(ranges))?;
-        self.memory = Some(memory);
+        if self.iommu {
+            // Keep the files; map nothing until the domain grants it. A new
+            // table starts a new, empty domain view.
+            self.iotlb = Some(Iotlb::new(regions, files));
+        } else {
+            let mut ranges = Vec::with_capacity(regions.len());
+            for (region, file) in regions.iter().zip(files) {
+                ranges.push((
+                    GuestAddress(region.guest_phys_addr),
+                    mapped(usize::try_from(region.memory_size))?,
+                    Some(FileOffset::new(file, region.mmap_offset)),
+                ));
+            }
+            ranges.sort_by_key(|range| range.0);
+            self.memory = Some(mapped(GuestMemoryMmap::from_ranges_with_files(ranges))?);
+        }
         self.regions = regions.to_vec();
         self.addresses = false;
         Ok(())
@@ -339,6 +515,35 @@ impl<A: Accelerator> VhostUserBackendReqHandlerMut for Host<A> {
             return Err(invalid());
         }
         let n = u64::from(self.queue.size());
+        if self.iommu {
+            // Already the device's own address space, and the driver's own
+            // numbers: no frontend has mapped or checked them. Whether the
+            // domain maps them is found out when the queue first runs.
+            let spans = [
+                (descriptor, n * 16),
+                (available, 6 + n * 2),
+                (used, 6 + n * 8),
+            ];
+            let mut queue = mapped(Queue::try_from(self.queue.state()))?;
+            self.described = spans
+                .iter()
+                .all(|(base, len)| base.checked_add(*len).is_some())
+                && !overlaps(spans[0].0, spans[0].1, spans[1].0, spans[1].1)
+                && !overlaps(spans[0].0, spans[0].1, spans[2].0, spans[2].1)
+                && !overlaps(spans[1].0, spans[1].1, spans[2].0, spans[2].1)
+                && queue
+                    .try_set_desc_table_address(GuestAddress(descriptor))
+                    .is_ok()
+                && queue
+                    .try_set_avail_ring_address(GuestAddress(available))
+                    .is_ok()
+                && queue.try_set_used_ring_address(GuestAddress(used)).is_ok();
+            if self.described {
+                self.queue = queue;
+            }
+            self.addresses = true;
+            return Ok(());
+        }
         let d = self.translate(descriptor, n * 16)?;
         let a = self.translate(available, 6 + n * 2)?;
         let u = self.translate(used, 6 + n * 8)?;
@@ -393,13 +598,37 @@ impl<A: Accelerator> VhostUserBackendReqHandlerMut for Host<A> {
         Ok(())
     }
     fn get_protocol_features(&mut self) -> Result<VhostUserProtocolFeatures> {
-        Ok(protocols())
+        Ok(self.protocols())
     }
     fn set_protocol_features(&mut self, features: u64) -> Result<()> {
-        if features & !protocols().bits() == 0 {
-            Ok(())
-        } else {
-            Err(invalid())
+        if features & !self.protocols().bits() != 0 {
+            return Err(invalid());
+        }
+        self.reply_ack = features & VhostUserProtocolFeatures::REPLY_ACK.bits() != 0;
+        Ok(())
+    }
+    fn set_backend_req_fd(&mut self, backend: Backend) {
+        // Offered only behind an IOMMU, where it carries misses. A handle
+        // that cannot be watched leaves the device without the channel, and
+        // the first miss then ends the connection.
+        backend.set_reply_ack_flag(self.reply_ack);
+        self.backend = backend
+            .reply_stream()
+            .ok()
+            .filter(|_| self.iommu)
+            .map(|replies| (backend, replies));
+    }
+    fn iotlb_msg(&mut self, message: &VhostUserIotlb) -> Result<()> {
+        match (message.msg_type, self.iotlb.as_mut()) {
+            (VhostUserIotlb::UPDATE, Some(iotlb)) => mapped(iotlb.update(message)),
+            (VhostUserIotlb::INVALIDATE, Some(iotlb)) => {
+                iotlb.invalidate(message.iova, message.size);
+                Ok(())
+            }
+            // The frontend's IOMMU may invalidate before it has sent a
+            // memory table; there is nothing to withdraw yet.
+            (VhostUserIotlb::INVALIDATE, None) if self.iommu => Ok(()),
+            _ => Err(invalid()),
         }
     }
     fn get_queue_num(&mut self) -> Result<u64> {
@@ -408,23 +637,36 @@ impl<A: Accelerator> VhostUserBackendReqHandlerMut for Host<A> {
     fn set_vring_enable(&mut self, which: u32, enable: bool) -> Result<()> {
         index(which)?;
         if enable {
+            // The frontend's obligations: failing one is a protocol error.
             if self.failed
                 || !self.owner
-                || !self.negotiated
                 || !self.addresses
                 || self.kick.is_none()
                 || self.call.is_none()
             {
                 return Err(invalid());
             }
+            // The driver's: a feature set this device does not run with, or
+            // a queue that is not one. The device stays connected, stopped
+            // and untouched until the driver resets and does better.
+            if !self.negotiated || (self.iommu && !self.described) {
+                self.queue.set_ready(false);
+                self.enabled = false;
+                return Ok(());
+            }
             self.queue.set_ready(true);
-            if !self
-                .queue
-                .is_valid(self.memory.as_ref().ok_or_else(invalid)?)
+            // Behind an IOMMU the rings are I/O virtual addresses, resolved
+            // through the domain when the queue first runs (`ring_miss`).
+            if self.iotlb.is_none()
+                && !self
+                    .queue
+                    .is_valid(self.memory.as_ref().ok_or_else(invalid)?)
             {
                 self.queue.set_ready(false);
                 return Err(invalid());
             }
+            self.asked = None;
+            self.parked = false;
             // SET_VRING_BASE restored both indices. This synchronous engine retires
             // every popped chain before processing another control message; never
             // trust a guest write to the device-owned used.idx on resume.
@@ -594,7 +836,31 @@ fn connected<A: Accelerator>(
                     .ok_or_else(invalid)?
                     .read_exact(&mut bytes)?;
             }
-            pending = state.process_queue()?;
+            pending = match state.process_queue()? {
+                Step::Idle => false,
+                Step::More => true,
+                Step::Miss { iova, write } => {
+                    let (backend, replies) = state.miss_channel()?;
+                    drop(state);
+                    if resolve(
+                        &control,
+                        &mut handler,
+                        &host,
+                        &backend,
+                        &replies,
+                        iova,
+                        write,
+                    )?
+                    .is_none()
+                    {
+                        return Ok(());
+                    }
+                    host.lock()
+                        .map_err(|_| io::Error::other("host lock poisoned"))?
+                        .answered(iova);
+                    true
+                }
+            };
         }
     })();
     // Quiesce and attempt dependency-ordered resource teardown even on abrupt disconnect.
@@ -605,6 +871,77 @@ fn connected<A: Accelerator>(
     result?;
     reset?;
     Ok(())
+}
+
+/// Ask the frontend to translate `iova` and wait for its answer: `Some(true)`
+/// when it supplied a translation, `Some(false)` when the address has none,
+/// `None` when it disconnected.
+///
+/// The frontend answers in two steps on two sockets. It sends the translation
+/// on the control channel and waits there for the acknowledgement, and only
+/// then replies to the miss. So the control channel is served while the reply
+/// is awaited — a daemon that blocked on the reply alone would deadlock with
+/// the frontend — and it is served first, which is also the order the
+/// frontend guarantees: by the time the reply is read, the update it refers to
+/// has been installed. Any other control message arriving meanwhile (a stop, a
+/// reset, an invalidation) is handled the same way; the queue re-derives what
+/// it needs when it next runs.
+fn resolve<A: Accelerator>(
+    control: &UnixStream,
+    handler: &mut BackendReqHandler<Mutex<Host<A>>>,
+    host: &Mutex<Host<A>>,
+    backend: &Backend,
+    replies: &UnixStream,
+    iova: u64,
+    write: bool,
+) -> std::result::Result<Option<bool>, Box<dyn std::error::Error>> {
+    backend.send_iotlb_miss(
+        iova,
+        if write {
+            VhostUserIotlb::ACCESS_WO
+        } else {
+            VhostUserIotlb::ACCESS_RO
+        },
+    )?;
+    let failure = PollFlags::POLLERR | PollFlags::POLLNVAL;
+    loop {
+        let mut fds = [
+            PollFd::new(control.as_fd(), PollFlags::POLLIN),
+            PollFd::new(replies.as_fd(), PollFlags::POLLIN),
+        ];
+        match poll(&mut fds, PollTimeout::NONE) {
+            Ok(_) => {}
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(error) => return Err(error.into()),
+        }
+        let [control_events, reply_events] =
+            fds.map(|fd| fd.revents().unwrap_or(PollFlags::empty()));
+        if control_events.contains(PollFlags::POLLIN) {
+            match handler.handle_request() {
+                Ok(()) => {}
+                Err(Error::Disconnected) => return Ok(None),
+                Err(error) => return Err(error.into()),
+            }
+            if host
+                .lock()
+                .map_err(|_| io::Error::other("host lock poisoned"))?
+                .failed
+            {
+                return Err(io::Error::other("backend reset requires device discard").into());
+            }
+            continue;
+        }
+        if control_events.intersects(failure) || reply_events.intersects(failure) {
+            return Err(io::Error::other("socket failed awaiting a translation").into());
+        }
+        if reply_events.contains(PollFlags::POLLIN) {
+            return Ok(Some(backend.recv_iotlb_miss_reply()?));
+        }
+        if control_events.contains(PollFlags::POLLHUP) || reply_events.contains(PollFlags::POLLHUP)
+        {
+            return Ok(None);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -681,13 +1018,19 @@ mod tests {
     }
 
     fn command(host: &mut Host<MockAccelerator>) -> u32 {
-        Host::command(
+        match Host::command(
             &mut host.processor,
             &host.queue,
             host.memory.as_ref().unwrap(),
+            None,
+            None,
             0,
         )
         .unwrap()
+        {
+            Outcome::Used(used) => used,
+            Outcome::Miss { .. } => panic!("a device with no IOMMU cannot miss"),
+        }
     }
 
     #[test]
@@ -697,10 +1040,14 @@ mod tests {
         assert!(h.set_features(FEATURES).is_err());
         h.set_owner().unwrap();
         assert!(h.set_owner().is_err());
-        assert!(h.set_features(FEATURES | 1 << 28).is_err());
-        assert!(h.set_features(0).is_err());
-        assert!(h.set_features(1 << 32).is_err());
+        // A feature set the device does not run with is the driver's doing:
+        // recorded, not answered by dropping the frontend.
+        for refused in [FEATURES | 1 << 28, 0, 1 << 32, FEATURES | ACCESS_PLATFORM] {
+            h.set_features(refused).unwrap();
+            assert!(!h.negotiated);
+        }
         h.set_features(FEATURES).unwrap();
+        assert!(h.negotiated);
         assert_eq!(
             h.get_config(0, 16, VhostUserConfigFlags::empty()).unwrap(),
             CONFIG.as_bytes()
@@ -785,7 +1132,7 @@ mod tests {
         assert!(!h.enabled && !h.queue.ready() && !h.negotiated && !h.addresses);
         assert_eq!(h.namespace, 2);
         assert_eq!(h.processor.health(), DeviceHealth::Running);
-        assert!(!h.process_queue().unwrap());
+        assert_eq!(h.process_queue().unwrap(), Step::Idle);
         h.namespace = u16::MAX;
         assert!(h.reset_device().is_err());
         assert!(h.failed);
@@ -863,7 +1210,7 @@ mod tests {
         memory
             .write_obj(0u16, GuestAddress(0x2004 + 7 * 2))
             .unwrap();
-        assert!(!h.process_queue().unwrap());
+        assert_eq!(h.process_queue().unwrap(), Step::Idle);
         assert_eq!(h.queue.next_avail(), 0);
         assert_eq!(h.queue.next_used(), 0);
         assert_eq!(h.call.as_ref().unwrap().metadata().unwrap().len(), 0);
@@ -880,8 +1227,220 @@ mod tests {
         memory
             .write_obj(1u16.to_le(), GuestAddress(0x2002))
             .unwrap();
-        assert!(!h.process_queue().unwrap());
+        assert_eq!(h.process_queue().unwrap(), Step::Idle);
         assert_eq!(h.call.as_ref().unwrap().metadata().unwrap().len(), 8);
+    }
+
+    /// A device behind an IOMMU, its memory table one 64 KiB file whose page
+    /// `n` is filled with byte `n` (pages 1 to 3, which the tests use for
+    /// rings, are zero), and a queue of eight at I/O virtual addresses
+    /// nothing has granted yet.
+    fn behind_iommu() -> Host<MockAccelerator> {
+        use std::io::Write as _;
+        let mut h = host().behind_iommu();
+        h.set_owner().unwrap();
+        let mut file = tempfile::tempfile().unwrap();
+        for page in 0..16u8 {
+            let fill = if (1..=3).contains(&page) { 0 } else { page };
+            file.write_all(&[fill; 4096]).unwrap();
+        }
+        let region = VhostUserMemoryRegion::new(0x4000_0000, 0x10000, 0x7f00_0000, 0);
+        h.set_mem_table(&[region], vec![file]).unwrap();
+        h.set_features(FEATURES | ACCESS_PLATFORM).unwrap();
+        h.set_vring_num(0, 8).unwrap();
+        h.set_vring_addr(
+            0,
+            VhostUserVringAddrFlags::empty(),
+            0x1_0000_1000,
+            0x1_0000_3000,
+            0x1_0000_2000,
+            0,
+        )
+        .unwrap();
+        h.kick = Some(tempfile::tempfile().unwrap());
+        h.call = Some(tempfile::tempfile().unwrap());
+        h.set_vring_enable(0, true).unwrap();
+        h
+    }
+
+    fn grant(h: &mut Host<MockAccelerator>, iova: u64, page: u64, perm: u8) {
+        let mut message = VhostUserIotlb::default();
+        message.iova = iova;
+        message.size = 4096;
+        message.uaddr = 0x7f00_0000 + page * 4096;
+        message.perm = perm;
+        message.msg_type = VhostUserIotlb::UPDATE;
+        h.iotlb_msg(&message).unwrap();
+    }
+
+    fn miss(h: &mut Host<MockAccelerator>) -> (u64, bool) {
+        match h.process_queue().unwrap() {
+            Step::Miss { iova, write } => (iova, write),
+            step => panic!("expected a miss, got {step:?}"),
+        }
+    }
+
+    #[test]
+    fn a_device_behind_an_iommu_requires_the_platform_feature() {
+        let mut h = host().behind_iommu();
+        assert_eq!(h.get_features().unwrap(), FEATURES | ACCESS_PLATFORM);
+        assert!(
+            h.get_protocol_features()
+                .unwrap()
+                .contains(VhostUserProtocolFeatures::BACKEND_REQ)
+        );
+        h.set_owner().unwrap();
+        // What a frontend sends when nothing translates for the device.
+        h.set_features(FEATURES).unwrap();
+        assert!(!h.negotiated);
+        // And nothing is mapped by receiving a memory table.
+        let file = tempfile::tempfile().unwrap();
+        file.set_len(0x10000).unwrap();
+        let region = VhostUserMemoryRegion::new(0x4000_0000, 0x10000, 0x7f00_0000, 0);
+        h.set_mem_table(&[region], vec![file]).unwrap();
+        assert!(h.memory.is_none());
+        assert_eq!(h.iotlb.as_ref().unwrap().view().num_regions(), 0);
+    }
+
+    #[test]
+    fn a_refused_feature_set_leaves_the_device_stopped_not_gone() {
+        let mut h = behind_iommu();
+        h.set_vring_enable(0, false).unwrap();
+        h.set_features(FEATURES).unwrap();
+        h.set_vring_enable(0, true).unwrap();
+        assert!(!h.enabled && !h.queue.ready());
+        assert_eq!(h.process_queue().unwrap(), Step::Idle);
+    }
+
+    #[test]
+    fn a_queue_that_is_not_one_leaves_the_device_stopped_not_gone() {
+        for (descriptor, used, available) in [
+            (u64::MAX - 8, 0x1_0000_3000, 0x1_0000_2000),  // wraps
+            (0x1_0000_1000, 0x1_0000_1000, 0x1_0000_2000), // aliases
+            (0x1_0000_1001, 0x1_0000_3000, 0x1_0000_2000), // misaligned
+        ] {
+            let mut h = behind_iommu();
+            h.set_vring_enable(0, false).unwrap();
+            h.set_vring_addr(
+                0,
+                VhostUserVringAddrFlags::empty(),
+                descriptor,
+                used,
+                available,
+                0,
+            )
+            .unwrap();
+            h.set_vring_enable(0, true).unwrap();
+            assert!(!h.enabled);
+            assert_eq!(h.process_queue().unwrap(), Step::Idle);
+        }
+    }
+
+    #[test]
+    fn rings_and_buffers_are_resolved_through_the_domain_before_anything_runs() {
+        let mut h = behind_iommu();
+        // Rings first, in the direction each is used.
+        assert_eq!(miss(&mut h), (0x1_0000_1000, false));
+        grant(&mut h, 0x1_0000_1000, 1, VhostUserIotlb::ACCESS_RO);
+        h.answered(0x1_0000_1000);
+        assert_eq!(miss(&mut h), (0x1_0000_2000, false));
+        grant(&mut h, 0x1_0000_2000, 2, VhostUserIotlb::ACCESS_RO);
+        assert_eq!(miss(&mut h), (0x1_0000_3000, true));
+        grant(&mut h, 0x1_0000_3000, 3, VhostUserIotlb::ACCESS_RW);
+        assert_eq!(h.process_queue().unwrap(), Step::Idle);
+
+        // One chain: a request at 0x…4000 and a response at 0x…5000, neither
+        // granted. The table and the available ring are written through the
+        // domain's own view, as a driver would through its mapping.
+        let header = RequestHeader::new(KnownOpcode::GetDeviceInfo, RequestFlags::empty(), 0, 7);
+        grant(&mut h, 0x1_0000_1000, 1, VhostUserIotlb::ACCESS_RW);
+        grant(&mut h, 0x1_0000_2000, 2, VhostUserIotlb::ACCESS_RW);
+        let view = h.iotlb.as_ref().unwrap().view();
+        view.write_obj(
+            Descriptor::new(0x1_0000_4000, 16, 1, 1),
+            GuestAddress(0x1_0000_1000),
+        )
+        .unwrap();
+        view.write_obj(
+            Descriptor::new(0x1_0000_5000, 256, 2, 0),
+            GuestAddress(0x1_0000_1010),
+        )
+        .unwrap();
+        view.write_obj(0u16, GuestAddress(0x1_0000_2004)).unwrap();
+        view.write_obj(1u16.to_le(), GuestAddress(0x1_0000_2002))
+            .unwrap();
+
+        // The request misses, read. Nothing has been consumed.
+        assert_eq!(miss(&mut h), (0x1_0000_4000, false));
+        assert_eq!(h.queue.next_avail(), 0);
+        grant(&mut h, 0x1_0000_4000, 4, VhostUserIotlb::ACCESS_RW);
+        h.iotlb
+            .as_ref()
+            .unwrap()
+            .view()
+            .write_slice(header.as_bytes(), GuestAddress(0x1_0000_4000))
+            .unwrap();
+        h.answered(0x1_0000_4000);
+        // Then the response, written. Granted read-only it still misses …
+        assert_eq!(miss(&mut h), (0x1_0000_5000, true));
+        grant(&mut h, 0x1_0000_5000, 5, VhostUserIotlb::ACCESS_RO);
+        h.answered(0x1_0000_4000);
+        assert_eq!(miss(&mut h), (0x1_0000_5000, true));
+        // … and once the frontend has answered for that very address without
+        // making it writable, the chain is unusable: completed, empty,
+        // nothing dispatched and nothing written.
+        h.answered(0x1_0000_5000);
+        assert_eq!(h.process_queue().unwrap(), Step::Idle);
+        assert_eq!(h.queue.next_avail(), 1);
+        let view = h.iotlb.as_ref().unwrap().view();
+        assert_eq!(
+            view.read_obj::<u32>(GuestAddress(0x1_0000_3008)).unwrap(),
+            0
+        );
+        assert_eq!(view.read_obj::<u8>(GuestAddress(0x1_0000_5000)).unwrap(), 5);
+
+        // The same chain again with the response writable: it runs.
+        view.write_obj(2u16.to_le(), GuestAddress(0x1_0000_2002))
+            .unwrap();
+        view.write_obj(0u16, GuestAddress(0x1_0000_2006)).unwrap();
+        grant(&mut h, 0x1_0000_5000, 5, VhostUserIotlb::ACCESS_RW);
+        assert_eq!(h.process_queue().unwrap(), Step::Idle);
+        let view = h.iotlb.as_ref().unwrap().view();
+        assert_eq!(
+            u32::from_le(view.read_obj::<u32>(GuestAddress(0x1_0000_3010)).unwrap()),
+            92
+        );
+    }
+
+    #[test]
+    fn a_ring_the_domain_does_not_map_parks_the_queue() {
+        let mut h = behind_iommu();
+        let (iova, _) = miss(&mut h);
+        h.answered(iova);
+        assert_eq!(h.process_queue().unwrap(), Step::Idle);
+        assert!(h.parked);
+        // Granting it later does not revive a parked queue; describing the
+        // queue again does.
+        grant(&mut h, iova, 1, VhostUserIotlb::ACCESS_RW);
+        assert_eq!(h.process_queue().unwrap(), Step::Idle);
+        h.set_vring_enable(0, false).unwrap();
+        h.set_vring_enable(0, true).unwrap();
+        assert!(matches!(h.process_queue().unwrap(), Step::Miss { .. }));
+    }
+
+    #[test]
+    fn an_invalidated_ring_is_asked_for_again() {
+        let mut h = behind_iommu();
+        for (iova, page) in [(0x1_0000_1000, 1), (0x1_0000_2000, 2), (0x1_0000_3000, 3)] {
+            grant(&mut h, iova, page, VhostUserIotlb::ACCESS_RW);
+        }
+        assert_eq!(h.process_queue().unwrap(), Step::Idle);
+        let mut message = VhostUserIotlb::default();
+        message.iova = 0x1_0000_2000;
+        message.size = 4096;
+        message.msg_type = VhostUserIotlb::INVALIDATE;
+        h.iotlb_msg(&message).unwrap();
+        assert_eq!(miss(&mut h), (0x1_0000_2000, false));
     }
 
     #[test]

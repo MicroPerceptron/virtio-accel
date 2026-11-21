@@ -16,7 +16,7 @@
 #include "virtio_accel.h"
 
 /* Development MMIO device only. This is NOT an allocated Virtio device ID. */
-#define VA_EXPERIMENTAL_ID 65535
+#define VA_EXPERIMENTAL_ID 56
 #define VA_MAX_BYTES (1024U * 1024U)
 
 struct va_config {
