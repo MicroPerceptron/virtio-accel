@@ -45,6 +45,13 @@ Every `VkResult` is checked before an out-value is trusted: `ash` returns `Resul
 and the crate never reads a handle or pointer from an `Err`. Unmapped result codes surface as
 `BackendError::External` in the stable `"VULK"` domain (`0x5655_4c4b`).
 
+The Vulkan memory model and its Device scope are enabled together only when both
+are reported. Generic packed-byte kernels use Device-scope atomics; enabling the
+memory model alone would invalidate those shaders (VUID 06265). Optional cooperative
+NVFP4 kernels require both features and declare both SPIR-V capabilities. Devices
+lacking either retain the baseline kernels and GLSL memory model. Native validation
+must inspect layer diagnostics as well as test exit status.
+
 ## Loader, instance, and handle lifetime
 
 - The loader is opened once per process in a `OnceLock` (`entry`); `ash::Entry` is reference

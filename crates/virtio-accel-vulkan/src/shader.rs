@@ -169,6 +169,7 @@ const CAPABILITY_SHADER: u32 = 1;
 const CAPABILITY_FLOAT16: u32 = 9;
 const CAPABILITY_GROUP_NON_UNIFORM_ARITHMETIC: u32 = 63;
 const CAPABILITY_VULKAN_MEMORY_MODEL: u32 = 5345;
+const CAPABILITY_VULKAN_MEMORY_MODEL_DEVICE_SCOPE: u32 = 5346;
 const CAPABILITY_COOPERATIVE_MATRIX_KHR: u32 = 6022;
 const ADDRESSING_MODEL_LOGICAL: u32 = 0;
 const MEMORY_MODEL_GLSL450: u32 = 1;
@@ -1583,6 +1584,13 @@ impl Builder {
             &mut self.capabilities,
             OP_CAPABILITY,
             &[CAPABILITY_VULKAN_MEMORY_MODEL],
+        );
+        // Packed output stores use Device-scope atomics. The native probe enables
+        // cooperative kernels only when this feature is available as well.
+        instruction(
+            &mut self.capabilities,
+            OP_CAPABILITY,
+            &[CAPABILITY_VULKAN_MEMORY_MODEL_DEVICE_SCOPE],
         );
         let memory_extension = literal_string("SPV_KHR_vulkan_memory_model");
         instruction(&mut self.extensions, OP_EXTENSION, &memory_extension);

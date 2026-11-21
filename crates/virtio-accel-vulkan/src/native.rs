@@ -401,8 +401,14 @@ impl PhysicalDeviceRecord {
         // SAFETY: `handle` is a live physical device of `instance`.
         let memory = unsafe { instance.get_physical_device_memory_properties(handle) };
         let host_import_alignment = host_import_alignment(instance, handle);
+        // Generic packed-byte kernels use Device-scope atomics. Enabling the Vulkan
+        // memory model without its Device scope makes those modules invalid, even
+        // though they use the baseline GLSL memory model. Keep both features disabled
+        // on devices lacking either; optional cooperative kernels then use the fallback.
+        let vulkan_memory_model = vulkan12.vulkan_memory_model == vk::TRUE
+            && vulkan12.vulkan_memory_model_device_scope == vk::TRUE;
         let cooperative_nvfp4 = vulkan12.shader_float16 == vk::TRUE
-            && vulkan12.vulkan_memory_model == vk::TRUE
+            && vulkan_memory_model
             && cooperative.cooperative_matrix == vk::TRUE
             && subgroup.subgroup_size == 32
             && subgroup
@@ -435,7 +441,7 @@ impl PhysicalDeviceRecord {
             host_import_alignment,
             timeline_semaphore: vulkan12.timeline_semaphore == vk::TRUE,
             shader_float16: vulkan12.shader_float16 == vk::TRUE,
-            vulkan_memory_model: vulkan12.vulkan_memory_model == vk::TRUE,
+            vulkan_memory_model,
             cooperative_nvfp4,
             tuning,
         })
@@ -719,7 +725,8 @@ impl Shared {
             .buffer_device_address(physical.buffer_device_address)
             .timeline_semaphore(physical.timeline_semaphore)
             .shader_float16(physical.shader_float16)
-            .vulkan_memory_model(physical.vulkan_memory_model);
+            .vulkan_memory_model(physical.vulkan_memory_model)
+            .vulkan_memory_model_device_scope(physical.vulkan_memory_model);
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default().synchronization2(true);
         let mut cooperative = vk::PhysicalDeviceCooperativeMatrixFeaturesKHR::default()
             .cooperative_matrix(physical.cooperative_nvfp4);
