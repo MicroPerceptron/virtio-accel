@@ -477,6 +477,66 @@ unsafe impl ByteValued for VhostUserU64 {}
 
 impl VhostUserMsgValidator for VhostUserU64 {}
 
+/// One IOTLB message: `struct vhost_iotlb_msg` as it travels in a
+/// `VHOST_USER_IOTLB_MSG` (frontend to backend: update, invalidate) or a
+/// `VHOST_USER_BACKEND_IOTLB_MSG` (backend to frontend: miss, access failure).
+///
+/// The C structure is two bytes short of a multiple of its alignment; the six
+/// bytes of tail padding are part of the 32 bytes on the wire and are spelled
+/// out here so the type has no implicit padding.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct VhostUserIotlb {
+    /// The I/O virtual address the message is about.
+    pub iova: u64,
+    /// Bytes covered, for an update or an invalidation.
+    pub size: u64,
+    /// For an update, the frontend's virtual address the range translates to.
+    pub uaddr: u64,
+    /// `VHOST_ACCESS_*`.
+    pub perm: u8,
+    /// `VHOST_IOTLB_*`.
+    pub msg_type: u8,
+    padding: [u8; 6],
+}
+
+impl VhostUserIotlb {
+    /// Read-only access.
+    pub const ACCESS_RO: u8 = 1;
+    /// Write-only access.
+    pub const ACCESS_WO: u8 = 2;
+    /// Read and write access.
+    pub const ACCESS_RW: u8 = 3;
+
+    /// The backend lacks a translation.
+    pub const MISS: u8 = 1;
+    /// The frontend supplies a translation.
+    pub const UPDATE: u8 = 2;
+    /// The frontend withdraws translations.
+    pub const INVALIDATE: u8 = 3;
+    /// The backend reports an access a translation does not permit.
+    pub const ACCESS_FAIL: u8 = 4;
+
+    /// A miss for the page holding `iova`, to be accessed as `perm`.
+    pub fn miss(iova: u64, perm: u8) -> Self {
+        Self {
+            iova,
+            perm,
+            msg_type: Self::MISS,
+            ..Self::default()
+        }
+    }
+}
+
+// SAFETY: Safe because all fields of VhostUserIotlb are POD and the padding is explicit.
+unsafe impl ByteValued for VhostUserIotlb {}
+
+impl VhostUserMsgValidator for VhostUserIotlb {
+    fn is_valid(&self) -> bool {
+        (Self::MISS..=Self::ACCESS_FAIL).contains(&self.msg_type) && self.perm <= Self::ACCESS_RW
+    }
+}
+
 /// Memory region descriptor for the SET_MEM_TABLE request.
 #[repr(C, packed)]
 #[derive(Copy, Clone, Default)]

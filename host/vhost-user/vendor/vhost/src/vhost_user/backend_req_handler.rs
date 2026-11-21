@@ -89,6 +89,12 @@ pub trait VhostUserBackendReqHandler {
     #[cfg(feature = "postcopy")]
     fn postcopy_end(&self) -> Result<()>;
     fn set_log_base(&self, log: &VhostUserLog, file: File) -> Result<()>;
+    /// An IOTLB update or invalidation from the frontend
+    /// (`VHOST_USER_IOTLB_MSG`). Reached only by a backend that offered
+    /// `VIRTIO_F_ACCESS_PLATFORM`; the default refuses.
+    fn iotlb_msg(&self, _msg: &VhostUserIotlb) -> Result<()> {
+        Err(Error::InvalidOperation("IOTLB messages are not handled"))
+    }
 }
 
 /// Services provided to the frontend by the backend without interior mutability.
@@ -155,6 +161,10 @@ pub trait VhostUserBackendReqHandlerMut {
     #[cfg(feature = "postcopy")]
     fn postcopy_end(&mut self) -> Result<()>;
     fn set_log_base(&mut self, log: &VhostUserLog, file: File) -> Result<()>;
+    /// See [`VhostUserBackendReqHandler::iotlb_msg`].
+    fn iotlb_msg(&mut self, _msg: &VhostUserIotlb) -> Result<()> {
+        Err(Error::InvalidOperation("IOTLB messages are not handled"))
+    }
 }
 
 impl<T: VhostUserBackendReqHandlerMut> VhostUserBackendReqHandler for Mutex<T> {
@@ -311,6 +321,9 @@ impl<T: VhostUserBackendReqHandlerMut> VhostUserBackendReqHandler for Mutex<T> {
     }
     fn set_log_base(&self, log: &VhostUserLog, file: File) -> Result<()> {
         self.lock().unwrap().set_log_base(log, file)
+    }
+    fn iotlb_msg(&self, msg: &VhostUserIotlb) -> Result<()> {
+        self.lock().unwrap().iotlb_msg(msg)
     }
 }
 
@@ -730,6 +743,14 @@ impl<S: VhostUserBackendReqHandler> BackendReqHandler<S> {
                 let msg = self.extract_request_body::<VhostUserLog>(&hdr, size, &buf)?;
                 self.backend.set_log_base(&msg, file)?;
                 self.send_reply_message(&hdr, &msg)?;
+            }
+            Ok(FrontendReq::IOTLB_MSG) => {
+                // The frontend waits for this acknowledgement before it
+                // answers the miss that asked for the translation, so a
+                // backend sees an update strictly before the miss's reply.
+                let msg = self.extract_request_body::<VhostUserIotlb>(&hdr, size, &buf)?;
+                let res = self.backend.iotlb_msg(&msg);
+                self.send_ack_message(&hdr, res)?;
             }
             _ => {
                 return Err(Error::InvalidMessage);

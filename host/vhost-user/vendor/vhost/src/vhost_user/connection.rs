@@ -121,6 +121,11 @@ impl<H: MsgHeader> Endpoint<H> {
         Ok(Self::from_stream(sock))
     }
 
+    /// A second handle on the underlying socket.
+    pub fn try_clone_stream(&self) -> std::io::Result<UnixStream> {
+        self.sock.try_clone()
+    }
+
     /// Create an endpoint from a stream object.
     pub fn from_stream(sock: UnixStream) -> Self {
         Endpoint {

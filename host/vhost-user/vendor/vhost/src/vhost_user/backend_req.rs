@@ -31,6 +31,9 @@ struct BackendInternal {
     // Protocol feature VHOST_USER_PROTOCOL_F_SHMEM has been negotiated.
     shmem_negotiated: bool,
 
+    // The IOTLB miss whose reply has not been read yet.
+    iotlb_miss: Option<VhostUserMsgHeader<BackendReq>>,
+
     // whether the endpoint has encountered any failure
     error: Option<i32>,
 }
@@ -102,6 +105,7 @@ impl Backend {
                 reply_ack_negotiated: false,
                 shared_object_negotiated: false,
                 shmem_negotiated: false,
+                iotlb_miss: None,
                 error: None,
             })),
         }
@@ -143,7 +147,68 @@ impl Backend {
     pub fn set_failed(&self, error: i32) {
         self.inner.lock().unwrap().error = Some(error);
     }
+
+    /// Ask the frontend for the translation of `iova`, to be accessed as
+    /// `perm` (`VhostUserIotlb::ACCESS_*`), without waiting for its answer.
+    ///
+    /// The send and the wait are two calls because the frontend answers in
+    /// two steps on two sockets: it delivers the translation as a
+    /// `VHOST_USER_IOTLB_MSG` on the main channel and waits for that to be
+    /// acknowledged, and only then replies here. A backend that blocked on
+    /// this channel after sending would never acknowledge the update. The
+    /// caller serves the main channel until this one is readable
+    /// ([`Self::reply_stream`]), then calls [`Self::recv_iotlb_miss_reply`].
+    ///
+    /// One miss is outstanding at a time.
+    pub fn send_iotlb_miss(&self, iova: u64, perm: u8) -> Result<()> {
+        let mut guard = self.inner.lock().unwrap();
+        guard.check_state()?;
+        if !guard.reply_ack_negotiated {
+            return Err(Error::InactiveOperation(
+                VhostUserProtocolFeatures::REPLY_ACK,
+            ));
+        }
+        if guard.iotlb_miss.is_some() {
+            return Err(Error::InvalidOperation("an IOTLB miss is outstanding"));
+        }
+        let body = VhostUserIotlb::miss(iova, perm);
+        let mut hdr = VhostUserMsgHeader::new(
+            BackendReq::IOTLB_MSG,
+            0,
+            mem::size_of::<VhostUserIotlb>() as u32,
+        );
+        hdr.set_need_reply(true);
+        guard.sock.send_message(&hdr, &body, None)?;
+        guard.iotlb_miss = Some(hdr);
+        Ok(())
+    }
+
+    /// A second handle on this channel's socket, for a caller that waits for
+    /// it to become readable alongside other descriptors. Reading from it
+    /// would steal bytes from this object: it is for polling only.
+    pub fn reply_stream(&self) -> Result<UnixStream> {
+        let guard = self.inner.lock().unwrap();
+        guard.sock.try_clone_stream().map_err(Error::SocketError)
+    }
+
+    /// The frontend's answer to the outstanding miss: `true` when it supplied
+    /// a translation (already delivered through the main channel), `false`
+    /// when the address has none.
+    pub fn recv_iotlb_miss_reply(&self) -> Result<bool> {
+        let mut guard = self.inner.lock().unwrap();
+        guard.check_state()?;
+        let hdr = guard
+            .iotlb_miss
+            .take()
+            .ok_or(Error::InvalidOperation("no IOTLB miss is outstanding"))?;
+        let (reply, body, rfds) = guard.sock.recv_body::<VhostUserU64>()?;
+        if !reply.is_reply_for(&hdr) || rfds.is_some() || !body.is_valid() {
+            return Err(Error::InvalidMessage);
+        }
+        Ok(body.value == 0)
+    }
 }
+
 
 impl VhostUserFrontendReqHandler for Backend {
     /// Forward vhost-user shared-object add request to the frontend.
