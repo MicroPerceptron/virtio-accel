@@ -152,6 +152,14 @@ and artifact tails are published without another payload copy. Non-`Copy` typed 
 queue reset epoch; release operations consume them and report whether a failure is retryable,
 invalidated, indeterminate, or an opaque unknown status.
 
+`virtio-accel-shared-queue` is the same boundary where the two sides do not share an address
+space. It lays the split ring out in memory both map (Virtio 1.2 §2.7) and reaches that memory
+through one trait, `SharedMemory`, which a platform implements over a lent window, guest-physical
+memory or an IOMMU domain; the crate itself contains no `unsafe`, allocates nothing, and trusts
+nothing the other side wrote. Its driver half never reads the descriptor table back and checks
+every used entry before believing it; its device half snapshots each descriptor once and hands a
+malformed chain up to be completed empty. The reference model below is its oracle.
+
 `virtio-accel-split-queue` is the deterministic executable implementation of that boundary. It
 preallocates descriptor ownership, chain records, available entries, and used entries at
 configuration. Its split-ring counters use wrapping `u16` arithmetic, direct chains retain their

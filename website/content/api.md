@@ -25,6 +25,7 @@ with all features enabled. The generated documentation is served under
 | [`virtio-accel-xdna`](api/virtio_accel_xdna/index.html) | `std` | AMD XDNA2 NPU backend over HRX with BF16/FP8/INT8 TOSA tiers |
 | [`virtio-accel-vulkan`](api/virtio_accel_vulkan/index.html) | `std` | Vendor-neutral Vulkan 1.3 compute backend with the shared FP32 tier plus the native FP16 and FP8 tiers |
 | [`virtio-accel-split-queue`](api/virtio_accel_split_queue/index.html) | `core + alloc` | Bounded in-memory split-ring reference model |
+| [`virtio-accel-shared-queue`](api/virtio_accel_shared_queue/index.html) | `core` | Both halves of the split ring over memory a driver and a device share |
 | [`virtio-accel-guest`](api/virtio_accel_guest/index.html) | `core + alloc` | Typed reference client |
 | [`virtio-accel-device`](api/virtio_accel_device/index.html) | `core + alloc` | Device-owned state with generational IDs |
 | [`virtio-accel-mock`](api/virtio_accel_mock/index.html) | `std` | In-memory backend with deterministic test-only artifacts |

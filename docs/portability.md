@@ -15,7 +15,7 @@ Rust 2024 edition selected by the workspace. Every package inherits the same `ru
 | `openvino-host-test` | Current stable on Ubuntu with a pinned Intel OpenVINO runtime | The real (probed) OpenVINO backend: lint, unit, integration, semantic-conformance, and example runs against the CPU plugin |
 | `vulkan-lavapipe-test` | Current stable on Ubuntu with the Mesa lavapipe ICD pinned | The native Vulkan 1.3 backend: lint, unit, integration, semantic-conformance, the shared FP32 operator corpus, and example runs without allowing a placeholder skip |
 | `msrv` | Rust 1.85.0 on Ubuntu | Every workspace target and test continues to compile at the declared MSRV |
-| `portable-target` | Stable `aarch64-unknown-none`, `riscv64gc-unknown-none-elf`, and `wasm32-unknown-unknown` | `cleanroom`, `proto`, `transport`, and `core` remain `no_std`; guest, split-queue, device, and facade layers require at most `alloc`; Wasm also checks the std reference crates |
+| `portable-target` | Stable `aarch64-unknown-none`, `riscv64gc-unknown-none-elf`, and `wasm32-unknown-unknown` | `cleanroom`, `proto`, `transport`, `core`, and `shared-queue` remain `no_std`; guest, split-queue, device, and facade layers require at most `alloc`; Wasm also checks the std reference crates |
 | `feature-sets-and-dependencies` | Stable on Ubuntu | Every Cargo feature combination plus dependency and `std`/`alloc` leakage guards for the portable codecs, queue ports, and core |
 | `dependency-policy` | Cargo-deny with Rust 1.85.0 | Advisories, yanked crates, duplicate versions, wildcard requirements, licenses, and dependency sources |
 | `fuzz-smoke` | Pinned nightly on Ubuntu | Shared harness tests plus bounded smoke iterations over generated seed corpora and committed minimized regressions for every fuzz target |
@@ -36,7 +36,7 @@ directly, and they must keep working on any platform the portable crates support
 
 | Tier | Crates | Allowed runtime surface |
 |---|---|---|
-| `core-only` | `virtio-accel-cleanroom`, `virtio-accel-proto`, `virtio-accel-transport`, `virtio-accel-core` | `core`; the clean-room codec and transport ports have no normal/build dependencies, while proc-macros used by other crates may execute with `std` on the build host |
+| `core-only` | `virtio-accel-cleanroom`, `virtio-accel-proto`, `virtio-accel-transport`, `virtio-accel-core`, `virtio-accel-shared-queue` | `core`; the clean-room codec and transport ports have no normal/build dependencies, the shared-memory queue depends only on the transport ports and reaches memory through a trait the platform implements, while proc-macros used by other crates may execute with `std` on the build host |
 | `alloc-portable` | `virtio-accel-guest`, `virtio-accel-split-queue`, `virtio-accel-device`, `virtio-accel-tosa`, `virtio-accel-tosa-build`, `virtio-accel` | `core + alloc`; no OS, filesystem, sockets, threads, or host synchronization |
 | `std-reference` | `virtio-accel-mock`, `virtio-accel-conformance` | Portable `std`; no host-OS or vendor-specific API |
 | `host-native` | `virtio-accel-coreml`, `virtio-accel-openvino`, `virtio-accel-hexagon`, `virtio-accel-xdna`, `virtio-accel-vulkan` | Core ML/Foundation on macOS 14+, the OpenVINO C runtime (`libopenvino_c` 2026.x), the complete QAIRT/QNN C SDK on Windows ARM64, the amdxdna-native HRX runtime (`libhrx`), or a dynamically loaded Vulkan loader (via `ash`) on the build.rs-enumerated host targets; a compile-only unsupported-platform or unsupported-runtime placeholder elsewhere |
@@ -153,8 +153,8 @@ protocol interpretation.
 
 The portable dependency guard inspects normal and build target features for
 `virtio-accel-cleanroom`, `virtio-accel-proto`, `virtio-accel-transport`, and
-`virtio-accel-core`, `virtio-accel-guest`, `virtio-accel-split-queue`, and
-`virtio-accel-tosa`; test-only development dependencies are
+`virtio-accel-core`, `virtio-accel-guest`, `virtio-accel-split-queue`,
+`virtio-accel-shared-queue`, and `virtio-accel-tosa`; test-only development dependencies are
 intentionally outside the target runtime graph. It additionally proves that the clean-room codec
 and transport ports have no normal or build dependencies at all. A dependency's host-side derive
 macro may use `std`, but the target graph for these crates must not enable a dependency feature
@@ -243,6 +243,7 @@ cargo check \
   -p virtio-accel-device \
   -p virtio-accel-guest \
   -p virtio-accel-split-queue \
+  -p virtio-accel-shared-queue \
   -p virtio-accel-tosa \
   -p virtio-accel \
   --target aarch64-unknown-none \
