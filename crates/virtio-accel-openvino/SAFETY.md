@@ -38,8 +38,29 @@ probes the request without blocking; on the first terminal observation the backi
 dropped strictly before the latched state becomes observable, so a caller that sees a terminal
 state can immediately transfer buffer bytes. Dropping an unpolled live event first cancels and
 joins the request, then frees the request and tensors, and only then releases the guards —
-runtime threads can never touch freed Rust memory. The backend never creates public slices or
-raw-pointer accessors.
+runtime threads can never touch freed Rust memory.
+
+## Shared immutable inputs and borrowed output access
+
+`SharedInput::initialize` allocates through the same checked, zero-initialized
+`AlignedAllocation`. Its exclusive callback receives only the logical byte range
+before any Arc, buffer or native tensor can observe it. The callback cannot return
+a borrow of this storage. After successful initialization, `SharedInput` exposes
+only immutable bytes and clones of its Arc; no mutable reference or raw-pointer
+import API is added. `import_shared_input` fixes usage to PROGRAM_INPUT and
+TRANSFER_SOURCE. Both host writes and native Write/ReadWrite bindings are therefore
+rejected by existing permission checks. Imports in separate contexts share the
+same allocation and atomic event gate. Buffer and event Arcs keep it alive after
+all caller input handles are dropped. This also justifies moving frozen input
+handles across threads under the existing allocation Send/Sync implementations.
+
+`OpenVinoBuffer::with_bytes` checks host-read permission and holds a shared
+`EventBacking` guard across its closure-scoped immutable slice. A native writer
+prevents entry; reentrant or concurrent native writers and host writes are rejected
+while the slice exists. Shared native readers are compatible. The callback cannot
+return a reference into the allocation, and unwinding releases the guard. Buffers
+remain !Send/!Sync; no mutable buffer view or public raw-pointer accessor is added.
+These host-only APIs do not advertise protocol external-memory import/export.
 
 The queue may retain one empty high-water vector allocation for backing metadata and one for
 bound-tensor metadata. Recycling clears and drops every element before the allocation enters the

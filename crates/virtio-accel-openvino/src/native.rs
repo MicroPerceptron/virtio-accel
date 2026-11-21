@@ -31,7 +31,7 @@ use crate::{InitError, REQUIRED_RESIDENT_BYTES, ffi};
 /// Maximal TOSA artifact bytes admitted before parsing.
 const MAX_TOSA_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Minimum allocation alignment: one page, satisfying every plugin's zero-copy import rules.
+/// Minimum host allocation alignment. Individual plugins may still stage data internally.
 const OPENVINO_MIN_ALIGNMENT: usize = 4096;
 
 /// Stack scratch size for segmented explicit transfers.
@@ -194,10 +194,9 @@ impl AlignedAllocation {
     }
 }
 
-// SAFETY: allocation access is available only through the `Accelerator` methods. The buffer
-// handle is neither Send nor Sync, and its atomic in-flight gate excludes host transfers while a
-// native inference owns a backing guard. Guards are dropped strictly before an event's terminal
-// state becomes observable. See `SAFETY.md`.
+// SAFETY: mutable storage is accessed only through guarded backend methods; frozen
+// SharedInput storage has no writer. Buffer handles remain !Send/!Sync. Host views
+// and native events share the atomic access gate. See `SAFETY.md`.
 unsafe impl Send for AlignedAllocation {}
 // SAFETY: same invariant as the `Send` implementation.
 unsafe impl Sync for AlignedAllocation {}
@@ -206,6 +205,49 @@ impl Drop for AlignedAllocation {
     fn drop(&mut self) {
         // SAFETY: `pointer` was returned by `alloc_zeroed(self.layout)` and has not been freed.
         unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
+    }
+}
+
+/// Immutable, page-aligned host input that can be imported by several OpenVINO
+/// contexts/devices without duplicating its bytes. Cloning shares ownership.
+/// Initialization happens before publication; no mutable access is exposed later.
+/// This is a local host API, not a wire-protocol external-memory capability.
+#[derive(Clone, Debug)]
+pub struct SharedInput {
+    allocation: Arc<AlignedAllocation>,
+    bytes: usize,
+}
+
+impl SharedInput {
+    /// Allocate zero-initialized storage and fill it in place before freezing it.
+    /// The callback cannot retain a borrow of the allocation. No runtime is needed.
+    pub fn initialize(
+        bytes: u64,
+        alignment: u64,
+        fill: impl FnOnce(&mut [u8]) -> Result<(), BackendError>,
+    ) -> Result<Self, BackendError> {
+        BufferDesc::new(
+            bytes,
+            alignment,
+            MemoryDomain::Shared,
+            BufferUsage::PROGRAM_INPUT,
+        )?;
+        let allocation = AlignedAllocation::new(bytes, alignment)?;
+        let bytes = usize::try_from(bytes).map_err(|_| BackendError::OutOfMemory)?;
+        // SAFETY: newly owned initialized allocation, validated logical length,
+        // and no native/host aliases exist before this exclusive callback ends.
+        fill(unsafe { std::slice::from_raw_parts_mut(allocation.pointer.as_ptr(), bytes) })?;
+        Ok(Self {
+            allocation: Arc::new(allocation),
+            bytes,
+        })
+    }
+
+    /// Borrow the frozen input. Imported descriptors forbid every write access.
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: immutable allocation retained by self. Every import is read-only,
+        // so neither safe host APIs nor native bindings can mutate these bytes.
+        unsafe { std::slice::from_raw_parts(self.allocation.pointer.as_ptr(), self.bytes) }
     }
 }
 
@@ -775,6 +817,31 @@ pub struct OpenVinoBuffer {
     _not_send_sync: PhantomData<Rc<()>>,
 }
 
+impl OpenVinoBuffer {
+    /// Inspect host-visible bytes without a readback copy. A read guard excludes
+    /// native writers for the entire callback, including reentrant submissions.
+    /// The borrowed slice cannot escape the callback; panic releases the guard.
+    ///
+    /// ```compile_fail
+    /// fn escape(buffer: &virtio_accel_openvino::OpenVinoBuffer) -> &[u8] {
+    ///     buffer.with_bytes(|bytes| bytes).unwrap()
+    /// }
+    /// ```
+    pub fn with_bytes<R>(&self, inspect: impl FnOnce(&[u8]) -> R) -> Result<R, BackendError> {
+        if !self.desc.usage.contains(BufferUsage::TRANSFER_SOURCE) {
+            return Err(BackendError::PermissionDenied);
+        }
+        let mut guard = EventBacking::new(self.allocation.clone(), AccessMode::Read);
+        guard.acquire()?;
+        // SAFETY: self owns the allocation, logical bytes fit its layout, and the
+        // live shared guard prevents native/host writes until inspect returns.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(self.allocation.pointer.as_ptr(), self.desc.bytes() as usize)
+        };
+        Ok(inspect(bytes))
+    }
+}
+
 /// Resident compiled OpenVINO model.
 pub struct OpenVinoProgram {
     context_id: u64,
@@ -926,6 +993,37 @@ impl std::fmt::Debug for OpenVinoAccelerator {
 }
 
 impl OpenVinoAccelerator {
+    /// Import immutable host input into this context. The fixed descriptor cannot
+    /// be used as an output or transfer destination. Events retain the backing;
+    /// dropping every caller handle cannot free pages still in use by a device.
+    pub fn import_shared_input(
+        &self,
+        context: &OpenVinoContext,
+        input: &SharedInput,
+    ) -> Result<AllocatedBuffer<OpenVinoBuffer>, BackendError> {
+        let desc = BufferDesc::new(
+            input.bytes as u64,
+            input.allocation.alignment(),
+            MemoryDomain::Shared,
+            BufferUsage::PROGRAM_INPUT | BufferUsage::TRANSFER_SOURCE,
+        )?;
+        self.info.validate_buffer_desc(desc)?;
+        let info = BufferInfo::new(
+            desc,
+            input.allocation.allocation_bytes(),
+            input.allocation.alignment(),
+            BufferProperties::HOST_VISIBLE | BufferProperties::DIRECT_BINDING,
+        )?;
+        Ok(AllocatedBuffer::new(
+            OpenVinoBuffer {
+                context_id: context.id,
+                desc,
+                allocation: input.allocation.clone(),
+                _not_send_sync: PhantomData,
+            },
+            info,
+        ))
+    }
     /// Initialize runtime loading from an installed library (for example a Python
     /// OpenVINO wheel). The first successful load is retained for the process
     /// lifetime. Call before discovery; this never replaces an active runtime.
@@ -1602,6 +1700,96 @@ impl Accelerator for OpenVinoAccelerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shared_input_is_immutable_aligned_and_shared_across_threads() {
+        let input = SharedInput::initialize(17, 16384, |bytes| {
+            bytes.copy_from_slice(&[7; 17]);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(input.as_bytes().as_ptr() as usize % 16384, 0);
+        let clone = input.clone();
+        assert!(Arc::ptr_eq(&input.allocation, &clone.allocation));
+        drop(input);
+        std::thread::spawn(move || assert_eq!(clone.as_bytes(), &[7; 17]))
+            .join()
+            .unwrap();
+        for (bytes, alignment) in [(0, 16), (4, 0), (4, 3), (u64::MAX, 16)] {
+            assert!(SharedInput::initialize(bytes, alignment, |_| Ok(())).is_err());
+        }
+        assert!(SharedInput::initialize(4, 16, |_| Err(BackendError::InvalidArgument)).is_err());
+    }
+
+    #[test]
+    fn borrowed_host_view_excludes_writers_and_releases_on_panic() {
+        let allocation = Arc::new(AlignedAllocation::new(16, 16).unwrap());
+        let buffer = OpenVinoBuffer {
+            context_id: 0,
+            desc: BufferDesc::new(
+                16,
+                16,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+            )
+            .unwrap(),
+            allocation: allocation.clone(),
+            _not_send_sync: PhantomData,
+        };
+        let mut writer = EventBacking::new(allocation.clone(), AccessMode::Write);
+        writer.acquire().unwrap();
+        assert_eq!(buffer.with_bytes(|_| ()), Err(BackendError::Busy));
+        drop(writer);
+        buffer
+            .with_bytes(|bytes| {
+                assert_eq!(bytes, &[0; 16]);
+                let mut writer = EventBacking::new(allocation.clone(), AccessMode::Write);
+                assert_eq!(writer.acquire(), Err(BackendError::Busy));
+            })
+            .unwrap();
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = buffer.with_bytes(|_| panic!("inspection failed"));
+            }))
+            .is_err()
+        );
+        let mut writer = EventBacking::new(allocation, AccessMode::Write);
+        writer.acquire().unwrap();
+    }
+
+    #[test]
+    fn imported_shared_input_is_read_only_and_retains_identical_backing() {
+        let Some(backend) = backend() else { return };
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        let input = SharedInput::initialize(16, 16384, |bytes| {
+            bytes.fill(3);
+            Ok(())
+        })
+        .unwrap();
+        let (mut first, _) = backend
+            .import_shared_input(&context, &input)
+            .unwrap()
+            .into_parts();
+        let context2 = backend.create_context(ContextDesc::default()).unwrap();
+        let (second, _) = backend
+            .import_shared_input(&context2, &input)
+            .unwrap()
+            .into_parts();
+        assert!(Arc::ptr_eq(&first.allocation, &second.allocation));
+        assert!(Arc::ptr_eq(&first.allocation, &input.allocation));
+        assert!(!first.desc.allows_access(AccessMode::Write));
+        assert!(!first.desc.allows_access(AccessMode::ReadWrite));
+        assert_eq!(
+            backend.write_buffer(&mut first, 0, &SliceSource(&[0; 16])),
+            Err(BackendError::PermissionDenied)
+        );
+        drop(input);
+        drop(first);
+        assert_eq!(
+            second.with_bytes(|bytes| bytes.iter().sum::<u8>()).unwrap(),
+            48
+        );
+        assert_eq!(backend.explicit_transfer_bytes(), 0);
+    }
     use virtio_accel_conformance::numerics::{
         IDENTITY_EDGES_FP32, IDENTITY_FP8E4M3, IDENTITY_FP8E5M2, MATMUL_FP16, MATMUL_FP32,
         MAX_POOL2D_FP32,

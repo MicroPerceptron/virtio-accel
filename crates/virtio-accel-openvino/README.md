@@ -17,6 +17,25 @@ asks pkg-config for `openvino` and enables the native modules only on success.
 placeholder, and `VIRTIO_ACCEL_OPENVINO_LIB_DIR` links archive installs that ship no pkg-config
 metadata. Builds without the runtime still compile and unit-test the portable TOSA-to-IR encoder.
 
+## Shared host inputs and output views
+
+Native builds expose `SharedInput::initialize(bytes, alignment, fill)` to allocate
+and initialize owned page-aligned storage once. After initialization it is
+immutable and cloneable across device-owning threads. `import_shared_input`
+creates context-local, read-only buffers over the same allocation: no per-device
+upload copy is performed. Events retain storage even if caller handles disappear.
+Producers can fill the shared allocation directly instead of staging a `Vec` first.
+
+`OpenVinoBuffer::with_bytes` inspects output storage through a scoped immutable
+borrow, without `read_buffer` or a readback allocation. A read guard rejects native
+writers for the callback lifetime, including reentrant submissions; the borrow
+cannot escape and panic releases the guard. The output still must be quiescent.
+
+These are safe host-only APIs; no wire-level external-memory feature is added.
+They eliminate explicit provider transfers but do not attest to plugin-internal
+staging. Column packing or dense output assembly may still copy application data.
+See [ADR 0017](../../docs/adr/0017-openvino-shared-inputs.md) and [the audit](SAFETY.md).
+
 ## Production TOSA artifacts
 
 The production path accepts `virtio-accel-tosa` artifacts (`ArtifactFormat` `"TOSA"`) declaring
