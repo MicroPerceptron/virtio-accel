@@ -88,15 +88,15 @@ pub enum CoreMlComputeUnits {
 }
 
 impl CoreMlComputeUnits {
-    // NeuralNetwork models do not carry typed intermediates: ANE may narrow FP32
+    // NeuralNetwork models do not carry typed intermediates: GPU and ANE may narrow FP32
     // arithmetic. Keep FP32 programs within a precision-preserving subset of the
     // explicitly selected policy. This is load-time placement, never a retry.
     #[cfg(target_os = "macos")]
     fn native_policy(self, requires_fp32: bool) -> u32 {
-        match (self, requires_fp32) {
-            (Self::CpuAndNeuralEngine, true) => 3, // private bridge CPUOnly
-            (Self::All, true) => Self::CpuAndGpu as u32,
-            _ => self as u32,
+        if requires_fp32 {
+            3 // private bridge CPUOnly; every public policy permits CPU execution
+        } else {
+            self as u32
         }
     }
 }

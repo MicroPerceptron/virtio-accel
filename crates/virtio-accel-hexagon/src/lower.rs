@@ -1248,8 +1248,14 @@ mod tests {
             let op = Op::new(raw);
             let coreml = virtio_accel_coreml::supports_tosa_operator(op);
             let openvino = virtio_accel_openvino::supports_tosa_operator(op);
-            assert_eq!(coreml, openvino, "shared providers disagree on {op:?}");
-            if !coreml {
+            // Core ML NeuralNetwork LOG adds an unavoidable epsilon. Its
+            // fail-closed exception must not narrow the other providers.
+            if op == Op::LOG {
+                assert!(!coreml && openvino && supports_tosa_operator(op));
+            } else {
+                assert_eq!(coreml, openvino, "shared providers disagree on {op:?}");
+            }
+            if !openvino {
                 assert!(
                     !supports_tosa_operator(op),
                     "Hexagon alone advertises {op:?}"

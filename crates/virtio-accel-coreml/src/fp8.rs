@@ -72,7 +72,9 @@ pub const COREML_TOSA_QUANTIZED_CAPABILITY: CapabilityDescriptor = CapabilityDes
         OperatorCapability::new(Op::CONST),
         OperatorCapability::new(Op::CONST_SHAPE),
         OperatorCapability::new(Op::CAST),
+        OperatorCapability::new(Op::IDENTITY),
         OperatorCapability::new(Op::ADD),
+        OperatorCapability::new(Op::TANH),
         OperatorCapability::constrained(Op::MUL, OperatorConstraints::ZERO_SHIFT),
         OperatorCapability::new(Op::GATHER),
         OperatorCapability::new(Op::CONCAT),
@@ -414,6 +416,12 @@ pub(crate) fn lower_with_weights(
                 }
             }
             Op::IDENTITY => args[0].clone(),
+            Op::TANH => {
+                if !matches!(t.dtype(), DType::FP16 | DType::FP32) {
+                    return Err(LoweringError::UnsupportedType(t.dtype()));
+                }
+                b.op("tanh", &[("x", &args[0])], d, &s)
+            }
             Op::ADD | Op::MUL => {
                 if !matches!(t.dtype(), DType::FP16 | DType::FP32)
                     && !(op.op() == Op::ADD && t.dtype() == DType::INT32)
