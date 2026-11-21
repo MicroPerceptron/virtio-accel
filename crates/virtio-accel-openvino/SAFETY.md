@@ -67,9 +67,32 @@ bound-tensor metadata. Recycling clears and drops every element before the alloc
 queue spare, so a spare owns no OpenVINO handle, `Arc`, backing guard, or buffer pointer. Events
 refer to the queue scratch weakly and therefore cannot extend queue lifetime. The separate
 pointer-slot scratch uses an RAII guard that clears its length on every return path, including a
-rejected submission. Native infer requests themselves are deliberately not pooled: OpenVINO
-retains copied tensor objects after `set_*_tensor_by_index`, and the C API supplies no operation
-that detaches all of those guest-backed tensors before reuse.
+rejected submission.
+
+A per-program cache retains at most eight successfully completed infer requests.
+An event owns an `Rc<ProgramResident>` retaining the compiled model and constant
+storage, even if the public program handle is unloaded before completion. The
+resident drops cached requests before the compiled model, weights tensor, and
+weights bytes. No global submission lock or cross-program request cache is used.
+
+The C API cannot detach all bound host pointers, so each cached `BoundTensor`
+retains its allocation Arc as well as its native tensor. Idle requests retain no
+access guards and cannot run independently. Every submission validates bindings
+and acquires fresh guards before taking a cached request. Exact pointer matches
+reuse the tensor wrappers; other bindings retain all old wrappers until every
+replacement succeeds. A partial rebind failure frees the request before either
+old or new backing storage is released. Cache entries cannot confuse reused host
+addresses because their allocation Arcs keep those addresses allocated.
+
+Only events latched `Complete` enter the cache. Failed, cancelled, rejected, or
+unobserved events use the existing quiesce/free path. `CachedRequest::drop` frees
+its native handle before Rust drops bound tensors and allocation Arcs. Moving an
+entry into an event transfers the unique request owner; no second handle owner
+or reference cycle is introduced. Keeping a program alive can therefore retain
+up to eight idle sets of host allocations after public buffer handles are freed.
+Unloading the last program/event owner releases them. Counters expose request
+creation/reuse for tests and benchmark assertions.
+
 
 OpenVINO receives tensors created from host pointers over Rust-owned memory. Submission
 validates range length and scalar alignment before exposing a bound pointer, and completion

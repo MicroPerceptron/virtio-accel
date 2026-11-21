@@ -441,6 +441,9 @@ impl Drop for TensorHandle {
 /// tensor removes a second per-event allocation.
 struct BoundTensor {
     _tensor: TensorHandle,
+    // Idle requests retain storage without retaining an access guard.
+    _allocation: Arc<AlignedAllocation>,
+    data: *mut c_void,
     output_io_index: usize,
     expected_output: *mut c_void,
 }
@@ -845,8 +848,14 @@ impl OpenVinoBuffer {
 /// Resident compiled OpenVINO model.
 pub struct OpenVinoProgram {
     context_id: u64,
-    compiled: CompiledModelHandle,
+    resident: Rc<ProgramResident>,
     slots: Vec<SlotPlan>,
+}
+
+// Field order releases requests before compiled models and constant storage.
+struct ProgramResident {
+    idle: RefCell<Vec<CachedRequest>>,
+    compiled: CompiledModelHandle,
     /// The reader shares the weights memory; both stay resident for the program lifetime
     /// because plugin retention of shared constants is unspecified.
     _weights_tensor: Option<TensorHandle>,
@@ -863,6 +872,20 @@ impl std::fmt::Debug for OpenVinoProgram {
     }
 }
 
+// Only completed requests enter this bounded per-program cache. Their tensor
+// wrappers retain allocations, but access guards are reacquired on every start.
+const MAX_IDLE_REQUESTS: usize = 8;
+struct CachedRequest {
+    request: NonNull<ffi::ov_infer_request_t>,
+    tensors: Vec<BoundTensor>,
+}
+impl Drop for CachedRequest {
+    fn drop(&mut self) {
+        // SAFETY: this request is quiescent. Free before releasing bound storage.
+        unsafe { (ffi::api().ov_infer_request_free)(self.request.as_ptr()) };
+    }
+}
+
 /// OpenVINO execution queue handle with reusable per-submission scratch.
 #[derive(Debug)]
 pub struct OpenVinoQueue {
@@ -876,6 +899,7 @@ pub struct OpenVinoQueue {
 /// observed terminal state is latched; the guards are dropped strictly before the latch is
 /// published.
 pub struct OpenVinoEvent {
+    resident: Rc<ProgramResident>,
     request: NonNull<ffi::ov_infer_request_t>,
     metadata: RefCell<EventMetadata>,
     scratch: Weak<QueueScratch>,
@@ -951,6 +975,17 @@ impl OpenVinoEvent {
 
 impl Drop for OpenVinoEvent {
     fn drop(&mut self) {
+        if self.latched.get() == Some(EventState::Complete)
+            && self.resident.idle.borrow().len() < MAX_IDLE_REQUESTS
+        {
+            let tensors = mem::take(&mut self.metadata.borrow_mut().tensors);
+            self.resident.idle.borrow_mut().push(CachedRequest {
+                request: self.request,
+                tensors,
+            });
+            self.recycle_metadata();
+            return;
+        }
         if self.latched.get().is_none() {
             // The inference may still be running and writing through the bound tensors into
             // allocations this drop is about to release: cancel best-effort, then block until
@@ -976,6 +1011,8 @@ pub struct OpenVinoAccelerator {
     device: CString,
     next_id: AtomicU64,
     direct_binding_admissions: AtomicU64,
+    native_requests_created: AtomicU64,
+    native_requests_reused: AtomicU64,
     explicit_transfer_bytes: AtomicU64,
     info: DeviceInfo,
     /// Whether this device's compiler accepts FP8, probed once at open.
@@ -1081,6 +1118,8 @@ impl OpenVinoAccelerator {
             device,
             next_id: AtomicU64::new(0),
             direct_binding_admissions: AtomicU64::new(0),
+            native_requests_created: AtomicU64::new(0),
+            native_requests_reused: AtomicU64::new(0),
             explicit_transfer_bytes: AtomicU64::new(0),
             info,
             fp8,
@@ -1135,7 +1174,7 @@ impl OpenVinoAccelerator {
         // NUL-terminated string for the duration of the call.
         unsafe {
             check_status((ffi::api().ov_compiled_model_export_model)(
-                program.compiled.as_const_ptr(),
+                program.resident.compiled.as_const_ptr(),
                 path.as_ptr(),
             ))
         }
@@ -1148,6 +1187,15 @@ impl OpenVinoAccelerator {
     /// Re-enumerate inference devices through this instance's runtime core.
     pub fn runtime_devices(&self) -> Result<Vec<String>, InitError> {
         self.core.available_devices()
+    }
+
+    /// Cumulative native infer requests created, including rejected submissions.
+    pub fn native_requests_created(&self) -> u64 {
+        self.native_requests_created.load(Ordering::Relaxed)
+    }
+    /// Successfully completed native requests reused on subsequent submissions.
+    pub fn native_requests_reused(&self) -> u64 {
+        self.native_requests_reused.load(Ordering::Relaxed)
     }
 
     /// Cumulative count of buffers admitted as direct bindings.
@@ -1503,11 +1551,14 @@ impl Accelerator for OpenVinoAccelerator {
 
         Ok(OpenVinoProgram {
             context_id: context.id,
-            compiled,
             slots,
-            _weights_tensor: weights_tensor,
-            _weights: lowered.weights,
-            _not_send_sync: PhantomData,
+            resident: Rc::new(ProgramResident {
+                idle: RefCell::new(Vec::with_capacity(MAX_IDLE_REQUESTS)),
+                compiled,
+                _weights_tensor: weights_tensor,
+                _weights: lowered.weights,
+                _not_send_sync: PhantomData,
+            }),
         })
     }
 
@@ -1598,22 +1649,33 @@ impl Accelerator for OpenVinoAccelerator {
         // Native phase. Failures below free every created handle and reject: nothing observable
         // was started until `start_async` succeeds, so `SubmitFailure::Indeterminate` is never
         // produced.
-        let mut request = ptr::null_mut();
-        // SAFETY: the compiled model is live and `request` is a valid out-pointer.
-        let status = unsafe {
-            (ffi::api().ov_compiled_model_create_infer_request)(
-                program.compiled.as_const_ptr(),
-                &mut request,
-            )
-        };
-        check_status(status).map_err(SubmitFailure::Rejected)?;
-        let Some(request) = NonNull::new(request) else {
-            return Err(SubmitFailure::Rejected(BackendError::External {
-                domain: OPENVINO_EXTERNAL_DOMAIN,
-                code: 0,
-            }));
+        let request = if let Some(mut cached) = program.resident.idle.borrow_mut().pop() {
+            event_metadata.tensors = mem::take(&mut cached.tensors);
+            let request = cached.request;
+            // Transfer request ownership into the event without freeing it.
+            mem::forget(cached);
+            self.native_requests_reused.fetch_add(1, Ordering::Relaxed);
+            request
+        } else {
+            let mut request = ptr::null_mut();
+            // SAFETY: compiled model is live and request is a valid out-pointer.
+            check_status(unsafe {
+                (ffi::api().ov_compiled_model_create_infer_request)(
+                    program.resident.compiled.as_const_ptr(),
+                    &mut request,
+                )
+            })
+            .map_err(SubmitFailure::Rejected)?;
+            let request =
+                NonNull::new(request).ok_or(SubmitFailure::Rejected(BackendError::External {
+                    domain: OPENVINO_EXTERNAL_DOMAIN,
+                    code: 0,
+                }))?;
+            self.native_requests_created.fetch_add(1, Ordering::Relaxed);
+            request
         };
         let event = OpenVinoEvent {
+            resident: program.resident.clone(),
             request,
             metadata: RefCell::new(event_metadata),
             scratch: Rc::downgrade(&queue.scratch),
@@ -1631,36 +1693,60 @@ impl Accelerator for OpenVinoAccelerator {
         };
 
         let mut metadata = event.metadata.borrow_mut();
-        for (plan, data) in program.slots.iter().zip(pointers.iter()) {
-            let tensor = TensorHandle::from_host_ptr(plan.element, plan.shape.as_value(), *data)
-                .map_err(SubmitFailure::Rejected)?;
-            // SAFETY: request and tensor are live; the runtime retains its own tensor reference.
-            let status = unsafe {
-                match plan.role {
-                    LoweredFeatureRole::Input => (ffi::api()
-                        .ov_infer_request_set_input_tensor_by_index)(
-                        event.request.as_ptr(),
-                        plan.io_index,
-                        tensor.as_const_ptr(),
-                    ),
-                    LoweredFeatureRole::Output => (ffi::api()
-                        .ov_infer_request_set_output_tensor_by_index)(
-                        event.request.as_ptr(),
-                        plan.io_index,
-                        tensor.as_const_ptr(),
-                    ),
-                }
-            };
-            check_status(status).map_err(SubmitFailure::Rejected)?;
-            metadata.tensors.push(BoundTensor {
-                _tensor: tensor,
-                output_io_index: plan.io_index,
-                expected_output: if plan.role == LoweredFeatureRole::Output {
-                    *data
-                } else {
-                    ptr::null_mut()
-                },
-            });
+        let old_len = metadata.tensors.len();
+        let same_bindings = old_len == pointers.len()
+            && metadata
+                .tensors
+                .iter()
+                .zip(pointers.iter())
+                .all(|(t, p)| t.data == *p);
+        if !same_bindings {
+            // Retain old bindings through partial replacement, including rejection.
+            metadata
+                .tensors
+                .try_reserve(program.slots.len())
+                .map_err(|_| SubmitFailure::Rejected(BackendError::OutOfMemory))?;
+            for (plan, data) in program.slots.iter().zip(pointers.iter()) {
+                let tensor =
+                    TensorHandle::from_host_ptr(plan.element, plan.shape.as_value(), *data)
+                        .map_err(SubmitFailure::Rejected)?;
+                // SAFETY: request and tensor are live; the runtime retains its own tensor reference.
+                let status = unsafe {
+                    match plan.role {
+                        LoweredFeatureRole::Input => (ffi::api()
+                            .ov_infer_request_set_input_tensor_by_index)(
+                            event.request.as_ptr(),
+                            plan.io_index,
+                            tensor.as_const_ptr(),
+                        ),
+                        LoweredFeatureRole::Output => (ffi::api()
+                            .ov_infer_request_set_output_tensor_by_index)(
+                            event.request.as_ptr(),
+                            plan.io_index,
+                            tensor.as_const_ptr(),
+                        ),
+                    }
+                };
+                check_status(status).map_err(SubmitFailure::Rejected)?;
+                metadata.tensors.push(BoundTensor {
+                    _tensor: tensor,
+                    _allocation: bindings
+                        .iter()
+                        .find(|b| b.slot == plan.slot)
+                        .expect("validated slot")
+                        .buffer
+                        .allocation
+                        .clone(),
+                    data: *data,
+                    output_io_index: plan.io_index,
+                    expected_output: if plan.role == LoweredFeatureRole::Output {
+                        *data
+                    } else {
+                        ptr::null_mut()
+                    },
+                });
+            }
+            metadata.tensors.drain(..old_len);
         }
         drop(metadata);
 
@@ -2218,21 +2304,67 @@ mod tests {
         assert_eq!(backend.direct_binding_admissions(), 2);
 
         backend.destroy_event(event).unwrap();
+        assert_eq!(program.resident.idle.borrow().len(), 1);
         assert!(
             queue
                 .scratch
                 .metadata_spare
                 .borrow()
                 .as_ref()
-                .is_some_and(|metadata| {
-                    metadata.backings.is_empty()
-                        && metadata.backings.capacity() >= bindings.len()
-                        && metadata.tensors.is_empty()
-                        && metadata.tensors.capacity() >= bindings.len()
-                })
+                .is_some_and(|m| m.backings.is_empty() && m.tensors.is_empty())
         );
-        backend.destroy_queue(queue).unwrap();
+        let event = backend
+            .submit(&queue, &program, &bindings, Timeout::Infinite)
+            .unwrap();
+        assert_eq!(wait_for_terminal(&backend, &event), EventState::Complete);
+        backend.destroy_event(event).unwrap();
+        assert_eq!(backend.native_requests_created(), 1);
+        assert_eq!(backend.native_requests_reused(), 1);
+        // Even identical artifacts have independent pools and compiled owners.
+        let other = backend
+            .load_program(&context, tosa_artifact(&SliceSource(IDENTITY_FP32_LOCAL)))
+            .unwrap();
+        let separate = backend
+            .submit(&queue, &other, &bindings, Timeout::Infinite)
+            .unwrap();
+        assert_eq!(wait_for_terminal(&backend, &separate), EventState::Complete);
+        backend.destroy_event(separate).unwrap();
+        assert_eq!(backend.native_requests_created(), 2);
+        assert_eq!(backend.native_requests_reused(), 1);
+        backend.unload_program(other).unwrap();
+        // Rebind an idle request to different allocations, then drop every public
+        // handle including the program before waiting. The event retains all data.
+        let (mut replacement, _) = backend
+            .allocate_buffer(&context, desc)
+            .unwrap()
+            .into_parts();
+        let doubled: Vec<_> = (1..=bytes as u32 / 4)
+            .flat_map(|v| (2.0 * v as f32).to_le_bytes())
+            .collect();
+        backend
+            .write_buffer(&mut replacement, 0, &SliceSource(&doubled))
+            .unwrap();
+        let rebound = [
+            BindingRef {
+                buffer: &replacement,
+                ..bindings[0]
+            },
+            BindingRef { ..bindings[1] },
+        ];
+        let event = backend
+            .submit(&queue, &program, &rebound, Timeout::Infinite)
+            .unwrap();
+        backend.free_buffer(replacement).unwrap();
         backend.unload_program(program).unwrap();
+        assert_eq!(wait_for_terminal(&backend, &event), EventState::Complete);
+        backend
+            .read_buffer(&output, 0, &mut SliceSink(&mut result))
+            .unwrap();
+        assert_eq!(result, doubled);
+        backend.destroy_event(event).unwrap();
+        assert_eq!(backend.native_requests_created(), 2);
+        assert_eq!(backend.native_requests_reused(), 2);
+        backend.destroy_queue(queue).unwrap();
         backend.free_buffer(input).unwrap();
         backend.free_buffer(output).unwrap();
         backend.destroy_context(context).unwrap();
