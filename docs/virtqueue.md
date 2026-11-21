@@ -260,6 +260,10 @@ by the in-memory split ring and future platform transports. The dependency-free
 and notification port contracts. `virtio-accel-split-queue` exercises the ring-level portions of
 `VQ-001`, `VQ-003` through `VQ-006`, `VQ-013`, `VQ-014`, and `VQ-016` through `VQ-018`. The reference
 guest and end-to-end scenarios exercise the complete `VQ-001` through `VQ-020` lifecycle.
+`virtio-accel-shared-queue` implements the same ports over the wire layout in shared memory and
+is held to the split-queue model chain shape by chain shape; where the two are separated by a
+trust boundary it adds what a model in one address space cannot need — bounds on every index
+and address a peer supplies, one snapshot per descriptor, and validation of used entries.
 
 ## Appendix A: portable Rust queue-port mapping
 

@@ -39,6 +39,7 @@ members = [
     "crates/virtio-accel-vulkan",
     "crates/virtio-accel-openvino",
     "crates/virtio-accel-proto",
+    "crates/virtio-accel-shared-queue",
     "crates/virtio-accel-split-queue",
     "crates/virtio-accel-tosa",
     "crates/virtio-accel-tosa-build",
@@ -78,6 +79,7 @@ virtio-accel-hexagon = { path = "crates/virtio-accel-hexagon", version = "0.5.0"
 virtio-accel-mock = { path = "crates/virtio-accel-mock", version = "0.5.0" }
 virtio-accel-openvino = { path = "crates/virtio-accel-openvino", version = "0.5.0" }
 virtio-accel-proto = { path = "crates/virtio-accel-proto", version = "0.5.0" }
+virtio-accel-shared-queue = { path = "crates/virtio-accel-shared-queue", version = "0.5.0" }
 virtio-accel-split-queue = { path = "crates/virtio-accel-split-queue", version = "0.5.0" }
 virtio-accel-tosa = { path = "crates/virtio-accel-tosa", version = "0.5.0" }
 virtio-accel-tosa-build = { path = "crates/virtio-accel-tosa-build", version = "0.5.0" }
@@ -108,6 +110,7 @@ virtio-accel-coreml.workspace = true
 virtio-accel-hexagon.workspace = true
 virtio-accel-mock.workspace = true
 virtio-accel-openvino.workspace = true
+virtio-accel-shared-queue.workspace = true
 virtio-accel-tosa.workspace = true
 virtio-accel-xdna.workspace = true
 zerocopy.workspace = true

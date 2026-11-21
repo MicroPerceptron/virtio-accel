@@ -77,7 +77,7 @@ global runtime, or platform synchronization primitive.
 Platform integrations must live in adapter crates that depend inward on the portable layers. They
 must not become default dependencies of `virtio-accel-core`, `virtio-accel-proto`,
 `virtio-accel-transport`, `virtio-accel-device`, `virtio-accel-guest`,
-`virtio-accel-split-queue`, or the facade crate.
+`virtio-accel-split-queue`, `virtio-accel-shared-queue`, or the facade crate.
 
 ## MSRV and supported targets
 
@@ -143,7 +143,7 @@ declares its own `description` and `readme`, and carries its own byte-identical 
 root license files do not reach the sub-crate tarballs; the copies exist for that reason and are
 copies rather than symlinks because CI runs `windows-latest`.
 
-`ci/check-release-policy.py` enforces all of this against an explicit eighteen-crate allowlist. A new
+`ci/check-release-policy.py` enforces all of this against an explicit nineteen-crate allowlist. A new
 package fails that check until it is added to the allowlist, which forces a decision about whether
 it is public rather than letting it default either way. The check also validates the crates.io
 keyword and category limits, which neither `cargo package` nor `cargo publish --dry-run` catches
@@ -153,7 +153,7 @@ The `fuzz/` harness is a separate workspace at version `0.0.0` and stays `publis
 
 ## Publication, yank, and rollback
 
-Eighteen packages are published to crates.io. Publication is ordered: a crate cannot be published
+Nineteen packages are published to crates.io. Publication is ordered: a crate cannot be published
 before every crate it depends on, and that includes development dependencies, because a published crate's
 versioned dev-dependencies must resolve from the registry for `cargo test` to run on the packaged
 source.
@@ -167,24 +167,25 @@ source.
 | 5 | `virtio-accel-tosa` | `core`, FlatBuffers | — |
 | 6 | `virtio-accel-tosa-build` | `tosa`, FlatBuffers | — |
 | 7 | `virtio-accel-split-queue` | `transport` | — |
-| 8 | `virtio-accel-guest` | `proto`, `transport` | `split-queue` |
-| 9 | `virtio-accel-mock` | `core` | — |
-| 10 | `virtio-accel-device` | `core`, `proto`, `transport` | `mock` |
-| 11 | `virtio-accel-conformance` | `core` | `mock`, `tosa` |
-| 12 | `virtio-accel-vaccel` | `core` | `conformance` |
-| 13 | `virtio-accel-xdna` | `core`, `tosa` | `conformance`, `tosa-build` |
-| 14 | `virtio-accel-coreml` | `core`, `tosa` | `conformance` |
-| 15 | `virtio-accel-openvino` | `core`, `tosa` | `conformance` |
-| 16 | `virtio-accel-hexagon` | `core`, `tosa` | `conformance` |
-| 17 | `virtio-accel-vulkan` | `core`, `tosa` | `conformance` |
-| 18 | `virtio-accel` | the six runtime crates | `conformance`, `mock`, `cleanroom` |
+| 8 | `virtio-accel-shared-queue` | `transport` | `split-queue` |
+| 9 | `virtio-accel-guest` | `proto`, `transport` | `split-queue` |
+| 10 | `virtio-accel-mock` | `core` | — |
+| 11 | `virtio-accel-device` | `core`, `proto`, `transport` | `mock` |
+| 12 | `virtio-accel-conformance` | `core` | `mock`, `tosa` |
+| 13 | `virtio-accel-vaccel` | `core` | `conformance` |
+| 14 | `virtio-accel-xdna` | `core`, `tosa` | `conformance`, `tosa-build` |
+| 15 | `virtio-accel-coreml` | `core`, `tosa` | `conformance` |
+| 16 | `virtio-accel-openvino` | `core`, `tosa` | `conformance` |
+| 17 | `virtio-accel-hexagon` | `core`, `tosa` | `conformance` |
+| 18 | `virtio-accel-vulkan` | `core`, `tosa` | `conformance` |
+| 19 | `virtio-accel` | the six runtime crates | `conformance`, `mock`, `cleanroom`, `shared-queue` |
 
 This order is executable, not just documentary: `ci/publish-dry-run.py` walks it against an isolated
 local registry, adding each crate only after it has been built, tested, and documented from its own
 extracted tarball. A crate can therefore only ever resolve its predecessors, so a wrong order fails
 with an unresolvable dependency instead of passing quietly. The same script is a required CI job.
 
-All eighteen packages share the workspace version and are published together. A GitHub release tag
+All nineteen packages share the workspace version and are published together. A GitHub release tag
 must be exactly `v<workspace-version>` and must point at the commit being released. Publishing a
 GitHub release triggers `.github/workflows/publish.yml`, which checks out that tag, runs the release
 policy checks and publication-driver tests, repeats the full ordered local-registry dry run on the
