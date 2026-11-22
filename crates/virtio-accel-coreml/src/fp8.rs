@@ -7,6 +7,7 @@ use crate::lower::{
     encode_array_feature, static_shape, tensor,
 };
 use crate::mlprogram::*;
+mod floating;
 mod weights;
 use virtio_accel_tosa::{
     AnalyzedValueKind, CapabilityDescriptor, DType, DTypeCapability, DTypeConstraints,
@@ -67,6 +68,10 @@ pub const COREML_TOSA_QUANTIZED_CAPABILITY: CapabilityDescriptor = CapabilityDes
         DTypeCapability::new(DType::INT32, ValueRoles::ALL),
         DTypeCapability::new(DType::FP32, ValueRoles::ALL),
         DTypeCapability::new(DType::FP16, ValueRoles::ALL),
+        DTypeCapability::new(
+            DType::BOOL,
+            ValueRoles::CONSTANT.union(ValueRoles::INTERMEDIATE),
+        ),
     ],
     operators: &[
         OperatorCapability::new(Op::CONST),
@@ -75,6 +80,18 @@ pub const COREML_TOSA_QUANTIZED_CAPABILITY: CapabilityDescriptor = CapabilityDes
         OperatorCapability::new(Op::IDENTITY),
         OperatorCapability::new(Op::ADD),
         OperatorCapability::new(Op::TANH),
+        OperatorCapability::new(Op::SUB),
+        OperatorCapability::new(Op::EXP),
+        OperatorCapability::new(Op::FLOOR),
+        OperatorCapability::new(Op::CEIL),
+        OperatorCapability::new(Op::GREATER),
+        OperatorCapability::new(Op::RSQRT),
+        OperatorCapability::new(Op::RECIPROCAL),
+        OperatorCapability::new(Op::REDUCE_SUM),
+        OperatorCapability::constrained(Op::REDUCE_MAX, OperatorConstraints::PROPAGATING_NAN),
+        OperatorCapability::constrained(Op::MAXIMUM, OperatorConstraints::PROPAGATING_NAN),
+        OperatorCapability::constrained(Op::MINIMUM, OperatorConstraints::PROPAGATING_NAN),
+        OperatorCapability::new(Op::SELECT),
         OperatorCapability::constrained(Op::MUL, OperatorConstraints::ZERO_SHIFT),
         OperatorCapability::new(Op::GATHER),
         OperatorCapability::new(Op::CONCAT),
@@ -87,7 +104,7 @@ pub const COREML_TOSA_QUANTIZED_CAPABILITY: CapabilityDescriptor = CapabilityDes
         max_regions: 1,
         max_blocks: 1,
         dynamic_shapes: false,
-        runtime_conditions: RuntimeConditionSupport::ProvenConstantOrByteLookup,
+        runtime_conditions: RuntimeConditionSupport::ProvenBoundedOrByteLookup,
     },
 };
 const F16: u64 = 10;
@@ -104,6 +121,7 @@ fn mil(d: DType) -> Result<u64, LoweringError> {
         DType::FP16 => F16,
         DType::FP32 => F32,
         DType::INT32 => I32,
+        DType::BOOL => BOOL,
         _ => return Err(LoweringError::UnsupportedType(d)),
     })
 }
@@ -147,6 +165,10 @@ impl Builder {
         let n = self.name();
         let mut repeated = Vec::new();
         let tensor_field = match dtype {
+            BOOL => {
+                field_bytes(&mut repeated, 1, bytes);
+                3
+            }
             F32 => {
                 field_bytes(&mut repeated, 1, bytes);
                 1
@@ -318,7 +340,9 @@ pub(crate) fn lower_with_weights(
         || a.regions().len() != 1
         || a.conditions().iter().any(|c| {
             target != COREML_TOSA_QUANTIZED_TARGET
-                || !(a.proves_byte_lookup_bounds(c) || a.proves_constant_index_bounds(c))
+                || !(a.proves_byte_lookup_bounds(c)
+                    || a.proves_constant_index_bounds(c)
+                    || a.proves_integer_index_bounds(c))
         })
     {
         return Err(LoweringError::UnsupportedGraph);
@@ -397,6 +421,7 @@ pub(crate) fn lower_with_weights(
                     && !((input_dtype == DType::INT8
                         && (t.dtype() == DType::INT32 || float(t.dtype())))
                         || (float(input_dtype) && float(t.dtype())))
+                    && !(float(input_dtype) && t.dtype() == DType::INT32)
                 {
                     return Err(LoweringError::UnsupportedType(input_dtype));
                 }
@@ -416,6 +441,18 @@ pub(crate) fn lower_with_weights(
                 }
             }
             Op::IDENTITY => args[0].clone(),
+            Op::SUB
+            | Op::EXP
+            | Op::FLOOR
+            | Op::CEIL
+            | Op::GREATER
+            | Op::RSQRT
+            | Op::RECIPROCAL
+            | Op::REDUCE_SUM
+            | Op::REDUCE_MAX
+            | Op::MAXIMUM
+            | Op::MINIMUM
+            | Op::SELECT => floating::emit(&mut b, &a, *id, &args, d, &s)?,
             Op::TANH => {
                 if !matches!(t.dtype(), DType::FP16 | DType::FP32) {
                     return Err(LoweringError::UnsupportedType(t.dtype()));
@@ -674,3 +711,6 @@ pub(crate) fn lower_with_weights(
         requires_fp32: false,
     })
 }
+
+#[cfg(test)]
+mod language_model_tests;

@@ -1,0 +1,136 @@
+use super::*;
+use virtio_accel_tosa::{DType, NanPropagationMode};
+use virtio_accel_tosa_build::{Graph, Operator, OperatorKind as K, Shape, Tensor};
+
+#[test]
+fn typed_transformer_arithmetic_preserves_numerics() {
+    let target = virtio_accel_coreml::COREML_TOSA_QUANTIZED_TARGET;
+    for units in [
+        CoreMlComputeUnits::CpuAndGpu,
+        CoreMlComputeUnits::CpuAndNeuralEngine,
+    ] {
+        let backend = match CoreMlAccelerator::new_tosa_with_compute_units(units) {
+            Ok(b) => b,
+            Err(InitError::GpuUnavailable | InitError::NeuralEngineUnavailable)
+                if std::env::var_os("VIRTIO_ACCEL_COREML_REQUIRE_QUANTIZED").is_none() =>
+            {
+                continue;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        for (op, values, expected) in [
+            (K::Rsqrt, vec![0.25, 1., 4., 16.], vec![2., 1., 0.5, 0.25]),
+            (
+                K::Reciprocal,
+                vec![0.25, 1., 4., 16.],
+                vec![4., 1., 0.25, 0.0625],
+            ),
+            (
+                K::Exp,
+                vec![0., 1., -1., 2.],
+                vec![1., std::f32::consts::E, (-1_f32).exp(), 2_f32.exp()],
+            ),
+            (K::Floor, vec![-1.5, -0.1, 0.1, 1.5], vec![-2., -1., 0., 1.]),
+            (K::Ceil, vec![-1.5, -0.1, 0.1, 1.5], vec![-1., 0., 1., 2.]),
+        ] {
+            eprintln!("typed native {units:?} {op:?}");
+            let tensors = [
+                Tensor::new("x", &[1, 4], DType::FP32),
+                Tensor::new("y", &[1, 4], DType::FP32),
+            ];
+            let ops = [Operator::new(op, &["x"], &["y"])];
+            let graph = Graph::new("typed", &tensors, &ops, &["x"], &["y"])
+                .build(target)
+                .unwrap();
+            let input = float_bytes(values);
+            let out = run_tosa_bytes_on(&backend, &graph, target, &[&input], 16).unwrap();
+            for (b, e) in out.chunks_exact(4).zip(expected) {
+                let v = f32::from_le_bytes(b.try_into().unwrap());
+                assert!((v - e).abs() < 1e-5, "{op:?} {v} != {e}");
+            }
+        }
+        for op in [
+            K::ReduceSum { axis: 1 },
+            K::ReduceMax {
+                axis: 1,
+                nan_mode: NanPropagationMode::PROPAGATE,
+            },
+        ] {
+            eprintln!("typed native {units:?} {op:?}");
+            let tensors = [
+                Tensor::new("x", &[2, 4], DType::FP32),
+                Tensor::new("y", &[2, 1], DType::FP32),
+            ];
+            let ops = [Operator::new(op, &["x"], &["y"])];
+            let graph = Graph::new("reduce", &tensors, &ops, &["x"], &["y"])
+                .build(target)
+                .unwrap();
+            let input = float_bytes([1., 2., 3., 4., 1., f32::NAN, 3., 4.]);
+            let out = run_tosa_bytes_on(&backend, &graph, target, &[&input], 8).unwrap();
+            let values: Vec<_> = out
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .collect();
+            assert_eq!(
+                values[0],
+                if matches!(op, K::ReduceSum { .. }) {
+                    10.
+                } else {
+                    4.
+                }
+            );
+            assert!(values[1].is_nan(), "{op:?} must propagate NaN: {values:?}");
+        }
+        for op in [
+            K::Maximum {
+                nan_mode: NanPropagationMode::PROPAGATE,
+            },
+            K::Minimum {
+                nan_mode: NanPropagationMode::PROPAGATE,
+            },
+        ] {
+            let tensors = [
+                Tensor::new("a", &[1, 4], DType::FP32),
+                Tensor::new("b", &[1, 4], DType::FP32),
+                Tensor::new("y", &[1, 4], DType::FP32),
+            ];
+            let ops = [Operator::new(op, &["a", "b"], &["y"])];
+            let graph = Graph::new("minmax", &tensors, &ops, &["a", "b"], &["y"])
+                .build(target)
+                .unwrap();
+            let a = float_bytes([1., f32::NAN, 2., f32::NAN]);
+            let b = float_bytes([2., 1., f32::NAN, f32::NAN]);
+            let out = run_tosa_bytes_on(&backend, &graph, target, &[&a, &b], 16).unwrap();
+            let values: Vec<_> = out
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .collect();
+            assert_eq!(
+                values[0],
+                if matches!(op, K::Maximum { .. }) {
+                    2.
+                } else {
+                    1.
+                }
+            );
+            assert!(values[1..].iter().all(|v| v.is_nan()), "{op:?}: {values:?}");
+        }
+        let tensors = [
+            Tensor::new("x", &[2, 4], DType::FP32),
+            Tensor::new("y", &[2, 2], DType::FP32),
+        ];
+        let shapes = [Shape::new("start", &[0, 1]), Shape::new("size", &[2, 2])];
+        let ops = [
+            Operator::new(K::ConstShape, &[], &["start"]),
+            Operator::new(K::ConstShape, &[], &["size"]),
+            Operator::new(K::Slice, &["x", "start", "size"], &["y"]),
+        ];
+        let graph = Graph::new("slice", &tensors, &ops, &["x"], &["y"])
+            .with_shapes(&shapes)
+            .build(target)
+            .unwrap();
+        let input = float_bytes((0..8).map(|i| i as f32));
+        let out = run_tosa_bytes_on(&backend, &graph, target, &[&input], 16).unwrap();
+        assert_eq!(out, float_bytes([1., 2., 5., 6.]));
+    }
+}

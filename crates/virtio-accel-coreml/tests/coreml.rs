@@ -1,5 +1,8 @@
 #![cfg(target_os = "macos")]
 
+#[path = "coreml/typed.rs"]
+mod typed;
+
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
