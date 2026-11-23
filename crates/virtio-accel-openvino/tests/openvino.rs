@@ -1223,3 +1223,55 @@ fn greater_equal_preserves_ordered_float_semantics_and_byte_output() {
         );
     }
 }
+
+#[test]
+fn fp8_runtime_activation_constant_rhs_preserves_matrix_order() {
+    use virtio_accel_openvino::OPENVINO_TOSA_FP8_TARGET as target;
+    use virtio_accel_tosa::{DType, TosaCapabilityProvider};
+    use virtio_accel_tosa_build::{Graph, Operator, OperatorKind as K, Tensor};
+    for device in devices() {
+        let backend = OpenVinoAccelerator::with_device(&device).unwrap();
+        if !backend
+            .tosa_capabilities()
+            .iter()
+            .any(|c| c.target == target)
+        {
+            continue;
+        }
+        for dtype in [DType::FP8E4M3, DType::FP8E5M2] {
+            let (input, weights) = if dtype == DType::FP8E4M3 {
+                ([0x38, 0x40], [0x38, 0x40, 0x44, 0x48, 0x4a, 0x4c])
+            } else {
+                ([0x3c, 0x40], [0x3c, 0x40, 0x42, 0x44, 0x45, 0x46])
+            };
+            for columns in [2, 3] {
+                let weight_shape = [1, 2, columns];
+                let output_shape = [1, 1, columns];
+                let tensors = [
+                    Tensor::new("x", &[1, 1, 2], dtype),
+                    Tensor::constant("w", &weight_shape, dtype, &weights[..2 * columns as usize]),
+                    Tensor::constant("z", &[1], dtype, &[0]),
+                    Tensor::new("y", &output_shape, DType::FP16),
+                ];
+                let ops = [
+                    Operator::new(K::Const, &[], &["w"]),
+                    Operator::new(K::Const, &[], &["z"]),
+                    Operator::new(K::MatMul, &["x", "w", "z", "z"], &["y"]),
+                ];
+                let graph = Graph::new("projection", &tensors, &ops, &["x"], &["y"])
+                    .build(target)
+                    .unwrap();
+                // [1,2] * [1,2;3,4] = [7,10]; non-square [1,2,3;4,5,6] = [9,12,15].
+                let expected: &[u8] = if columns == 2 {
+                    &[0, 0x47, 0, 0x49]
+                } else {
+                    &[0x80, 0x48, 0, 0x4a, 0x80, 0x4b]
+                };
+                let out =
+                    run_tosa_bytes_for_target(&device, &graph, target, &[&input], expected.len())
+                        .expect("advertised FP8 endpoint must execute constant-weight projection");
+                assert_eq!(out, expected, "{device} {dtype:?} columns={columns}");
+            }
+        }
+    }
+}

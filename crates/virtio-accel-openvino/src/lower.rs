@@ -773,14 +773,20 @@ pub(crate) fn lower_tosa_with_weights(
                 | Op::SLICE
         )
     });
-    builder.packed_fp8 = target == OPENVINO_TOSA_FP8_TARGET
-        && (storage_only || analysis
-            .execution_order(block)
-            .iter()
-            .any(|id| analysis.operator(*id).op() == Op::SLICE
-                || (analysis.operator(*id).op() == Op::CAST
-                    && analysis.operator_inputs(*id).iter().chain(analysis.operator_outputs(*id))
-                        .any(|v| matches!(analysis.value(*v).kind(), AnalyzedValueKind::Tensor(t) if t.dtype() == DType::FP32)))));
+    // A native FP8 Constant -> Convert -> MatMul RHS was misordered by the
+    // tested GPU plugin ([1,2;3,4] behaved as its transpose). Byte carriers
+    // and explicit decoding keep that constant off the native FP8 weight path.
+    let packed_arithmetic = analysis.execution_order(block).iter().any(|id| {
+        let op = analysis.operator(*id).op();
+        op == Op::SLICE
+            || (op == Op::CAST
+                && analysis.operator_inputs(*id).iter().chain(analysis.operator_outputs(*id))
+                    .any(|v| matches!(analysis.value(*v).kind(), AnalyzedValueKind::Tensor(t) if t.dtype() == DType::FP32)))
+            || (avoid_gpu_residual_sum && op == Op::MATMUL
+                && analysis.value(analysis.operator_inputs(*id)[1]).producer()
+                    .is_some_and(|producer| analysis.operator(producer).op() == Op::CONST))
+    });
+    builder.packed_fp8 = target == OPENVINO_TOSA_FP8_TARGET && (storage_only || packed_arithmetic);
     let packed_fp8 = builder.packed_fp8;
     if packed_fp8
         && analysis.execution_order(block).iter().any(|id| {
