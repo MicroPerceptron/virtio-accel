@@ -1,0 +1,40 @@
+name: Website TLS
+
+# certbot on the droplet owns the certificate for virtio-accel.org, so nothing
+# in this repository can renew it. This is the alarm for the day that renewal
+# quietly stops: it fails while the certificate still has weeks of validity
+# left, instead of visitors finding out from a browser security error.
+#
+# There is deliberately no pull_request trigger. The check talks to the live
+# site, so its result says nothing about a pull request; the logic is covered
+# by website/test_tls_check.py, which `check-site` in website.yml runs.
+"on":
+  schedule:
+    # Daily, and off the hour so it is not queued behind every other schedule.
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  certificate:
+    name: check-certificate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The checker is standard-library Python, so the runner's own python3 is
+      # enough and nothing else from the repository is needed.
+      - name: Check out the certificate checker
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          sparse-checkout: website/tls_check.py
+          sparse-checkout-cone-mode: false
+
+      # Fails on a chain or hostname that does not verify, on less validity
+      # than certbot's renewal would ever leave, and on a site that cannot be
+      # reached at all. `www` is not listed because it is not served; see
+      # "TLS certificate" in website/README.md before adding it.
+      - name: Verify the certificate virtio-accel.org serves
+        run: python3 website/tls_check.py virtio-accel.org

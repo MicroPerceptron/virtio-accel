@@ -15,6 +15,7 @@ so it stays out of `cargo fmt --all`, `cargo clippy --workspace`, and
 | `requirements.txt` | Pinned documentation dependencies |
 | `release_trigger.py` | Require an actual production upload before a release-triggered refresh |
 | `check.py` | Validates the built tree: required pages, the landing overlay, dangling links |
+| `tls_check.py` | Fails when the certificate the live site serves does not verify or is not being renewed |
 | `content/index.html` | The landing page &mdash; a standalone document, not an mdBook chapter |
 | `content/api.md` | The API reference index chapter |
 | `theme/` | Favicon, docs-reader stylesheet, sidebar brand script |
@@ -127,6 +128,18 @@ required reviewers if you want that. The site is static, so **nothing is built
 on the droplet** -- it needs `nginx` and `rsync`, and no Rust, mdBook, Python,
 or Docker.
 
+`verify-live-site` runs after the sync, as a separate job that holds no deploy
+secret and is outside the `production` environment. It runs `tls_check.py`
+against `virtio-accel.org` and **fails the run when the served certificate does
+not verify** (expired, wrong hostname, untrusted issuer): that is not transient,
+and it puts the whole site behind a browser security error even though the
+files synced. A non-200 response, an unreachable host, or low remaining
+validity only warns there.
+
+`.github/workflows/website-tls.yml` (`Website TLS`) is the certificate monitor.
+It runs `tls_check.py` daily and on manual dispatch, and fails long before
+expiry; see [TLS certificate](#tls-certificate).
+
 To validate locally, run `python -m unittest discover -s website -p 'test_*.py' -v`,
 then build and run `check.py`. In addition to links and required pages, the checker
 requires every public Python export and public method/property to appear in the API
@@ -218,6 +231,86 @@ or those lines are lost. `nginx -t && systemctl reload nginx` after any change.
 The deploy `rsync`s with `--delete`, so the served tree exactly mirrors the
 build and a page removed from `SUMMARY.md` stops being served. `.well-known` is
 excluded so it cannot race certbot's ACME challenges.
+
+### TLS certificate
+
+certbot on the droplet obtains the certificate and is the only thing that can
+renew it. Nothing in this repository takes part in renewal; the repository's
+job is to notice when it stops.
+
+**Renewal on the droplet.** The certbot package installs a systemd timer that
+runs `certbot renew` twice a day, and that timer must be enabled and active:
+`certbot.timer` when certbot came from `apt`, `snap.certbot.renew.timer` when it
+came from `snap`. `certbot renew` is a no-op until a certificate is due
+(30 days before expiry up to certbot 3.x, a third of the lifetime from 4.0 on,
+which is also 30 days for a 90-day certificate). Because the certificate was
+installed with `--nginx`, a successful renewal reloads nginx on its own.
+Renewal uses the HTTP-01 challenge, so port 80 must stay reachable from the
+internet and the HTTP server block certbot manages must stay in place.
+
+Check all of it after building or changing the droplet, as root:
+
+```sh
+systemctl list-timers --all | grep -i certbot   # a timer exists and has a next run
+systemctl is-enabled certbot.timer              # or snap.certbot.renew.timer
+systemctl is-active certbot.timer               # or snap.certbot.renew.timer
+certbot certificates                            # names covered and days left
+certbot renew --dry-run                         # full renewal against the staging CA
+```
+
+`certbot renew --dry-run` must end with "all simulated renewals succeeded". It
+exercises the challenge, the nginx plugin, and the firewall without touching
+the live certificate, so it is the one command that shows whether the next
+real renewal will work.
+
+**The monitor.** `Website TLS` connects to `virtio-accel.org:443` every day
+at 05:23 UTC, verifies the chain and the hostname against the runner's trust
+store, and reads `notAfter` from the certificate the server presents. It checks
+what is *served*, so a certificate that renewed on disk while nginx kept the old
+one loaded is caught too. `tls_check.py` reports one of four outcomes per host:
+
+| Outcome | Meaning | `Website TLS` | `verify-live-site` |
+| --- | --- | --- | --- |
+| `ok` | Verifies, and clears the threshold | pass | pass |
+| `expiring` | Verifies, but under the threshold: renewal has stopped | **fail** | warn |
+| `invalid` | Chain or hostname does not verify (includes expired) | **fail** | **fail** |
+| `unreachable` | No TLS handshake after three attempts | **fail** | warn |
+
+The threshold is 21 days, capped at a quarter of the certificate's own
+lifetime. With today's 90-day certificates that is 21 days: renewal should have
+happened at 30, so the monitor fails after about nine days of failed renewals
+and three weeks before visitors are affected. The cap exists because Let's
+Encrypt lifetimes drop to 64 days on 2027-02-10 and to 45 days on 2028-02-16;
+a fixed 21 days would then fire during healthy operation, while a quarter of
+the lifetime (16 and about 11 days) stays below certbot's renewal point.
+
+GitHub notifies one person about a failed scheduled run: whoever created
+`website-tls.yml`, or whoever last changed its `cron` line. That person must
+have Actions notifications on; everyone else sees the red run on the Actions
+tab. GitHub also disables scheduled workflows in a public repository that has
+had no activity for 60 days, and a disabled monitor is silent. The workflow
+holds only `contents: read`, so it cannot open an issue itself.
+
+**When it fails.** On the droplet, as root:
+
+```sh
+systemctl status certbot.timer certbot.service   # snap: snap.certbot.renew.*
+tail -n 100 /var/log/letsencrypt/letsencrypt.log
+certbot renew --dry-run                          # reproduce the failure safely
+certbot renew                                    # renew for real once it passes
+systemctl enable --now certbot.timer             # if the timer was missing or disabled
+nginx -t && systemctl reload nginx               # only if nginx still serves the old one
+```
+
+Then run `Website TLS` from the Actions tab (**Run workflow**) to confirm, or
+locally: `python3 website/tls_check.py virtio-accel.org`.
+
+The monitor covers the apex only, because that is the only name served. As of
+2026-11-23 `www.virtio-accel.org` resolves to an address at the DNS host rather
+than to the droplet, and no certificate covering `www` has ever been issued. If
+`www` is brought into service as described under DNS below, add
+`www.virtio-accel.org` to the `tls_check.py` command in both `website-tls.yml`
+and `website.yml`.
 
 ### DNS
 

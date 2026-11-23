@@ -2,3 +2,5 @@
 Sphinx==8.2.3
 numpy==2.5.5
 ml-dtypes==0.7.0
+# Test-only: mints the synthetic certificates test_tls_check.py serves.
+cryptography==50.0.2

@@ -271,6 +271,34 @@ jobs:
             -e "ssh -i ~/.ssh/deploy_key -p ${DEPLOY_SSH_PORT} -o IdentitiesOnly=yes" \
             book/ "${DEPLOY_SSH_USERNAME}@${DEPLOY_SSH_HOST}:${DEPLOY_PATH}/"
 
+  # What visitors actually get once the files are in place. This is its own
+  # job so that the only repository code run against the live site executes
+  # without the deploy key, the deploy secrets, or the `production` environment.
+  verify:
+    name: verify-live-site
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: deploy
+    steps:
+      - name: Check out the certificate checker
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          persist-credentials: false
+          sparse-checkout: website/tls_check.py
+          sparse-checkout-cone-mode: false
+
+      # A certificate that browsers reject is not transient and hides the
+      # whole site behind a security error, so it fails the run even though
+      # the files synced. The two softer outcomes only warn here: low
+      # remaining validity is the daily `Website TLS` workflow's failure to
+      # raise, and an unreachable host may be a blip, like a non-200 below.
+      - name: Verify the served certificate
+        run: >-
+          python3 website/tls_check.py
+          --warn expiring --warn unreachable
+          virtio-accel.org
+
       - name: Verify the deployed site responds
         run: |
           for attempt in 1 2 3; do
