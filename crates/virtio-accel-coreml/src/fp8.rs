@@ -683,9 +683,13 @@ pub(crate) fn lower_with_weights(
         let s = static_shape(t)?;
         let n = format!("output_{i}");
         let input = &names[v.get() as usize];
-        // Identity over int8 is not supported by MIL; the exact cast pair preserves all bits.
+        // Identity over int8 is not supported by MIL. Retain exact arithmetic
+        // between the casts, as in the integer target: a cast-only identity can
+        // collapse to an unsupported int8 output alias during native compilation.
         let x = if mil(t.dtype())? == I8 {
-            b.cast(input, I32, &s)
+            let wide = b.cast(input, I32, &s);
+            let zero = b.int(0);
+            b.binary("add", &wide, &zero, I32, &s)
         } else {
             input.clone()
         };

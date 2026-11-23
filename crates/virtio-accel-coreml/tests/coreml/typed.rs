@@ -15,6 +15,31 @@ fn gpu_backend() -> Option<CoreMlAccelerator> {
 }
 
 #[test]
+fn typed_byte_identity_preserves_all_storage_patterns() {
+    let Some(backend) = gpu_backend() else {
+        return;
+    };
+    for dtype in [DType::INT8, DType::FP8E4M3, DType::FP8E5M2] {
+        let target = if dtype == DType::INT8 {
+            virtio_accel_coreml::COREML_TOSA_QUANTIZED_TARGET
+        } else {
+            virtio_accel_coreml::COREML_TOSA_FP8_TARGET
+        };
+        let tensors = [
+            Tensor::new("x", &[1, 256], dtype),
+            Tensor::new("y", &[1, 256], dtype),
+        ];
+        let ops = [Operator::new(K::Identity, &["x"], &["y"])];
+        let graph = Graph::new("byte_identity", &tensors, &ops, &["x"], &["y"])
+            .build(target)
+            .unwrap();
+        let input: Vec<u8> = (0..=255).collect();
+        let out = run_tosa_bytes_on(&backend, &graph, target, &[&input], input.len()).unwrap();
+        assert_eq!(out, input, "{dtype:?}");
+    }
+}
+
+#[test]
 fn typed_repeated_concat_preserves_recurrent_layout() {
     let Some(backend) = gpu_backend() else {
         return;
