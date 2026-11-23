@@ -1,13 +1,20 @@
 # virtio-accel-coreml
 
 The macOS 26+ mixed ML Program target also accepts typed transformer graphs:
-bounded GATHER, floating/integer CAST, static SLICE, SUB/EXP/RSQRT/RECIPROCAL,
+bounded GATHER, floating/integer CAST, static SLICE, SUB/EXP/LOG/SIGMOID/NEGATE/RSQRT/RECIPROCAL,
 FLOOR/CEIL/GREATER/SELECT, SUM/MAX reductions, and integer min/max clamps, alongside
 the existing arithmetic/layout operations. Runtime lookup indices require a
 graph-derived bounds proof; calibration samples cannot establish admission.
-Reciprocal operations emit an explicit zero epsilon, and propagating-NaN
+Logarithm and reciprocal operations emit an explicit zero epsilon, and propagating-NaN
 operators reject other NaN modes. This does not widen the older NeuralNetwork
 target or imply a particular GPU/ANE placement.
+
+Repeated identical floating CONCAT operands lower to native MIL `tile`. This
+preserves repetition order and avoids a GPU numerical failure observed with
+large aliased concat tuples inside Mamba-2 recurrent state updates on M4.
+NEGATE still requires constant zero zero-points. Recurrent execution must retain
+each stream's own state and validate accumulated error; FP16 permission alone
+does not establish acceptable long-horizon accuracy.
 
 A host-native [`virtio_accel_core::Accelerator`](https://docs.rs/virtio-accel-core)
 implementation for Apple's Core ML runtime, GPU and Neural Engine.

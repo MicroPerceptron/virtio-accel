@@ -82,6 +82,9 @@ pub const COREML_TOSA_QUANTIZED_CAPABILITY: CapabilityDescriptor = CapabilityDes
         OperatorCapability::new(Op::TANH),
         OperatorCapability::new(Op::SUB),
         OperatorCapability::new(Op::EXP),
+        OperatorCapability::new(Op::LOG),
+        OperatorCapability::new(Op::SIGMOID),
+        OperatorCapability::constrained(Op::NEGATE, OperatorConstraints::ZERO_ZERO_POINTS),
         OperatorCapability::new(Op::FLOOR),
         OperatorCapability::new(Op::CEIL),
         OperatorCapability::new(Op::GREATER),
@@ -443,6 +446,9 @@ pub(crate) fn lower_with_weights(
             Op::IDENTITY => args[0].clone(),
             Op::SUB
             | Op::EXP
+            | Op::LOG
+            | Op::SIGMOID
+            | Op::NEGATE
             | Op::FLOOR
             | Op::CEIL
             | Op::GREATER
@@ -624,6 +630,23 @@ pub(crate) fn lower_with_weights(
                 let OpAttributes::Concat { axis } = op.source().attributes() else {
                     return Err(LoweringError::UnsupportedGraph);
                 };
+                // Repeating one floating tensor is a tile. Keep that intent in
+                // MIL instead of a large tuple of aliased concat operands.
+                if matches!(d, F16 | F32) && inputs.iter().all(|v| *v == inputs[0]) {
+                    let mut reps = vec![1_i32; s.len()];
+                    reps[axis as usize] = inputs.len() as i32;
+                    let reps = b.constant(
+                        I32,
+                        &[reps.len() as i32],
+                        &reps
+                            .iter()
+                            .flat_map(|n| n.to_le_bytes())
+                            .collect::<Vec<_>>(),
+                    );
+                    let result = b.op("tile", &[("x", &args[0]), ("reps", &reps)], d, &s);
+                    names[out.get() as usize] = result;
+                    continue;
+                }
                 let axis = b.int(axis);
                 let inter = b.boolean(false);
                 let n = b.name();

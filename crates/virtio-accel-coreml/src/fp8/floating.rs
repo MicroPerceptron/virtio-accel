@@ -19,6 +19,27 @@ pub(super) fn emit(
     Ok(match op.op() {
         Op::SUB => b.binary("sub", &args[0], &args[1], dtype, shape),
         Op::EXP => b.op("exp", &[("x", &args[0])], dtype, shape),
+        Op::SIGMOID => b.op("sigmoid", &[("x", &args[0])], dtype, shape),
+        Op::NEGATE => {
+            for id in &a.operator_inputs(id)[1..] {
+                let bytes = a
+                    .serialized_constant(*id)
+                    .ok_or(LoweringError::UnsupportedGraph)?;
+                if bytes.iter().any(|byte| *byte != 0) {
+                    return Err(LoweringError::UnsupportedGraph);
+                }
+            }
+            let minus_one = b.constant(
+                dtype,
+                &[],
+                if dtype == F16 {
+                    &[0, 188]
+                } else {
+                    &[0, 0, 128, 191]
+                },
+            );
+            b.binary("mul", &args[0], &minus_one, dtype, shape)
+        }
         Op::FLOOR | Op::CEIL => b.op(
             if op.op() == Op::FLOOR {
                 "floor"
@@ -30,7 +51,7 @@ pub(super) fn emit(
             shape,
         ),
         Op::GREATER => b.binary("greater", &args[0], &args[1], dtype, shape),
-        Op::RSQRT | Op::RECIPROCAL => {
+        Op::RSQRT | Op::RECIPROCAL | Op::LOG => {
             // MIL's default epsilon changes TOSA arithmetic. Emit an explicit zero.
             let zero = b.constant(
                 dtype,
@@ -38,10 +59,10 @@ pub(super) fn emit(
                 if dtype == F16 { &[0, 0] } else { &[0, 0, 0, 0] },
             );
             b.op(
-                if op.op() == Op::RSQRT {
-                    "rsqrt"
-                } else {
-                    "inverse"
+                match op.op() {
+                    Op::RSQRT => "rsqrt",
+                    Op::LOG => "log",
+                    _ => "inverse",
                 },
                 &[("x", &args[0]), ("epsilon", &zero)],
                 dtype,
