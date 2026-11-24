@@ -88,7 +88,7 @@ class DecodingTests(unittest.TestCase):
             'notAfter': 'Nov 22 20:47:09 2026 GMT',
             'issuer': ((('countryName', 'US'),), (('organizationName', "Let's Encrypt"),),
                        (('commonName', 'YE1'),)),
-        }, '178.128.132.33')
+        }, '192.0.2.1')
         self.assertEqual(decoded.not_before, datetime(2026, 8, 24, 20, 47, 10, tzinfo=timezone.utc))
         self.assertEqual(decoded.not_after, datetime(2026, 11, 22, 20, 47, 9, tzinfo=timezone.utc))
         self.assertEqual(decoded.issuer, "US, Let's Encrypt, YE1")
