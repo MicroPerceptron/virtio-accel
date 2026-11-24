@@ -14,7 +14,7 @@ so it stays out of `cargo fmt --all`, `cargo clippy --workspace`, and
 | `python/` | Sphinx configuration and public module directives; signatures and prose come from Python docstrings |
 | `requirements.txt` | Pinned documentation dependencies |
 | `release_trigger.py` | Require an actual production upload before a release-triggered refresh |
-| `check.py` | Validates the built tree: required pages, the landing overlay, dangling links |
+| `check.py` | Validates the built tree: required pages, the landing overlay, dangling links, hidden files and build caches |
 | `content/index.html` | The landing page &mdash; a standalone document, not an mdBook chapter |
 | `content/api.md` | The API reference index chapter |
 | `theme/` | Favicon, docs-reader stylesheet, sidebar brand script |
@@ -93,6 +93,15 @@ curated docs to repository files that are not part of the site (source files,
 `include/virtio_accel.h`, conformance artifacts, licenses) are rewritten to
 point at GitHub.
 
+Nothing hidden is published. Sphinx's doctree cache is written to a temporary
+directory (`-d`) instead of `python/api/.doctrees`, because its pickles embed
+absolute paths from the build machine; `build.py` also deletes the bookkeeping
+files the generators always write (Sphinx's `.buildinfo`, mdBook's `.nojekyll`)
+and leaves dotfiles such as rustdoc's `.lock` behind when it copies a tree in.
+`check.py` then fails on any dotfile, hidden directory, `*.pickle`, `*.pkl` or
+`*.doctree` anywhere under `book/`. A generator that starts writing a new one
+needs a decision in `build.py`, not an exception in `check.py`.
+
 Adding a page means adding it to `CURATED` **and** to `write_summary()` in
 `build.py`; `check.py`'s `REQUIRED_PAGES` is the backstop that fails the build
 if the two drift apart.
@@ -129,6 +138,7 @@ or Docker.
 
 To validate locally, run `python -m unittest discover -s website -p 'test_*.py' -v`,
 then build and run `check.py`. In addition to links and required pages, the checker
+rejects hidden files and build caches, and
 requires every public Python export and public method/property to appear in the API
 reference with a docstring. Add documentation alongside new API code; no duplicate
 hand-maintained function list is needed. Sphinx doctests run as part of `build.py`.

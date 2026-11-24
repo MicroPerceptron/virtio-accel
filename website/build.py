@@ -16,9 +16,11 @@ This script is the single entry point for producing the public site. It:
   7. Overlays the hand-written landing page (``content/index.html``) onto
      ``book/index.html``. The landing page is a standalone document rather than
      an mdBook chapter, so it is not constrained by the book's chrome.
+  8. Removes the bookkeeping files the generators leave in their output.
 
 The result in ``book/`` is a plain static tree, served by nginx on the droplet.
-Nothing in it is host-specific.
+Nothing in it is host-specific, and nothing in it is hidden: build caches stay
+outside ``book/`` and ``check.py`` fails if a dotfile or a pickle turns up.
 
 The generated ``src/`` and ``book/`` trees are git-ignored; only the curated
 inputs, the theme, and this script are checked in.
@@ -36,6 +38,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -85,6 +88,23 @@ STANDALONE_PAGES: list[tuple[Path, str]] = [
     (WEBSITE / "theme" / "favicon.svg", "favicon.svg"),
     (WEBSITE / "theme" / "logo-mark.svg", "logo-mark.svg"),
 ]
+
+# Bookkeeping files the generators write into ``book/`` unconditionally and that
+# are not part of the site. They are listed by name, not swept up by pattern, so
+# that a hidden file nobody has looked at still fails ``check.py`` instead of
+# being deleted here unseen.
+GENERATOR_LEFTOVERS: list[str] = [
+    # mdBook's GitHub Pages marker. The site is served by nginx.
+    ".nojekyll",
+    # Sphinx's incremental-build stamp. Every Python API build here is a clean
+    # one, so nothing ever reads it back.
+    "python/api/.buildinfo",
+]
+
+# Trees copied into the site come from directories that were not produced for
+# it: a cargo build cache and a repository directory. Their dotfiles (rustdoc's
+# ``.lock``, a stray ``.DS_Store``) are never site content.
+IGNORE_HIDDEN = shutil.ignore_patterns(".*")
 
 LINK_RE = re.compile(r"(\[[^\]]*\]\()([^)\s]+)(\))")
 
@@ -222,7 +242,7 @@ def build_rustdoc() -> None:
     if api_dir.exists():
         shutil.rmtree(api_dir)
     api_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(TARGET_DOC, api_dir, dirs_exist_ok=True)
+    shutil.copytree(TARGET_DOC, api_dir, ignore=IGNORE_HIDDEN, dirs_exist_ok=True)
     write_api_index(api_dir)
 
 
@@ -327,17 +347,21 @@ See the <a href="../api.html">crate reference</a> for tiers and roles, or the
 def build_python_docs() -> None:
     # Imports the pure Python frontend from source; never loads _native or probes
     # devices. A clean build prevents deleted API pages from lingering.
+    source = str(WEBSITE / "python")
     output = BOOK / "python" / "api"
     if output.exists():
         shutil.rmtree(output)
-    subprocess.run(
-        [sys.executable, "-m", "sphinx", "-W", "--keep-going", "-E", "-a",
-         "-b", "html", str(WEBSITE / "python"), str(output)], check=True,
-    )
-    subprocess.run(
-        [sys.executable, "-m", "sphinx", "-W", "--keep-going", "-b", "doctest",
-         str(WEBSITE / "python"), str(WEBSITE / "python-doctest")], check=True,
-    )
+    # Without ``-d`` Sphinx keeps its doctree cache in ``<output>/.doctrees``,
+    # which would publish pickles that embed this machine's absolute paths. The
+    # HTML build never reuses a cache (``-E``), so there is nothing worth keeping
+    # between runs: the cache lives in a temporary directory for exactly as long
+    # as the doctest run needs the documents the HTML run just parsed.
+    with tempfile.TemporaryDirectory(prefix="virtio-accel-doctrees-") as doctrees:
+        sphinx = [sys.executable, "-m", "sphinx", "-W", "--keep-going", "-d", doctrees]
+        subprocess.run([*sphinx, "-E", "-a", "-b", "html", source, str(output)], check=True)
+        subprocess.run(
+            [*sphinx, "-b", "doctest", source, str(WEBSITE / "python-doctest")], check=True,
+        )
 
 
 def build_mdbook() -> None:
@@ -374,7 +398,17 @@ def copy_assets() -> None:
     """
     if not ASSETS.is_dir():
         return
-    shutil.copytree(ASSETS, BOOK / "assets", dirs_exist_ok=True)
+    shutil.copytree(ASSETS, BOOK / "assets", ignore=IGNORE_HIDDEN, dirs_exist_ok=True)
+
+
+def remove_generator_leftovers() -> None:
+    """Delete the bookkeeping files mdBook and Sphinx leave in ``book/``.
+
+    Runs last and unconditionally, so a ``--skip-mdbook`` run also clears what an
+    earlier build left behind.
+    """
+    for rel in GENERATOR_LEFTOVERS:
+        (BOOK / rel).unlink(missing_ok=True)
 
 
 def main() -> int:
@@ -397,6 +431,7 @@ def main() -> int:
     build_python_docs()
     copy_standalone()
     copy_assets()
+    remove_generator_leftovers()
 
     return 0
 
