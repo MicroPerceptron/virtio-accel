@@ -16,6 +16,7 @@ so it stays out of `cargo fmt --all`, `cargo clippy --workspace`, and
 | `release_trigger.py` | Require an actual production upload before a release-triggered refresh |
 | `check.py` | Validates the built tree: required pages, the landing overlay, dangling links |
 | `tls_check.py` | Fails when the certificate the live site serves does not verify or is not being renewed |
+| `nginx/virtio-accel.org.conf` | The nginx site the droplet runs; copied there by hand, not deployed by CI |
 | `content/index.html` | The landing page &mdash; a standalone document, not an mdBook chapter |
 | `content/api.md` | The API reference index chapter |
 | `theme/` | Favicon, docs-reader stylesheet, sidebar brand script |
@@ -201,32 +202,46 @@ chmod 600 /home/deploy/.ssh/authorized_keys
 The deploy pins modes itself (`--chmod=D755,F644`), so nginx can always read
 the tree no matter what the CI artifact round-trip did to permissions.
 
-### What the nginx server block must do
+### nginx site configuration
 
-`root` points at `DEPLOY_PATH`, and mdBook's hashed assets can be cached hard
-because their names change whenever their contents do:
+The droplet runs [`nginx/virtio-accel.org.conf`](nginx/virtio-accel.org.conf).
+CI does not deploy it: copy it over by hand when it changes, and change it here
+first so the file in the repository stays the one the server runs.
 
-```nginx
-root /var/www/virtio-accel.org;
-index index.html;
-
-location / {
-    try_files $uri $uri/ =404;
-}
-
-# Content-addressed assets mdBook emits with a hash in the filename.
-location ~* -[0-9a-f]{8}\.(css|js|svg)$ {
-    expires 1y;
-    add_header Cache-Control "public, immutable";
-}
-
-error_page 404 /404.html;
+```sh
+# As root, with the file copied to the droplet. Its `root` must equal DEPLOY_PATH.
+install -m 644 virtio-accel.org.conf /etc/nginx/sites-available/virtio-accel.org
+ln -sf ../sites-available/virtio-accel.org /etc/nginx/sites-enabled/virtio-accel.org
+rm -f /etc/nginx/sites-enabled/default
+nginx -t && systemctl reload nginx
+certbot renew --dry-run
 ```
 
-Leave TLS to certbot (`certbot --nginx -d virtio-accel.org`); it writes and
-renews the `listen 443 ssl`, `ssl_certificate`, and HTTP-to-HTTPS redirect lines
-in the same server block. Edit `root` in place rather than replacing the file,
-or those lines are lost. `nginx -t && systemctl reload nginx` after any change.
+On a new droplet, run `certbot --nginx -d virtio-accel.org` once against the
+stock `default` site first, so the certificate and the `/etc/letsencrypt` files
+this configuration includes exist; then install the file as above. The lines
+marked `# managed by Certbot` are the ones certbot wrote. Keep them: certbot
+renews the certificate they point at, and the port-80 block that names
+`virtio-accel.org` is where its HTTP-01 challenge is answered. That is what the
+closing `certbot renew --dry-run` confirms.
+
+What the file does beyond serving `DEPLOY_PATH`:
+
+- **Caching.** Files with a content hash in their name -- mdBook's
+  `name-<8 hex>.css|js|svg|woff2` and everything under rustdoc's
+  `/api/static.files/` -- are served `immutable` for a year. Everything else is
+  `no-cache`, so it is revalidated on each use. A deploy replaces HTML that
+  points at new hashes and deletes the old hashed files, so HTML served from a
+  browser's heuristic cache would reference assets that no longer exist.
+- **Compression.** The stock `nginx.conf` only compresses `text/html`; the site
+  file adds CSS, JavaScript, JSON, and SVG.
+- **Other hostnames.** Requests that do not name `virtio-accel.org` (address
+  scans, stray `Host` headers) are dropped instead of being served the site.
+- **Hidden files.** Dotfiles in the synced tree return 404, except
+  `.well-known/`. A directory without an `index.html`, such as `/docs/`,
+  returns the site's 404 page rather than nginx's 403.
+- **Headers.** HSTS for one year, without `includeSubDomains` because `www` is
+  not served from the droplet; `X-Content-Type-Options` and `Referrer-Policy`.
 
 The deploy `rsync`s with `--delete`, so the served tree exactly mirrors the
 build and a page removed from `SUMMARY.md` stops being served. `.well-known` is
@@ -319,9 +334,14 @@ droplet can be rebuilt or replaced without a DNS change:
 
 | Type | Name | Value |
 | --- | --- | --- |
-| `A` | `@` | reserved IPv4 (`178.128.132.33`) |
-| `AAAA` | `@` | droplet IPv6 |
+| `A` | `@` | reserved IPv4 (`45.55.117.138`) |
 | `CNAME` | `www` | `virtio-accel.org.` |
+
+There is deliberately no `AAAA` record. A droplet's IPv6 address is not
+reserved, so it changes whenever the droplet is replaced, and Let's Encrypt
+validates over IPv6 first when the record exists: a stale `AAAA` breaks
+certificate issuance and renewal even though the site still loads over IPv4.
+Add one only together with a step that updates it on every rebuild.
 
 `DEPLOY_SSH_HOST` should be that same reserved IP for the same reason.
 
