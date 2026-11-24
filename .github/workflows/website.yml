@@ -236,7 +236,20 @@ jobs:
             printf '%s\n' "$DEPLOY_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
           else
             echo "::warning::DEPLOY_SSH_KNOWN_HOSTS is not set; trusting the host key on first sight."
-            ssh-keyscan -p "$DEPLOY_SSH_PORT" "$DEPLOY_SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+            if ! ssh-keyscan -T 10 -p "$DEPLOY_SSH_PORT" "$DEPLOY_SSH_HOST" >> ~/.ssh/known_hosts; then
+              # ssh-keyscan prints nothing at all when the connection is
+              # refused, so ask TCP why before giving up.
+              if reason="$(timeout 10 bash -c 'exec 3<>"/dev/tcp/$1/$2"' probe "$DEPLOY_SSH_HOST" "$DEPLOY_SSH_PORT" 2>&1)"; then
+                reason="the port accepts connections but no SSH server answered on it"
+              elif [ -z "$reason" ]; then
+                reason="the connection timed out; a firewall is dropping it or the address is wrong"
+              fi
+              echo "::error::No SSH host key from DEPLOY_SSH_HOST on DEPLOY_SSH_PORT: $(printf '%s' "$reason" | tr '\n' ' ')"
+              echo "Check that DEPLOY_SSH_HOST is the bare address of the droplet, that" >&2
+              echo "DEPLOY_SSH_PORT is the port sshd listens on there (22 unless it was" >&2
+              echo "changed), and that the droplet's firewall allows that port." >&2
+              exit 1
+            fi
           fi
           chmod 600 ~/.ssh/known_hosts
 
