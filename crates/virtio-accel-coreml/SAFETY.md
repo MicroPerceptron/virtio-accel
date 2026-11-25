@@ -24,7 +24,12 @@ one native writer, rejects host transfers while either mode is active, and rejec
 submission. Multiple bindings from one event to the same allocation are collapsed to the strongest
 required access before acquiring a guard. The completion callback drops its backing guards before
 publishing the terminal event state, so a successful acquire-poll makes the output bytes available
-to the next host transfer. The backend never creates public slices or raw-pointer accessors. A
+to the next host transfer. `CoreMlBuffer::with_bytes` lends a slice only inside a
+synchronous callback after checking transfer usage, completion, and the logical
+byte range. An `EventBacking` read guard retains the allocation and excludes
+reentrant native writers for the entire callback, including unwinding. The
+callback's result cannot borrow the temporary slice. No raw pointer or unguarded
+slice is returned. A
 direct trait user can drop handles early without causing a dangling native pointer because the
 completion-owned `Arc`s outlive prediction.
 
@@ -36,8 +41,8 @@ failure.
 
 The model-loading ABI also takes a scalar `va_coreml_compute_units` tag. Rust's closed
 `CoreMlComputeUnits` enum maps CPU/ANE, CPU/GPU and All to explicit bridge values.
-The private CPUOnly value is used for FP32 NeuralNetwork graphs under CPU/ANE; under
-All those graphs use CPU/GPU. This preserves FP32 arithmetic without expanding the
+The private CPUOnly value is used for FP32 NeuralNetwork graphs under every policy.
+GPU and ANE may narrow untyped NeuralNetwork intermediates. This preserves FP32 arithmetic without expanding the
 selected policy. Discovery checks the required compute-device classes (both for All).
 The policy is immutable per backend and mapped at each TOSA model load, including
 in-memory compilation. It changes placement permissions only, not pointer ownership or

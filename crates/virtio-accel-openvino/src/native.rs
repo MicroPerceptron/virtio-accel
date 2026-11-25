@@ -2616,6 +2616,110 @@ mod tests {
     }
 
     #[test]
+    fn centered_normalization_handles_zero_variance_and_nearly_constant_rows() {
+        let Some(discovery) = backend() else { return };
+        let artifact = crate::lower::language_model_tests::normalization_graph(0.25, 1e-5, false);
+        for device in discovery.runtime_devices().unwrap() {
+            let backend = OpenVinoAccelerator::with_device(&device).unwrap();
+            let context = backend.create_context(ContextDesc::default()).unwrap();
+            let queue = backend
+                .create_queue(&context, QueueDesc::default())
+                .unwrap();
+            let program = backend
+                .load_program(&context, tosa_artifact(&SliceSource(&artifact)))
+                .unwrap();
+            let mut buffers: Vec<_> = program
+                .slots
+                .iter()
+                .map(|slot| {
+                    backend
+                        .allocate_buffer(
+                            &context,
+                            BufferDesc::new(
+                                slot.byte_len,
+                                4096,
+                                MemoryDomain::Shared,
+                                BufferUsage::TRANSFER_SOURCE
+                                    | BufferUsage::TRANSFER_DESTINATION
+                                    | BufferUsage::PROGRAM_INPUT
+                                    | BufferUsage::PROGRAM_OUTPUT,
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap()
+                        .into_parts()
+                        .0
+                })
+                .collect();
+            let mut cases = vec![
+                [-4.0f32, -1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 0.0],
+                [16384.0; 8],
+                [-100.0, 100.0, -100.0, 100.0, -2.0, -1.0, 1.0, 2.0],
+            ];
+            if !device.starts_with("NPU") {
+                cases.push([1.0, 1.0001, 1.0002, 1.0003, -1.0, -1.0001, -1.0002, -1.0003]);
+            }
+            for input in cases {
+                let raw: Vec<_> = input.iter().flat_map(|x| x.to_ne_bytes()).collect();
+                backend
+                    .write_buffer(&mut buffers[0], 0, &SliceSource(&raw))
+                    .unwrap();
+                let bindings: Vec<_> = buffers
+                    .iter()
+                    .zip(&program.slots)
+                    .enumerate()
+                    .map(|(i, (buffer, slot))| BindingRef {
+                        slot: i as u32,
+                        buffer,
+                        range: virtio_accel_core::BufferRange::new(0, slot.byte_len).unwrap(),
+                        access: if i == 0 {
+                            AccessMode::Read
+                        } else {
+                            AccessMode::Write
+                        },
+                    })
+                    .collect();
+                let event = backend
+                    .submit(&queue, &program, &bindings, Timeout::Infinite)
+                    .unwrap();
+                assert_eq!(wait_for_terminal(&backend, &event), EventState::Complete);
+                buffers[1]
+                    .with_bytes(|bytes| {
+                        for (i, raw) in bytes.chunks_exact(4).enumerate() {
+                            let row = &input[i / 4 * 4..i / 4 * 4 + 4];
+                            let mean = row.iter().map(|&x| f64::from(x)).sum::<f64>() / 4.0;
+                            let variance = row
+                                .iter()
+                                .map(|&x| (f64::from(x) - mean).powi(2))
+                                .sum::<f64>()
+                                / 4.0;
+                            let expected = (f64::from(input[i]) - mean) / (variance + 1e-5).sqrt();
+                            let actual = f32::from_ne_bytes(raw.try_into().unwrap());
+                            let tolerance = if device.starts_with("NPU") {
+                                0.03
+                            } else {
+                                0.005
+                            };
+                            assert!(
+                                actual.is_finite()
+                                    && (f64::from(actual) - expected).abs() < tolerance,
+                                "{device} input={input:?} element={i}: {actual} != {expected}"
+                            );
+                        }
+                    })
+                    .unwrap();
+                backend.destroy_event(event).unwrap();
+            }
+            backend.unload_program(program).unwrap();
+            for buffer in buffers {
+                backend.free_buffer(buffer).unwrap();
+            }
+            backend.destroy_queue(queue).unwrap();
+            backend.destroy_context(context).unwrap();
+        }
+    }
+
+    #[test]
     fn external_residual_is_read_on_every_reused_request() {
         let Some(discovery) = backend() else { return };
         for device in discovery.runtime_devices().unwrap() {

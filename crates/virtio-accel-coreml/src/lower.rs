@@ -65,7 +65,7 @@ const FLOAT_OPERATORS: &[OperatorCapability] = &[
     OperatorCapability::new(Op::COS),
     OperatorCapability::new(Op::EXP),
     OperatorCapability::new(Op::FLOOR),
-    OperatorCapability::new(Op::LOG),
+    // LOG is excluded: NeuralNetwork adds an unavoidable default epsilon.
     OperatorCapability::new(Op::LOGICAL_NOT),
     OperatorCapability::constrained(Op::NEGATE, OperatorConstraints::ZERO_ZERO_POINTS),
     OperatorCapability::new(Op::RECIPROCAL),
@@ -471,7 +471,6 @@ fn encode_operator(
         }
         Op::ABS => encode_unary(&mut layer, 6, None),
         Op::EXP => encode_unary(&mut layer, 4, None),
-        Op::LOG => encode_unary(&mut layer, 5, None),
         // Core ML's INVERSE and RSQRT unary modes force a nonzero default epsilon when zero is
         // encoded. POWER avoids that numerical mismatch while retaining one fused unary layer.
         Op::RECIPROCAL => encode_unary(&mut layer, 3, Some(-1.0)),
@@ -1086,6 +1085,16 @@ mod tests {
         let mut layer = Vec::new();
         field_message(&mut layer, 832, &[]);
         assert_eq!(layer, [0x82, 0x34, 0x00]);
+    }
+
+    #[test]
+    fn logarithm_is_not_advertised_or_lowered_with_hidden_epsilon() {
+        let case = virtio_accel_conformance::numerics::FP32_UNARY_CASES
+            .iter()
+            .find(|c| c.name == "log-fp32")
+            .unwrap();
+        assert!(!supports_tosa_operator(Op::LOG));
+        assert!(lower_tosa(case.artifact, COREML_TOSA_TARGET).is_err());
     }
 
     #[test]
