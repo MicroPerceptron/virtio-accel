@@ -149,3 +149,14 @@ only a notified callback's retirement via native wait, then check the result and
 release backing guards. Callback code must stay bounded and cannot depend on the
 waiting worker. Events with deadlines decline registration, preserving timed
 cancellation observation. Registration after notification wakes immediately.
+
+On a concrete Linux NPU, an immutable shared input may be imported through
+the compiled model's remote context using CPU_VA. Both the actual offset
+address and the logical tensor length must be multiples of 4096. MEM_HANDLE
+is the raw host pointer. The other variadic properties are static C strings.
+The tensor retains the original allocation and event access guards apply as
+usual. A cached request with a changed imported address is destroyed before
+its tensors and pages are released. Replays with the same imported address
+keep the binding alive. Runtime loading treats the three remote-context functions as an optional group.
+Unsupported contexts, imports, or input bindings
+fall back to ordinary host tensors before starting inference.
