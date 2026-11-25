@@ -9,12 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
-name = "atomic-waker"
-version = "1.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
-
-[[package]]
 name = "bfp16ebs8-probe-runner"
 version = "0.0.0"
 dependencies = [
@@ -118,16 +112,15 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "virtio-accel-core"
-version = "0.5.0"
+version = "0.3.4"
 dependencies = [
- "atomic-waker",
  "bitflags",
  "virtio-accel-transport",
 ]
 
 [[package]]
 name = "virtio-accel-tosa"
-version = "0.5.0"
+version = "0.3.4"
 dependencies = [
  "flatbuffers",
  "virtio-accel-core",
@@ -135,11 +128,11 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-transport"
-version = "0.5.0"
+version = "0.3.4"
 
 [[package]]
 name = "virtio-accel-xdna"
-version = "0.5.0"
+version = "0.3.4"
 dependencies = [
  "virtio-accel-core",
  "virtio-accel-tosa",

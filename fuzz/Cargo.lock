@@ -9,12 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 
 [[package]]
-name = "atomic-waker"
-version = "1.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
-
-[[package]]
 name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -155,20 +149,19 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "virtio-accel-cleanroom"
-version = "0.5.0"
+version = "0.4.0"
 
 [[package]]
 name = "virtio-accel-core"
-version = "0.5.0"
+version = "0.4.0"
 dependencies = [
- "atomic-waker",
  "bitflags",
  "virtio-accel-transport",
 ]
 
 [[package]]
 name = "virtio-accel-device"
-version = "0.5.0"
+version = "0.4.0"
 dependencies = [
  "virtio-accel-core",
  "virtio-accel-proto",
@@ -195,7 +188,7 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-guest"
-version = "0.5.0"
+version = "0.4.0"
 dependencies = [
  "bitflags",
  "virtio-accel-proto",
@@ -205,14 +198,14 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-mock"
-version = "0.5.0"
+version = "0.4.0"
 dependencies = [
  "virtio-accel-core",
 ]
 
 [[package]]
 name = "virtio-accel-proto"
-version = "0.5.0"
+version = "0.4.0"
 dependencies = [
  "bitflags",
  "zerocopy",
@@ -220,14 +213,14 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-split-queue"
-version = "0.5.0"
+version = "0.4.0"
 dependencies = [
  "virtio-accel-transport",
 ]
 
 [[package]]
 name = "virtio-accel-tosa"
-version = "0.5.0"
+version = "0.4.0"
 dependencies = [
  "flatbuffers",
  "virtio-accel-core",
@@ -235,7 +228,7 @@ dependencies = [
 
 [[package]]
 name = "virtio-accel-transport"
-version = "0.5.0"
+version = "0.4.0"
 
 [[package]]
 name = "zerocopy"
