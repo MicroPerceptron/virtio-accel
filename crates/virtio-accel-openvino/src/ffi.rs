@@ -61,6 +61,8 @@ opaque_handle! {
     ov_model_t,
     /// Opaque compiled model handle (`ov_compiled_model_t`).
     ov_compiled_model_t,
+    /// Remote context for device tensor import.
+    ov_remote_context_t,
     /// Opaque inference request handle (`ov_infer_request_t`).
     ov_infer_request_t,
     /// Opaque tensor handle (`ov_tensor_t`).
@@ -100,13 +102,19 @@ pub(crate) struct ov_version_t {
 // resolves every symbol before publishing the table, and retains the library for
 // the process lifetime so handles and asynchronous work never outlive its code.
 macro_rules! native_api {
-    ($( $(#[$attr:meta])* pub(crate) fn $name:ident($($args:tt)*) $(-> $ret:ty)?; )*) => {
+    ($( $(#[$attr:meta])* pub(crate) fn $name:ident($($args:tt)*) $(-> $ret:ty)?; )*
+     optional_remote { $(pub(crate) fn $remote:ident($($params:tt)*) $(-> $result:ty)?;)* }) => {
         #[cfg(not(feature = "runtime-loading"))]
         unsafe extern "C" {
             $( $(#[$attr])* pub(crate) fn $name($($args)*) $(-> $ret)?; )*
+            $(pub(crate) fn $remote($($params)*) $(-> $result)?;)*
         }
 
+        pub(crate) struct RemoteApi {
+            $(pub(crate) $remote: unsafe extern "C" fn($($params)*) $(-> $result)?,)*
+        }
         pub(crate) struct Api {
+            pub(crate) remote: Option<RemoteApi>,
             $(pub(crate) $name: unsafe extern "C" fn($($args)*) $(-> $ret)?,)*
             #[cfg(feature = "runtime-loading")]
             _library: libloading::Library,
@@ -116,7 +124,7 @@ macro_rules! native_api {
 
         #[cfg(not(feature = "runtime-loading"))]
         pub(crate) fn api() -> &'static Api {
-            static API: Api = Api { $($name,)* };
+            static API: Api = Api { $($name,)* remote: Some(RemoteApi { $($remote,)* }), };
             &API
         }
 
@@ -156,7 +164,13 @@ macro_rules! native_api {
                 if key.is_null() { return Err("null OpenVINO property key".into()); }
                 std::ffi::CStr::from_ptr(key).to_owned()
             };
+            // SAFETY: identical C ABI and lifetime to the required table. Older runtimes
+            // may omit the remote API and still support ordinary host tensors.
+            let remote = (|| Some(RemoteApi {
+                $($remote: unsafe { *library.get(concat!(stringify!($remote), "\0").as_bytes()).ok()? },)*
+            }))();
             Ok(Api {
+                remote,
                 execution_mode,
                 // SAFETY: signatures are transcribed from the pinned C headers.
                 // All required symbols must resolve; the retained library outlives
@@ -270,7 +284,16 @@ native_api! {
     pub(crate) fn ov_infer_request_cancel(infer_request: *mut ov_infer_request_t) -> ov_status_e;
     pub(crate) fn ov_infer_request_free(infer_request: *mut ov_infer_request_t);
 
-
+    optional_remote {
+        pub(crate) fn ov_compiled_model_get_context(
+            compiled: *const ov_compiled_model_t, context: *mut *mut ov_remote_context_t,
+        ) -> ov_status_e;
+        pub(crate) fn ov_remote_context_create_tensor(
+            context: *const ov_remote_context_t, ty: ov_element_type_e, shape: ov_shape_t,
+            property_args_size: usize, tensor: *mut *mut ov_tensor_t, ...
+        ) -> ov_status_e;
+        pub(crate) fn ov_remote_context_free(context: *mut ov_remote_context_t);
+    }
 }
 
 /// Resolve the complete ABI before any native initialization. Failed loads are not

@@ -394,6 +394,65 @@ impl Drop for OwnedShape {
     }
 }
 
+/// Remote context owned by the same resident program as its idle requests.
+struct NpuContext {
+    context: NonNull<ffi::ov_remote_context_t>,
+    api: &'static ffi::RemoteApi,
+}
+
+impl NpuContext {
+    fn for_compiled(compiled: &CompiledModelHandle, device: &str) -> Option<Self> {
+        if !cfg!(target_os = "linux") || device.split('.').next() != Some("NPU") {
+            return None;
+        }
+        let api = ffi::api().remote.as_ref()?;
+        let mut context = ptr::null_mut();
+        // SAFETY: compiled is live and the runtime initializes the out-pointer on success.
+        check_status(unsafe {
+            (api.ov_compiled_model_get_context)(compiled.as_const_ptr(), &mut context)
+        })
+        .ok()?;
+        NonNull::new(context).map(|context| Self { context, api })
+    }
+
+    fn import(&self, plan: &SlotPlan, data: *mut c_void) -> Option<TensorHandle> {
+        if plan.role != LoweredFeatureRole::Input
+            || data as usize % OPENVINO_MIN_ALIGNMENT != 0
+            || plan.byte_len % OPENVINO_MIN_ALIGNMENT as u64 != 0
+        {
+            return None;
+        }
+        let mut tensor = ptr::null_mut();
+        // SAFETY: submit validated the whole range. BoundTensor retains these immutable
+        // pages until the last request using this import is destroyed. The C API takes
+        // six variadic arguments: MEM_HANDLE is a void pointer, the rest are C strings.
+        check_status(unsafe {
+            (self.api.ov_remote_context_create_tensor)(
+                self.context.as_ptr(),
+                plan.element,
+                plan.shape.as_value(),
+                6,
+                &mut tensor,
+                c"MEM_TYPE".as_ptr(),
+                c"CPU_VA".as_ptr(),
+                c"MEM_HANDLE".as_ptr(),
+                data,
+                c"TENSOR_TYPE".as_ptr(),
+                c"INPUT".as_ptr(),
+            )
+        })
+        .ok()?;
+        NonNull::new(tensor).map(|tensor| TensorHandle { tensor })
+    }
+}
+
+impl Drop for NpuContext {
+    fn drop(&mut self) {
+        // SAFETY: one owned remote context, released after the idle request pool.
+        unsafe { (self.api.ov_remote_context_free)(self.context.as_ptr()) }
+    }
+}
+
 /// Owned `ov_tensor_t`.
 struct TensorHandle {
     tensor: NonNull<ffi::ov_tensor_t>,
@@ -440,6 +499,7 @@ impl Drop for TensorHandle {
 /// originate in a live [`AlignedAllocation`]. Keeping the verification metadata beside the
 /// tensor removes a second per-event allocation.
 struct BoundTensor {
+    imported: bool,
     _tensor: TensorHandle,
     // Idle requests retain storage without retaining an access guard.
     _allocation: Arc<AlignedAllocation>,
@@ -814,6 +874,7 @@ pub struct OpenVinoContext {
 /// Page-aligned buffer directly wrapped by OpenVINO tensors.
 #[derive(Debug)]
 pub struct OpenVinoBuffer {
+    immutable_input: bool,
     context_id: u64,
     desc: BufferDesc,
     allocation: Arc<AlignedAllocation>,
@@ -855,6 +916,7 @@ pub struct OpenVinoProgram {
 // Field order releases requests before compiled models and constant storage.
 struct ProgramResident {
     idle: RefCell<Vec<CachedRequest>>,
+    npu: Option<NpuContext>,
     compiled: CompiledModelHandle,
     /// The reader shares the weights memory; both stay resident for the program lifetime
     /// because plugin retention of shared constants is unspecified.
@@ -1043,6 +1105,7 @@ pub struct OpenVinoAccelerator {
     device: CString,
     next_id: AtomicU64,
     direct_binding_admissions: AtomicU64,
+    npu_page_imports: AtomicU64,
     native_requests_created: AtomicU64,
     native_requests_reused: AtomicU64,
     explicit_transfer_bytes: AtomicU64,
@@ -1087,6 +1150,7 @@ impl OpenVinoAccelerator {
             OpenVinoBuffer {
                 context_id: context.id,
                 desc,
+                immutable_input: true,
                 allocation: input.allocation.clone(),
                 _not_send_sync: PhantomData,
             },
@@ -1150,6 +1214,7 @@ impl OpenVinoAccelerator {
             device,
             next_id: AtomicU64::new(0),
             direct_binding_admissions: AtomicU64::new(0),
+            npu_page_imports: AtomicU64::new(0),
             native_requests_created: AtomicU64::new(0),
             native_requests_reused: AtomicU64::new(0),
             explicit_transfer_bytes: AtomicU64::new(0),
@@ -1219,6 +1284,11 @@ impl OpenVinoAccelerator {
     /// Re-enumerate inference devices through this instance's runtime core.
     pub fn runtime_devices(&self) -> Result<Vec<String>, InitError> {
         self.core.available_devices()
+    }
+
+    /// Immutable page imports bound to NPU infer requests, excluding cached replays.
+    pub fn npu_page_imports(&self) -> u64 {
+        self.npu_page_imports.load(Ordering::Relaxed)
     }
 
     /// Cumulative native infer requests created, including rejected submissions.
@@ -1409,6 +1479,7 @@ impl Accelerator for OpenVinoAccelerator {
             OpenVinoBuffer {
                 context_id: context.id,
                 desc,
+                immutable_input: false,
                 allocation,
                 _not_send_sync: PhantomData,
             },
@@ -1622,6 +1693,7 @@ impl Accelerator for OpenVinoAccelerator {
             slots,
             resident: Rc::new(ProgramResident {
                 idle: RefCell::new(Vec::with_capacity(MAX_IDLE_REQUESTS)),
+                npu: NpuContext::for_compiled(&compiled, self.device_name()),
                 compiled,
                 _weights_tensor: weights_tensor,
                 _weights: lowered.weights,
@@ -1718,8 +1790,14 @@ impl Accelerator for OpenVinoAccelerator {
         // was started until `start_async` succeeds, so `SubmitFailure::Indeterminate` is never
         // produced.
         let (request, mut callback) = if let Some(mut cached) =
-            program.resident.idle.borrow_mut().pop()
-        {
+            program.resident.idle.borrow_mut().pop().filter(|cached| {
+                // The driver requires imported pages to outlive every request that used them.
+                cached
+                    .tensors
+                    .iter()
+                    .zip(&*pointers)
+                    .all(|(tensor, data)| !tensor.imported || tensor.data == *data)
+            }) {
             event_metadata.tensors = mem::take(&mut cached.tensors);
             let request = cached.request;
             let callback = cached.callback.take().expect("cached callback");
@@ -1784,17 +1862,34 @@ impl Accelerator for OpenVinoAccelerator {
                 .zip(pointers.iter())
                 .all(|(t, p)| t.data == *p);
         if !same_bindings {
-            // Retain old bindings through partial replacement, including rejection.
+            // Reserve before binding so each successful native bind is immediately guarded.
             metadata
                 .tensors
                 .try_reserve(program.slots.len())
                 .map_err(|_| SubmitFailure::Rejected(BackendError::OutOfMemory))?;
-            for (plan, data) in program.slots.iter().zip(pointers.iter()) {
-                let tensor =
-                    TensorHandle::from_host_ptr(plan.element, plan.shape.as_value(), *data)
-                        .map_err(SubmitFailure::Rejected)?;
+            for (index, (plan, data)) in program.slots.iter().zip(pointers.iter()).enumerate() {
+                if metadata.tensors.get(index).is_some_and(|t| t.data == *data) {
+                    continue;
+                }
+                let buffer = bindings
+                    .iter()
+                    .find(|b| b.slot == plan.slot)
+                    .expect("validated slot")
+                    .buffer;
+                let imported = program
+                    .resident
+                    .npu
+                    .as_ref()
+                    .filter(|_| buffer.immutable_input)
+                    .and_then(|context| context.import(plan, *data));
+                let mut is_imported = imported.is_some();
+                let mut tensor = match imported {
+                    Some(tensor) => tensor,
+                    None => TensorHandle::from_host_ptr(plan.element, plan.shape.as_value(), *data)
+                        .map_err(SubmitFailure::Rejected)?,
+                };
                 // SAFETY: request and tensor are live; the runtime retains its own tensor reference.
-                let status = unsafe {
+                let bind = |tensor: &TensorHandle| unsafe {
                     match plan.role {
                         LoweredFeatureRole::Input => (ffi::api()
                             .ov_infer_request_set_input_tensor_by_index)(
@@ -1810,16 +1905,22 @@ impl Accelerator for OpenVinoAccelerator {
                         ),
                     }
                 };
+                let mut status = bind(&tensor);
+                if is_imported && status != ffi::OV_STATUS_OK {
+                    tensor =
+                        TensorHandle::from_host_ptr(plan.element, plan.shape.as_value(), *data)
+                            .map_err(SubmitFailure::Rejected)?;
+                    status = bind(&tensor);
+                    is_imported = false;
+                }
                 check_status(status).map_err(SubmitFailure::Rejected)?;
-                metadata.tensors.push(BoundTensor {
+                if is_imported {
+                    self.npu_page_imports.fetch_add(1, Ordering::Relaxed);
+                }
+                let bound = BoundTensor {
+                    imported: is_imported,
                     _tensor: tensor,
-                    _allocation: bindings
-                        .iter()
-                        .find(|b| b.slot == plan.slot)
-                        .expect("validated slot")
-                        .buffer
-                        .allocation
-                        .clone(),
+                    _allocation: buffer.allocation.clone(),
                     data: *data,
                     output_io_index: plan.io_index,
                     expected_output: if plan.role == LoweredFeatureRole::Output {
@@ -1827,9 +1928,16 @@ impl Accelerator for OpenVinoAccelerator {
                     } else {
                         ptr::null_mut()
                     },
-                });
+                };
+                if index < old_len {
+                    // Keep the displaced ordinary binding alive through partial replacement.
+                    let previous = mem::replace(&mut metadata.tensors[index], bound);
+                    metadata.tensors.push(previous);
+                } else {
+                    metadata.tensors.push(bound);
+                }
             }
-            metadata.tensors.drain(..old_len);
+            metadata.tensors.truncate(program.slots.len());
         }
         drop(metadata);
 
@@ -1911,6 +2019,7 @@ mod tests {
     fn borrowed_host_view_excludes_writers_and_releases_on_panic() {
         let allocation = Arc::new(AlignedAllocation::new(16, 16).unwrap());
         let buffer = OpenVinoBuffer {
+            immutable_input: false,
             context_id: 0,
             desc: BufferDesc::new(
                 16,
