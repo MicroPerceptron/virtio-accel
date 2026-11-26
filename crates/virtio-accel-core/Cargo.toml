@@ -12,5 +12,6 @@ description = "Transport-independent accelerator lifecycle traits"
 readme = "README.md"
 
 [dependencies]
+atomic-waker = "=1.1.2"
 bitflags.workspace = true
 virtio-accel-transport.workspace = true

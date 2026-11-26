@@ -67,6 +67,13 @@ opaque_handle! {
     ov_tensor_t,
 }
 
+/// OpenVINO retains a pointer to this record; it must stay at a stable address.
+#[repr(C)]
+pub(crate) struct ov_callback_t {
+    pub callback_func: unsafe extern "C" fn(*mut c_void),
+    pub args: *mut c_void,
+}
+
 /// Tensor shape (`ov_shape_t` in `openvino/c/ov_shape.h`); passed by value where the C API does.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -247,6 +254,10 @@ native_api! {
         infer_request: *const ov_infer_request_t,
         idx: usize,
         tensor: *mut *mut ov_tensor_t,
+    ) -> ov_status_e;
+    pub(crate) fn ov_infer_request_set_callback(
+        infer_request: *mut ov_infer_request_t,
+        callback: *const ov_callback_t,
     ) -> ov_status_e;
     pub(crate) fn ov_infer_request_start_async(
         infer_request: *mut ov_infer_request_t,

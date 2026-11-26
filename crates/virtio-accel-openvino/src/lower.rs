@@ -20,6 +20,8 @@
 mod compressed_tests;
 mod constant_weights;
 mod packed_fp8;
+#[cfg(test)]
+pub(crate) mod residual_tests;
 
 use std::fmt;
 use std::fmt::Write as _;
@@ -510,6 +512,7 @@ struct PortRef {
 struct IrBuilder {
     packed_fp8: bool,
     expand_weight_constants: bool,
+    avoid_gpu_residual_sum: bool,
     layers: String,
     edges: String,
     weights: Vec<u8>,
@@ -528,6 +531,7 @@ impl IrBuilder {
         Ok(Self {
             packed_fp8: false,
             expand_weight_constants: false,
+            avoid_gpu_residual_sum: false,
             layers: String::new(),
             edges: String::new(),
             weights: Vec::new(),
@@ -713,13 +717,14 @@ fn element_byte_len(element: OvElement, dims: &[i64]) -> Result<u64, LoweringErr
 
 #[cfg(test)]
 pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, LoweringError> {
-    lower_tosa_with_weights(bytes, target, false)
+    lower_tosa_with_weights(bytes, target, false, false)
 }
 
 pub(crate) fn lower_tosa_with_weights(
     bytes: &[u8],
     target: Target,
     expand_weight_constants: bool,
+    avoid_gpu_residual_sum: bool,
 ) -> Result<LoweredModel, LoweringError> {
     let capability = capability_for(target).ok_or(LoweringError::UnsupportedGraph)?;
     let model = parse(bytes).map_err(LoweringError::Parse)?;
@@ -746,6 +751,7 @@ pub(crate) fn lower_tosa_with_weights(
 
     let mut builder = IrBuilder::new(analysis.values().len())?;
     builder.expand_weight_constants = expand_weight_constants;
+    builder.avoid_gpu_residual_sum = avoid_gpu_residual_sum;
     // Native Convert rounds through FP16 on some plugins, and GPU Slice rejects FP8.
     // Native GPU FP8 movement also canonicalizes some E5M2 NaN payloads. Pure
     // storage graphs use byte carriers so cache movement preserves every bit.
@@ -1090,6 +1096,43 @@ fn encode_operator(
     }
     let output_element = builder.element(output_tensor.dtype())?;
     let output_dims = static_dims(output_tensor)?;
+
+    // Panther Lake / OpenVINO 2026.4 GPU fuses an external residual Add into
+    // a fully-connected sum post-op that reads the old destination instead of
+    // the residual input. Reused requests then accumulate stale output. Keep
+    // the workaround in vendor lowering, without changing the TOSA contract:
+    // x + y == x - (-y), including signed zeros and infinities (NaN payloads
+    // are not promised). Negation is exact and needs no host staging.
+    if builder.avoid_gpu_residual_sum && op == Op::ADD && output_element == OvElement::F32 {
+        for (product, residual) in [(inputs[0], inputs[1]), (inputs[1], inputs[0])] {
+            let is_matmul = analysis
+                .value(product)
+                .producer()
+                .is_some_and(|id| analysis.operator(id).op() == Op::MATMUL);
+            if is_matmul && analysis.value(residual).producer().is_none() {
+                let (product, product_dims) = value_port_dims(builder, analysis, product)?;
+                let (residual, residual_dims) = value_port_dims(builder, analysis, residual)?;
+                let negative = builder.emit_layer(
+                    "Negative",
+                    "opset1",
+                    &format!("{stem}_negative_residual"),
+                    "",
+                    &[(residual, &residual_dims)],
+                    &[(output_element, &residual_dims)],
+                )[0];
+                let result = builder.emit_layer(
+                    "Subtract",
+                    "opset1",
+                    &stem,
+                    "auto_broadcast=\"numpy\"",
+                    &[(product, &product_dims), (negative, &residual_dims)],
+                    &[(output_element, &output_dims)],
+                )[0];
+                builder.set_source(outputs[0], result);
+                return Ok(());
+            }
+        }
+    }
 
     if op == Op::GREATER_EQUAL {
         // OpenVINO 2026.4.1 on Lunar Lake NPU compiles GreaterEqual with a BOOL

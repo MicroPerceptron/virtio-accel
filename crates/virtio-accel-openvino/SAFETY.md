@@ -32,23 +32,67 @@ multiple native readers or one native writer, rejects host transfers while eithe
 active, and rejects every conflicting submission. Multiple bindings from one event to the same
 allocation are collapsed to the strongest required access before acquiring a guard.
 
-Event completion is poll-latch: no foreign callback ever owns Rust memory. Each submission's
+Event completion retains authoritative poll-latch state observation. Each submission's
 infer request, bound tensors, and backing guards are owned by the Rust event handle. Polling
 probes the request without blocking; on the first terminal observation the backing guards are
 dropped strictly before the latched state becomes observable, so a caller that sees a terminal
 state can immediately transfer buffer bytes. Dropping an unpolled live event first cancels and
 joins the request, then frees the request and tensors, and only then releases the guards —
-runtime threads can never touch freed Rust memory. The backend never creates public slices or
-raw-pointer accessors.
+runtime threads can never touch freed Rust memory.
+
+## Shared immutable inputs and borrowed output access
+
+`SharedInput::initialize` allocates through the same checked, zero-initialized
+`AlignedAllocation`. Its exclusive callback receives only the logical byte range
+before any Arc, buffer or native tensor can observe it. The callback cannot return
+a borrow of this storage. After successful initialization, `SharedInput` exposes
+only immutable bytes and clones of its Arc; no mutable reference or raw-pointer
+import API is added. `import_shared_input` fixes usage to PROGRAM_INPUT and
+TRANSFER_SOURCE. Both host writes and native Write/ReadWrite bindings are therefore
+rejected by existing permission checks. Imports in separate contexts share the
+same allocation and atomic event gate. Buffer and event Arcs keep it alive after
+all caller input handles are dropped. This also justifies moving frozen input
+handles across threads under the existing allocation Send/Sync implementations.
+
+`OpenVinoBuffer::with_bytes` checks host-read permission and holds a shared
+`EventBacking` guard across its closure-scoped immutable slice. A native writer
+prevents entry; reentrant or concurrent native writers and host writes are rejected
+while the slice exists. Shared native readers are compatible. The callback cannot
+return a reference into the allocation, and unwinding releases the guard. Buffers
+remain !Send/!Sync; no mutable buffer view or public raw-pointer accessor is added.
+These host-only APIs do not advertise protocol external-memory import/export.
 
 The queue may retain one empty high-water vector allocation for backing metadata and one for
 bound-tensor metadata. Recycling clears and drops every element before the allocation enters the
 queue spare, so a spare owns no OpenVINO handle, `Arc`, backing guard, or buffer pointer. Events
 refer to the queue scratch weakly and therefore cannot extend queue lifetime. The separate
 pointer-slot scratch uses an RAII guard that clears its length on every return path, including a
-rejected submission. Native infer requests themselves are deliberately not pooled: OpenVINO
-retains copied tensor objects after `set_*_tensor_by_index`, and the C API supplies no operation
-that detaches all of those guest-backed tensors before reuse.
+rejected submission.
+
+A per-program cache retains at most eight successfully completed infer requests.
+An event owns an `Rc<ProgramResident>` retaining the compiled model and constant
+storage, even if the public program handle is unloaded before completion. The
+resident drops cached requests before the compiled model, weights tensor, and
+weights bytes. No global submission lock or cross-program request cache is used.
+
+The C API cannot detach all bound host pointers, so each cached `BoundTensor`
+retains its allocation Arc as well as its native tensor. Idle requests retain no
+access guards and cannot run independently. Every submission validates bindings
+and acquires fresh guards before taking a cached request. Exact pointer matches
+reuse the tensor wrappers; other bindings retain all old wrappers until every
+replacement succeeds. A partial rebind failure frees the request before either
+old or new backing storage is released. Cache entries cannot confuse reused host
+addresses because their allocation Arcs keep those addresses allocated.
+
+Only events latched `Complete` enter the cache. Failed, cancelled, rejected, or
+unobserved events use the existing quiesce/free path. `CachedRequest::drop` frees
+its native handle before Rust drops bound tensors and allocation Arcs. Moving an
+entry into an event transfers the unique request owner; no second handle owner
+or reference cycle is introduced. Keeping a program alive can therefore retain
+up to eight idle sets of host allocations after public buffer handles are freed.
+Unloading the last program/event owner releases them. Counters expose request
+creation/reuse for tests and benchmark assertions.
+
 
 OpenVINO receives tensors created from host pointers over Rust-owned memory. Submission
 validates range length and scalar alignment before exposing a bound pointer, and completion
@@ -86,3 +130,22 @@ is internal constant storage only: no i4 type can reach host buffer binding/alig
 On Windows an explicit runtime path is made absolute and loaded with
 `LOAD_WITH_ALTERED_SEARCH_PATH`, keeping dependent DLL lookup relative to that
 library without mutating the process-wide DLL search configuration.
+
+## Completion notification
+
+The optional host waker adds no wire capability. A request-owned stable
+`Box<CallbackState>` contains both `ov_callback_t` and its notification word:
+the OpenVINO C wrapper captures the callback record's address, not a copy.
+The foreign callback borrows only this notification object, never the Rust event,
+buffers or non-Send native handles. Waker panics are caught at the ABI boundary.
+Native request destruction precedes callback storage destruction on every path.
+Cached requests retain the box and reset its registration only after terminal
+native observation proves the previous callback has returned.
+
+The C callback omits the exception status and precedes publication of the final
+native promise. It is a hint, not a completion latch. `poll_event` still uses a
+zero-timeout probe. The explicit owning-worker `observe_notified_event` may join
+only a notified callback's retirement via native wait, then check the result and
+release backing guards. Callback code must stay bounded and cannot depend on the
+waiting worker. Events with deadlines decline registration, preserving timed
+cancellation observation. Registration after notification wakes immediately.

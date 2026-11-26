@@ -2,8 +2,8 @@
 //!
 //! Every `unsafe` block carries a `SAFETY:` comment referencing the invariants audited in
 //! `SAFETY.md`. Each OpenVINO handle has exactly one Rust owner with a `Drop` implementation;
-//! the shared `ov_core_t` is process-wide. Completion is poll-latched: no foreign callback ever
-//! owns Rust memory.
+//! the shared `ov_core_t` is process-wide. A request-owned callback only publishes
+//! a notification; the owning thread observes native status and releases storage.
 
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::cell::{Cell, RefCell, RefMut};
@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 use virtio_accel_core::{
     Accelerator, AcceleratorClass, AccessMode, AllocatedBuffer, ArtifactRef, BackendError,
     BindingRef, BufferDesc, BufferInfo, BufferProperties, BufferUsage, ByteSink, ByteSource,
-    Capabilities, ContextDesc, DeviceIdentity, DeviceInfo, DeviceLimits, EventState, MemoryDomain,
-    QueueDesc, ReleaseFailure, SubmitFailure, Timeout,
+    Capabilities, CompletionNotification, ContextDesc, DeviceIdentity, DeviceInfo, DeviceLimits,
+    EventState, MemoryDomain, QueueDesc, ReleaseFailure, SubmitFailure, Timeout,
 };
 use virtio_accel_tosa::{CapabilityDescriptor, TosaCapabilityProvider};
 
@@ -31,7 +31,7 @@ use crate::{InitError, REQUIRED_RESIDENT_BYTES, ffi};
 /// Maximal TOSA artifact bytes admitted before parsing.
 const MAX_TOSA_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Minimum allocation alignment: one page, satisfying every plugin's zero-copy import rules.
+/// Minimum host allocation alignment. Individual plugins may still stage data internally.
 const OPENVINO_MIN_ALIGNMENT: usize = 4096;
 
 /// Stack scratch size for segmented explicit transfers.
@@ -194,10 +194,9 @@ impl AlignedAllocation {
     }
 }
 
-// SAFETY: allocation access is available only through the `Accelerator` methods. The buffer
-// handle is neither Send nor Sync, and its atomic in-flight gate excludes host transfers while a
-// native inference owns a backing guard. Guards are dropped strictly before an event's terminal
-// state becomes observable. See `SAFETY.md`.
+// SAFETY: mutable storage is accessed only through guarded backend methods; frozen
+// SharedInput storage has no writer. Buffer handles remain !Send/!Sync. Host views
+// and native events share the atomic access gate. See `SAFETY.md`.
 unsafe impl Send for AlignedAllocation {}
 // SAFETY: same invariant as the `Send` implementation.
 unsafe impl Sync for AlignedAllocation {}
@@ -206,6 +205,49 @@ impl Drop for AlignedAllocation {
     fn drop(&mut self) {
         // SAFETY: `pointer` was returned by `alloc_zeroed(self.layout)` and has not been freed.
         unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
+    }
+}
+
+/// Immutable, page-aligned host input that can be imported by several OpenVINO
+/// contexts/devices without duplicating its bytes. Cloning shares ownership.
+/// Initialization happens before publication; no mutable access is exposed later.
+/// This is a local host API, not a wire-protocol external-memory capability.
+#[derive(Clone, Debug)]
+pub struct SharedInput {
+    allocation: Arc<AlignedAllocation>,
+    bytes: usize,
+}
+
+impl SharedInput {
+    /// Allocate zero-initialized storage and fill it in place before freezing it.
+    /// The callback cannot retain a borrow of the allocation. No runtime is needed.
+    pub fn initialize(
+        bytes: u64,
+        alignment: u64,
+        fill: impl FnOnce(&mut [u8]) -> Result<(), BackendError>,
+    ) -> Result<Self, BackendError> {
+        BufferDesc::new(
+            bytes,
+            alignment,
+            MemoryDomain::Shared,
+            BufferUsage::PROGRAM_INPUT,
+        )?;
+        let allocation = AlignedAllocation::new(bytes, alignment)?;
+        let bytes = usize::try_from(bytes).map_err(|_| BackendError::OutOfMemory)?;
+        // SAFETY: newly owned initialized allocation, validated logical length,
+        // and no native/host aliases exist before this exclusive callback ends.
+        fill(unsafe { std::slice::from_raw_parts_mut(allocation.pointer.as_ptr(), bytes) })?;
+        Ok(Self {
+            allocation: Arc::new(allocation),
+            bytes,
+        })
+    }
+
+    /// Borrow the frozen input. Imported descriptors forbid every write access.
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: immutable allocation retained by self. Every import is read-only,
+        // so neither safe host APIs nor native bindings can mutate these bytes.
+        unsafe { std::slice::from_raw_parts(self.allocation.pointer.as_ptr(), self.bytes) }
     }
 }
 
@@ -399,6 +441,9 @@ impl Drop for TensorHandle {
 /// tensor removes a second per-event allocation.
 struct BoundTensor {
     _tensor: TensorHandle,
+    // Idle requests retain storage without retaining an access guard.
+    _allocation: Arc<AlignedAllocation>,
+    data: *mut c_void,
     output_io_index: usize,
     expected_output: *mut c_void,
 }
@@ -775,11 +820,42 @@ pub struct OpenVinoBuffer {
     _not_send_sync: PhantomData<Rc<()>>,
 }
 
+impl OpenVinoBuffer {
+    /// Inspect host-visible bytes without a readback copy. A read guard excludes
+    /// native writers for the entire callback, including reentrant submissions.
+    /// The borrowed slice cannot escape the callback; panic releases the guard.
+    ///
+    /// ```compile_fail
+    /// fn escape(buffer: &virtio_accel_openvino::OpenVinoBuffer) -> &[u8] {
+    ///     buffer.with_bytes(|bytes| bytes).unwrap()
+    /// }
+    /// ```
+    pub fn with_bytes<R>(&self, inspect: impl FnOnce(&[u8]) -> R) -> Result<R, BackendError> {
+        if !self.desc.usage.contains(BufferUsage::TRANSFER_SOURCE) {
+            return Err(BackendError::PermissionDenied);
+        }
+        let mut guard = EventBacking::new(self.allocation.clone(), AccessMode::Read);
+        guard.acquire()?;
+        // SAFETY: self owns the allocation, logical bytes fit its layout, and the
+        // live shared guard prevents native/host writes until inspect returns.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(self.allocation.pointer.as_ptr(), self.desc.bytes() as usize)
+        };
+        Ok(inspect(bytes))
+    }
+}
+
 /// Resident compiled OpenVINO model.
 pub struct OpenVinoProgram {
     context_id: u64,
-    compiled: CompiledModelHandle,
+    resident: Rc<ProgramResident>,
     slots: Vec<SlotPlan>,
+}
+
+// Field order releases requests before compiled models and constant storage.
+struct ProgramResident {
+    idle: RefCell<Vec<CachedRequest>>,
+    compiled: CompiledModelHandle,
     /// The reader shares the weights memory; both stay resident for the program lifetime
     /// because plugin retention of shared constants is unspecified.
     _weights_tensor: Option<TensorHandle>,
@@ -796,6 +872,50 @@ impl std::fmt::Debug for OpenVinoProgram {
     }
 }
 
+// Only completed requests enter this bounded per-program cache. Their tensor
+// wrappers retain allocations, but access guards are reacquired on every start.
+const MAX_IDLE_REQUESTS: usize = 8;
+// The C runtime captures the ADDRESS of ov_callback_t, not a copy. Both the
+// ABI record and its argument therefore live in one request-owned stable Box.
+struct CallbackState {
+    notification: CompletionNotification,
+    record: ffi::ov_callback_t,
+}
+impl CallbackState {
+    fn new() -> Box<Self> {
+        let mut state = Box::new(Self {
+            notification: CompletionNotification::default(),
+            record: ffi::ov_callback_t {
+                callback_func: completion_callback,
+                args: ptr::null_mut(),
+            },
+        });
+        state.record.args = (&state.notification as *const CompletionNotification)
+            .cast_mut()
+            .cast();
+        state
+    }
+}
+unsafe extern "C" fn completion_callback(context: *mut c_void) {
+    // SAFETY: the event/cache owns the stable Box until request destruction has
+    // joined callbacks. Reset/reuse happens only after native terminal observation.
+    let notification = unsafe { &*context.cast::<CompletionNotification>() };
+    // A user-supplied waker must never unwind across the foreign ABI.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| notification.notify()));
+}
+
+struct CachedRequest {
+    callback: Option<Box<CallbackState>>,
+    request: NonNull<ffi::ov_infer_request_t>,
+    tensors: Vec<BoundTensor>,
+}
+impl Drop for CachedRequest {
+    fn drop(&mut self) {
+        // SAFETY: this request is quiescent. Free before releasing bound storage.
+        unsafe { (ffi::api().ov_infer_request_free)(self.request.as_ptr()) };
+    }
+}
+
 /// OpenVINO execution queue handle with reusable per-submission scratch.
 #[derive(Debug)]
 pub struct OpenVinoQueue {
@@ -809,6 +929,8 @@ pub struct OpenVinoQueue {
 /// observed terminal state is latched; the guards are dropped strictly before the latch is
 /// published.
 pub struct OpenVinoEvent {
+    callback: Option<Box<CallbackState>>,
+    resident: Rc<ProgramResident>,
     request: NonNull<ffi::ov_infer_request_t>,
     metadata: RefCell<EventMetadata>,
     scratch: Weak<QueueScratch>,
@@ -884,6 +1006,18 @@ impl OpenVinoEvent {
 
 impl Drop for OpenVinoEvent {
     fn drop(&mut self) {
+        if self.latched.get() == Some(EventState::Complete)
+            && self.resident.idle.borrow().len() < MAX_IDLE_REQUESTS
+        {
+            let tensors = mem::take(&mut self.metadata.borrow_mut().tensors);
+            self.resident.idle.borrow_mut().push(CachedRequest {
+                callback: self.callback.take(),
+                request: self.request,
+                tensors,
+            });
+            self.recycle_metadata();
+            return;
+        }
         if self.latched.get().is_none() {
             // The inference may still be running and writing through the bound tensors into
             // allocations this drop is about to release: cancel best-effort, then block until
@@ -909,6 +1043,8 @@ pub struct OpenVinoAccelerator {
     device: CString,
     next_id: AtomicU64,
     direct_binding_admissions: AtomicU64,
+    native_requests_created: AtomicU64,
+    native_requests_reused: AtomicU64,
     explicit_transfer_bytes: AtomicU64,
     info: DeviceInfo,
     /// Whether this device's compiler accepts FP8, probed once at open.
@@ -926,6 +1062,37 @@ impl std::fmt::Debug for OpenVinoAccelerator {
 }
 
 impl OpenVinoAccelerator {
+    /// Import immutable host input into this context. The fixed descriptor cannot
+    /// be used as an output or transfer destination. Events retain the backing;
+    /// dropping every caller handle cannot free pages still in use by a device.
+    pub fn import_shared_input(
+        &self,
+        context: &OpenVinoContext,
+        input: &SharedInput,
+    ) -> Result<AllocatedBuffer<OpenVinoBuffer>, BackendError> {
+        let desc = BufferDesc::new(
+            input.bytes as u64,
+            input.allocation.alignment(),
+            MemoryDomain::Shared,
+            BufferUsage::PROGRAM_INPUT | BufferUsage::TRANSFER_SOURCE,
+        )?;
+        self.info.validate_buffer_desc(desc)?;
+        let info = BufferInfo::new(
+            desc,
+            input.allocation.allocation_bytes(),
+            input.allocation.alignment(),
+            BufferProperties::HOST_VISIBLE | BufferProperties::DIRECT_BINDING,
+        )?;
+        Ok(AllocatedBuffer::new(
+            OpenVinoBuffer {
+                context_id: context.id,
+                desc,
+                allocation: input.allocation.clone(),
+                _not_send_sync: PhantomData,
+            },
+            info,
+        ))
+    }
     /// Initialize runtime loading from an installed library (for example a Python
     /// OpenVINO wheel). The first successful load is retained for the process
     /// lifetime. Call before discovery; this never replaces an active runtime.
@@ -983,6 +1150,8 @@ impl OpenVinoAccelerator {
             device,
             next_id: AtomicU64::new(0),
             direct_binding_admissions: AtomicU64::new(0),
+            native_requests_created: AtomicU64::new(0),
+            native_requests_reused: AtomicU64::new(0),
             explicit_transfer_bytes: AtomicU64::new(0),
             info,
             fp8,
@@ -1037,7 +1206,7 @@ impl OpenVinoAccelerator {
         // NUL-terminated string for the duration of the call.
         unsafe {
             check_status((ffi::api().ov_compiled_model_export_model)(
-                program.compiled.as_const_ptr(),
+                program.resident.compiled.as_const_ptr(),
                 path.as_ptr(),
             ))
         }
@@ -1050,6 +1219,15 @@ impl OpenVinoAccelerator {
     /// Re-enumerate inference devices through this instance's runtime core.
     pub fn runtime_devices(&self) -> Result<Vec<String>, InitError> {
         self.core.available_devices()
+    }
+
+    /// Cumulative native infer requests created, including rejected submissions.
+    pub fn native_requests_created(&self) -> u64 {
+        self.native_requests_created.load(Ordering::Relaxed)
+    }
+    /// Successfully completed native requests reused on subsequent submissions.
+    pub fn native_requests_reused(&self) -> u64 {
+        self.native_requests_reused.load(Ordering::Relaxed)
     }
 
     /// Cumulative count of buffers admitted as direct bindings.
@@ -1085,6 +1263,33 @@ impl OpenVinoAccelerator {
         let start = usize::try_from(offset).map_err(|_| BackendError::OutOfBounds)?;
         let end = usize::try_from(end).map_err(|_| BackendError::OutOfBounds)?;
         Ok((start, end))
+    }
+
+    /// Owning-worker completion observation. After a callback hint, explicitly
+    /// join its retirement to obtain the C API's authoritative success/error.
+    /// OpenVINO publishes that result AFTER its callback returns. This may block
+    /// for the callback tail; never call it from submit, poll_event or a callback.
+    /// Without a hint it performs the ordinary nonblocking readiness probe.
+    pub fn observe_notified_event(
+        &self,
+        event: &OpenVinoEvent,
+    ) -> Result<EventState, BackendError> {
+        if let Some(state) = event.latched.get() {
+            return Ok(state);
+        }
+        if event
+            .callback
+            .as_ref()
+            .expect("event callback")
+            .notification
+            .is_notified()
+        {
+            // SAFETY: the event retains a live request and all storage; its
+            // callback only notifies and does not depend on the owning worker.
+            let status = unsafe { (ffi::api().ov_infer_request_wait)(event.request.as_ptr()) };
+            return Ok(self.latch_request_status(event, status));
+        }
+        Ok(self.poll_request(event))
     }
 
     fn lowering_error(error: crate::LoweringError) -> BackendError {
@@ -1124,6 +1329,10 @@ impl OpenVinoAccelerator {
                 return EventState::Pending;
             }
         }
+        self.latch_request_status(event, status)
+    }
+
+    fn latch_request_status(&self, event: &OpenVinoEvent, status: ffi::ov_status_e) -> EventState {
         let state = match status {
             ffi::OV_STATUS_OK => match event.outputs_are_directly_backed() {
                 Ok(true) => EventState::Complete,
@@ -1354,8 +1563,13 @@ impl Accelerator for OpenVinoAccelerator {
         // constant to prevent scale fusion from changing FP16 intermediates.
         let expand_weights = self.device.to_bytes().starts_with(b"CPU")
             || self.device.to_bytes().starts_with(b"NPU");
-        let lowered =
-            lower_tosa_with_weights(bytes, target, expand_weights).map_err(Self::lowering_error)?;
+        let lowered = lower_tosa_with_weights(
+            bytes,
+            target,
+            expand_weights,
+            self.device.to_bytes().starts_with(b"GPU"),
+        )
+        .map_err(Self::lowering_error)?;
         let require_fp32 = (target == crate::OPENVINO_TOSA_QUANTIZED_TARGET
             || target == crate::OPENVINO_TOSA_FP8_TARGET)
             && lowered.requires_fp32;
@@ -1405,11 +1619,14 @@ impl Accelerator for OpenVinoAccelerator {
 
         Ok(OpenVinoProgram {
             context_id: context.id,
-            compiled,
             slots,
-            _weights_tensor: weights_tensor,
-            _weights: lowered.weights,
-            _not_send_sync: PhantomData,
+            resident: Rc::new(ProgramResident {
+                idle: RefCell::new(Vec::with_capacity(MAX_IDLE_REQUESTS)),
+                compiled,
+                _weights_tensor: weights_tensor,
+                _weights: lowered.weights,
+                _not_send_sync: PhantomData,
+            }),
         })
     }
 
@@ -1500,22 +1717,48 @@ impl Accelerator for OpenVinoAccelerator {
         // Native phase. Failures below free every created handle and reject: nothing observable
         // was started until `start_async` succeeds, so `SubmitFailure::Indeterminate` is never
         // produced.
-        let mut request = ptr::null_mut();
-        // SAFETY: the compiled model is live and `request` is a valid out-pointer.
-        let status = unsafe {
-            (ffi::api().ov_compiled_model_create_infer_request)(
-                program.compiled.as_const_ptr(),
-                &mut request,
-            )
+        let (request, mut callback) = if let Some(mut cached) =
+            program.resident.idle.borrow_mut().pop()
+        {
+            event_metadata.tensors = mem::take(&mut cached.tensors);
+            let request = cached.request;
+            let callback = cached.callback.take().expect("cached callback");
+            // Transfer request ownership into the event without freeing it.
+            mem::forget(cached);
+            self.native_requests_reused.fetch_add(1, Ordering::Relaxed);
+            (request, callback)
+        } else {
+            let mut request = ptr::null_mut();
+            // SAFETY: compiled model is live and request is a valid out-pointer.
+            check_status(unsafe {
+                (ffi::api().ov_compiled_model_create_infer_request)(
+                    program.resident.compiled.as_const_ptr(),
+                    &mut request,
+                )
+            })
+            .map_err(SubmitFailure::Rejected)?;
+            let request =
+                NonNull::new(request).ok_or(SubmitFailure::Rejected(BackendError::External {
+                    domain: OPENVINO_EXTERNAL_DOMAIN,
+                    code: 0,
+                }))?;
+            let callback = CallbackState::new();
+            // SAFETY: both request and callback record are stable and remain owned
+            // until after native request destruction. Nothing has started yet.
+            if let Err(error) = check_status(unsafe {
+                (ffi::api().ov_infer_request_set_callback)(request.as_ptr(), &callback.record)
+            }) {
+                // SAFETY: no inference was started; free before the callback Box.
+                unsafe { (ffi::api().ov_infer_request_free)(request.as_ptr()) };
+                return Err(SubmitFailure::Rejected(error));
+            }
+            self.native_requests_created.fetch_add(1, Ordering::Relaxed);
+            (request, callback)
         };
-        check_status(status).map_err(SubmitFailure::Rejected)?;
-        let Some(request) = NonNull::new(request) else {
-            return Err(SubmitFailure::Rejected(BackendError::External {
-                domain: OPENVINO_EXTERNAL_DOMAIN,
-                code: 0,
-            }));
-        };
+        callback.notification.reset();
         let event = OpenVinoEvent {
+            callback: Some(callback),
+            resident: program.resident.clone(),
             request,
             metadata: RefCell::new(event_metadata),
             scratch: Rc::downgrade(&queue.scratch),
@@ -1533,36 +1776,60 @@ impl Accelerator for OpenVinoAccelerator {
         };
 
         let mut metadata = event.metadata.borrow_mut();
-        for (plan, data) in program.slots.iter().zip(pointers.iter()) {
-            let tensor = TensorHandle::from_host_ptr(plan.element, plan.shape.as_value(), *data)
-                .map_err(SubmitFailure::Rejected)?;
-            // SAFETY: request and tensor are live; the runtime retains its own tensor reference.
-            let status = unsafe {
-                match plan.role {
-                    LoweredFeatureRole::Input => (ffi::api()
-                        .ov_infer_request_set_input_tensor_by_index)(
-                        event.request.as_ptr(),
-                        plan.io_index,
-                        tensor.as_const_ptr(),
-                    ),
-                    LoweredFeatureRole::Output => (ffi::api()
-                        .ov_infer_request_set_output_tensor_by_index)(
-                        event.request.as_ptr(),
-                        plan.io_index,
-                        tensor.as_const_ptr(),
-                    ),
-                }
-            };
-            check_status(status).map_err(SubmitFailure::Rejected)?;
-            metadata.tensors.push(BoundTensor {
-                _tensor: tensor,
-                output_io_index: plan.io_index,
-                expected_output: if plan.role == LoweredFeatureRole::Output {
-                    *data
-                } else {
-                    ptr::null_mut()
-                },
-            });
+        let old_len = metadata.tensors.len();
+        let same_bindings = old_len == pointers.len()
+            && metadata
+                .tensors
+                .iter()
+                .zip(pointers.iter())
+                .all(|(t, p)| t.data == *p);
+        if !same_bindings {
+            // Retain old bindings through partial replacement, including rejection.
+            metadata
+                .tensors
+                .try_reserve(program.slots.len())
+                .map_err(|_| SubmitFailure::Rejected(BackendError::OutOfMemory))?;
+            for (plan, data) in program.slots.iter().zip(pointers.iter()) {
+                let tensor =
+                    TensorHandle::from_host_ptr(plan.element, plan.shape.as_value(), *data)
+                        .map_err(SubmitFailure::Rejected)?;
+                // SAFETY: request and tensor are live; the runtime retains its own tensor reference.
+                let status = unsafe {
+                    match plan.role {
+                        LoweredFeatureRole::Input => (ffi::api()
+                            .ov_infer_request_set_input_tensor_by_index)(
+                            event.request.as_ptr(),
+                            plan.io_index,
+                            tensor.as_const_ptr(),
+                        ),
+                        LoweredFeatureRole::Output => (ffi::api()
+                            .ov_infer_request_set_output_tensor_by_index)(
+                            event.request.as_ptr(),
+                            plan.io_index,
+                            tensor.as_const_ptr(),
+                        ),
+                    }
+                };
+                check_status(status).map_err(SubmitFailure::Rejected)?;
+                metadata.tensors.push(BoundTensor {
+                    _tensor: tensor,
+                    _allocation: bindings
+                        .iter()
+                        .find(|b| b.slot == plan.slot)
+                        .expect("validated slot")
+                        .buffer
+                        .allocation
+                        .clone(),
+                    data: *data,
+                    output_io_index: plan.io_index,
+                    expected_output: if plan.role == LoweredFeatureRole::Output {
+                        *data
+                    } else {
+                        ptr::null_mut()
+                    },
+                });
+            }
+            metadata.tensors.drain(..old_len);
         }
         drop(metadata);
 
@@ -1584,6 +1851,24 @@ impl Accelerator for OpenVinoAccelerator {
         Ok(event)
     }
 
+    fn register_event_waker(
+        &self,
+        event: &Self::Event,
+        waker: &core::task::Waker,
+    ) -> Result<bool, BackendError> {
+        // Deadline cancellation still requires the caller's timer/poll path.
+        if event.deadline.is_some() {
+            return Ok(false);
+        }
+        event
+            .callback
+            .as_ref()
+            .expect("event callback")
+            .notification
+            .register(waker);
+        Ok(true)
+    }
+
     fn poll_event(&self, event: &Self::Event) -> Result<EventState, BackendError> {
         Ok(self.poll_request(event))
     }
@@ -1602,6 +1887,96 @@ impl Accelerator for OpenVinoAccelerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shared_input_is_immutable_aligned_and_shared_across_threads() {
+        let input = SharedInput::initialize(17, 16384, |bytes| {
+            bytes.copy_from_slice(&[7; 17]);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(input.as_bytes().as_ptr() as usize % 16384, 0);
+        let clone = input.clone();
+        assert!(Arc::ptr_eq(&input.allocation, &clone.allocation));
+        drop(input);
+        std::thread::spawn(move || assert_eq!(clone.as_bytes(), &[7; 17]))
+            .join()
+            .unwrap();
+        for (bytes, alignment) in [(0, 16), (4, 0), (4, 3), (u64::MAX, 16)] {
+            assert!(SharedInput::initialize(bytes, alignment, |_| Ok(())).is_err());
+        }
+        assert!(SharedInput::initialize(4, 16, |_| Err(BackendError::InvalidArgument)).is_err());
+    }
+
+    #[test]
+    fn borrowed_host_view_excludes_writers_and_releases_on_panic() {
+        let allocation = Arc::new(AlignedAllocation::new(16, 16).unwrap());
+        let buffer = OpenVinoBuffer {
+            context_id: 0,
+            desc: BufferDesc::new(
+                16,
+                16,
+                MemoryDomain::Shared,
+                BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+            )
+            .unwrap(),
+            allocation: allocation.clone(),
+            _not_send_sync: PhantomData,
+        };
+        let mut writer = EventBacking::new(allocation.clone(), AccessMode::Write);
+        writer.acquire().unwrap();
+        assert_eq!(buffer.with_bytes(|_| ()), Err(BackendError::Busy));
+        drop(writer);
+        buffer
+            .with_bytes(|bytes| {
+                assert_eq!(bytes, &[0; 16]);
+                let mut writer = EventBacking::new(allocation.clone(), AccessMode::Write);
+                assert_eq!(writer.acquire(), Err(BackendError::Busy));
+            })
+            .unwrap();
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = buffer.with_bytes(|_| panic!("inspection failed"));
+            }))
+            .is_err()
+        );
+        let mut writer = EventBacking::new(allocation, AccessMode::Write);
+        writer.acquire().unwrap();
+    }
+
+    #[test]
+    fn imported_shared_input_is_read_only_and_retains_identical_backing() {
+        let Some(backend) = backend() else { return };
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        let input = SharedInput::initialize(16, 16384, |bytes| {
+            bytes.fill(3);
+            Ok(())
+        })
+        .unwrap();
+        let (mut first, _) = backend
+            .import_shared_input(&context, &input)
+            .unwrap()
+            .into_parts();
+        let context2 = backend.create_context(ContextDesc::default()).unwrap();
+        let (second, _) = backend
+            .import_shared_input(&context2, &input)
+            .unwrap()
+            .into_parts();
+        assert!(Arc::ptr_eq(&first.allocation, &second.allocation));
+        assert!(Arc::ptr_eq(&first.allocation, &input.allocation));
+        assert!(!first.desc.allows_access(AccessMode::Write));
+        assert!(!first.desc.allows_access(AccessMode::ReadWrite));
+        assert_eq!(
+            backend.write_buffer(&mut first, 0, &SliceSource(&[0; 16])),
+            Err(BackendError::PermissionDenied)
+        );
+        drop(input);
+        drop(first);
+        assert_eq!(
+            second.with_bytes(|bytes| bytes.iter().sum::<u8>()).unwrap(),
+            48
+        );
+        assert_eq!(backend.explicit_transfer_bytes(), 0);
+    }
     use virtio_accel_conformance::numerics::{
         IDENTITY_EDGES_FP32, IDENTITY_FP8E4M3, IDENTITY_FP8E5M2, MATMUL_FP16, MATMUL_FP32,
         MAX_POOL2D_FP32,
@@ -1673,8 +2048,43 @@ mod tests {
         }
     }
 
+    struct CompletionWake {
+        ready: std::sync::atomic::AtomicBool,
+        thread: std::thread::Thread,
+    }
+    impl std::task::Wake for CompletionWake {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.ready.store(true, std::sync::atomic::Ordering::Release);
+            self.thread.unpark();
+        }
+    }
     fn wait_for_terminal(backend: &OpenVinoAccelerator, event: &OpenVinoEvent) -> EventState {
+        let observer = std::sync::Arc::new(CompletionWake {
+            ready: std::sync::atomic::AtomicBool::new(false),
+            thread: std::thread::current(),
+        });
+        let waker = core::task::Waker::from(observer.clone());
+        let notified = backend.register_event_waker(event, &waker).unwrap();
         let deadline = Instant::now() + Duration::from_secs(15);
+        if notified {
+            while !observer.ready.load(std::sync::atomic::Ordering::Acquire) {
+                let left = deadline
+                    .checked_duration_since(Instant::now())
+                    .expect("completion notification lost");
+                std::thread::park_timeout(left);
+            }
+            let terminal = backend.observe_notified_event(event).unwrap();
+            assert_ne!(terminal, EventState::Pending);
+            observer
+                .ready
+                .store(false, std::sync::atomic::Ordering::Release);
+            assert!(backend.register_event_waker(event, &waker).unwrap());
+            assert!(
+                observer.ready.load(std::sync::atomic::Ordering::Acquire),
+                "late registration lost"
+            );
+            return terminal;
+        }
         loop {
             match backend.poll_event(event).unwrap() {
                 EventState::Pending => {
@@ -2030,24 +2440,169 @@ mod tests {
         assert_eq!(backend.direct_binding_admissions(), 2);
 
         backend.destroy_event(event).unwrap();
+        assert_eq!(program.resident.idle.borrow().len(), 1);
         assert!(
             queue
                 .scratch
                 .metadata_spare
                 .borrow()
                 .as_ref()
-                .is_some_and(|metadata| {
-                    metadata.backings.is_empty()
-                        && metadata.backings.capacity() >= bindings.len()
-                        && metadata.tensors.is_empty()
-                        && metadata.tensors.capacity() >= bindings.len()
-                })
+                .is_some_and(|m| m.backings.is_empty() && m.tensors.is_empty())
         );
-        backend.destroy_queue(queue).unwrap();
+        let event = backend
+            .submit(&queue, &program, &bindings, Timeout::Infinite)
+            .unwrap();
+        assert_eq!(wait_for_terminal(&backend, &event), EventState::Complete);
+        backend.destroy_event(event).unwrap();
+        assert_eq!(backend.native_requests_created(), 1);
+        assert_eq!(backend.native_requests_reused(), 1);
+        // Even identical artifacts have independent pools and compiled owners.
+        let other = backend
+            .load_program(&context, tosa_artifact(&SliceSource(IDENTITY_FP32_LOCAL)))
+            .unwrap();
+        let separate = backend
+            .submit(&queue, &other, &bindings, Timeout::Infinite)
+            .unwrap();
+        assert_eq!(wait_for_terminal(&backend, &separate), EventState::Complete);
+        backend.destroy_event(separate).unwrap();
+        assert_eq!(backend.native_requests_created(), 2);
+        assert_eq!(backend.native_requests_reused(), 1);
+        backend.unload_program(other).unwrap();
+        // Rebind an idle request to different allocations, then drop every public
+        // handle including the program before waiting. The event retains all data.
+        let (mut replacement, _) = backend
+            .allocate_buffer(&context, desc)
+            .unwrap()
+            .into_parts();
+        let doubled: Vec<_> = (1..=bytes as u32 / 4)
+            .flat_map(|v| (2.0 * v as f32).to_le_bytes())
+            .collect();
+        backend
+            .write_buffer(&mut replacement, 0, &SliceSource(&doubled))
+            .unwrap();
+        let rebound = [
+            BindingRef {
+                buffer: &replacement,
+                ..bindings[0]
+            },
+            BindingRef { ..bindings[1] },
+        ];
+        let event = backend
+            .submit(&queue, &program, &rebound, Timeout::Infinite)
+            .unwrap();
+        backend.free_buffer(replacement).unwrap();
         backend.unload_program(program).unwrap();
+        assert_eq!(wait_for_terminal(&backend, &event), EventState::Complete);
+        backend
+            .read_buffer(&output, 0, &mut SliceSink(&mut result))
+            .unwrap();
+        assert_eq!(result, doubled);
+        backend.destroy_event(event).unwrap();
+        assert_eq!(backend.native_requests_created(), 2);
+        assert_eq!(backend.native_requests_reused(), 2);
+        backend.destroy_queue(queue).unwrap();
         backend.free_buffer(input).unwrap();
         backend.free_buffer(output).unwrap();
         backend.destroy_context(context).unwrap();
+    }
+
+    #[test]
+    fn external_residual_is_read_on_every_reused_request() {
+        let Some(discovery) = backend() else { return };
+        for device in discovery.runtime_devices().unwrap() {
+            let backend = OpenVinoAccelerator::with_device(&device).unwrap();
+            let context = backend.create_context(ContextDesc::default()).unwrap();
+            let queue = backend
+                .create_queue(&context, QueueDesc::default())
+                .unwrap();
+            for (rows, columns) in [(1, 4), (2, 7), (16, 4)] {
+                for swapped in [false, true] {
+                    let artifact =
+                        crate::lower::residual_tests::residual_graph(rows, columns, swapped);
+                    let program = backend
+                        .load_program(&context, tosa_artifact(&SliceSource(&artifact)))
+                        .unwrap();
+                    let mut buffers: Vec<_> = program
+                        .slots
+                        .iter()
+                        .map(|slot| {
+                            let desc = BufferDesc::new(
+                                slot.byte_len,
+                                4096,
+                                MemoryDomain::Shared,
+                                BufferUsage::TRANSFER_SOURCE
+                                    | BufferUsage::TRANSFER_DESTINATION
+                                    | BufferUsage::PROGRAM_INPUT
+                                    | BufferUsage::PROGRAM_OUTPUT,
+                            )
+                            .unwrap();
+                            backend
+                                .allocate_buffer(&context, desc)
+                                .unwrap()
+                                .into_parts()
+                                .0
+                        })
+                        .collect();
+                    let created = backend.native_requests_created();
+                    let reused = backend.native_requests_reused();
+                    for iteration in 0..8 {
+                        let input: Vec<f32> = (0..rows * 3)
+                            .map(|i| (i - iteration) as f32 / 16.0)
+                            .collect();
+                        let residual: Vec<f32> = (0..rows * columns)
+                            .map(|i| (i + iteration * 3 - 5) as f32 / 32.0)
+                            .collect();
+                        for (buffer, values) in buffers.iter_mut().zip([&input, &residual]) {
+                            let bytes: Vec<_> =
+                                values.iter().flat_map(|x| x.to_ne_bytes()).collect();
+                            backend
+                                .write_buffer(buffer, 0, &SliceSource(&bytes))
+                                .unwrap();
+                        }
+                        let bindings: Vec<_> = buffers
+                            .iter()
+                            .zip(&program.slots)
+                            .enumerate()
+                            .map(|(i, (buffer, slot))| BindingRef {
+                                slot: i as u32,
+                                buffer,
+                                range: virtio_accel_core::BufferRange::new(0, slot.byte_len)
+                                    .unwrap(),
+                                access: if i == 2 {
+                                    AccessMode::Write
+                                } else {
+                                    AccessMode::Read
+                                },
+                            })
+                            .collect();
+                        let event = backend
+                            .submit(&queue, &program, &bindings, Timeout::Infinite)
+                            .unwrap();
+                        assert_eq!(wait_for_terminal(&backend, &event), EventState::Complete);
+                        buffers[2].with_bytes(|bytes| {
+                            for (i, b) in bytes.chunks_exact(4).enumerate() {
+                                let row = i / columns as usize;
+                                let col = i % columns as usize;
+                                let dot: f32 = (0..3).map(|k| input[row*3+k] * (((k*columns as usize+col)%7) as f32-3.0)/8.0).sum();
+                                let expected = (dot + residual[i])*0.5;
+                                let actual = f32::from_ne_bytes(b.try_into().unwrap());
+                                assert!((actual-expected).abs() < 0.005,
+                                    "{device} rows={rows} columns={columns} swapped={swapped} iteration={iteration} element={i}: {actual} != {expected}");
+                            }
+                        }).unwrap();
+                        backend.destroy_event(event).unwrap();
+                    }
+                    assert_eq!(backend.native_requests_created() - created, 1);
+                    assert_eq!(backend.native_requests_reused() - reused, 7);
+                    backend.unload_program(program).unwrap();
+                    for buffer in buffers {
+                        backend.free_buffer(buffer).unwrap();
+                    }
+                }
+            }
+            backend.destroy_queue(queue).unwrap();
+            backend.destroy_context(context).unwrap();
+        }
     }
 
     #[test]

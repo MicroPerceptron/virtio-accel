@@ -233,3 +233,20 @@ the explicit unavailable-runtime surface.
   ownership already provides the required exclusivity.
 - Treating a Rust handle drop, ID invalidation, or reset request as proof that provider state was
   released.
+
+### Optional host completion notification
+
+`Accelerator::register_event_waker` optionally registers one completion observer.
+The default returns `false`, preserving existing polling implementations. A provider
+returning `true` must retain the waker, handle registration racing completion, and
+wake late registrants. A wake is only a hint: callers still poll authoritative
+state and re-register if pending. Callbacks must not release leases on a hint alone,
+block on the observer, or unwind across a foreign ABI. This Rust host API does not
+negotiate a wire event queue or change protocol 1.0.
+
+The allocation-free `CompletionNotification` helper uses a sticky atomic flag and
+`AtomicWaker`; its reset requires exclusive access and retirement of all producers
+from the previous generation. Core ML publishes its hint after terminal status.
+OpenVINO's C callback precedes the final request promise; an owning worker may use
+`observe_notified_event` to join that callback tail, while `poll_event` remains a
+nonblocking probe. Finite-deadline OpenVINO events retain polling for cancellation.
