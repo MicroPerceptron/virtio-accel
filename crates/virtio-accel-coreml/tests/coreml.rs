@@ -1,5 +1,8 @@
 #![cfg(target_os = "macos")]
 
+#[path = "coreml/typed.rs"]
+mod typed;
+
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -419,6 +422,39 @@ fn all_policy_reports_other_identity_and_executes_tosa() {
         virtio_accel_core::AcceleratorClass::OTHER,
         "VIRTIO_ACCEL_COREML_REQUIRE_ALL",
     );
+}
+
+#[test]
+fn fp32_cosine_preserves_precision_under_every_placement_policy() {
+    let case = virtio_accel_conformance::numerics::FP32_UNARY_CASES
+        .iter()
+        .find(|c| c.name == "cos-fp32")
+        .unwrap();
+    let input: Vec<_> = case.inputs.iter().map(|v| v.bytes()).collect();
+    let views: Vec<_> = input.iter().map(Vec::as_slice).collect();
+    for units in [
+        CoreMlComputeUnits::CpuAndNeuralEngine,
+        CoreMlComputeUnits::CpuAndGpu,
+        CoreMlComputeUnits::All,
+    ] {
+        let backend = match CoreMlAccelerator::new_tosa_with_compute_units(units) {
+            Ok(b) => b,
+            Err(InitError::NeuralEngineUnavailable | InitError::GpuUnavailable) => continue,
+            Err(e) => panic!("{e}"),
+        };
+        if let Some(output) = run_tosa_bytes_on(
+            &backend,
+            case.artifact,
+            COREML_TOSA_TARGET,
+            &views,
+            case.output.byte_len(),
+        ) {
+            assert!(
+                case.output_matches(&output),
+                "FP32 cosine narrowed under {units:?}"
+            );
+        }
+    }
 }
 
 fn check_compute_policy(

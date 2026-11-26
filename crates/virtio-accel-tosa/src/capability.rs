@@ -127,6 +127,11 @@ pub enum RuntimeConditionSupport {
     /// Index bounds must be discharged by `TosaAnalysis::proves_byte_lookup_bounds`
     /// or `TosaAnalysis::proves_constant_index_bounds`. Other conditions are rejected.
     ProvenConstantOrByteLookup,
+    /// Index bounds must be discharged by `TosaAnalysis::proves_integer_index_bounds`
+    /// or `TosaAnalysis::proves_byte_lookup_bounds`. The former follows constants
+    /// and bounded INT32 MINIMUM/MAXIMUM expressions. Other conditions are rejected;
+    /// no external input-range promise is trusted.
+    ProvenBoundedOrByteLookup,
 }
 
 /// Whole-graph structural boundary that is not reducible to an operator bit.

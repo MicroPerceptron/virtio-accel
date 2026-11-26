@@ -33,7 +33,7 @@ class ExampleTests(unittest.TestCase):
             spec.loader.exec_module(module)
             for dtype in ('float16', 'float32'):
                 with self.subTest(example=name, dtype=dtype):
-                    if provider in ('coreml', 'openvino', 'vulkan') and name == 'nearest_centroid' and dtype == 'float16':
+                    if provider in ('coreml', 'vulkan') and name == 'nearest_centroid' and dtype == 'float16':
                         with self.assertRaisesRegex(RuntimeError, 'CAST'):
                             module.demo(dtype=dtype, device=device)
                     else:

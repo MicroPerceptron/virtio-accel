@@ -315,6 +315,29 @@ pub struct CoreMlBuffer {
     _not_send_sync: PhantomData<Rc<()>>,
 }
 
+impl CoreMlBuffer {
+    /// Inspect a completed, transfer-readable allocation without a readback copy.
+    /// A read guard excludes reentrant native writers until the callback returns,
+    /// including on unwind. The slice cannot escape the callback.
+    pub fn with_bytes<R>(&self, inspect: impl FnOnce(&[u8]) -> R) -> Result<R, BackendError> {
+        if !self.desc.usage.contains(BufferUsage::TRANSFER_SOURCE) {
+            return Err(BackendError::PermissionDenied);
+        }
+        if self.allocation.in_flight.load(Ordering::Acquire) != 0 {
+            return Err(BackendError::Busy);
+        }
+        let mut guard = EventBacking::new(Arc::clone(&self.allocation), AccessMode::Read);
+        guard.acquire()?;
+        let length = usize::try_from(self.desc.bytes()).map_err(|_| BackendError::ResourceLimit)?;
+        // SAFETY: the allocation owns at least `desc.bytes()` initialized bytes. Native
+        // completion synchronizes before releasing the backing gate, and `guard` excludes
+        // writers for the entire callback. This thread-affine buffer stays alive and the
+        // callback's result cannot borrow its input slice.
+        let bytes = unsafe { std::slice::from_raw_parts(self.allocation.pointer.as_ptr(), length) };
+        Ok(inspect(bytes))
+    }
+}
+
 /// Resident Core ML model handle.
 pub struct CoreMlProgram {
     context_id: u64,
@@ -1174,6 +1197,34 @@ mod tests {
         prepare_event_backings(&mut pending).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].access, BackingAccess::Exclusive);
+    }
+
+    #[test]
+    fn scoped_buffer_view_excludes_writers_and_releases_after_unwind() {
+        let buffer = CoreMlBuffer {
+            context_id: 1,
+            desc: BufferDesc::new(4, 16, MemoryDomain::Shared, BufferUsage::TRANSFER_SOURCE)
+                .unwrap(),
+            allocation: Arc::new(AlignedAllocation::new(4, 16).unwrap()),
+            _not_send_sync: PhantomData,
+        };
+        buffer
+            .with_bytes(|bytes| {
+                assert_eq!(bytes, [0; 4]);
+                let mut writer =
+                    EventBacking::new(Arc::clone(&buffer.allocation), AccessMode::Write);
+                assert_eq!(writer.acquire(), Err(BackendError::Busy));
+            })
+            .unwrap();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            buffer.with_bytes::<()>(|_| panic!("view callback"))
+        }));
+        assert!(panic.is_err());
+        let mut writer = EventBacking::new(Arc::clone(&buffer.allocation), AccessMode::Write);
+        writer.acquire().unwrap();
+        assert_eq!(buffer.with_bytes(|_| ()), Err(BackendError::Busy));
+        drop(writer);
+        assert_eq!(buffer.allocation.in_flight.load(Ordering::Acquire), 0);
     }
 
     #[test]
