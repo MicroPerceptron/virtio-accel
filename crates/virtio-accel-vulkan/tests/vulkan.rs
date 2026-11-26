@@ -170,6 +170,108 @@ fn load(
     backend.load_program(context, artifact)
 }
 
+#[test]
+fn bounded_fence_wait_and_scoped_output_view_preserve_ownership() {
+    for name in devices() {
+        let backend = open(&name);
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        let program = load(&backend, &context, IDENTITY_FP32_LOCAL, VULKAN_TOSA_TARGET).unwrap();
+        let queue = backend
+            .create_queue(&context, QueueDesc::default())
+            .unwrap();
+        let allocate = |usage| {
+            backend
+                .allocate_buffer(
+                    &context,
+                    BufferDesc::new(4, 64, MemoryDomain::Host, usage).unwrap(),
+                )
+                .unwrap()
+                .into_parts()
+                .0
+        };
+        let mut input = allocate(BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT);
+        let output = allocate(BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT);
+        backend
+            .write_buffer(&mut input, 0, &SliceSource(&3.25f32.to_ne_bytes()))
+            .unwrap();
+        let bindings = [
+            BindingRef {
+                slot: 0,
+                buffer: &input,
+                range: BufferRange::new(0, 4).unwrap(),
+                access: AccessMode::Read,
+            },
+            BindingRef {
+                slot: 1,
+                buffer: &output,
+                range: BufferRange::new(0, 4).unwrap(),
+                access: AccessMode::Write,
+            },
+        ];
+        let gate = backend.host_gate().ok();
+        let event = if let Some(gate) = &gate {
+            backend.submit_after(&queue, &program, &bindings, gate, 1)
+        } else {
+            backend.submit(&queue, &program, &bindings, Timeout::Infinite)
+        }
+        .unwrap();
+        if let Some(gate) = &gate {
+            assert_eq!(
+                backend.wait_event(&event, Duration::ZERO).unwrap(),
+                EventState::Pending
+            );
+            assert_eq!(output.with_bytes(|_| ()).unwrap_err(), BackendError::Busy);
+            gate.signal().raise(1).unwrap();
+        }
+        let foreign = open(&name);
+        assert_eq!(
+            foreign.wait_event(&event, Duration::ZERO).unwrap_err(),
+            BackendError::InvalidArgument
+        );
+        assert_eq!(
+            backend.wait_event(&event, Duration::from_secs(10)).unwrap(),
+            EventState::Complete
+        );
+        release(backend.destroy_event(event));
+        let before = backend.explicit_transfer_bytes();
+        output
+            .with_bytes(|bytes| {
+                assert_eq!(bytes, &3.25f32.to_ne_bytes());
+                let rejected = backend
+                    .submit(&queue, &program, &bindings, Timeout::Infinite)
+                    .unwrap_err();
+                assert_eq!(failure_error(rejected), BackendError::Busy);
+            })
+            .unwrap();
+        assert_eq!(backend.explicit_transfer_bytes(), before);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                || output.with_bytes(|_| panic!("inspection panic"))
+            ))
+            .is_err()
+        );
+        let event = backend
+            .submit(&queue, &program, &bindings, Timeout::Infinite)
+            .unwrap();
+        assert_eq!(
+            backend.wait_event(&event, Duration::from_secs(10)).unwrap(),
+            EventState::Complete
+        );
+        release(backend.destroy_event(event));
+        assert_eq!(
+            input.with_bytes(|_| ()).unwrap_err(),
+            BackendError::PermissionDenied
+        );
+        drop(gate);
+        drop(foreign);
+        release(backend.free_buffer(output));
+        release(backend.free_buffer(input));
+        release(backend.unload_program(program));
+        release(backend.destroy_queue(queue));
+        release(backend.destroy_context(context));
+    }
+}
+
 /// Full lifecycle in `domain`: allocate, write, execute the FP32 identity, read the output back.
 fn run_identity(
     backend: &VulkanAccelerator,
@@ -1691,6 +1793,126 @@ fn multi_operator_graphs_run_as_one_submission_over_an_arena() {
         );
         release(backend.unload_program(program));
         release(backend.destroy_context(context));
+    }
+}
+
+/// Distinct request slots still share a program's intermediate arena. Queue submission order
+/// must be strengthened by a compute dependency before reusing that arena.
+#[test]
+fn overlapping_graph_requests_order_program_arena_reuse() {
+    const ELEMENTS: usize = 16384;
+    const REQUESTS: usize = 16;
+    let mut graph = OwnedGraph::new("main");
+    for name in ["x", "hidden", "y"] {
+        graph.push_tensor(OwnedTensor::new(name, vec![ELEMENTS as i32], DType::FP32));
+    }
+    graph
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Tanh,
+            vec!["x".into()],
+            vec!["hidden".into()],
+        ))
+        .push_operator(OwnedOperator::new(
+            OperatorKind::Tanh,
+            vec!["hidden".into()],
+            vec!["y".into()],
+        ))
+        .push_input("x")
+        .push_output("y");
+    let artifact = graph.build(VULKAN_TOSA_TARGET).unwrap();
+    for device in devices() {
+        let backend = open(&device);
+        let context = backend.create_context(ContextDesc::default()).unwrap();
+        let program = load(&backend, &context, &artifact, VULKAN_TOSA_TARGET).unwrap();
+        assert_eq!(program.dispatch_count(), 2);
+        assert!(program.arena_bytes() > 0);
+        let queue = backend
+            .create_queue(&context, QueueDesc::default())
+            .unwrap();
+        let gate = backend.host_gate().ok();
+        // Allocate/upload everything before submitting: no host transfer can accidentally
+        // serialize the requests. Each input has a distinct sign/magnitude.
+        let requests = (0..REQUESTS)
+            .map(|index| {
+                let value = (index as f32 - 7.5) / 8.0;
+                let mut input = allocate(
+                    &backend,
+                    &context,
+                    (ELEMENTS * 4) as u64,
+                    MemoryDomain::Host,
+                    BufferUsage::TRANSFER_DESTINATION | BufferUsage::PROGRAM_INPUT,
+                );
+                let output = allocate(
+                    &backend,
+                    &context,
+                    (ELEMENTS * 4) as u64,
+                    MemoryDomain::Host,
+                    BufferUsage::TRANSFER_SOURCE | BufferUsage::PROGRAM_OUTPUT,
+                );
+                backend
+                    .write_buffer(
+                        &mut input,
+                        0,
+                        &SliceSource(&float_bytes_le(&vec![value; ELEMENTS])),
+                    )
+                    .unwrap();
+                (input, output, value.tanh().tanh())
+            })
+            .collect::<Vec<_>>();
+        let events = requests
+            .iter()
+            .map(|(input, output, _)| {
+                let range = BufferRange::new(0, (ELEMENTS * 4) as u64).unwrap();
+                let bindings = [
+                    BindingRef {
+                        slot: 0,
+                        buffer: input,
+                        range,
+                        access: AccessMode::Read,
+                    },
+                    BindingRef {
+                        slot: 1,
+                        buffer: output,
+                        range,
+                        access: AccessMode::Write,
+                    },
+                ];
+                if let Some(gate) = &gate {
+                    backend.submit_after(&queue, &program, &bindings, gate, 1)
+                } else {
+                    backend.submit(&queue, &program, &bindings, Timeout::Infinite)
+                }
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        if let Some(gate) = &gate {
+            gate.signal().raise(1).unwrap();
+        }
+        for event in events {
+            assert_eq!(
+                backend.wait_event(&event, Duration::from_secs(10)).unwrap(),
+                EventState::Complete
+            );
+            release(backend.destroy_event(event));
+        }
+        for (input, output, expected) in requests {
+            output
+                .with_bytes(|bytes| {
+                    for actual in floats_le(bytes) {
+                        assert!(
+                            (actual - expected).abs() < 1e-5,
+                            "{device}: {actual} != {expected}"
+                        );
+                    }
+                })
+                .unwrap();
+            release(backend.free_buffer(input));
+            release(backend.free_buffer(output));
+        }
+        release(backend.destroy_queue(queue));
+        release(backend.unload_program(program));
+        release(backend.destroy_context(context));
+        assert_eq!(backend.live_resources(), Default::default());
     }
 }
 

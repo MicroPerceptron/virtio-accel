@@ -45,6 +45,13 @@ Every `VkResult` is checked before an out-value is trusted: `ash` returns `Resul
 and the crate never reads a handle or pointer from an `Err`. Unmapped result codes surface as
 `BackendError::External` in the stable `"VULK"` domain (`0x5655_4c4b`).
 
+The Vulkan memory model and its Device scope are enabled together only when both
+are reported. Generic packed-byte kernels use Device-scope atomics; enabling the
+memory model alone would invalidate those shaders (VUID 06265). Optional cooperative
+NVFP4 kernels require both features and declare both SPIR-V capabilities. Devices
+lacking either retain the baseline kernels and GLSL memory model. Native validation
+must inspect layer diagnostics as well as test exit status.
+
 ## Loader, instance, and handle lifetime
 
 - The loader is opened once per process in a `OnceLock` (`entry`); `ash::Entry` is reference
@@ -67,6 +74,19 @@ and the crate never reads a handle or pointer from an `Err`. Unmapped result cod
   synchronized objects; thread affinity discharges that requirement without locks.
 
 ## Buffers and mappings
+
+`VulkanBuffer::with_bytes` exposes a scoped immutable view only for mapped,
+transfer-readable, quiescent buffers. A `Guard` remains live through the callback,
+so a reentrant writable submission is rejected even though `submit` accepts shared
+Rust borrows. The guard drops on unwind. The view does not outlive the callback.
+It uses the same coherent mapping and terminal host-visibility barrier as
+`read_buffer`; it adds no memory import or cross-thread access.
+
+`VulkanAccelerator::wait_event` is an explicitly blocking, timeout-bounded host
+operation. It validates backend identity and retains the event's context/device
+and claimed fence slot for the whole wait. Thread-affine handles exclude fence
+reset/destruction races. Timeout leaves every lease live; only observed completion
+or device loss latches a terminal state. Public `poll_event` stays nonblocking.
 
 Every buffer is one `VkBuffer` bound at offset 0 of one dedicated `VkDeviceMemory`
 (`RawAllocation`), created with `STORAGE_BUFFER | TRANSFER_SRC | TRANSFER_DST` usage and a size
@@ -122,7 +142,14 @@ pipeline, dispatch; a final `COMPUTE_SHADER/SHADER_STORAGE_WRITE → HOST|COPY` 
 and transfer read/write access, so the host mapping and any later staging copy of a device-local
 output observe the results), and
 calls `vkQueueSubmit2` with the slot's fence. Which dispatches need a barrier is decided by the
-lowering from the plan's read/write sets, not at record time. `vkQueueSubmit2` success is the
+lowering from the plan's read/write sets. In addition, if the program has an arena and an
+earlier submission has not been observed terminal, a compute-to-compute dependency precedes
+the first dispatch. Request slots have separate descriptors and fences but share that arena;
+submission order alone does not protect its intermediates. This dependency orders earlier
+reads before reuse and makes earlier writes available/visible across submissions on the same
+queue. Arena-free programs need no such serialization. The queued sixteen-request regression
+checks distinct outputs through a shared intermediate arena.
+`vkQueueSubmit2` success is the
 admission boundary: any failure before it releases the slot and gates and rejects; an
 out-of-memory result from `vkQueueSubmit2` itself is specified to leave every resource untouched
 and is also a rejection; `VK_ERROR_DEVICE_LOST` returns `Indeterminate` with an event already

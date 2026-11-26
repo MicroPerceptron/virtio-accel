@@ -181,7 +181,7 @@ jobs:
       - name: Install the distribution Vulkan loader and Mesa software ICD
         run: |
           sudo apt-get update
-          sudo apt-get install -y libvulkan1 mesa-vulkan-drivers
+          sudo apt-get install -y libvulkan1 mesa-vulkan-drivers vulkan-validationlayers
 
       - name: Pin the loader to lavapipe
         run: |
@@ -195,6 +195,16 @@ jobs:
 
       - name: Test against the software ICD
         run: cargo test -p virtio-accel-vulkan --all-targets
+
+      - name: Check Vulkan API and synchronization validity
+        env:
+          VK_INSTANCE_LAYERS: VK_LAYER_KHRONOS_validation
+          VK_LAYER_ENABLES: VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
+        run: |
+          set -o pipefail
+          cargo test -p virtio-accel-vulkan --test vulkan -- --test-threads=1 2>&1 | tee vulkan-validation.log
+          # Layer diagnostics do not change a Rust test's exit status.
+          ! grep -Eq 'Validation Error|SYNC-HAZARD' vulkan-validation.log
 
       - name: Run the example against the software ICD
         run: cargo run -p virtio-accel-vulkan --example tosa_vulkan
