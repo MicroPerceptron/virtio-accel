@@ -1,0 +1,24 @@
+diff --git a/hw/virtio/vhost.c b/hw/virtio/vhost.c
+index e654ea4..3b11a34 100644
+--- a/hw/virtio/vhost.c
++++ b/hw/virtio/vhost.c
+@@ -1238,8 +1238,17 @@ int vhost_device_iotlb_miss(struct vhost_dev *dev, uint64_t iova, int write)
+         len = MIN(iotlb.addr_mask + 1, len);
+         iova = iova & ~iotlb.addr_mask;
+ 
+-        ret = vhost_backend_update_device_iotlb(dev, iova, uaddr,
+-                                                len, iotlb.perm);
++        /*
++         * address_space_get_iotlb_entry() reports every translation it
++         * finds as read-write, whatever the IOMMU's mapping permits. All
++         * that is known here is that the access asked for is allowed, so
++         * that is all the backend is granted: one that later needs the
++         * other direction misses again and is answered for it. Handing
++         * out iotlb.perm would let a backend write a page the guest
++         * mapped read-only as soon as it had read it once.
++         */
++        ret = vhost_backend_update_device_iotlb(dev, iova, uaddr, len,
++                                                write ? IOMMU_WO : IOMMU_RO);
+         if (ret) {
+             trace_vhost_iotlb_miss(dev, 4);
+             error_report("Fail to update device iotlb");

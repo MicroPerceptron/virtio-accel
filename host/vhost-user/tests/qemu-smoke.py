@@ -67,7 +67,7 @@ class Device:
     def __init__(self, qtest):
         self.q = qtest
         candidates = range(0x0A000000, 0x0A004000, 0x200)
-        self.base = next(addr for addr in candidates if self.q.readl(addr + 8) == 65535)
+        self.base = next(addr for addr in candidates if self.q.readl(addr + 8) == 56)
         assert self.q.readl(self.base) == 0x74726976
         assert self.q.readl(self.base + 4) == 2, "modern Virtio MMIO required"
         self.request_id = 0
@@ -366,7 +366,7 @@ def main():
                     "-chardev",
                     f"socket,id=accel,path={root / 'vhost.sock'}",
                     "-device",
-                    "vhost-user-test-device,bus=virtio-mmio-bus.0,chardev=accel,virtio-id=65535,num_vqs=1,vq_size=1024,config_size=16",
+                    "vhost-user-test-device,bus=virtio-mmio-bus.0,chardev=accel,virtio-id=56,num_vqs=1,vq_size=1024,config_size=16",
                     "-qtest-log",
                     "/dev/null",
                     "-qtest",

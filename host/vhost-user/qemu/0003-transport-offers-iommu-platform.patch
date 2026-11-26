@@ -1,0 +1,32 @@
+diff --git a/hw/virtio/vhost-user-base.c b/hw/virtio/vhost-user-base.c
+index 37cf08f..768c661 100644
+--- a/hw/virtio/vhost-user-base.c
++++ b/hw/virtio/vhost-user-base.c
+@@ -132,9 +132,26 @@ static uint64_t vub_get_features(VirtIODevice *vdev,
+                                  uint64_t requested_features, Error **errp)
+ {
+     VHostUserBase *vub = VHOST_USER_BASE(vdev);
++    uint64_t features;
++
+     /* This should be set when the vhost connection initialises */
+     g_assert(vub->vhost_dev.features);
+-    return vub->vhost_dev.features & ~(1ULL << VHOST_USER_F_PROTOCOL_FEATURES);
++    features = vub->vhost_dev.features &
++               ~(1ULL << VHOST_USER_F_PROTOCOL_FEATURES);
++    /*
++     * VIRTIO_F_IOMMU_PLATFORM is the transport's to offer, not the
++     * backend's. It tells the driver that this device's DMA goes through
++     * the bus's IOMMU, and that is only so when the bus was asked to route
++     * it there (iommu_platform=on): otherwise vdev->dma_as stays the system
++     * address space. Passing a backend's bit through regardless would offer
++     * the driver a translation nothing performs, while the vhost layer,
++     * seeing the bit and an IOMMU on the bus, answers the backend's IOTLB
++     * misses with identity mappings of guest-physical memory.
++     */
++    if (!virtio_has_feature(requested_features, VIRTIO_F_IOMMU_PLATFORM)) {
++        features &= ~(1ULL << VIRTIO_F_IOMMU_PLATFORM);
++    }
++    return features;
+ }
+ 
+ /*

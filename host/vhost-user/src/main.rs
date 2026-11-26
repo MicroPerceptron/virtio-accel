@@ -5,19 +5,25 @@ use virtio_accel_core::Accelerator;
 use virtio_accel_device::ResourcePolicy;
 use virtio_accel_vhost_user::{Host, serve};
 
-const USAGE: &str = "usage: virtio-accel-vhost-user --backend mock|openvino|vulkan|xdna [--list-devices | --socket PATH] [--device NAME] [--buffer-budget BYTES] [--program-budget BYTES | --allow-unknown-program-residency]";
+const USAGE: &str = "usage: virtio-accel-vhost-user --backend mock|openvino|vulkan|xdna [--list-devices | --socket PATH] [--iommu] [--device NAME] [--buffer-budget BYTES] [--program-budget BYTES | --allow-unknown-program-residency]";
 
 fn run<A: Accelerator>(
     socket: &Path,
     accelerator: A,
     policy: ResourcePolicy,
+    iommu: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!(
         "virtio-accel: buffer budget={}, program resident-charge budget={}",
         policy.max_buffer_backing_bytes(),
         policy.max_program_resident_bytes()
     );
-    serve(socket, Host::new(accelerator, policy)?)
+    let host = Host::new(accelerator, policy)?;
+    if iommu {
+        eprintln!("virtio-accel: behind the platform IOMMU (ACCESS_PLATFORM required)");
+        return serve(socket, host.behind_iommu());
+    }
+    serve(socket, host)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -28,6 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut buffers = 512 << 20;
     let mut programs = 256 << 20;
     let mut list = false;
+    let mut iommu = false;
     while let Some(arg) = args.next() {
         if arg == "--help" {
             println!("{USAGE}");
@@ -35,6 +42,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         if arg == "--list-devices" {
             list = true;
+            continue;
+        }
+        if arg == "--iommu" {
+            iommu = true;
             continue;
         }
         if arg == "--allow-unknown-program-residency" {
@@ -105,6 +116,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             socket,
             virtio_accel_mock::MockAccelerator::completing_on_poll(),
             policy,
+            iommu,
         ),
         #[cfg(feature = "openvino")]
         "openvino" => {
@@ -114,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             .map_err(|e| format!("OpenVINO: {e:?}"))?;
             eprintln!("virtio-accel: OpenVINO {}", accelerator.device_name());
-            run(socket, accelerator, policy)
+            run(socket, accelerator, policy, iommu)
         }
         #[cfg(feature = "vulkan")]
         "vulkan" => {
@@ -124,13 +136,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             .map_err(|e| format!("Vulkan: {e:?}"))?;
             eprintln!("virtio-accel: Vulkan {}", accelerator.device_name());
-            run(socket, accelerator, policy)
+            run(socket, accelerator, policy, iommu)
         }
         #[cfg(feature = "xdna")]
         "xdna" => run(
             socket,
             virtio_accel_xdna::XdnaAccelerator::new().map_err(|e| format!("XDNA: {e:?}"))?,
             policy,
+            iommu,
         ),
         _ => Err(format!("backend {backend:?} is unavailable in this build").into()),
     }
