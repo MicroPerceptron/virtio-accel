@@ -21,7 +21,7 @@ use virtio_accel_coreml::{
     CoreMlArtifact, CoreMlComputeUnits, CoreMlEvent, InitError, REQUIRED_RESIDENT_BYTES,
     TARGET_IDENTITY,
 };
-use virtio_accel_tosa::{Target, parse};
+use virtio_accel_tosa::{DType, Target, parse};
 
 // Core ML protobuf for one Float32[8] neural network: y = 2*x + 1.
 const MODEL: &[u8] = &[
@@ -1149,7 +1149,7 @@ fn fp8_cast_graph(
 #[test]
 fn fp8_packed_casts_preserve_values_and_round_ties() {
     use virtio_accel_coreml::COREML_TOSA_FP8_TARGET as target;
-    use virtio_accel_tosa::{DType, TosaCapabilityProvider, fp8e4m3_to_f32, fp8e5m2_to_f32};
+    use virtio_accel_tosa::{TosaCapabilityProvider, fp8e4m3_to_f32, fp8e5m2_to_f32};
     for units in [
         CoreMlComputeUnits::CpuAndNeuralEngine,
         CoreMlComputeUnits::CpuAndGpu,
@@ -1516,6 +1516,93 @@ fn fp8_activation_and_constant_weights_execute_together() {
     }
 }
 
+/// The projection `int8_matmul_fp16` builds, with scales of any value: the
+/// portable helper admits only positive ones, while a graph may carry others.
+fn projection_with_scales(
+    m: usize,
+    n: usize,
+    k: usize,
+    group: usize,
+    weights: &[i8],
+    scales: &[u16],
+) -> Vec<u8> {
+    use virtio_accel_tosa_build::{
+        OperatorKind, OwnedGraph, OwnedOperator, OwnedShape, OwnedTensor, quantized,
+    };
+    let (m, n, k, group) = (m as i32, n as i32, k as i32, group as i32);
+    let mut g = OwnedGraph::new("signed_scale_projection");
+    let op = |g: &mut OwnedGraph<'_>, kind, inputs: &[&str], output: &str| {
+        g.push_operator(OwnedOperator::new(
+            kind,
+            inputs.iter().map(|name| (*name).into()).collect(),
+            vec![output.into()],
+        ));
+    };
+    let half = DType::FP16;
+    g.push_tensor(OwnedTensor::new("x", vec![1, m, k], half));
+    g.push_input("x");
+    for (name, shape, dtype, data) in [
+        (
+            "weights",
+            vec![n, k / group, group],
+            DType::INT8,
+            weights.iter().map(|v| *v as u8).collect::<Vec<_>>(),
+        ),
+        (
+            "scales",
+            vec![n, k / group, 1],
+            half,
+            scales.iter().flat_map(|v| v.to_le_bytes()).collect(),
+        ),
+        ("shift", vec![1], DType::INT8, vec![0]),
+        ("zero", vec![1], half, vec![0, 0]),
+    ] {
+        g.push_tensor(OwnedTensor::constant(name, shape, dtype, data));
+        op(&mut g, OperatorKind::Const, &[], name);
+    }
+    for (name, shape) in [
+        ("decoded", vec![n, k / group, group]),
+        ("scaled", vec![n, k / group, group]),
+        ("matrix", vec![1, n, k]),
+        ("transposed", vec![1, k, n]),
+        ("y", vec![1, m, n]),
+    ] {
+        g.push_tensor(OwnedTensor::new(name, shape, half));
+    }
+    op(&mut g, OperatorKind::Cast, &["weights"], "decoded");
+    op(
+        &mut g,
+        OperatorKind::Mul,
+        &["decoded", "scales", "shift"],
+        "scaled",
+    );
+    g.push_shape(OwnedShape::new("to_matrix", vec![1, n.into(), k.into()]));
+    op(&mut g, OperatorKind::ConstShape, &[], "to_matrix");
+    op(
+        &mut g,
+        OperatorKind::Reshape,
+        &["scaled", "to_matrix"],
+        "matrix",
+    );
+    op(
+        &mut g,
+        OperatorKind::Transpose {
+            perms: [0, 2, 1, 0, 0, 0],
+            rank: 3,
+        },
+        &["matrix"],
+        "transposed",
+    );
+    op(
+        &mut g,
+        OperatorKind::MatMul,
+        &["x", "transposed", "zero", "zero"],
+        "y",
+    );
+    g.push_output("y");
+    g.build(quantized::TARGET).unwrap()
+}
+
 #[test]
 fn compressed_integer_weights_preserve_fp16_rounding() {
     use half::f16;
@@ -1525,17 +1612,22 @@ fn compressed_integer_weights_preserve_fp16_rounding() {
     // The first shape's constants stay inline in the ML Program; the second's are
     // large enough to be stored in its weight file.
     let scales = [0x3555u16, 0x399a, 0x2e66, 0x0400];
-    for ((m, n, k, group), bits) in [(32, 8, 32, 16), (256, 64, 256, 32)]
+    // The last variants scale by negative values and zeros of both signs too.
+    let mixed = [0x3555u16, 0xb99a, 0x0000, 0x8000, 0x8400];
+    for ((m, n, k, group), (bits, signed)) in [(32, 8, 32, 16), (256, 64, 256, 32)]
         .into_iter()
-        .flat_map(|shape| [(shape, 4), (shape, 8)])
+        .flat_map(|shape| [(4, false), (8, false), (4, true), (8, true)].map(|v| (shape, v)))
     {
         let weights = (0..n * k)
             .map(|i| ((i % 16) as i8 - 8) * if bits == 8 { 16 } else { 1 })
             .collect::<Vec<_>>();
+        let table: &[u16] = if signed { &mixed } else { &scales };
         let scales = (0..n * k / group)
-            .map(|i| scales[i % scales.len()])
+            .map(|i| table[i % table.len()])
             .collect::<Vec<_>>();
-        let graph = if bits == 4 {
+        let graph = if signed {
+            projection_with_scales(m, n, k, group, &weights, &scales)
+        } else if bits == 4 {
             let packed = weights
                 .chunks_exact(2)
                 .map(|v| (v[0] as u8 & 15) | ((v[1] as u8 & 15) << 4))

@@ -108,10 +108,13 @@ pub(super) fn plans(a: &TosaAnalysis<'_>) -> Result<Vec<Option<Weights>>, Loweri
                 {
                     continue;
                 }
-                // Finite positive scales keep zero and sign semantics identical to multiply.
+                // A finite scale of either sign, zero included, gives the same dot
+                // products as the multiply it replaces; only the sign of a zero
+                // weight can differ, which a sum does not observe. A NaN or an
+                // infinity would turn zero weights into NaN, so those stay in the graph.
                 if scales.chunks_exact(2).any(|b| {
                     let v = u16::from_le_bytes([b[0], b[1]]);
-                    v == 0 || v & 0x8000 != 0 || v & 0x7c00 == 0x7c00
+                    v & 0x7c00 == 0x7c00
                 }) {
                     continue;
                 }
