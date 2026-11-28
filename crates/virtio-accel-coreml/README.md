@@ -166,6 +166,16 @@ palettes; sharing tables across output channels can improve ANE placement. Palet
 varying across the input dimension may execute on CPU. Selected policies always permit
 CPU participation; inspect the compute plan and benchmark the actual geometry.
 
+Scales may be of either sign or zero; only a non-finite scale leaves a projection
+in the graph. The portable authoring helpers still emit positive scales only.
+
+The same tier admits `SUB`, `EXP`, `RECIPROCAL`, `RSQRT`, `SIGMOID`, `REDUCE_SUM`
+and `REDUCE_MAX` on FP16 and FP32, so a normalized, gated or attention block
+around compressed projections loads as one program. In this tier's ML Programs,
+constants of 4 KiB or more are written to Core ML's binary weight file and loaded
+with the program as a model package; inline constants are parsed from text by Core
+ML's compiler, which dominated load time for graphs holding many weights.
+
 These optimizations apply only to immutable constants. The portable integer artifact
 stores one byte per weight and the palette artifact stores INT32 indices; native packing
 happens at load. Updating weights requires rebuilding/reloading. Runtime NVFP4 and FP8

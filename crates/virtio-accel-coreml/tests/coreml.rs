@@ -1816,3 +1816,158 @@ fn compressed_palette_weights_preserve_arbitrary_entries() {
         }
     }
 }
+
+#[test]
+fn quantized_tier_float_operators_match_their_definitions() {
+    use half::f16;
+    use virtio_accel_tosa::{NanPropagationMode, TosaCapabilityProvider};
+    use virtio_accel_tosa_build::{
+        OperatorKind, OwnedGraph, OwnedOperator, OwnedTensor, quantized,
+    };
+    const SHAPE: [i32; 3] = [2, 3, 4];
+    // The operator, its operands, the result's shape and the expected values.
+    type Case = (OperatorKind, &'static [&'static str], [i32; 3], Vec<f32>);
+    // Distinct positive and negative values; `y` stays away from zero, since it
+    // is also divided by and rooted.
+    let x: Vec<f32> = (0..24)
+        .map(|i| ((i * 7) % 24) as f32 * 0.25 - 3.0)
+        .collect();
+    let y: Vec<f32> = (0..24)
+        .map(|i| ((i * 5) % 24) as f32 * 0.125 + 0.25)
+        .collect();
+    let sum: Vec<f32> = x.chunks(4).map(|row| row.iter().sum()).collect();
+    let most: Vec<f32> = (0..8)
+        .map(|i| {
+            let (batch, column) = (i / 4, i % 4);
+            (0..3)
+                .map(|row| x[batch * 12 + row * 4 + column])
+                .fold(f32::MIN, f32::max)
+        })
+        .collect();
+    let cases: Vec<Case> = vec![
+        (
+            OperatorKind::Sub,
+            &["x", "y"],
+            SHAPE,
+            x.iter().zip(&y).map(|(x, y)| x - y).collect(),
+        ),
+        (
+            OperatorKind::Exp,
+            &["x"],
+            SHAPE,
+            x.iter().map(|x| x.exp()).collect(),
+        ),
+        (
+            OperatorKind::Reciprocal,
+            &["y"],
+            SHAPE,
+            y.iter().map(|y| y.recip()).collect(),
+        ),
+        (
+            OperatorKind::Rsqrt,
+            &["y"],
+            SHAPE,
+            y.iter().map(|y| y.sqrt().recip()).collect(),
+        ),
+        (
+            OperatorKind::Sigmoid,
+            &["x"],
+            SHAPE,
+            x.iter().map(|x| (1.0 + (-x).exp()).recip()).collect(),
+        ),
+        (OperatorKind::ReduceSum { axis: 2 }, &["x"], [2, 3, 1], sum),
+        (
+            OperatorKind::ReduceMax {
+                axis: 1,
+                nan_mode: NanPropagationMode::PROPAGATE,
+            },
+            &["x"],
+            [2, 1, 4],
+            most,
+        ),
+    ];
+    for units in [
+        CoreMlComputeUnits::CpuAndGpu,
+        CoreMlComputeUnits::CpuAndNeuralEngine,
+        CoreMlComputeUnits::All,
+    ] {
+        let backend = match CoreMlAccelerator::new_tosa_with_compute_units(units) {
+            Ok(backend) => backend,
+            Err(InitError::GpuUnavailable | InitError::NeuralEngineUnavailable)
+                if std::env::var_os("VIRTIO_ACCEL_COREML_REQUIRE_QUANTIZED").is_none() =>
+            {
+                continue;
+            }
+            Err(error) => panic!("{units:?}: {error}"),
+        };
+        if !backend
+            .tosa_capabilities()
+            .iter()
+            .any(|c| c.target == quantized::TARGET)
+        {
+            assert!(
+                std::env::var_os("VIRTIO_ACCEL_COREML_REQUIRE_QUANTIZED").is_none(),
+                "quantized target required"
+            );
+            continue;
+        }
+        for dtype in [DType::FP16, DType::FP32] {
+            let encode = |values: &[f32]| -> Vec<u8> {
+                match dtype {
+                    DType::FP16 => values
+                        .iter()
+                        .flat_map(|v| f16::from_f32(*v).to_le_bytes())
+                        .collect(),
+                    _ => values.iter().flat_map(|v| v.to_le_bytes()).collect(),
+                }
+            };
+            for (kind, operands, shape, expected) in &cases {
+                let mut graph = OwnedGraph::new("float_operator");
+                for name in *operands {
+                    graph.push_tensor(OwnedTensor::new(*name, SHAPE.to_vec(), dtype));
+                    graph.push_input(*name);
+                }
+                graph.push_tensor(OwnedTensor::new("out", shape.to_vec(), dtype));
+                graph.push_operator(OwnedOperator::new(
+                    *kind,
+                    operands.iter().map(|name| (*name).into()).collect(),
+                    vec!["out".into()],
+                ));
+                graph.push_output("out");
+                let graph = graph.build(quantized::TARGET).unwrap();
+                let inputs: Vec<Vec<u8>> = operands
+                    .iter()
+                    .map(|name| encode(if *name == "x" { &x } else { &y }))
+                    .collect();
+                let inputs: Vec<&[u8]> = inputs.iter().map(Vec::as_slice).collect();
+                let bytes = run_tosa_bytes_on(
+                    &backend,
+                    &graph,
+                    quantized::TARGET,
+                    &inputs,
+                    encode(expected).len(),
+                )
+                .unwrap();
+                let got: Vec<f32> = match dtype {
+                    DType::FP16 => bytes
+                        .chunks_exact(2)
+                        .map(|b| f16::from_le_bytes(b.try_into().unwrap()).to_f32())
+                        .collect(),
+                    _ => bytes
+                        .chunks_exact(4)
+                        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                        .collect(),
+                };
+                for (at, (got, want)) in got.iter().zip(expected).enumerate() {
+                    // A few binary16 units, relative to values above one.
+                    let bound = 4.0 / 1024.0 * want.abs().max(1.0);
+                    assert!(
+                        (got - want).abs() <= bound,
+                        "{units:?} {dtype:?} {:?} [{at}]: {got} vs {want}",
+                        kind.op()
+                    );
+                }
+            }
+        }
+    }
+}
