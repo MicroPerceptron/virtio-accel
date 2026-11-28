@@ -177,6 +177,7 @@ pub(crate) fn lower_integer_tosa(
     field_message(&mut encoded, 502, &program);
     Ok(LoweredModel {
         bytes: encoded,
+        weights: Vec::new(),
         features,
         execution: LoweredExecution::CoreMl,
         requires_fp32: false,

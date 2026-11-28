@@ -1522,9 +1522,13 @@ fn compressed_integer_weights_preserve_fp16_rounding() {
     use virtio_accel_tosa::TosaCapabilityProvider;
     use virtio_accel_tosa_build::quantized;
     // Basis vectors isolate weight decoding from reduction-order differences.
-    let (m, n, k, group) = (32, 8, 32, 16);
+    // The first shape's constants stay inline in the ML Program; the second's are
+    // large enough to be stored in its weight file.
     let scales = [0x3555u16, 0x399a, 0x2e66, 0x0400];
-    for bits in [4, 8] {
+    for ((m, n, k, group), bits) in [(32, 8, 32, 16), (256, 64, 256, 32)]
+        .into_iter()
+        .flat_map(|shape| [(shape, 4), (shape, 8)])
+    {
         let weights = (0..n * k)
             .map(|i| ((i % 16) as i8 - 8) * if bits == 8 { 16 } else { 1 })
             .collect::<Vec<_>>();

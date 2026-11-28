@@ -2,6 +2,7 @@
 //! the native INT8 boundary transports their bits, never their signed numeric value.
 //! Decode/encode are graph operations, not host-side tensor conversions.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+use crate::blob::{self, Blobs};
 use crate::lower::{
     LoweredExecution, LoweredFeature, LoweredFeatureRole, LoweredModel, LoweringError,
     encode_array_feature, static_shape, tensor,
@@ -102,6 +103,18 @@ const F32: u64 = 11;
 const I8: u64 = 21;
 const I32: u64 = 23;
 const BOOL: u64 = 1;
+/// The weight file's type for a MIL element type it can hold.
+fn blob_kind(dtype: u64) -> Option<blob::Kind> {
+    Some(match dtype {
+        F16 => blob::Kind::Float16,
+        F32 => blob::Kind::Float32,
+        I8 => blob::Kind::Int8,
+        I32 => blob::Kind::Int32,
+        weights::I4 => blob::Kind::Int4,
+        weights::U4 => blob::Kind::UInt4,
+        _ => return None,
+    })
+}
 fn is_fp8(d: DType) -> bool {
     matches!(d, DType::FP8E4M3 | DType::FP8E5M2)
 }
@@ -122,6 +135,9 @@ fn boundary(d: DType) -> DType {
 struct Builder {
     ops: Vec<Vec<u8>>,
     next: usize,
+    weights: Blobs,
+    /// A constant could not be stored; reported once the graph is walked.
+    overflow: Option<LoweringError>,
 }
 impl Builder {
     fn name(&mut self) -> String {
@@ -152,6 +168,20 @@ impl Builder {
     }
     fn constant(&mut self, dtype: u64, shape: &[i32], bytes: &[u8]) -> String {
         let n = self.name();
+        let stored = blob_kind(dtype).filter(|_| bytes.len() >= blob::INLINE_BELOW);
+        if let Some(kind) = stored {
+            let elements = shape.iter().map(|d| *d as u64).product();
+            match self.weights.push(kind, elements, bytes) {
+                Ok(offset) => {
+                    let mut file = Vec::new();
+                    field_string(&mut file, 1, blob::FILE_NAME);
+                    field_varint(&mut file, 2, offset);
+                    self.declare(&n, dtype, shape, 5, &file);
+                }
+                Err(error) => self.overflow = Some(error),
+            }
+            return n;
+        }
         let mut repeated = Vec::new();
         let tensor_field = match dtype {
             F32 => {
@@ -178,16 +208,21 @@ impl Builder {
         field_message(&mut t, tensor_field, &repeated);
         let mut imm = Vec::new();
         field_message(&mut imm, 1, &t);
+        self.declare(&n, dtype, shape, 3, &imm);
+        n
+    }
+    /// A `const` operation whose value is the `Value` field numbered `source`:
+    /// 3 inline, 5 in the weight file.
+    fn declare(&mut self, n: &str, dtype: u64, shape: &[i32], source: u32, content: &[u8]) {
         let mut value = Vec::new();
         field_message(&mut value, 2, &value_type(dtype, shape));
-        field_message(&mut value, 3, &imm);
+        field_message(&mut value, source, content);
         let mut op = Vec::new();
         field_string(&mut op, 1, "const");
-        field_message(&mut op, 3, &named_value_type(&n, dtype, shape));
+        field_message(&mut op, 3, &named_value_type(n, dtype, shape));
         field_message(&mut op, 5, &attribute_entry("val", &value));
-        field_message(&mut op, 5, &attribute_entry("name", &string_value(&n)));
+        field_message(&mut op, 5, &attribute_entry("name", &string_value(n)));
         self.ops.push(op);
-        n
     }
     fn float(&mut self, x: f32) -> String {
         self.constant(F32, &[], &x.to_le_bytes())
@@ -719,6 +754,9 @@ pub(crate) fn lower_with_weights(
             name: n,
         });
     }
+    if let Some(error) = b.overflow {
+        return Err(error);
+    }
     for op in b.ops {
         field_message(&mut block_body, 3, &op)
     }
@@ -733,6 +771,7 @@ pub(crate) fn lower_with_weights(
     field_message(&mut encoded, 502, &program);
     Ok(LoweredModel {
         bytes: encoded,
+        weights: b.weights.finish(),
         features,
         execution: LoweredExecution::CoreMl,
         requires_fp32: false,

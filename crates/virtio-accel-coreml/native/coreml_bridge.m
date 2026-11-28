@@ -424,15 +424,68 @@ void *va_coreml_model_load(const uint8_t *path,
 }
 #pragma clang diagnostic pop
 
+/* Lay `model` and `weights` out as a model package under `directory` and return
+ * its URL. The data are borrowed: nothing here copies the weights. */
+static NSURL *va_write_package(NSURL *directory,
+                               NSData *model,
+                               NSData *weights,
+                               NSError **error) {
+    NSFileManager *files = NSFileManager.defaultManager;
+    NSURL *package = [directory URLByAppendingPathComponent:@"model.mlpackage" isDirectory:YES];
+    NSURL *data = [package URLByAppendingPathComponent:@"Data/com.apple.CoreML" isDirectory:YES];
+    NSURL *folder = [data URLByAppendingPathComponent:@"weights" isDirectory:YES];
+    if (![files createDirectoryAtURL:folder
+            withIntermediateDirectories:YES
+                             attributes:nil
+                                  error:error]) {
+        return nil;
+    }
+    NSString *modelIdentifier = NSUUID.UUID.UUIDString;
+    NSDictionary *manifest = @{
+        @"fileFormatVersion" : @"1.0.0",
+        @"itemInfoEntries" : @{
+            modelIdentifier : @{
+                @"author" : @"com.apple.CoreML",
+                @"description" : @"CoreML Model Specification",
+                @"name" : @"model.mlmodel",
+                @"path" : @"com.apple.CoreML/model.mlmodel"
+            },
+            NSUUID.UUID.UUIDString : @{
+                @"author" : @"com.apple.CoreML",
+                @"description" : @"CoreML Model Weights",
+                @"name" : @"weights",
+                @"path" : @"com.apple.CoreML/weights"
+            }
+        },
+        @"rootModelIdentifier" : modelIdentifier
+    };
+    NSData *encoded = [NSJSONSerialization dataWithJSONObject:manifest options:0 error:error];
+    if (encoded == nil ||
+        ![encoded writeToURL:[package URLByAppendingPathComponent:@"Manifest.json"]
+                     options:0
+                       error:error] ||
+        ![model writeToURL:[data URLByAppendingPathComponent:@"model.mlmodel"]
+                   options:0
+                     error:error] ||
+        ![weights writeToURL:[folder URLByAppendingPathComponent:@"weight.bin"]
+                     options:0
+                       error:error]) {
+        return nil;
+    }
+    return package;
+}
+
 void *va_coreml_model_load_memory(const uint8_t *bytes,
                                   size_t bytes_len,
+                                  const uint8_t *weights,
+                                  size_t weights_len,
                                   const struct va_coreml_feature_mapping *mappings,
                                   size_t mapping_count,
                                   uint32_t compute_units,
                                   struct va_coreml_error *error) {
     @autoreleasepool {
         va_set_error(error, VA_COREML_OK, 0, 0);
-        if (bytes == NULL || bytes_len == 0) {
+        if (bytes == NULL || bytes_len == 0 || (weights == NULL && weights_len != 0)) {
             va_set_error(error, VA_COREML_INVALID_ARGUMENT, VA_COREML_BRIDGE_DOMAIN, 25);
             return NULL;
         }
@@ -453,10 +506,27 @@ void *va_coreml_model_load_memory(const uint8_t *bytes,
             NSURL *sourceURL = [sourceDirectoryURL
                 URLByAppendingPathComponent:@"model.mlmodel" isDirectory:NO];
             NSData *modelData = [NSData dataWithBytes:bytes length:bytes_len];
-            if (modelData == nil ||
-                ![modelData writeToURL:sourceURL options:NSDataWritingAtomic error:&nativeError]) {
-                va_set_nserror(error, nativeError);
+            if (modelData == nil) {
+                va_set_error(error, VA_COREML_EXTERNAL, VA_COREML_BRIDGE_DOMAIN, 26);
                 return NULL;
+            }
+            if (weights_len == 0) {
+                if (![modelData writeToURL:sourceURL
+                                   options:NSDataWritingAtomic
+                                     error:&nativeError]) {
+                    va_set_nserror(error, nativeError);
+                    return NULL;
+                }
+            } else {
+                NSData *weightData = [NSData dataWithBytesNoCopy:(void *)weights
+                                                          length:weights_len
+                                                    freeWhenDone:NO];
+                sourceURL = va_write_package(sourceDirectoryURL, modelData, weightData,
+                                             &nativeError);
+                if (sourceURL == nil) {
+                    va_set_nserror(error, nativeError);
+                    return NULL;
+                }
             }
             const char *path = sourceURL.path.UTF8String;
             void *model = NULL;

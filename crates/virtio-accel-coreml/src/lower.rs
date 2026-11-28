@@ -144,6 +144,8 @@ pub(crate) struct LoweredFeature {
 #[derive(Clone, Debug)]
 pub(crate) struct LoweredModel {
     pub bytes: Vec<u8>,
+    /// The weight file an ML Program refers to; empty when all is inline.
+    pub weights: Vec<u8>,
     pub features: Vec<LoweredFeature>,
     pub execution: LoweredExecution,
     /// FP32 anywhere in a NeuralNetwork graph requires exclusion of ANE arithmetic.
@@ -258,6 +260,7 @@ pub(crate) fn lower_tosa(bytes: &[u8], target: Target) -> Result<LoweredModel, L
     field_message(&mut encoded, 500, &network);
     Ok(LoweredModel {
         bytes: encoded,
+        weights: Vec::new(),
         features,
         execution,
         requires_fp32: analysis.values().iter().any(|value| {

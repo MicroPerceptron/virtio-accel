@@ -103,6 +103,8 @@ unsafe extern "C" {
     fn va_coreml_model_load_memory(
         bytes: *const u8,
         bytes_len: usize,
+        weights: *const u8,
+        weights_len: usize,
         mappings: *const NativeFeatureMapping,
         mapping_count: usize,
         compute_units: u32,
@@ -855,6 +857,8 @@ impl Accelerator for CoreMlAccelerator {
                         va_coreml_model_load_memory(
                             lowered.bytes.as_ptr(),
                             lowered.bytes.len(),
+                            lowered.weights.as_ptr(),
+                            lowered.weights.len(),
                             mappings.as_ptr(),
                             mappings.len(),
                             self.compute_units.native_policy(lowered.requires_fp32),

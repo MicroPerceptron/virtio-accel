@@ -11,6 +11,7 @@
 #![cfg_attr(not(target_os = "macos"), forbid(unsafe_code))]
 
 mod artifact;
+mod blob;
 mod fp8;
 mod lower;
 mod mlprogram;

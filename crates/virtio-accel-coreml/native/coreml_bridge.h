@@ -73,8 +73,13 @@ void *va_coreml_model_load(const uint8_t *path,
                            uint32_t compute_units,
                            struct va_coreml_error *error);
 
+/* `weights` may be NULL with a zero length: the model then holds everything.
+ * Otherwise it is the weight file the model refers to as
+ * "@model_path/weights/weight.bin", and the two are loaded as a package. */
 void *va_coreml_model_load_memory(const uint8_t *bytes,
                                   size_t bytes_len,
+                                  const uint8_t *weights,
+                                  size_t weights_len,
                                   const struct va_coreml_feature_mapping *mappings,
                                   size_t mapping_count,
                                   uint32_t compute_units,

@@ -2,8 +2,8 @@
 use super::*;
 use virtio_accel_tosa::{TosaAnalysis, ValueId};
 
-const I4: u64 = 25;
-const U4: u64 = 35;
+pub(super) const I4: u64 = 25;
+pub(super) const U4: u64 = 35;
 
 pub(super) struct Weights {
     n: i32,
