@@ -80,6 +80,15 @@ pub const COREML_TOSA_QUANTIZED_CAPABILITY: CapabilityDescriptor = CapabilityDes
         OperatorCapability::new(Op::RESHAPE),
         OperatorCapability::new(Op::TRANSPOSE),
         OperatorCapability::constrained(Op::MATMUL, OperatorConstraints::ZERO_ZERO_POINTS),
+        // FP16/FP32 only: what a normalised, gated or attention block needs around
+        // its compressed projections, so that it stays one program.
+        OperatorCapability::new(Op::SUB),
+        OperatorCapability::new(Op::EXP),
+        OperatorCapability::new(Op::RECIPROCAL),
+        OperatorCapability::new(Op::RSQRT),
+        OperatorCapability::new(Op::SIGMOID),
+        OperatorCapability::new(Op::REDUCE_MAX),
+        OperatorCapability::new(Op::REDUCE_SUM),
     ],
     graph: GraphCapabilities {
         max_regions: 1,
@@ -294,6 +303,24 @@ fn decode(x: u8, d: DType) -> f32 {
     }
 }
 
+/// The float operators admit one float type for every operand and the result.
+fn float_only(
+    a: &virtio_accel_tosa::TosaAnalysis<'_>,
+    inputs: &[virtio_accel_tosa::ValueId],
+    result: DType,
+) -> Result<(), LoweringError> {
+    if !matches!(result, DType::FP16 | DType::FP32) {
+        return Err(LoweringError::UnsupportedType(result));
+    }
+    for value in inputs {
+        let input = tensor(a, *value)?.dtype();
+        if input != result {
+            return Err(LoweringError::UnsupportedType(input));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn lower(bytes: &[u8], target: Target) -> Result<LoweredModel, LoweringError> {
     lower_with_weights(bytes, target, false)
 }
@@ -430,6 +457,51 @@ pub(crate) fn lower_with_weights(
                     if op.op() == Op::ADD { "add" } else { "mul" },
                     &args[0],
                     &args[1],
+                    d,
+                    &s,
+                )
+            }
+            Op::SUB | Op::EXP | Op::RECIPROCAL | Op::RSQRT | Op::SIGMOID => {
+                float_only(&a, inputs, t.dtype())?;
+                match op.op() {
+                    Op::SUB => b.binary("sub", &args[0], &args[1], d, &s),
+                    Op::EXP => b.op("exp", &[("x", &args[0])], d, &s),
+                    Op::SIGMOID => b.op("sigmoid", &[("x", &args[0])], d, &s),
+                    // MIL's own inverse and rsqrt add an epsilon; these do not.
+                    kind => {
+                        let divisor = if kind == Op::RSQRT {
+                            b.op("sqrt", &[("x", &args[0])], d, &s)
+                        } else {
+                            args[0].clone()
+                        };
+                        let one = if t.dtype() == DType::FP16 {
+                            b.constant(F16, &[], &0x3c00u16.to_le_bytes())
+                        } else {
+                            b.float(1.0)
+                        };
+                        b.binary("real_div", &one, &divisor, d, &s)
+                    }
+                }
+            }
+            Op::REDUCE_MAX | Op::REDUCE_SUM => {
+                float_only(&a, inputs, t.dtype())?;
+                let axis = match op.source().attributes() {
+                    OpAttributes::ReduceMax { axis, nan_mode } => {
+                        crate::lower::require_propagating_nan(nan_mode)?;
+                        axis
+                    }
+                    OpAttributes::ReduceSum { axis } => axis,
+                    _ => return Err(LoweringError::UnsupportedGraph),
+                };
+                let axes = b.constant(I32, &[1], &axis.to_le_bytes());
+                let keep = b.boolean(true);
+                b.op(
+                    if op.op() == Op::REDUCE_MAX {
+                        "reduce_max"
+                    } else {
+                        "reduce_sum"
+                    },
+                    &[("x", &args[0]), ("axes", &axes), ("keep_dims", &keep)],
                     d,
                     &s,
                 )

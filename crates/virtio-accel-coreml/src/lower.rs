@@ -737,7 +737,7 @@ fn validate_operator_types(
     Ok(())
 }
 
-fn require_propagating_nan(nan_mode: NanPropagationMode) -> Result<(), LoweringError> {
+pub(crate) fn require_propagating_nan(nan_mode: NanPropagationMode) -> Result<(), LoweringError> {
     if nan_mode == NanPropagationMode::PROPAGATE {
         Ok(())
     } else {
